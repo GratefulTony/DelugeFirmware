@@ -5904,6 +5904,15 @@ void Song::displayCurrentRootNoteAndScaleName() {
 	display->displayPopup(popupMsg.c_str());
 }
 
+void Song::commandTranspose(int32_t interval) {
+	if (Buttons::isShiftButtonPressed()) {
+		adjustMasterTransposeInterval(interval);
+	}
+	else {
+		transpose(interval);
+	}
+}
+
 void Song::transpose(int32_t interval) {
 	if (anyScaleModeClips()) {
 		if (masterTransposeInterval != 0) {
