@@ -19,6 +19,7 @@
 
 #include "definitions_cxx.hpp"
 #include "deluge/dsp/granular/GranularProcessor.h"
+#include "dsp/compressor/multiband.h"
 #include "dsp/compressor/rms_feedback.h"
 #include "dsp/delay/delay.h"
 #include "dsp_ng/core/types.hpp"
@@ -114,6 +115,8 @@ public:
 	ModFXType modFXType_;
 	ModFXProcessor modfx{};
 	deluge::dsp::RMSFeedbackCompressor compressor;
+	deluge::dsp::MultibandCompressor multibandCompressor;
+	CompressorMode compressorMode{CompressorMode::SINGLE};
 	deluge::dsp::GranularProcessor* grainFX{nullptr};
 
 	uint32_t lowSampleRatePos{};

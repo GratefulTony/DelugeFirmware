@@ -28,6 +28,7 @@
 #include "gui/menu_item/audio_clip/transpose.h"
 #include "gui/menu_item/audio_compressor/compressor_params.h"
 #include "gui/menu_item/audio_compressor/compressor_values.h"
+#include "gui/menu_item/audio_compressor/multiband.h"
 #include "gui/menu_item/audio_interpolation.h"
 #include "gui/menu_item/battery/level.h"
 #include "gui/menu_item/bend_range/main.h"
