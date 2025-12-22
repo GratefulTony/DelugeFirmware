@@ -989,6 +989,17 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_DEFAULT_HORIZONTAL_MENU, "Horizontal Menu"},
         {STRING_FOR_CHORD_KEYBOARD_MODE_ROW, "Chord Row Mode"},
         {STRING_FOR_CHORD_KEYBOARD_MODE_COLUMN, "Chord Column Mode"},
+        {STRING_FOR_COMPRESSOR_MODE, "Mode"},
+        {STRING_FOR_COMPRESSOR_MODE_SINGLE, "Single"},
+        {STRING_FOR_COMPRESSOR_MODE_MULTIBAND, "Multiband"},
+        {STRING_FOR_COMPRESSOR_LOW_CROSSOVER, "Low X-Over"},
+        {STRING_FOR_COMPRESSOR_HIGH_CROSSOVER, "High X-Over"},
+        {STRING_FOR_COMPRESSOR_BAND, "Band"},
+        {STRING_FOR_COMPRESSOR_BAND_LOW, "Low"},
+        {STRING_FOR_COMPRESSOR_BAND_MID, "Mid"},
+        {STRING_FOR_COMPRESSOR_BAND_HIGH, "High"},
+        {STRING_FOR_COMPRESSOR_THRESHOLD_UP, "Thresh Up"},
+        {STRING_FOR_COMPRESSOR_RATIO_UP, "Ratio Up"},
     },
 };
 } // namespace deluge::l10n::built_in

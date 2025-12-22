@@ -143,10 +143,16 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	                           pan, true);
 
 	if (compThreshold > 0) {
-		compressor.renderVolNeutral(global_effectable_audio, volumePostFX);
+		if (compressorMode == CompressorMode::MULTIBAND) {
+			multibandCompressor.render(global_effectable_audio, volumePostFX);
+		}
+		else {
+			compressor.renderVolNeutral(global_effectable_audio, volumePostFX);
+		}
 	}
 	else {
 		compressor.reset();
+		multibandCompressor.reset();
 	}
 
 	// Add the global effectable data to the output

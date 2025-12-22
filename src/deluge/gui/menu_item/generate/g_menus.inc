@@ -28,19 +28,25 @@ std::array<MenuItem*, 3> child2 = {
     &filterRoutingMenu,
 };
 Submenu soundFiltersMenu{STRING_FOR_FILTERS, child2};
+audio_compressor::CompressorModeSelection compMode{STRING_FOR_COMPRESSOR_MODE};
 audio_compressor::CompParam threshold{STRING_FOR_THRESHOLD, STRING_FOR_COMP_THRESHOLD_MENU_TITLE, params::UNPATCHED_COMPRESSOR_THRESHOLD, BAR};
 audio_compressor::Ratio compRatio{STRING_FOR_RATIO, STRING_FOR_RATIO};
 audio_compressor::Blend compBlend{STRING_FOR_BLEND, STRING_FOR_BLEND};
 audio_compressor::Attack compAttack{STRING_FOR_ATTACK, STRING_FOR_ATTACK};
 audio_compressor::Release compRelease{STRING_FOR_RELEASE, STRING_FOR_RELEASE};
 audio_compressor::SideHPF compHPF{STRING_FOR_HPF, STRING_FOR_HPF};
-std::array<MenuItem*, 6> child3 = {
+audio_compressor::LowCrossover compLowXover{STRING_FOR_COMPRESSOR_LOW_CROSSOVER};
+audio_compressor::HighCrossover compHighXover{STRING_FOR_COMPRESSOR_HIGH_CROSSOVER};
+std::array<MenuItem*, 9> child3 = {
+    &compMode,
     &threshold,
     &compRatio,
     &compBlend,
     &compAttack,
     &compRelease,
     &compHPF,
+    &compLowXover,
+    &compHighXover,
 };
 HorizontalMenu audioCompMenu{STRING_FOR_COMMUNITY_FEATURE_MASTER_COMPRESSOR, child3};
 unison::CountToStereoSpread numUnisonMenu{STRING_FOR_UNISON_NUMBER, STRING_FOR_UNISON_NUMBER_MENU_TITLE};

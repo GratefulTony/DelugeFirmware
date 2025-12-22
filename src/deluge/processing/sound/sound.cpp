@@ -2572,10 +2572,16 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, deluge::dsp::Stere
 	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
 	compressor.setThreshold(compThreshold);
 	if (compThreshold > 0) {
-		compressor.renderVolNeutral(sound_stereo, postFXVolume);
+		if (compressorMode == CompressorMode::MULTIBAND) {
+			multibandCompressor.render(sound_stereo, postFXVolume);
+		}
+		else {
+			compressor.renderVolNeutral(sound_stereo, postFXVolume);
+		}
 	}
 	else {
 		compressor.reset();
+		multibandCompressor.reset();
 	}
 
 	if (recorder && recorder->status < RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
