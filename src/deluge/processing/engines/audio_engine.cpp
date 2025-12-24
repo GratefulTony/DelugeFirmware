@@ -844,6 +844,7 @@ void renderSongFX(size_t numSamples) { // LPF and stutter for song (must happen 
 		currentSong->globalEffectable.processFilters(renderingBuffer);
 		currentSong->globalEffectable.processSRRAndBitcrushing(renderingBuffer, &masterVolumeAdjustmentL,
 		                                                       &currentSong->paramManager);
+		currentSong->globalEffectable.processNewDistortions(renderingBuffer, &currentSong->paramManager);
 
 		masterVolumeAdjustmentR = masterVolumeAdjustmentL; // This might have changed in the above function calls
 
@@ -873,13 +874,9 @@ void renderSongFX(size_t numSamples) { // LPF and stutter for song (must happen 
 		    >> 1;
 		// there used to be a static subtraction of 2 nepers (natural log based dB), this is the multiplicative
 		// equivalent
-		if (currentSong->globalEffectable.compressorMode == CompressorMode::MULTIBAND) {
-			currentSong->globalEffectable.multibandCompressor.render(renderingBuffer, songVolume >> 3);
-		}
-		else {
-			currentSong->globalEffectable.compressor.render(renderingBuffer, masterVolumeAdjustmentL >> 1,
-			                                                masterVolumeAdjustmentR >> 1, songVolume >> 3);
-		}
+		// Note: Song-level DOTT not yet implemented - would need to be in series with RMS compressor
+		currentSong->globalEffectable.compressor.render(renderingBuffer, masterVolumeAdjustmentL >> 1,
+		                                                masterVolumeAdjustmentR >> 1, songVolume >> 3);
 		masterVolumeAdjustmentL = ONE_Q31;
 		masterVolumeAdjustmentR = ONE_Q31;
 		logAction("mastercomp end");

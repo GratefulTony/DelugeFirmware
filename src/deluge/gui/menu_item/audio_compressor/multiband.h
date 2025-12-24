@@ -22,7 +22,13 @@
 #include "gui/menu_item/decimal.h"
 #include "gui/menu_item/selection.h"
 #include "gui/ui/sound_editor.h"
+#include "hid/display/oled.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
+#include "model/model_stack.h"
+#include "modulation/params/param.h"
+#include "modulation/params/param_set.h"
+
+namespace params = deluge::modulation::params;
 
 namespace deluge::gui::menu_item::audio_compressor {
 
@@ -50,21 +56,28 @@ public:
 };
 
 /// Menu item for low crossover frequency (Hz)
+/// Range: 50Hz to 2000Hz. Clamped to stay below high crossover.
 class LowCrossover final : public DecimalWithoutScrolling {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
 
+	static constexpr float kMinFreq = 50.0f;
+	static constexpr float kMaxFreq = 2000.0f;
+	static constexpr float kMinGap = 100.0f; // Minimum gap between low and high crossovers
+
 	void readCurrentValue() override {
-		float freqHz = soundEditor.currentModControllable->multibandCompressor.getLowCrossoverHz();
-		// Map frequency to 0-127 range (50Hz to 500Hz)
-		int32_t value = static_cast<int32_t>((freqHz - 50.0f) / (500.0f - 50.0f) * 127.0f);
-		this->setValue(std::clamp<int32_t>(value, 0, 127));
+		q31_t value = soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(
+		    params::UNPATCHED_MB_COMPRESSOR_LOW_CROSSOVER);
+		this->setValue((value + (1 << 23)) >> 24);
 	}
 
 	void writeCurrentValue() override {
-		// Map 0-127 to 50Hz-500Hz
-		float freqHz = 50.0f + (static_cast<float>(this->getValue()) / 127.0f) * (500.0f - 50.0f);
-		soundEditor.currentModControllable->multibandCompressor.setLowCrossover(freqHz);
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(modelStackMemory);
+		ModelStackWithAutoParam* modelStackWithParam =
+		    modelStack->getUnpatchedAutoParamFromId(params::UNPATCHED_MB_COMPRESSOR_LOW_CROSSOVER);
+		modelStackWithParam->autoParam->setCurrentValueInResponseToUserInput(value, modelStackWithParam);
 	}
 
 	[[nodiscard]] float getDisplayValue() override {
@@ -83,21 +96,28 @@ public:
 };
 
 /// Menu item for high crossover frequency (Hz)
+/// Range: 200Hz to 8000Hz. Clamped to stay above low crossover.
 class HighCrossover final : public DecimalWithoutScrolling {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
 
+	static constexpr float kMinFreq = 200.0f; // Fixed minimum for consistent knob feel
+	static constexpr float kMaxFreq = 8000.0f;
+	static constexpr float kMinGap = 100.0f; // Minimum gap between low and high crossovers
+
 	void readCurrentValue() override {
-		float freqHz = soundEditor.currentModControllable->multibandCompressor.getHighCrossoverHz();
-		// Map frequency to 0-127 range (1000Hz to 8000Hz)
-		int32_t value = static_cast<int32_t>((freqHz - 1000.0f) / (8000.0f - 1000.0f) * 127.0f);
-		this->setValue(std::clamp<int32_t>(value, 0, 127));
+		q31_t value = soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(
+		    params::UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER);
+		this->setValue((value + (1 << 23)) >> 24);
 	}
 
 	void writeCurrentValue() override {
-		// Map 0-127 to 1000Hz-8000Hz
-		float freqHz = 1000.0f + (static_cast<float>(this->getValue()) / 127.0f) * (8000.0f - 1000.0f);
-		soundEditor.currentModControllable->multibandCompressor.setHighCrossover(freqHz);
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(modelStackMemory);
+		ModelStackWithAutoParam* modelStackWithParam =
+		    modelStack->getUnpatchedAutoParamFromId(params::UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER);
+		modelStackWithParam->autoParam->setCurrentValueInResponseToUserInput(value, modelStackWithParam);
 	}
 
 	[[nodiscard]] float getDisplayValue() override {
@@ -105,6 +125,479 @@ public:
 	}
 
 	const char* getUnit() override { return "HZ"; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+};
+
+/// Linked threshold control - sets threshold for all bands simultaneously
+class LinkedThreshold final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(
+		    params::UNPATCHED_MB_COMPRESSOR_THRESHOLD);
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(modelStackMemory);
+		ModelStackWithAutoParam* modelStackWithParam =
+		    modelStack->getUnpatchedAutoParamFromId(params::UNPATCHED_MB_COMPRESSOR_THRESHOLD);
+		modelStackWithParam->autoParam->setCurrentValueInResponseToUserInput(value, modelStackWithParam);
+	}
+
+	[[nodiscard]] float getDisplayValue() override {
+		return soundEditor.currentModControllable->multibandCompressor.getBand(0).getThresholdForDisplay();
+	}
+
+	const char* getUnit() override { return "DB"; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+};
+
+/// Linked ratio control - sets ratio for all bands simultaneously
+class LinkedRatio final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getLinkedRatio();
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.setAllRatios(value);
+	}
+
+	[[nodiscard]] float getDisplayValue() override {
+		return soundEditor.currentModControllable->multibandCompressor.getBand(0).getRatioForDisplay();
+	}
+
+	const char* getUnit() override { return " : 1"; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+};
+
+/// Linked attack control - sets attack for all bands simultaneously
+class LinkedAttack final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getLinkedAttack();
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.setAllAttacks(value);
+	}
+
+	[[nodiscard]] float getDisplayValue() override {
+		return soundEditor.currentModControllable->multibandCompressor.getBand(0).getAttackMS();
+	}
+
+	const char* getUnit() override { return "MS"; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return ATTACK; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+};
+
+/// Linked release control - sets release for all bands simultaneously
+class LinkedRelease final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getLinkedRelease();
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.setAllReleases(value);
+	}
+
+	[[nodiscard]] float getDisplayValue() override {
+		return soundEditor.currentModControllable->multibandCompressor.getBand(0).getReleaseMS();
+	}
+
+	const char* getUnit() override { return "MS"; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return RELEASE; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+};
+
+/// Character control (replaces knee) - controls width, knee, timing, skew via zones
+/// Zones: Width, Timing, Skew, Punch, Air, Rich, OTT, OWLTT
+class Character final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getCharacter();
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.setCharacter(value);
+	}
+
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+
+protected:
+	void drawPixelsForOled() override {
+		using namespace deluge::hid::display;
+		auto zone = soundEditor.currentModControllable->multibandCompressor.getCharacterZone();
+		const char* zoneName = getZoneName(zone);
+
+		// Draw zone name at top (smaller font)
+		OLED::main.drawStringCentred(zoneName, 8 + OLED_MAIN_TOPMOST_PIXEL, kTextSpacingX, kTextSpacingY);
+
+		// Draw numeric value below (larger font)
+		char buffer[8];
+		intToString(this->getValue(), buffer);
+		OLED::main.drawStringCentred(buffer, 24 + OLED_MAIN_TOPMOST_PIXEL, kTextHugeSpacingX, kTextHugeSizeY);
+	}
+
+private:
+	static const char* getZoneName(deluge::dsp::CharacterZone zone) {
+		switch (zone) {
+		case deluge::dsp::CharacterZone::Width:
+			return "Width";
+		case deluge::dsp::CharacterZone::Timing:
+			return "Timing";
+		case deluge::dsp::CharacterZone::Skew:
+			return "Skew";
+		case deluge::dsp::CharacterZone::Punch:
+			return "Punch";
+		case deluge::dsp::CharacterZone::Air:
+			return "Air";
+		case deluge::dsp::CharacterZone::Rich:
+			return "Rich";
+		case deluge::dsp::CharacterZone::OTT:
+			return "OTT";
+		case deluge::dsp::CharacterZone::OWLTT:
+			return "OWLTT";
+		default:
+			return "?";
+		}
+	}
+};
+
+/// Up/Down ratio skew control (balance between upward and downward compression)
+class UpDownSkew final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getUpDownSkew();
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.setUpDownSkew(value);
+	}
+
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+};
+
+/// Vibe control - controls phase relationships between oscillations in Feel
+/// Zones: Sync, Spread, Pairs, Cascade, Invert, Pulse, Drift, Chaos
+class Vibe final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getVibe();
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.setVibe(value);
+	}
+
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+
+protected:
+	void drawPixelsForOled() override {
+		using namespace deluge::hid::display;
+		auto zone = soundEditor.currentModControllable->multibandCompressor.getVibeZone();
+		const char* zoneName = getZoneName(zone);
+
+		// Draw zone name at top (smaller font)
+		OLED::main.drawStringCentred(zoneName, 8 + OLED_MAIN_TOPMOST_PIXEL, kTextSpacingX, kTextSpacingY);
+
+		// Draw numeric value below (larger font)
+		char buffer[8];
+		intToString(this->getValue(), buffer);
+		OLED::main.drawStringCentred(buffer, 24 + OLED_MAIN_TOPMOST_PIXEL, kTextHugeSpacingX, kTextHugeSizeY);
+	}
+
+private:
+	static const char* getZoneName(deluge::dsp::VibeZone zone) {
+		switch (zone) {
+		case deluge::dsp::VibeZone::Sync:
+			return "Sync";
+		case deluge::dsp::VibeZone::Spread:
+			return "Spread";
+		case deluge::dsp::VibeZone::Pairs:
+			return "Pairs";
+		case deluge::dsp::VibeZone::Cascade:
+			return "Cascade";
+		case deluge::dsp::VibeZone::Invert:
+			return "Invert";
+		case deluge::dsp::VibeZone::Pulse:
+			return "Pulse";
+		case deluge::dsp::VibeZone::Drift:
+			return "Drift";
+		case deluge::dsp::VibeZone::Chaos:
+			return "Chaos";
+		default:
+			return "?";
+		}
+	}
+};
+
+/// Global output gain control
+class OutputGain final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getOutputGain();
+		// Add 0.5 LSB before truncating to round instead of truncate (prevents jumps on first edit)
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.setOutputGain(value);
+	}
+
+	[[nodiscard]] float getDisplayValue() override {
+		float linear = soundEditor.currentModControllable->multibandCompressor.getOutputGainLinear();
+		// Convert to dB for display
+		return 20.0f * std::log10(linear);
+	}
+
+	const char* getUnit() override { return "DB"; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+};
+
+/// Per-band threshold control (parameterized by band index)
+template <size_t BAND_INDEX>
+class BandThreshold final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).getThresholdDown();
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).setThresholdDown(value);
+	}
+
+	[[nodiscard]] float getDisplayValue() override {
+		return soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).getThresholdForDisplay();
+	}
+
+	const char* getUnit() override { return "DB"; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+};
+
+/// Per-band ratio control (parameterized by band index)
+template <size_t BAND_INDEX>
+class BandRatio final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).getRatioDown();
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).setRatioDown(value);
+	}
+
+	[[nodiscard]] float getDisplayValue() override {
+		return soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).getRatioForDisplay();
+	}
+
+	const char* getUnit() override { return " : 1"; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+};
+
+/// Per-band bandwidth control (gap between up/down thresholds)
+template <size_t BAND_INDEX>
+class BandBandwidth final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).getBandwidth();
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).setBandwidth(value);
+	}
+
+	[[nodiscard]] float getDisplayValue() override {
+		return soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).getBandwidthForDisplay();
+	}
+
+	const char* getUnit() override { return "DB"; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+};
+
+/// Per-band output level control (post-compression, like OTT's L/M/H sliders)
+/// CCW = -inf, 12:00 = 0dB, CW = +16dB
+template <size_t BAND_INDEX>
+class BandOutputLevel final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).getOutputLevel();
+		this->setValue((value + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).setOutputLevel(value);
+	}
+
+	[[nodiscard]] float getDisplayValue() override {
+		float linear =
+		    soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).getOutputLevelLinear();
+		// Convert to dB for display
+		return 20.0f * std::log10(linear + 1e-10f);
+	}
+
+	const char* getUnit() override { return "DB"; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::MULTIBAND;
+	}
+};
+
+/// Multiband wet/dry blend control
+class MultibandBlend final : public DecimalWithoutScrolling {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	void readCurrentValue() override {
+		FixedPoint<31> blend = soundEditor.currentModControllable->multibandCompressor.getBlend();
+		this->setValue((blend.raw() + (1 << 23)) >> 24);
+	}
+
+	void writeCurrentValue() override {
+		FixedPoint<31> blend;
+		blend.raw() = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.setBlend(blend);
+	}
+
+	[[nodiscard]] float getDisplayValue() override {
+		FixedPoint<31> blend = soundEditor.currentModControllable->multibandCompressor.getBlend();
+		return static_cast<float>(blend) * 100.0f;
+	}
+
+	const char* getUnit() override { return "%"; }
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }

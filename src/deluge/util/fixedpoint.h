@@ -546,3 +546,10 @@ static_assert(ONE_Q31f == 1.0f * std::numeric_limits<int32_t>::max());
 static_assert(ONE_Q16 == std::numeric_limits<uint16_t>::max());
 static_assert(NEGATIVE_ONE_Q31 == std::numeric_limits<int32_t>::min());
 static_assert(ONE_OVER_SQRT2_Q31 == 1518500249);
+
+/// Effective 0dBFS for sound-level peak metering
+/// VU meter uses RMS clip point at 2^24 (~16.7 million), but peak is √2 higher
+/// Peak clip point = 2^24 × √2 ≈ 23.7 million
+/// Reference: View::getMaxYDisplayForVUMeter uses log(2^24) for RMS; this is peak equivalent
+constexpr int32_t EFFECTIVE_0DBFS_Q31 = static_cast<int32_t>((ONE_Q31 / 128) * 1.414); // ~23.7 million (peak)
+constexpr float EFFECTIVE_0DBFS_Q31f = static_cast<float>(EFFECTIVE_0DBFS_Q31);

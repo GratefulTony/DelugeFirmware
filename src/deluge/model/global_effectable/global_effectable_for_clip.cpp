@@ -130,6 +130,7 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 
 	// Render FX
 	processSRRAndBitcrushing(global_effectable_audio, &volumePostFX, paramManagerForClip);
+	processNewDistortions(global_effectable_audio, paramManagerForClip);
 	processFXForGlobalEffectable(global_effectable_audio, &volumePostFX, paramManagerForClip, delayWorkingState,
 	                             renderedLastTime, reverbSendAmount);
 	processStutter(global_effectable_audio, paramManagerForClip);
@@ -142,17 +143,17 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	processReverbSendAndVolume(global_effectable_audio, reverbBuffer, volumePostFX, postReverbVolume, reverbSendAmount,
 	                           pan, true);
 
-	if (compThreshold > 0) {
-		if (compressorMode == CompressorMode::MULTIBAND) {
-			multibandCompressor.render(global_effectable_audio, volumePostFX);
-		}
-		else {
-			compressor.renderVolNeutral(global_effectable_audio, volumePostFX);
-		}
+	if (compressorMode == CompressorMode::MULTIBAND) {
+		// Multiband mode always runs (has its own threshold controls)
+		// TODO: Re-enable applyMultibandCompressorParams for modulation once menu items use params
+		multibandCompressor.render(global_effectable_audio, volumePostFX);
+	}
+	else if (compThreshold > 0) {
+		// Single-band mode only runs when threshold is set
+		compressor.renderVolNeutral(global_effectable_audio, volumePostFX);
 	}
 	else {
 		compressor.reset();
-		multibandCompressor.reset();
 	}
 
 	// Add the global effectable data to the output

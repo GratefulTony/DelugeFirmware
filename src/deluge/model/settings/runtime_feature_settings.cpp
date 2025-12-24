@@ -200,6 +200,11 @@ void RuntimeFeatureSettings::init() {
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::ShowBatteryLevel],
 	                  STRING_FOR_COMMUNITY_FEATURE_SHOW_BATTERY_LEVEL, "showBatteryLevel",
 	                  RuntimeFeatureStateToggle::On);
+
+	// Dynamics Sound Design (OTT, Sine Shaper, etc.)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DynamicsSoundDesign],
+	                  STRING_FOR_COMMUNITY_FEATURE_DYNAMICS_SOUND_DESIGN, "dynamicsSoundDesign",
+	                  RuntimeFeatureStateToggle::Off);
 }
 
 void RuntimeFeatureSettings::readSettingsFromFile() {

@@ -19,11 +19,19 @@
 
 #include "definitions_cxx.hpp"
 #include "dsp/filter/allpass_crossover.h"
+#include "dsp/filter/ladder_components.h"
 #include "dsp_ng/core/types.hpp"
+#include "gui/ui/ui.h"
+#include "hid/display/display.h"
 #include "util/fixedpoint.h"
+#include "util/functions.h"
 #include <array>
 #include <cmath>
 #include <span>
+
+// Forward declaration to avoid circular dependency
+class SoundEditor;
+extern SoundEditor soundEditor;
 
 namespace deluge::dsp {
 
@@ -50,18 +58,24 @@ public:
 	}
 
 	void setAttack(q31_t attack) {
-		attackMS_ = 0.5f + (std::exp(2.0f * float(attack) / ONE_Q31f) - 1.0f) * 10.0f;
+		attackKnob_ = attack;
+		// Map 0-ONE_Q31 to 0.5ms - 100ms (exponential curve)
+		attackMS_ = 0.5f + (std::exp(2.0f * float(attack) / ONE_Q31f) - 1.0f) * 15.0f;
 		attack_ = (-1000.0f / kSampleRate) / attackMS_;
 	}
 
 	void setRelease(q31_t release) {
-		releaseMS_ = 50.0f + (std::exp(2.0f * float(release) / ONE_Q31f) - 1.0f) * 50.0f;
+		releaseKnob_ = release;
+		// Map 0-ONE_Q31 to 5ms - 500ms (exponential curve)
+		releaseMS_ = 5.0f + (std::exp(2.0f * float(release) / ONE_Q31f) - 1.0f) * 75.0f;
 		release_ = (-1000.0f / kSampleRate) / releaseMS_;
 	}
 
 	void setThresholdDown(q31_t t) {
 		thresholdDownKnob_ = t;
-		thresholdDown_ = 1.0f - 0.8f * (float(t) / ONE_Q31f);
+		// Map 0-ONE_Q31 to 0.2-1.0 (conventional: knob up = higher threshold = less compression)
+		// Higher thresholdDown_ = higher internal threshold = signal must be louder to trigger compression
+		thresholdDown_ = 0.2f + 0.8f * (float(t) / ONE_Q31f);
 	}
 
 	void setThresholdUp(q31_t t) {
@@ -71,74 +85,228 @@ public:
 
 	void setRatioDown(q31_t r) {
 		ratioDownKnob_ = r;
-		fractionDown_ = 0.5f + (float(r) / ONE_Q31f) / 2.0f;
+		// Map 0-ONE_Q31 to 0-1.0 (0 = no compression / 1:1 ratio, 1 = full limiting)
+		fractionDown_ = float(r) / ONE_Q31f;
 	}
 
 	void setRatioUp(q31_t r) {
 		ratioUpKnob_ = r;
-		fractionUp_ = 0.5f + (float(r) / ONE_Q31f) / 2.0f;
+		// Map 0-ONE_Q31 to 0-1.0 (0 = no expansion, 1 = full expansion)
+		fractionUp_ = float(r) / ONE_Q31f;
 	}
 
-	[[nodiscard]] q31_t getAttack() const { return static_cast<q31_t>(attackMS_ * ONE_Q31f / 70.0f); }
-	[[nodiscard]] q31_t getRelease() const { return static_cast<q31_t>(releaseMS_ * ONE_Q31f / 400.0f); }
+	/// Set per-band output level (0 to ONE_Q31) - applied after compression
+	/// CCW = -inf, 12:00 = 0dB, CW = +16dB
+	/// This controls the mix balance of bands (like OTT's L/M/H sliders)
+	void setOutputLevel(q31_t g) {
+		outputLevelKnob_ = g;
+		float normalized = float(g) / ONE_Q31f;
+		if (normalized <= 0.5f) {
+			// 0 to 0.5 maps to 0x to 1.0x (-inf to 0dB)
+			outputLevel_ = normalized * 2.0f;
+		}
+		else {
+			// 0.5 to 1.0 maps to 1.0x to 6.31x (0dB to +16dB)
+			outputLevel_ = 1.0f + (normalized - 0.5f) * 2.0f * 5.31f;
+		}
+	}
+
+	/// Set bandwidth (gap between up and down thresholds)
+	/// When BW=0, thresholds are equal. When BW=max, maximum gap.
+	void setBandwidth(q31_t bw) {
+		bandwidthKnob_ = bw;
+		// Bandwidth as a fraction of available headroom (0 to 0.6)
+		float bandwidthFraction = 0.6f * (float(bw) / ONE_Q31f);
+		// thresholdUp = thresholdDown + bandwidth offset
+		// This creates a "dead zone" where no compression happens
+		thresholdUp_ = std::min(1.0f, thresholdDown_ + bandwidthFraction);
+	}
+
+	[[nodiscard]] q31_t getAttack() const { return attackKnob_; }
+	[[nodiscard]] q31_t getRelease() const { return releaseKnob_; }
+	[[nodiscard]] float getAttackMS() const { return attackMS_; }
+	[[nodiscard]] float getReleaseMS() const { return releaseMS_; }
 	[[nodiscard]] q31_t getThresholdDown() const { return thresholdDownKnob_; }
 	[[nodiscard]] q31_t getThresholdUp() const { return thresholdUpKnob_; }
 	[[nodiscard]] q31_t getRatioDown() const { return ratioDownKnob_; }
 	[[nodiscard]] q31_t getRatioUp() const { return ratioUpKnob_; }
+	[[nodiscard]] q31_t getOutputLevel() const { return outputLevelKnob_; }
+	[[nodiscard]] q31_t getBandwidth() const { return bandwidthKnob_; }
+	[[nodiscard]] float getOutputLevelLinear() const { return outputLevel_; }
+
+	/// Get bandwidth for display in dB (0-36dB range)
+	/// This represents the "dead zone" gap between up and down thresholds
+	[[nodiscard]] float getBandwidthForDisplay() const {
+		// Bandwidth fraction 0-0.6 maps to approximately 0-36dB
+		// (assuming ~60dB reference dynamic range)
+		float bandwidthFraction = 0.6f * (float(bandwidthKnob_) / ONE_Q31f);
+		return bandwidthFraction * 60.0f; // 0-36dB
+	}
+
+	/// Get threshold for display in dB (approximately -60dB to -12dB range)
+	/// Lower values = more aggressive compression (compresses quieter signals)
+	[[nodiscard]] float getThresholdForDisplay() const {
+		// thresholdDown_ is 0.2-1.0, representing fraction of dynamic range
+		// Map 0.2-1.0 to -60dB to -12dB (conventional: lower threshold = more compression)
+		// When thresholdDown_=0.2 (knob low), display -60dB (more compression)
+		// When thresholdDown_=1.0 (knob high), display -12dB (less compression)
+		constexpr float minDB = -60.0f;
+		constexpr float maxDB = -12.0f;
+		float normalized = (thresholdDown_ - 0.2f) / 0.8f; // 0 to 1
+		return minDB + normalized * (maxDB - minDB);       // -60dB to -12dB
+	}
+
+	/// Get ratio for display in x:1 format (1.0 = no compression, higher = more compression)
+	[[nodiscard]] float getRatioForDisplay() const {
+		// fractionDown_ is 0-1, where 0 = no compression, 1 = limiting
+		// Convert to ratio: ratio = 1 / (1 - fraction), clamped
+		if (fractionDown_ >= 0.99f) {
+			return 100.0f; // Essentially limiting
+		}
+		return 1.0f / (1.0f - fractionDown_);
+	}
 
 	/// Reset the compressor state
 	void reset() {
 		envelope_ = 0.0f;
 		rms_ = 0.0f;
-		mean_ = 0.0f;
+		level_ = 0.0f;
+		lastFrameCount_ = 0;
 	}
 
 	/// Calculate gain adjustment for the band based on current RMS level.
 	/// Returns a linear gain multiplier.
 	/// @param numSamples Number of samples in the current buffer
 	/// @param songVolumedB Reference volume level in dB (log scale)
-	[[nodiscard]] float calculateGain(float numSamples, float songVolumedB) {
+	/// @param knee Soft knee amount (0 = hard, 1 = soft, affects transition around threshold)
+	/// @param skew Up/down balance (-1 = upward only, 0 = balanced, +1 = downward only)
+	/// @param frameCount Global frame counter for gap detection
+	[[nodiscard]] float calculateGain(float numSamples, float songVolumedB, float knee = 0.0f, float skew = 0.0f,
+	                                  uint32_t frameCount = 0) {
+		// Detect gap in processing - if more than 1 frame since last call,
+		// there was a pause. Calculate natural decay over the gap.
+		uint32_t previousFrameCount = lastFrameCount_;
+		lastFrameCount_ = frameCount;
+		bool gapDetected = (frameCount > 0) && (previousFrameCount > 0) && (frameCount > previousFrameCount + 1);
+
 		float threshDowndB = songVolumedB * thresholdDown_;
 		float threshUpdB = songVolumedB * thresholdUp_;
 
-		// Downward compression: reduce gain when above threshold
-		float over = std::max(0.0f, rms_ - threshDowndB);
+		// Calculate how far above/below thresholds we are
+		float diffDown = rms_ - threshDowndB;
+		float diffUp = threshUpdB - rms_;
 
-		// Upward compression: boost gain when below threshold
-		float under = std::max(0.0f, threshUpdB - rms_);
+		// Knee width in dB (0 = hard knee, up to 12dB soft knee)
+		float kneeWidthdB = knee * 12.0f;
+		float halfKnee = kneeWidthdB / 2.0f;
 
-		// Combined target
-		float target = -over * fractionDown_ + under * fractionUp_;
+		// Downward compression with soft knee
+		float over;
+		if (kneeWidthdB < 0.1f || diffDown > halfKnee) {
+			// Hard knee or fully above knee region
+			over = std::max(0.0f, diffDown);
+		}
+		else if (diffDown > -halfKnee) {
+			// In soft knee transition region - quadratic interpolation
+			float x = diffDown + halfKnee; // 0 to kneeWidth
+			over = (x * x) / (2.0f * kneeWidthdB);
+		}
+		else {
+			// Below knee region
+			over = 0.0f;
+		}
 
-		// Run envelope follower
-		envelope_ = runEnvelope(envelope_, target, numSamples);
+		// Upward compression with soft knee
+		float under;
+		if (kneeWidthdB < 0.1f || diffUp > halfKnee) {
+			// Hard knee or fully below knee region
+			under = std::max(0.0f, diffUp);
+		}
+		else if (diffUp > -halfKnee) {
+			// In soft knee transition region
+			float x = diffUp + halfKnee;
+			under = (x * x) / (2.0f * kneeWidthdB);
+		}
+		else {
+			// Above knee region
+			under = 0.0f;
+		}
+
+		// Apply up/down skew to balance compression types
+		// skew = -1: upward only, skew = 0: balanced, skew = +1: downward only
+		float upwardFactor = std::clamp(1.0f - skew, 0.0f, 1.0f);
+		float downwardFactor = std::clamp(1.0f + skew, 0.0f, 1.0f);
+
+		// Combined target with skew applied
+		float target = -over * fractionDown_ * downwardFactor + under * fractionUp_ * upwardFactor;
+
+		// Run envelope follower - if gap detected, calculate natural decay
+		if (gapDetected) {
+			// Processing just resumed after a pause
+			// Calculate how many samples elapsed during the gap
+			uint32_t gapFrames = frameCount - previousFrameCount - 1;
+			float gapSamples = static_cast<float>(gapFrames) * numSamples;
+
+			// During silence, target would be 0 (no compression needed)
+			// Decay envelope toward 0 using release time constant
+			// This simulates what would have happened if we processed silence
+			envelope_ = envelope_ * std::exp(release_ * gapSamples);
+
+			// Reset level tracking since we have no history of what happened during gap
+			level_ = 0.0f;
+			rms_ = 0.0f;
+		}
+		else {
+			envelope_ = runEnvelope(envelope_, target, numSamples);
+		}
 
 		// Convert to linear gain, clamped to prevent overflow
 		float gain = std::exp(envelope_);
 		return std::clamp(gain, 0.1f, 10.0f);
 	}
 
-	/// Update the RMS level from the band's audio buffer
-	void updateRMS(std::span<const q31_t> buffer) {
-		q31_t sum = 0;
+	/// Update the level from the band's audio buffer using peak/MAV blend
+	/// @param buffer Audio samples to analyze
+	/// @param response 0.0 = mean absolute (smooth), 1.0 = peak (punchy)
+	void updateLevel(std::span<const q31_t> buffer, float response) {
+		q31_t peak = 0;
+		int64_t sum = 0;
 		for (q31_t sample : buffer) {
 			q31_t s = std::abs(sample);
-			sum += multiply_32x32_rshift32(s, s);
+			peak = std::max(peak, s);
+			sum += s; // No squaring - cheaper than RMS!
 		}
 
 		float ns = static_cast<float>(buffer.size());
-		float newMean = (static_cast<float>(sum) / ONE_Q31f) / ns;
-		mean_ = (newMean * ns + mean_) / (1.0f + ns);
-		float rmsLinear = ONE_Q31 * std::sqrt(mean_);
-		rms_ = std::log(std::max(rmsLinear, 1.0f));
+		float peakF = static_cast<float>(peak);
+		float meanAbsF = static_cast<float>(sum) / ns;
+
+		// Blend between peak and mean absolute based on response
+		float newLevel = peakF * response + meanAbsF * (1.0f - response);
+
+		// Smooth the level over time (simple IIR filter)
+		level_ = level_ * 0.9f + newLevel * 0.1f;
+
+		// Convert to log domain for threshold comparison (same as before)
+		rms_ = std::log(std::max(level_, 1.0f));
 	}
 
 	/// Get current gain reduction in dB (for metering)
 	[[nodiscard]] float getGainReductionDB() const { return envelope_; }
 
+	/// Get current input level in log domain (for metering)
+	[[nodiscard]] float getInputLevelLog() const { return rms_; }
+
+	/// Get threshold in log domain (for metering tick marks)
+	[[nodiscard]] float getThresholdLog() const { return thresholdDown_; }
+
 private:
 	[[nodiscard]] float runEnvelope(float current, float target, float numSamples) const {
-		float timeConstant = (target > current) ? attack_ : release_;
+		// Attack = envelope moving AWAY from unity (0) - compression/expansion starting
+		// Release = envelope moving TOWARD unity (0) - compression/expansion ending
+		// This works correctly for both downward (negative envelope) and upward (positive envelope)
+		bool movingAwayFromUnity = std::abs(target) > std::abs(current);
+		float timeConstant = movingAwayFromUnity ? attack_ : release_;
 		return target + std::exp(timeConstant * numSamples) * (current - target);
 	}
 
@@ -152,12 +320,42 @@ private:
 	float fractionUp_ = 0.5f;
 	float envelope_ = 0.0f;
 	float rms_ = 0.0f;
-	float mean_ = 0.0f;
+	float level_ = 0.0f;
+	uint32_t lastFrameCount_ = 0; // For gap detection
 
+	q31_t attackKnob_ = ONE_Q31 / 4;  // Default ~10ms
+	q31_t releaseKnob_ = ONE_Q31 / 4; // Default ~100ms
 	q31_t thresholdDownKnob_ = 0;
 	q31_t thresholdUpKnob_ = 0;
 	q31_t ratioDownKnob_ = 0;
 	q31_t ratioUpKnob_ = 0;
+	q31_t outputLevelKnob_ = ONE_Q31 / 2; // Default 0dB (unity) - 12:00 position
+	q31_t bandwidthKnob_ = ONE_Q31 / 2;   // Default medium bandwidth
+	float outputLevel_ = 1.0f;            // Linear output level multiplier (matches knob default)
+};
+
+/// Character zone names for display
+enum class CharacterZone : uint8_t {
+	Width = 0,  // Stereo width variations
+	Timing = 1, // Per-band timing offsets
+	Skew = 2,   // Per-band up/down skew
+	Punch = 3,  // Fast attack, transient emphasis
+	Air = 4,    // High frequency emphasis
+	Rich = 5,   // Upward compression focus
+	OTT = 6,    // Classic OTT character
+	OWLTT = 7   // Extreme/experimental - OTT cranked to 11
+};
+
+/// Vibe zone names for display - controls phase relationships between oscillations
+enum class VibeZone : uint8_t {
+	Sync = 0,    // All oscillations in phase
+	Spread = 1,  // Evenly spread phases (120° apart)
+	Pairs = 2,   // Band pairs in/out of phase
+	Cascade = 3, // Progressive phase shift across bands
+	Invert = 4,  // Opposite phases between parameters
+	Pulse = 5,   // Clustered phases creating pulses
+	Drift = 6,   // Slowly varying phase relationships
+	Chaos = 7    // Rapidly oscillating phase offsets
 };
 
 /// 3-band multiband compressor with OTT-style upward/downward compression.
@@ -165,6 +363,8 @@ private:
 class MultibandCompressor {
 public:
 	static constexpr int kNumBands = 3;
+	static constexpr int kNumCharacterZones = 8;
+	static constexpr int kNumVibeZones = 8;
 
 	enum class Band : uint8_t { Low = 0, Mid = 1, High = 2 };
 
@@ -174,14 +374,22 @@ public:
 		crossover_.setHighCrossover(2000.0f);
 
 		// Set default parameters for each band
+		// Use setter functions to keep knob values in sync with actual values
 		for (auto& band : bands_) {
 			band.setAttack(ONE_Q31 / 4);
 			band.setRelease(ONE_Q31 / 4);
 			band.setThresholdDown(ONE_Q31 / 2);
-			band.setThresholdUp(ONE_Q31 / 2);
-			band.setRatioDown(ONE_Q31 / 2);
-			band.setRatioUp(ONE_Q31 / 2);
+			band.setRatioDown(0); // Start at 1:1 ratio (transparent)
+			band.setRatioUp(0);   // Start at 1:1 ratio (transparent)
+			band.setBandwidth(ONE_Q31 / 2);
+			band.setOutputLevel(ONE_Q31 / 2); // 12:00 = 0dB (unity)
 		}
+
+		// Initialize global parameters via setters to keep knob values in sync
+		setOutputGain(ONE_Q31 / 2); // 12:00 = 0dB (unity)
+		setCharacter(0);            // Default to 0 (Width zone start) - neutral settings
+		setUpDownSkew(ONE_Q31 / 2);
+		setVibe(0); // Default to 0 (Sync zone start) - all in phase
 	}
 
 	/// Set crossover frequency between low and mid bands
@@ -212,21 +420,385 @@ public:
 
 	[[nodiscard]] FixedPoint<31> getBlend() const { return wet_; }
 
+	/// Set output gain (0 to ONE_Q31)
+	/// CCW = -inf, 12:00 = 0dB, CW = +16dB
+	void setOutputGain(q31_t g) {
+		outputGainKnob_ = g;
+		float normalized = float(g) / ONE_Q31f;
+		if (normalized <= 0.5f) {
+			// 0 to 0.5 maps to 0x to 1.0x (-inf to 0dB)
+			outputGain_ = normalized * 2.0f;
+		}
+		else {
+			// 0.5 to 1.0 maps to 1.0x to 6.31x (0dB to +16dB)
+			outputGain_ = 1.0f + (normalized - 0.5f) * 2.0f * 5.31f;
+		}
+	}
+
+	[[nodiscard]] q31_t getOutputGain() const { return outputGainKnob_; }
+	[[nodiscard]] float getOutputGainLinear() const { return outputGain_; }
+
+	/// Set threshold for all bands simultaneously (linked control)
+	void setAllThresholds(q31_t t) {
+		for (auto& band : bands_) {
+			band.setThresholdDown(t);
+		}
+	}
+
+	/// Set ratio for all bands simultaneously (linked control)
+	/// Sets both up and down ratios to the same value - the u/dn skew knob
+	/// then attenuates one or the other away from this setting
+	void setAllRatios(q31_t r) {
+		for (auto& band : bands_) {
+			band.setRatioDown(r);
+			band.setRatioUp(r);
+		}
+	}
+
+	/// Set attack for all bands simultaneously (linked control)
+	void setAllAttacks(q31_t a) {
+		for (auto& band : bands_) {
+			band.setAttack(a);
+		}
+	}
+
+	/// Set release for all bands simultaneously (linked control)
+	void setAllReleases(q31_t r) {
+		for (auto& band : bands_) {
+			band.setRelease(r);
+		}
+	}
+
+	/// Set character (0 to ONE_Q31) - replaces knee, controls multiple internal params
+	/// Divided into 8 zones: Width, Timing, Skew, Punch, Air, Rich, OTT, Wild
+	/// Each zone emphasizes different aspects of the compression character
+	/// Uses vibe phase offsets for OWLTT zone oscillations
+	void setCharacter(q31_t c) {
+		characterKnob_ = c;
+		float t = float(c) / ONE_Q31f; // 0.0 to 1.0
+
+		// Determine zone (0-7) and position within zone (0.0-1.0)
+		float zoneFloat = t * kNumCharacterZones;
+		int zone = std::min(kNumCharacterZones - 1, static_cast<int>(zoneFloat));
+		float zonePos = zoneFloat - zone; // 0-1 within zone
+
+		// Triangle wave: cheap periodic function for OWLTT zone oscillations
+		// Input: phase (any value), Output: -1 to +1
+		auto triangle = [](float phase) {
+			float p = phase - std::floor(phase); // Wrap to 0-1
+			return 1.0f - 4.0f * std::abs(p - 0.5f);
+		};
+
+		// === Compute derived parameters based on zone ===
+		// Each zone has characteristic curves for width, knee, timing, skew
+
+		// Response: 0=smooth/MAV, 1=punchy/peak (set based on zone character)
+		switch (zone) {
+		case 3: // Punch: peak detection for transients
+		case 6: // OTT: peak for classic aggressive response
+			response_ = 0.8f + zonePos * 0.2f;
+			break;
+		case 4: // Air: MAV for smoothness
+		case 5: // Rich: MAV for warmth
+			response_ = 0.2f - zonePos * 0.1f;
+			break;
+		case 7: // OWLTT: oscillates between peak and MAV
+			response_ = 0.5f + 0.5f * triangle(zonePos * 2.0f + vibePhaseWidth_);
+			break;
+		default:
+			response_ = 0.5f; // Balanced
+		}
+
+		// Stereo width: 0=mono, 1=full stereo (bass always mono regardless)
+		// Width zone: sweeps 0→1, others have moderate values
+		switch (zone) {
+		case 0: // Width: sweep mono to full stereo
+			width_ = zonePos;
+			break;
+		case 4: // Air: wide stereo for spaciousness
+		case 6: // OTT: wide for that classic sound
+			width_ = 0.7f + zonePos * 0.3f;
+			break;
+		case 3: // Punch: narrower for impact
+			width_ = 0.3f + zonePos * 0.2f;
+			break;
+		case 7: // OWLTT: oscillates wildly (with vibe phase offset)
+			width_ = 0.5f + 0.5f * triangle(zonePos * 2.0f + vibePhaseWidth_);
+			break;
+		default:
+			width_ = 0.5f; // Moderate stereo
+		}
+
+		// Knee: 0=hard, 1=soft
+		switch (zone) {
+		case 0: // Width: start with steepish knee (0.2), soften as width increases
+			knee_ = 0.2f + zonePos * 0.4f;
+			break;
+		case 4: // Air: soft for smoothness
+		case 5: // Rich: soft for warmth
+			knee_ = 0.6f + zonePos * 0.3f;
+			break;
+		case 3: // Punch: hard knee for transients
+		case 6: // OTT: medium-hard for aggression
+			knee_ = 0.1f + zonePos * 0.2f;
+			break;
+		case 7: // OWLTT: varies dramatically (with vibe phase offset)
+			knee_ = 0.5f + 0.4f * triangle(zonePos * 3.0f + vibePhaseKnee_);
+			break;
+		default:
+			knee_ = 0.4f; // Medium
+		}
+
+		// Per-band timing offsets: multiplier on base attack/release (0.5x to 2x)
+		// Stored as offset from 1.0 (so 0 = no change, -0.5 = half speed, +1.0 = double)
+		switch (zone) {
+		case 1:                                 // Timing: sweep from uniform to differentiated
+			timingOffset_[0] = -0.3f * zonePos; // Low slower
+			timingOffset_[1] = 0.0f;
+			timingOffset_[2] = 0.3f * zonePos; // High faster
+			break;
+		case 3: // Punch: fast attack across all bands
+			timingOffset_[0] = -0.4f - zonePos * 0.2f;
+			timingOffset_[1] = -0.3f - zonePos * 0.2f;
+			timingOffset_[2] = -0.2f - zonePos * 0.2f;
+			break;
+		case 4: // Air: fast high band
+			timingOffset_[0] = 0.2f;
+			timingOffset_[1] = 0.0f;
+			timingOffset_[2] = -0.4f - zonePos * 0.3f;
+			break;
+		case 6: // OTT: classic fast timing
+			timingOffset_[0] = -0.2f;
+			timingOffset_[1] = -0.3f;
+			timingOffset_[2] = -0.4f;
+			break;
+		case 7: // OWLTT: chaos (with vibe phase offsets)
+			timingOffset_[0] = 0.5f * triangle(zonePos * 4.0f + vibePhaseTiming_[0]);
+			timingOffset_[1] = 0.5f * triangle(zonePos * 5.0f + 0.333f + vibePhaseTiming_[1]);
+			timingOffset_[2] = 0.5f * triangle(zonePos * 6.0f + 0.667f + vibePhaseTiming_[2]);
+			break;
+		default:
+			timingOffset_[0] = timingOffset_[1] = timingOffset_[2] = 0.0f;
+		}
+
+		// Per-band skew: -1=upward, 0=balanced, +1=downward
+		switch (zone) {
+		case 2:                               // Skew: sweep through skew variations
+			skewOffset_[0] = -0.5f + zonePos; // Low: up→balanced
+			skewOffset_[1] = 0.0f;
+			skewOffset_[2] = 0.5f - zonePos; // High: down→balanced
+			break;
+		case 4: // Air: upward on highs
+			skewOffset_[0] = 0.0f;
+			skewOffset_[1] = -0.2f * zonePos;
+			skewOffset_[2] = -0.5f - zonePos * 0.3f;
+			break;
+		case 5: // Rich: upward emphasis
+			skewOffset_[0] = -0.3f - zonePos * 0.3f;
+			skewOffset_[1] = -0.4f - zonePos * 0.3f;
+			skewOffset_[2] = -0.2f - zonePos * 0.2f;
+			break;
+		case 6: // OTT: balanced aggressive
+			skewOffset_[0] = 0.1f;
+			skewOffset_[1] = 0.0f;
+			skewOffset_[2] = -0.1f;
+			break;
+		case 7: // OWLTT: extreme variation (with vibe phase offsets)
+			skewOffset_[0] = 0.8f * triangle(zonePos * 5.0f + vibePhaseSkew_[0]);
+			skewOffset_[1] = 0.8f * triangle(zonePos * 4.0f + 0.167f + vibePhaseSkew_[1]);
+			skewOffset_[2] = 0.8f * triangle(zonePos * 6.0f + 0.333f + vibePhaseSkew_[2]);
+			break;
+		default:
+			skewOffset_[0] = skewOffset_[1] = skewOffset_[2] = 0.0f;
+		}
+	}
+
+	/// Get character knob value
+	[[nodiscard]] q31_t getCharacter() const { return characterKnob_; }
+
+	/// Get current character zone for display
+	[[nodiscard]] CharacterZone getCharacterZone() const {
+		float t = float(characterKnob_) / ONE_Q31f;
+		int zone = std::min(kNumCharacterZones - 1, static_cast<int>(t * kNumCharacterZones));
+		return static_cast<CharacterZone>(zone);
+	}
+
+	/// Get position within current zone (0-127 for display)
+	[[nodiscard]] int32_t getCharacterZonePosition() const {
+		float t = float(characterKnob_) / ONE_Q31f;
+		float zoneFloat = t * kNumCharacterZones;
+		int zone = static_cast<int>(zoneFloat);
+		float zonePos = zoneFloat - zone;
+		return static_cast<int32_t>(zonePos * 127.0f);
+	}
+
+	/// Get stereo width (0=mono, 1=full stereo) - bass always mono regardless
+	[[nodiscard]] float getWidth() const { return width_; }
+
+	/// Get knee value (internal, computed from character)
+	[[nodiscard]] float getKnee() const { return knee_; }
+
+	/// Get per-band skew offset (added to global skew)
+	[[nodiscard]] float getBandSkewOffset(size_t band) const { return (band < kNumBands) ? skewOffset_[band] : 0.0f; }
+
+	/// Get per-band timing offset (multiplier adjustment)
+	[[nodiscard]] float getBandTimingOffset(size_t band) const {
+		return (band < kNumBands) ? timingOffset_[band] : 0.0f;
+	}
+
+	/// Set up/down ratio skew (0 = favor upward, ONE_Q31/2 = balanced, ONE_Q31 = favor downward)
+	/// Controls the balance between upward and downward compression
+	void setUpDownSkew(q31_t s) {
+		upDownSkewKnob_ = s;
+		// Map to -1.0 to +1.0 (-1 = all upward, 0 = balanced, +1 = all downward)
+		upDownSkew_ = (float(s) / ONE_Q31f) * 2.0f - 1.0f;
+	}
+
+	/// Set vibe (0 to ONE_Q31) - controls phase relationships between Feel oscillations
+	/// Divided into 8 zones: Sync, Spread, Pairs, Cascade, Invert, Pulse, Drift, Chaos
+	void setVibe(q31_t v) {
+		vibeKnob_ = v;
+		float t = float(v) / ONE_Q31f; // 0.0 to 1.0
+
+		// Determine zone (0-7) and position within zone (0.0-1.0)
+		float zoneFloat = t * kNumVibeZones;
+		int zone = std::min(kNumVibeZones - 1, static_cast<int>(zoneFloat));
+		float zonePos = zoneFloat - zone; // 0-1 within zone
+
+		// Triangle wave for Chaos zone oscillations
+		auto triangle = [](float phase) {
+			float p = phase - std::floor(phase);
+			return 1.0f - 4.0f * std::abs(p - 0.5f);
+		};
+
+		// Compute phase offsets based on zone
+		switch (zone) {
+		case 0: // Sync: all in phase, sweep from 0 to slight offset
+			vibePhaseWidth_ = zonePos * 0.1f;
+			vibePhaseKnee_ = zonePos * 0.1f;
+			vibePhaseTiming_ = {zonePos * 0.1f, zonePos * 0.1f, zonePos * 0.1f};
+			vibePhaseSkew_ = {zonePos * 0.1f, zonePos * 0.1f, zonePos * 0.1f};
+			break;
+
+		case 1: // Spread: evenly spread phases (120° = 0.333 apart)
+			vibePhaseWidth_ = 0.0f;
+			vibePhaseKnee_ = 0.167f * zonePos;
+			vibePhaseTiming_ = {0.0f, 0.333f * zonePos, 0.667f * zonePos};
+			vibePhaseSkew_ = {0.0f, 0.333f * zonePos, 0.667f * zonePos};
+			break;
+
+		case 2: // Pairs: low+high in phase, mid opposite
+			vibePhaseWidth_ = 0.0f;
+			vibePhaseKnee_ = 0.5f * zonePos;
+			vibePhaseTiming_ = {0.0f, 0.5f * zonePos, 0.0f};
+			vibePhaseSkew_ = {0.0f, 0.5f * zonePos, 0.0f};
+			break;
+
+		case 3: // Cascade: progressive phase shift
+			vibePhaseWidth_ = 0.25f * zonePos;
+			vibePhaseKnee_ = 0.5f * zonePos;
+			vibePhaseTiming_ = {0.0f, 0.25f * zonePos, 0.5f * zonePos};
+			vibePhaseSkew_ = {0.0f, 0.333f * zonePos, 0.667f * zonePos};
+			break;
+
+		case 4: // Invert: width/knee vs timing/skew opposite
+			vibePhaseWidth_ = 0.0f;
+			vibePhaseKnee_ = 0.0f;
+			vibePhaseTiming_ = {0.5f * zonePos, 0.5f * zonePos, 0.5f * zonePos};
+			vibePhaseSkew_ = {0.5f * zonePos, 0.5f * zonePos, 0.5f * zonePos};
+			break;
+
+		case 5: // Pulse: clustered phases creating pulses
+			vibePhaseWidth_ = 0.0f;
+			vibePhaseKnee_ = 0.1f * zonePos;
+			vibePhaseTiming_ = {0.0f, 0.05f * zonePos, 0.1f * zonePos};
+			vibePhaseSkew_ = {0.5f, 0.55f * zonePos, 0.6f * zonePos};
+			break;
+
+		case 6: // Drift: slowly varying relationships
+			vibePhaseWidth_ = 0.2f * zonePos;
+			vibePhaseKnee_ = 0.3f * zonePos;
+			vibePhaseTiming_ = {0.1f * zonePos, 0.2f * zonePos, 0.4f * zonePos};
+			vibePhaseSkew_ = {0.15f * zonePos, 0.35f * zonePos, 0.25f * zonePos};
+			break;
+
+		case 7: // Chaos: rapidly oscillating phase offsets
+			vibePhaseWidth_ = 0.5f * triangle(zonePos * 3.0f);
+			vibePhaseKnee_ = 0.5f * triangle(zonePos * 4.0f + 0.25f);
+			vibePhaseTiming_[0] = 0.5f * triangle(zonePos * 5.0f);
+			vibePhaseTiming_[1] = 0.5f * triangle(zonePos * 6.0f + 0.333f);
+			vibePhaseTiming_[2] = 0.5f * triangle(zonePos * 7.0f + 0.667f);
+			vibePhaseSkew_[0] = 0.5f * triangle(zonePos * 4.0f + 0.5f);
+			vibePhaseSkew_[1] = 0.5f * triangle(zonePos * 5.0f + 0.167f);
+			vibePhaseSkew_[2] = 0.5f * triangle(zonePos * 6.0f + 0.833f);
+			break;
+
+		default:
+			vibePhaseWidth_ = 0.0f;
+			vibePhaseKnee_ = 0.0f;
+			vibePhaseTiming_ = {0.0f, 0.0f, 0.0f};
+			vibePhaseSkew_ = {0.0f, 0.0f, 0.0f};
+		}
+	}
+
+	/// Get vibe knob value
+	[[nodiscard]] q31_t getVibe() const { return vibeKnob_; }
+
+	/// Get current vibe zone for display
+	[[nodiscard]] VibeZone getVibeZone() const {
+		float t = float(vibeKnob_) / ONE_Q31f;
+		int zone = std::min(kNumVibeZones - 1, static_cast<int>(t * kNumVibeZones));
+		return static_cast<VibeZone>(zone);
+	}
+
+	/// Get position within current vibe zone (0-127 for display)
+	[[nodiscard]] int32_t getVibeZonePosition() const {
+		float t = float(vibeKnob_) / ONE_Q31f;
+		float zoneFloat = t * kNumVibeZones;
+		int zone = static_cast<int>(zoneFloat);
+		float zonePos = zoneFloat - zone;
+		return static_cast<int32_t>(zonePos * 127.0f);
+	}
+
+	/// Get the linked threshold value (from first band)
+	[[nodiscard]] q31_t getLinkedThreshold() const { return bands_[0].getThresholdDown(); }
+
+	/// Get the linked ratio value (from first band)
+	[[nodiscard]] q31_t getLinkedRatio() const { return bands_[0].getRatioDown(); }
+
+	/// Get the linked attack value (from first band)
+	[[nodiscard]] q31_t getLinkedAttack() const { return bands_[0].getAttack(); }
+
+	/// Get the linked release value (from first band)
+	[[nodiscard]] q31_t getLinkedRelease() const { return bands_[0].getRelease(); }
+
+	/// Get the up/down skew value
+	[[nodiscard]] q31_t getUpDownSkew() const { return upDownSkewKnob_; }
+
 	/// Reset all filter and compressor states
 	void reset() {
 		crossover_.reset();
 		for (auto& band : bands_) {
 			band.reset();
 		}
+		saturationStateL_.fill(0);
+		saturationStateR_.fill(0);
+		dcBlockL_.reset();
+		dcBlockR_.reset();
 	}
 
 	/// Render the multiband compressor in-place
+	/// Pure dynamics processor - output gain knob is the only gain control.
+	/// At 1:1 ratio with output gain at unity, this is transparent.
 	/// @param buffer Stereo audio buffer to process
-	/// @param finalVolume Reference volume level (same as RMSFeedbackCompressor)
+	/// @param finalVolume Reference volume level for threshold calculation (log domain)
 	void render(StereoBuffer<q31_t> buffer, q31_t finalVolume) {
 		if (buffer.empty()) {
 			return;
 		}
+
+		// Increment frame counter for gap detection in band compressors
+		++frameCount_;
 
 		// Store dry signal if blending
 		static std::array<StereoSample<q31_t>, SSI_TX_BUFFER_NUM_SAMPLES> dryBuffer;
@@ -256,27 +828,143 @@ public:
 
 		// Process each band
 		for (size_t b = 0; b < kNumBands; ++b) {
-			// Calculate RMS for the band (combine L+R)
+			// Calculate level for the band (combine L+R)
 			std::array<q31_t, SSI_TX_BUFFER_NUM_SAMPLES> combinedBuffer;
 			for (size_t i = 0; i < buffer.size(); ++i) {
 				combinedBuffer[i] = (bandBufferL[b][i] >> 1) + (bandBufferR[b][i] >> 1);
 			}
-			bands_[b].updateRMS(std::span(combinedBuffer.data(), buffer.size()));
+			bands_[b].updateLevel(std::span(combinedBuffer.data(), buffer.size()), response_);
 
-			// Calculate and apply gain
-			float gain = bands_[b].calculateGain(static_cast<float>(buffer.size()), songVolumedB);
+			// Calculate and apply compression gain
+			// Use character-derived knee and add per-band skew offset to global skew
+			float bandSkew = std::clamp(upDownSkew_ + skewOffset_[b], -1.0f, 1.0f);
+			float gain =
+			    bands_[b].calculateGain(static_cast<float>(buffer.size()), songVolumedB, knee_, bandSkew, frameCount_);
 			q31_t gainFixed = static_cast<q31_t>(gain * (1 << 27)); // 4.27 format
 
+			// Apply compression gain and check for saturation
+			q31_t bandPeak = 0;
 			for (size_t i = 0; i < buffer.size(); ++i) {
 				bandBufferL[b][i] = multiply_32x32_rshift32(bandBufferL[b][i], gainFixed) << 4;
 				bandBufferR[b][i] = multiply_32x32_rshift32(bandBufferR[b][i], gainFixed) << 4;
+				// Track peak before saturation
+				q31_t absL = (bandBufferL[b][i] < 0) ? -bandBufferL[b][i] : bandBufferL[b][i];
+				q31_t absR = (bandBufferR[b][i] < 0) ? -bandBufferR[b][i] : bandBufferR[b][i];
+				bandPeak = std::max(bandPeak, std::max(absL, absR));
 			}
+
+			// Detect saturation (tanh starts to soft-clip around 0.7 of full scale)
+			// With saturationAmount = 3, signal is shifted left 3 bits before tanh
+			// Threshold is 8x higher than for saturationAmount = 6
+			constexpr q31_t saturationThreshold = static_cast<q31_t>(EFFECTIVE_0DBFS_Q31 * 5.6);
+			if (bandPeak > saturationThreshold) {
+				bandSaturationHoldCounter_[b] = kIndicatorHoldBuffers;
+			}
+			else if (bandSaturationHoldCounter_[b] > 0) {
+				bandSaturationHoldCounter_[b]--;
+			}
+			bandSaturating_[b] = (bandSaturationHoldCounter_[b] > 0);
+
+			// Per-band soft saturation (tanh) with antialiasing
+			// Currently disabled - saves ~35-45% CPU
+			// TODO: Re-enable once performance is acceptable
+			// for (size_t i = 0; i < buffer.size(); ++i) {
+			// 	bandBufferL[b][i] = getTanHAntialiased(bandBufferL[b][i], &saturationStateL_[b], 6);
+			// 	bandBufferR[b][i] = getTanHAntialiased(bandBufferR[b][i], &saturationStateR_[b], 6);
+			// }
+
+			// Track post-saturation peak for metering
+			q31_t postSatPeak = 0;
+			for (size_t i = 0; i < buffer.size(); ++i) {
+				q31_t absL = (bandBufferL[b][i] < 0) ? -bandBufferL[b][i] : bandBufferL[b][i];
+				q31_t absR = (bandBufferR[b][i] < 0) ? -bandBufferR[b][i] : bandBufferR[b][i];
+				postSatPeak = std::max(postSatPeak, std::max(absL, absR));
+			}
+			bandOutputPeak_[b] = std::max(postSatPeak, static_cast<q31_t>(bandOutputPeak_[b] * 0.95f));
 		}
 
-		// Recombine bands
+		// Recombine bands with per-band output levels and stereo width
+		// Apply M/S stereo width processing per band (bass always mono)
+		// Apply output gain using 64-bit accumulation to prevent overflow
+		int64_t truePeak = 0; // Track true peak before clamping for accurate metering
 		for (size_t i = 0; i < buffer.size(); ++i) {
-			buffer[i].l = bandBufferL[0][i] + bandBufferL[1][i] + bandBufferL[2][i];
-			buffer[i].r = bandBufferR[0][i] + bandBufferR[1][i] + bandBufferR[2][i];
+			int64_t sumL = 0, sumR = 0;
+
+			for (size_t b = 0; b < kNumBands; ++b) {
+				float level = bands_[b].getOutputLevelLinear();
+				q31_t L = bandBufferL[b][i];
+				q31_t R = bandBufferR[b][i];
+
+				// Apply stereo width via M/S processing
+				// Bass (b=0) always mono, mid/high use character width
+				float bandWidth = (b == 0) ? 0.0f : width_;
+
+				// M/S encoding: M = (L+R)/2, S = (L-R)/2
+				// Width scaling: S_out = S * width
+				// Decoding: L_out = M + S_out, R_out = M - S_out
+				q31_t mid = (L >> 1) + (R >> 1);
+				q31_t side = (L >> 1) - (R >> 1);
+				q31_t sideScaled = static_cast<q31_t>(static_cast<float>(side) * bandWidth);
+				L = mid + sideScaled;
+				R = mid - sideScaled;
+
+				sumL += static_cast<int64_t>(static_cast<double>(L) * level);
+				sumR += static_cast<int64_t>(static_cast<double>(R) * level);
+			}
+
+			// Apply output gain in 64-bit (outputGain_ is the only gain control)
+			sumL = static_cast<int64_t>(static_cast<double>(sumL) * outputGain_);
+			sumR = static_cast<int64_t>(static_cast<double>(sumR) * outputGain_);
+
+			// Track true peak before clamping
+			// Note: Use explicit 64-bit abs to avoid std::abs truncating to int32_t
+			int64_t absL = (sumL < 0) ? -sumL : sumL;
+			int64_t absR = (sumR < 0) ? -sumR : sumR;
+			truePeak = std::max(truePeak, std::max(absL, absR));
+
+			// Clamp to q31 range (soft clip at boundaries)
+			q31_t outL = static_cast<q31_t>(
+			    std::clamp(sumL, static_cast<int64_t>(INT32_MIN + 1), static_cast<int64_t>(INT32_MAX)));
+			q31_t outR = static_cast<q31_t>(
+			    std::clamp(sumR, static_cast<int64_t>(INT32_MIN + 1), static_cast<int64_t>(INT32_MAX)));
+
+			// Apply DC-blocking high-pass filter (removes DC offset from saturation)
+			buffer[i].l = outL - dcBlockL_.doFilter(outL, kDCBlockCoeff);
+			buffer[i].r = outR - dcBlockR_.doFilter(outR, kDCBlockCoeff);
+		}
+
+		// Track output level using true peak (before clamping) for accurate metering
+		// Convert 64-bit peak to equivalent q31 scale for display
+		q31_t bufferPeak;
+		if (truePeak > INT32_MAX) {
+			// Signal exceeded full scale - report as full scale for meter
+			bufferPeak = INT32_MAX;
+		}
+		else {
+			bufferPeak = static_cast<q31_t>(truePeak);
+		}
+		// Decay the peak slowly for visual smoothing (~50ms decay)
+		outputPeak_ = std::max(bufferPeak, static_cast<q31_t>(outputPeak_ * 0.95f));
+
+		// Detect clipping with hold timer (~500ms hold time)
+		// Trigger at +2.5dBFS relative to effective 0dBFS (warning when close to DAC clip)
+		constexpr int64_t clipThreshold64 = static_cast<int64_t>(EFFECTIVE_0DBFS_Q31 * 1.33);
+		if (truePeak > clipThreshold64) {
+			clippingHoldCounter_ = kIndicatorHoldBuffers;
+		}
+		else if (clippingHoldCounter_ > 0) {
+			clippingHoldCounter_--;
+		}
+		clipping_ = (clippingHoldCounter_ > 0);
+
+		// Trigger UI refresh for meter display (~10fps at 44.1kHz/128 samples)
+		// Only for OLED displays when sound editor is active - avoids flicker in other menus
+		if (hid::display::have_oled_screen && ++meterRefreshCounter_ >= kMeterRefreshBuffers) {
+			meterRefreshCounter_ = 0;
+			// Only refresh if sound editor is active (avoids flicker in other menus)
+			if (getCurrentUI() == reinterpret_cast<UI*>(&soundEditor)) {
+				renderUIsForOled();
+			}
 		}
 
 		// Apply wet/dry blend
@@ -299,11 +987,177 @@ public:
 		return static_cast<uint8_t>(std::clamp(totalReduction * 4.0f * 4.0f / kNumBands, 0.0f, 127.0f));
 	}
 
+	/// Get gain change for a specific band (bipolar: -127 to +127)
+	/// Negative = downward compression (gain reduction) → meter bars go DOWN
+	/// Positive = upward compression (gain boost) → meter bars go UP
+	[[nodiscard]] int8_t getBandGainReduction(size_t bandIndex) const {
+		if (bandIndex >= kNumBands) {
+			return 0;
+		}
+		// envelope_ is in natural log units, convert to dB:
+		// dB = 20 * log10(exp(envelope_)) = 20 * envelope_ / ln(10) ≈ 8.686 * envelope_
+		float envelope = bands_[bandIndex].getGainReductionDB();
+		// Apply noise floor - ignore very small envelope values (< 0.1dB)
+		if (std::abs(envelope) < 0.012f) { // ~0.1dB in natural log units
+			return 0;
+		}
+		float grDB = envelope * 8.686f; // Convert from natural log to dB
+		// Scale ±12dB to ±127, preserve sign so bars match gain direction
+		float scaled = std::clamp(grDB * (127.0f / 12.0f), -127.0f, 127.0f);
+		return static_cast<int8_t>(scaled);
+	}
+
+	/// Get input level for a specific band (0-127 scale for metering)
+	/// dBFS-linear scale: -48dBFS = 0, -24dBFS = ~64 (half), 0dBFS = 127
+	[[nodiscard]] uint8_t getBandInputLevel(size_t bandIndex) const {
+		if (bandIndex >= kNumBands) {
+			return 0;
+		}
+		// rms_ is log(level) where level is in raw sample space
+		// Convert to dBFS: dBFS = 20 * log10(level / ONE_Q31) = 8.686 * (rms_ - 21.5)
+		float level = bands_[bandIndex].getInputLevelLog();
+		constexpr float refLevel = 21.5f; // log(ONE_Q31)
+		float dBFS = 8.686f * (level - refLevel);
+		// Noise floor at -48dBFS
+		if (dBFS < -48.0f) {
+			return 0;
+		}
+		// Linear mapping from [-48, 0] dBFS to [0, 127]
+		float scaled = (dBFS + 48.0f) * (127.0f / 48.0f);
+		return static_cast<uint8_t>(std::clamp(scaled, 0.0f, 127.0f));
+	}
+
+	/// Get output level for a specific band (0-127 scale for metering)
+	/// Shows pre-saturation signal level, dBFS scale: -48dBFS = 0, 0dBFS = 127
+	/// Note: 0dBFS is calibrated to downstream clip point (~24dB below internal full scale)
+	[[nodiscard]] uint8_t getBandOutputLevel(size_t bandIndex) const {
+		if (bandIndex >= kNumBands) {
+			return 0;
+		}
+		q31_t peak = bandOutputPeak_[bandIndex];
+		if (peak < 1000) {
+			return 0;
+		}
+		// Use system constant for downstream clipping point
+		float peakNormalized = static_cast<float>(peak) / EFFECTIVE_0DBFS_Q31f;
+		float dB = 20.0f * std::log10(peakNormalized + 1e-10f);
+		// Range: -48dBFS (bottom) to 0dBFS (full scale)
+		if (dB < -48.0f) {
+			return 0;
+		}
+		float scaled = (dB + 48.0f) * (127.0f / 48.0f);
+		return static_cast<uint8_t>(std::clamp(scaled, 0.0f, 127.0f));
+	}
+
+	/// Get threshold position for metering (0.0 to 1.0, where 0=bottom, 1=top of meter)
+	/// This represents where the threshold tick should be drawn on the band meter
+	[[nodiscard]] float getBandThresholdPosition(size_t bandIndex) const {
+		if (bandIndex >= kNumBands) {
+			return 0.5f;
+		}
+		// thresholdDown_ is 0.2-1.0, map to 0-1 for meter position
+		float threshold = bands_[bandIndex].getThresholdLog();
+		return (threshold - 0.2f) / 0.8f;
+	}
+
+	/// Get output level for metering (0-127 scale)
+	/// Range: -48dBFS = 0, 0dBFS = 127
+	/// Note: 0dBFS is calibrated to downstream clip point (~24dB below internal full scale)
+	[[nodiscard]] uint8_t getOutputLevel() const {
+		if (outputPeak_ < 1000) {
+			return 0;
+		}
+		// Use system constant for downstream clipping point
+		float peakNormalized = static_cast<float>(outputPeak_) / EFFECTIVE_0DBFS_Q31f;
+		float dB = 20.0f * std::log10(peakNormalized + 1e-10f);
+		// Range: -48dBFS (bottom) to 0dBFS (full scale)
+		if (dB < -48.0f) {
+			return 0;
+		}
+		float scaled = (dB + 48.0f) * (127.0f / 48.0f);
+		return static_cast<uint8_t>(std::clamp(scaled, 0.0f, 127.0f));
+	}
+
+	/// Get raw output peak value for debugging
+	[[nodiscard]] q31_t getOutputPeak() const { return outputPeak_; }
+
+	/// Check if output is clipping (exceeded 0dBFS in recent buffer)
+	[[nodiscard]] bool isClipping() const { return clipping_; }
+
+	/// Clear the clipping indicator (also auto-clears after ~500ms)
+	void clearClipping() {
+		clipping_ = false;
+		clippingHoldCounter_ = 0;
+	}
+
+	/// Check if a specific band is saturating (hitting the tanh soft clipper)
+	[[nodiscard]] bool isBandSaturating(size_t bandIndex) const {
+		if (bandIndex >= kNumBands) {
+			return false;
+		}
+		return bandSaturating_[bandIndex];
+	}
+
 private:
 	filter::AllpassCrossover crossover_;
 	std::array<BandCompressor, kNumBands> bands_;
 	FixedPoint<31> wet_{ONE_Q31};
 	float dry_ = 0.0f;
+	q31_t outputGainKnob_ = (ONE_Q31 / 5) * 3; // Default +12dB (~4x) to compensate for low band gains
+	float outputGain_ = 4.18f;                 // Linear output gain multiplier (matches knob)
+
+	// Character knob (replaces knee) - controls width, knee, timing, skew
+	q31_t characterKnob_ = 0; // Default 0 (Width zone start) - neutral settings
+	float width_ = 0.0f;      // Stereo width: 0=mono, 1=full (bass always mono)
+	float knee_ = 0.2f;       // 0=hard, 1=soft (derived from character) - steepish default
+	std::array<float, kNumBands> timingOffset_{0.0f, 0.0f, 0.0f}; // Per-band timing multiplier offset
+	std::array<float, kNumBands> skewOffset_{0.0f, 0.0f, 0.0f};   // Per-band up/down skew offset
+
+	q31_t upDownSkewKnob_ = ONE_Q31 / 2; // Default balanced
+	float upDownSkew_ = 0.0f;            // -1=upward, 0=balanced, +1=downward
+
+	// Response - controlled by Feel zone, not a separate knob
+	float response_ = 0.5f; // 0=smooth/MAV, 1=punchy/peak
+
+	// Vibe knob - controls phase relationships between oscillations in Feel
+	q31_t vibeKnob_ = 0;                                             // Default 0 (Sync zone start)
+	float vibePhaseWidth_ = 0.0f;                                    // Phase offset for width oscillation
+	float vibePhaseKnee_ = 0.0f;                                     // Phase offset for knee oscillation
+	std::array<float, kNumBands> vibePhaseTiming_{0.0f, 0.0f, 0.0f}; // Phase offsets for timing
+	std::array<float, kNumBands> vibePhaseSkew_{0.0f, 0.0f, 0.0f};   // Phase offsets for skew
+
+	// Saturation state for antialiasing (per-band, per-channel)
+	// Initialize to midpoint (2147483648 = 0x80000000) which represents zero signal
+	// Using 0 causes DC offset because the 2D interpolation sees a transition from "large negative" to "zero"
+	static constexpr uint32_t kSaturationNeutral = 2147483648u;
+	std::array<uint32_t, kNumBands> saturationStateL_{kSaturationNeutral, kSaturationNeutral, kSaturationNeutral};
+	std::array<uint32_t, kNumBands> saturationStateR_{kSaturationNeutral, kSaturationNeutral, kSaturationNeutral};
+
+	// DC-blocking high-pass filter (removes DC offset introduced by saturation)
+	// fc = 5Hz gives very low cutoff that only removes DC, not audio
+	// hpfCoeff = tan(pi*fc/fs) / (1 + tan(pi*fc/fs)) ≈ fc/fs for small fc
+	static constexpr q31_t kDCBlockCoeff = static_cast<q31_t>((5.0f / kSampleRate) * ONE_Q31);
+	filter::BasicFilterComponent dcBlockL_;
+	filter::BasicFilterComponent dcBlockR_;
+
+	// Output metering state
+	q31_t outputPeak_{0};                                        // Peak output level for metering
+	bool clipping_{false};                                       // True if output exceeded 0dBFS recently
+	uint8_t clippingHoldCounter_{0};                             // Hold counter for clip indicator
+	std::array<bool, kNumBands> bandSaturating_{};               // Per-band saturation indicators
+	std::array<uint8_t, kNumBands> bandSaturationHoldCounter_{}; // Hold counters for saturation indicators
+	std::array<q31_t, kNumBands> bandOutputPeak_{};              // Per-band output peak levels
+
+	// Hold time for indicators (~500ms at 345 buffers/sec)
+	static constexpr uint8_t kIndicatorHoldBuffers = 170;
+
+	// UI refresh counter for meter display
+	// At 44.1kHz with 128 sample buffers: 345 buffers/sec, so ~35 buffers = 100ms
+	static constexpr uint8_t kMeterRefreshBuffers = 35;
+	uint8_t meterRefreshCounter_{0};
+
+	// Frame counter for gap detection (passed to band compressors)
+	uint32_t frameCount_{0};
 };
 
 } // namespace deluge::dsp

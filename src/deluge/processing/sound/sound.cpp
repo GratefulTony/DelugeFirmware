@@ -2563,6 +2563,7 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, deluge::dsp::Stere
 	int32_t modFXRate = paramFinalValues[params::GLOBAL_MOD_FX_RATE - params::FIRST_GLOBAL];
 
 	processSRRAndBitcrushing(sound_stereo, &postFXVolume, paramManager);
+	processNewDistortions(sound_stereo, paramManager);
 	processFX(sound_stereo, modFXType_, modFXRate, modFXDepth, delayWorkingState, &postFXVolume, paramManager,
 	          !voices_.empty(), reverbSendAmount >> 1);
 	processStutter(sound_stereo, paramManager);
@@ -2571,17 +2572,17 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, deluge::dsp::Stere
 
 	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
 	compressor.setThreshold(compThreshold);
-	if (compThreshold > 0) {
-		if (compressorMode == CompressorMode::MULTIBAND) {
-			multibandCompressor.render(sound_stereo, postFXVolume);
-		}
-		else {
-			compressor.renderVolNeutral(sound_stereo, postFXVolume);
-		}
+	if (compressorMode == CompressorMode::MULTIBAND) {
+		// Multiband mode always runs (has its own threshold controls)
+		// TODO: Re-enable applyMultibandCompressorParams for modulation once menu items use params
+		multibandCompressor.render(sound_stereo, postFXVolume);
+	}
+	else if (compThreshold > 0) {
+		// Single-band mode only runs when threshold is set
+		compressor.renderVolNeutral(sound_stereo, postFXVolume);
 	}
 	else {
 		compressor.reset();
-		multibandCompressor.reset();
 	}
 
 	if (recorder && recorder->status < RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {

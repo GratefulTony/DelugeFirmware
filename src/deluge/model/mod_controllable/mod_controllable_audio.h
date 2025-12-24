@@ -22,6 +22,8 @@
 #include "dsp/compressor/multiband.h"
 #include "dsp/compressor/rms_feedback.h"
 #include "dsp/delay/delay.h"
+#include "dsp/disperser.h"
+#include "dsp/saturator.h"
 #include "dsp_ng/core/types.hpp"
 #include "hid/button.h"
 #include "model/fx/stutterer.h"
@@ -61,6 +63,7 @@ public:
 	                              int32_t readAutomationUpToPos, ArpeggiatorSettings* arpSettings, Song* song);
 	void processSRRAndBitcrushing(deluge::dsp::StereoBuffer<q31_t> buffer, int32_t* postFXVolume,
 	                              ParamManager* paramManager);
+	void processNewDistortions(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager);
 	static void writeParamAttributesToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,
 	                                       int32_t* valuesForOverride = nullptr);
 	static void writeParamTagsToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,
@@ -107,6 +110,39 @@ public:
 
 	bool sampleRateReductionOnLastTime;
 	uint8_t clippingAmount; // Song probably doesn't currently use this?
+
+	// Wavefold smoothing state
+	q31_t wavefoldLast{0}; // Previous wavefold value for parameter smoothing
+
+	// Sine shaper distortion params (0-127, converted to q31_t for DSP)
+	uint8_t sineShaperDrive{0};     // Input gain / saturation amount
+	uint8_t sineShaperHarmonic{0};  // Blend between fundamental and 3rd harmonic
+	uint8_t sineShaperSymmetry{64}; // DC bias for asymmetry (64 = center/symmetric)
+	uint8_t sineShaperMix{0};       // Wet/dry blend (0 = bypass)
+	q31_t sineShaperDriveLast{0};   // Previous drive value for parameter smoothing
+	q31_t sineShaperFilterL{0};     // 12kHz lowpass state for left channel
+	q31_t sineShaperFilterR{0};     // 12kHz lowpass state for right channel
+
+	// Saturator with X/Y shape control
+	deluge::dsp::Saturator saturator; // DSP processor with lookup table
+	uint8_t saturatorDrive{0};        // Input gain / saturation amount (0-127)
+	uint8_t saturatorShapeX{0};       // Soft→Hard axis (0-127)
+	uint8_t saturatorShapeY{0};       // Clean→Weird axis (0-127)
+	uint8_t saturatorMix{0};          // Wet/dry blend (0 = bypass)
+	q31_t saturatorDriveLast{0};      // Previous drive value for smoothing
+	q31_t saturatorFilterL{0};        // Anti-aliasing filter state L
+	q31_t saturatorFilterR{0};        // Anti-aliasing filter state R
+
+	// Disperser (allpass cascade with feedback)
+	deluge::dsp::Disperser disperser; // DSP processor with 16 allpass stages
+	uint8_t disperserFreq{64};        // Center frequency (0-127, maps to 50Hz-8kHz)
+	uint8_t disperserSpread{0};       // Frequency spread (0-127, 0=all same, 127=±4 octaves)
+	uint8_t disperserFeedback{64};    // Feedback amount (0-127, 64=none, 0=negative, 127=positive)
+	uint8_t disperserStages{0};       // Number of active stages (0-16, 0 = bypass)
+	q31_t disperserFreqLast{0};       // Previous freq value for smoothing
+	q31_t disperserSpreadLast{0};     // Previous spread value for smoothing
+	q31_t disperserFeedbackLast{0};   // Previous feedback value for smoothing
+
 	FilterMode lpfMode;
 	FilterMode hpfMode;
 	FilterRoute filterRoute;
@@ -117,6 +153,9 @@ public:
 	deluge::dsp::RMSFeedbackCompressor compressor;
 	deluge::dsp::MultibandCompressor multibandCompressor;
 	CompressorMode compressorMode{CompressorMode::SINGLE};
+
+	/// Apply modulated params from UnpatchedParamSet to multiband compressor before rendering
+	void applyMultibandCompressorParams(ParamManager* paramManager);
 	deluge::dsp::GranularProcessor* grainFX{nullptr};
 
 	uint32_t lowSampleRatePos{};

@@ -35,9 +35,30 @@ audio_compressor::Blend compBlend{STRING_FOR_BLEND, STRING_FOR_BLEND};
 audio_compressor::Attack compAttack{STRING_FOR_ATTACK, STRING_FOR_ATTACK};
 audio_compressor::Release compRelease{STRING_FOR_RELEASE, STRING_FOR_RELEASE};
 audio_compressor::SideHPF compHPF{STRING_FOR_HPF, STRING_FOR_HPF};
+audio_compressor::LinkedThreshold mbLinkedThreshold{STRING_FOR_THRESHOLD};
+audio_compressor::LinkedRatio mbLinkedRatio{STRING_FOR_RATIO};
+audio_compressor::UpDownSkew mbUpDownSkew{STRING_FOR_COMPRESSOR_UP_DOWN_SKEW};
+audio_compressor::LinkedAttack mbLinkedAttack{STRING_FOR_ATTACK};
+audio_compressor::LinkedRelease mbLinkedRelease{STRING_FOR_RELEASE};
+audio_compressor::Character mbCharacter{STRING_FOR_COMPRESSOR_CHARACTER};
+audio_compressor::Vibe mbVibe{STRING_FOR_COMPRESSOR_VIBE};
+audio_compressor::BandThreshold<0> mbLowThreshold{STRING_FOR_COMPRESSOR_LOW_THRESHOLD};
+audio_compressor::BandRatio<0> mbLowRatio{STRING_FOR_COMPRESSOR_LOW_RATIO};
+audio_compressor::BandBandwidth<0> mbLowBandwidth{STRING_FOR_COMPRESSOR_LOW_BW};
+audio_compressor::BandOutputLevel<0> mbLowOutputLevel{STRING_FOR_COMPRESSOR_LOW_LEVEL};
+audio_compressor::BandThreshold<1> mbMidThreshold{STRING_FOR_COMPRESSOR_MID_THRESHOLD};
+audio_compressor::BandRatio<1> mbMidRatio{STRING_FOR_COMPRESSOR_MID_RATIO};
+audio_compressor::BandBandwidth<1> mbMidBandwidth{STRING_FOR_COMPRESSOR_MID_BW};
+audio_compressor::BandOutputLevel<1> mbMidOutputLevel{STRING_FOR_COMPRESSOR_MID_LEVEL};
+audio_compressor::BandThreshold<2> mbHighThreshold{STRING_FOR_COMPRESSOR_HIGH_THRESHOLD};
+audio_compressor::BandRatio<2> mbHighRatio{STRING_FOR_COMPRESSOR_HIGH_RATIO};
+audio_compressor::BandBandwidth<2> mbHighBandwidth{STRING_FOR_COMPRESSOR_HIGH_BW};
+audio_compressor::BandOutputLevel<2> mbHighOutputLevel{STRING_FOR_COMPRESSOR_HIGH_LEVEL};
 audio_compressor::LowCrossover compLowXover{STRING_FOR_COMPRESSOR_LOW_CROSSOVER};
 audio_compressor::HighCrossover compHighXover{STRING_FOR_COMPRESSOR_HIGH_CROSSOVER};
-std::array<MenuItem*, 9> child3 = {
+audio_compressor::OutputGain mbOutputGain{STRING_FOR_COMPRESSOR_OUTPUT_GAIN};
+audio_compressor::MultibandBlend mbBlend{STRING_FOR_BLEND};
+std::array<MenuItem*, 30> child3 = {
     &compMode,
     &threshold,
     &compRatio,
@@ -45,10 +66,31 @@ std::array<MenuItem*, 9> child3 = {
     &compAttack,
     &compRelease,
     &compHPF,
+    &mbLinkedThreshold,
+    &mbLinkedRatio,
+    &mbUpDownSkew,
+    &mbLinkedAttack,
+    &mbLinkedRelease,
+    &mbCharacter,
+    &mbVibe,
+    &mbLowThreshold,
+    &mbLowRatio,
+    &mbLowBandwidth,
+    &mbLowOutputLevel,
+    &mbMidThreshold,
+    &mbMidRatio,
+    &mbMidBandwidth,
+    &mbMidOutputLevel,
+    &mbHighThreshold,
+    &mbHighRatio,
+    &mbHighBandwidth,
+    &mbHighOutputLevel,
     &compLowXover,
     &compHighXover,
+    &mbOutputGain,
+    &mbBlend,
 };
-HorizontalMenu audioCompMenu{STRING_FOR_COMMUNITY_FEATURE_MASTER_COMPRESSOR, child3};
+submenu::CompressorHorizontalMenu audioCompMenu{STRING_FOR_COMMUNITY_FEATURE_MASTER_COMPRESSOR, child3};
 unison::CountToStereoSpread numUnisonMenu{STRING_FOR_UNISON_NUMBER, STRING_FOR_UNISON_NUMBER_MENU_TITLE};
 unison::Detune unisonDetuneMenu{STRING_FOR_UNISON_DETUNE, STRING_FOR_UNISON_DETUNE_MENU_TITLE};
 unison::StereoSpread unison::stereoSpreadMenu{STRING_FOR_UNISON_STEREO_SPREAD, STRING_FOR_UNISON_STEREO_SPREAD_MENU_TITLE};

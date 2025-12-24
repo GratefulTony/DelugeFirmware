@@ -77,6 +77,9 @@
 #include "gui/menu_item/firmware/version.h"
 #include "gui/menu_item/flash/status.h"
 #include "gui/menu_item/fx/clipping.h"
+#include "gui/menu_item/fx/disperser.h"
+#include "gui/menu_item/fx/saturator.h"
+#include "gui/menu_item/fx/sine_shaper.h"
 #include "gui/menu_item/gate/mode.h"
 #include "gui/menu_item/gate/off_time.h"
 #include "gui/menu_item/gate/selection.h"
@@ -207,6 +210,7 @@
 #include "gui/menu_item/submenu/actual_source.h"
 #include "gui/menu_item/submenu/arp_mpe_submenu.h"
 #include "gui/menu_item/submenu/bend.h"
+#include "gui/menu_item/submenu/compressor.h"
 #include "gui/menu_item/submenu/mod_fx.h"
 #include "gui/menu_item/submenu/modulator.h"
 #include "gui/menu_item/swing/interval.h"
@@ -609,6 +613,25 @@ UnpatchedParam srrMenu{STRING_FOR_DECIMATION, params::UNPATCHED_SAMPLE_RATE_REDU
 UnpatchedParam bitcrushMenu{STRING_FOR_BITCRUSH, params::UNPATCHED_BITCRUSHING, RenderingStyle::BAR};
 patched_param::Integer foldMenu{STRING_FOR_WAVEFOLD, STRING_FOR_WAVEFOLD, params::LOCAL_FOLD, RenderingStyle::BAR};
 
+// Sine Shaper - sinusoidal waveshaper distortion (drive is learnable)
+UnpatchedParam sineShaperDriveMenu{STRING_FOR_SINE_SHAPER_DRIVE, params::UNPATCHED_SINE_SHAPER_DRIVE,
+                                   RenderingStyle::BAR};
+fx::SineShaperHarmonic sineShaperHarmonicMenu{STRING_FOR_SINE_SHAPER_HARMONIC};
+fx::SineShaperSymmetry sineShaperSymmetryMenu{STRING_FOR_SINE_SHAPER_SYMMETRY};
+fx::SineShaperMix sineShaperMixMenu{STRING_FOR_SINE_SHAPER_MIX};
+
+// Saturator - XY waveshaper with lookup table (drive is learnable)
+UnpatchedParam saturatorDriveMenu{STRING_FOR_SATURATOR_DRIVE, params::UNPATCHED_SATURATOR_DRIVE, RenderingStyle::BAR};
+fx::SaturatorShapeX saturatorShapeXMenu{STRING_FOR_SATURATOR_SHAPE_X};
+fx::SaturatorShapeY saturatorShapeYMenu{STRING_FOR_SATURATOR_SHAPE_Y};
+fx::SaturatorMix saturatorMixMenu{STRING_FOR_SATURATOR_MIX};
+
+// Disperser - allpass cascade with feedback
+fx::DisperserFreq disperserFreqMenu{STRING_FOR_DISPERSER_FREQ};
+fx::DisperserSpread disperserSpreadMenu{STRING_FOR_DISPERSER_SPREAD};
+fx::DisperserFeedback disperserFeedbackMenu{STRING_FOR_DISPERSER_FEEDBACK};
+fx::DisperserStages disperserStagesMenu{STRING_FOR_DISPERSER_STAGES};
+
 HorizontalMenu soundDistortionMenu{
     STRING_FOR_DISTORTION,
     {
@@ -616,6 +639,21 @@ HorizontalMenu soundDistortionMenu{
         &bitcrushMenu,
         &srrMenu,
         &foldMenu,
+        // Sine Shaper
+        &sineShaperDriveMenu,
+        &sineShaperHarmonicMenu,
+        &sineShaperSymmetryMenu,
+        &sineShaperMixMenu,
+        // Saturator
+        &saturatorDriveMenu,
+        &saturatorShapeXMenu,
+        &saturatorShapeYMenu,
+        &saturatorMixMenu,
+        // Disperser
+        &disperserFreqMenu,
+        &disperserSpreadMenu,
+        &disperserFeedbackMenu,
+        &disperserStagesMenu,
     },
 };
 
@@ -797,6 +835,21 @@ HorizontalMenu globalDistortionMenu{
     {
         &srrMenu,
         &bitcrushMenu,
+        // Sine Shaper
+        &sineShaperDriveMenu,
+        &sineShaperHarmonicMenu,
+        &sineShaperSymmetryMenu,
+        &sineShaperMixMenu,
+        // Saturator
+        &saturatorDriveMenu,
+        &saturatorShapeXMenu,
+        &saturatorShapeYMenu,
+        &saturatorMixMenu,
+        // Disperser
+        &disperserFreqMenu,
+        &disperserSpreadMenu,
+        &disperserFeedbackMenu,
+        &disperserStagesMenu,
     },
 };
 
@@ -852,6 +905,21 @@ HorizontalMenu audioClipDistortionMenu{
         &clippingMenu,
         &bitcrushMenu,
         &srrMenu,
+        // Sine Shaper
+        &sineShaperDriveMenu,
+        &sineShaperHarmonicMenu,
+        &sineShaperSymmetryMenu,
+        &sineShaperMixMenu,
+        // Saturator
+        &saturatorDriveMenu,
+        &saturatorShapeXMenu,
+        &saturatorShapeYMenu,
+        &saturatorMixMenu,
+        // Disperser
+        &disperserFreqMenu,
+        &disperserSpreadMenu,
+        &disperserFeedbackMenu,
+        &disperserStagesMenu,
     },
 };
 
