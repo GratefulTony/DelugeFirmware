@@ -631,24 +631,22 @@ public:
 };
 
 /// Per-band threshold control (parameterized by band index)
-/// Displays NET value (linked + offset), stores offset when adjusted
+/// Displays and modifies the actual per-band threshold value
 template <size_t BAND_INDEX>
 class BandThreshold final : public DecimalWithoutScrolling {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
 
 	void readCurrentValue() override {
-		// Display NET value (linked + offset)
-		q31_t netValue = soundEditor.currentModControllable->multibandCompressor.getNetThreshold(BAND_INDEX);
-		this->setValue(paramToMenuValue128(netValue));
+		// Display actual per-band value
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).getThresholdDown();
+		this->setValue(paramToMenuValue128(value));
 	}
 
 	void writeCurrentValue() override {
-		// Calculate offset = newNetValue - linkedValue
-		q31_t newNetValue = lshiftAndSaturate<24>(this->getValue());
-		q31_t linkedValue = soundEditor.currentModControllable->multibandCompressor.getLinkedThreshold();
-		q31_t offset = newNetValue - linkedValue;
-		soundEditor.currentModControllable->multibandCompressor.setThresholdOffset(BAND_INDEX, offset);
+		// Set actual per-band value directly
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).setThresholdDown(value);
 	}
 
 	[[nodiscard]] float getDisplayValue() override {
@@ -668,24 +666,23 @@ public:
 };
 
 /// Per-band ratio control (parameterized by band index)
-/// Displays NET value (linked + offset), stores offset when adjusted
+/// Displays and modifies the actual per-band ratio value
 template <size_t BAND_INDEX>
 class BandRatio final : public DecimalWithoutScrolling {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
 
 	void readCurrentValue() override {
-		// Display NET value (linked + offset)
-		q31_t netValue = soundEditor.currentModControllable->multibandCompressor.getNetRatio(BAND_INDEX);
-		this->setValue(paramToMenuValue128(netValue));
+		// Display actual per-band value
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).getRatioDown();
+		this->setValue(paramToMenuValue128(value));
 	}
 
 	void writeCurrentValue() override {
-		// Calculate offset = newNetValue - linkedValue
-		q31_t newNetValue = lshiftAndSaturate<24>(this->getValue());
-		q31_t linkedValue = soundEditor.currentModControllable->multibandCompressor.getLinkedRatio();
-		q31_t offset = newNetValue - linkedValue;
-		soundEditor.currentModControllable->multibandCompressor.setRatioOffset(BAND_INDEX, offset);
+		// Set actual per-band value directly (both up and down ratios)
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).setRatioDown(value);
+		soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).setRatioUp(value);
 	}
 
 	[[nodiscard]] float getDisplayValue() override {
@@ -705,24 +702,22 @@ public:
 };
 
 /// Per-band bandwidth control (gap between up/down thresholds)
-/// Displays NET value (linked + offset), stores offset when adjusted
+/// Displays and modifies the actual per-band bandwidth value
 template <size_t BAND_INDEX>
 class BandBandwidth final : public DecimalWithoutScrolling {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
 
 	void readCurrentValue() override {
-		// Display NET value (linked + offset)
-		q31_t netValue = soundEditor.currentModControllable->multibandCompressor.getNetBandwidth(BAND_INDEX);
-		this->setValue(paramToMenuValue128(netValue));
+		// Display actual per-band value
+		q31_t value = soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).getBandwidth();
+		this->setValue(paramToMenuValue128(value));
 	}
 
 	void writeCurrentValue() override {
-		// Calculate offset = newNetValue - linkedValue
-		q31_t newNetValue = lshiftAndSaturate<24>(this->getValue());
-		q31_t linkedValue = soundEditor.currentModControllable->multibandCompressor.getLinkedBandwidth();
-		q31_t offset = newNetValue - linkedValue;
-		soundEditor.currentModControllable->multibandCompressor.setBandwidthOffset(BAND_INDEX, offset);
+		// Set actual per-band value directly
+		q31_t value = lshiftAndSaturate<24>(this->getValue());
+		soundEditor.currentModControllable->multibandCompressor.getBand(BAND_INDEX).setBandwidth(value);
 	}
 
 	[[nodiscard]] float getDisplayValue() override {

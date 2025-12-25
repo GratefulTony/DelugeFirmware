@@ -477,19 +477,28 @@ public:
 	[[nodiscard]] float getOutputGainLinear() const { return outputGain_; }
 
 	/// Set threshold for all bands simultaneously (linked control)
+	/// Shifts all per-band values by delta from previous linked value
 	void setAllThresholds(q31_t t) {
-		for (auto& band : bands_) {
-			band.setThresholdDown(t);
+		int64_t delta = static_cast<int64_t>(t) - static_cast<int64_t>(linkedThreshold_);
+		linkedThreshold_ = t;
+		for (size_t i = 0; i < kNumBands; ++i) {
+			int64_t newVal = static_cast<int64_t>(bands_[i].getThresholdDown()) + delta;
+			bands_[i].setThresholdDown(
+			    static_cast<q31_t>(std::clamp(newVal, static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31))));
 		}
 	}
 
 	/// Set ratio for all bands simultaneously (linked control)
-	/// Sets both up and down ratios to the same value - the u/dn skew knob
-	/// then attenuates one or the other away from this setting
+	/// Shifts all per-band values by delta from previous linked value
 	void setAllRatios(q31_t r) {
-		for (auto& band : bands_) {
-			band.setRatioDown(r);
-			band.setRatioUp(r);
+		int64_t delta = static_cast<int64_t>(r) - static_cast<int64_t>(linkedRatio_);
+		linkedRatio_ = r;
+		for (size_t i = 0; i < kNumBands; ++i) {
+			int64_t newVal = static_cast<int64_t>(bands_[i].getRatioDown()) + delta;
+			q31_t clamped =
+			    static_cast<q31_t>(std::clamp(newVal, static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31)));
+			bands_[i].setRatioDown(clamped);
+			bands_[i].setRatioUp(clamped);
 		}
 	}
 
@@ -807,11 +816,11 @@ public:
 		return static_cast<int32_t>(zonePos * 127.0f);
 	}
 
-	/// Get the linked threshold value (from first band)
-	[[nodiscard]] q31_t getLinkedThreshold() const { return bands_[0].getThresholdDown(); }
+	/// Get the linked threshold value
+	[[nodiscard]] q31_t getLinkedThreshold() const { return linkedThreshold_; }
 
-	/// Get the linked ratio value (from first band)
-	[[nodiscard]] q31_t getLinkedRatio() const { return bands_[0].getRatioDown(); }
+	/// Get the linked ratio value
+	[[nodiscard]] q31_t getLinkedRatio() const { return linkedRatio_; }
 
 	/// Get the linked attack value (from first band)
 	[[nodiscard]] q31_t getLinkedAttack() const { return bands_[0].getAttack(); }
@@ -839,79 +848,96 @@ public:
 	[[nodiscard]] q31_t getLinkedBandwidth() const { return linkedBandwidth_; }
 
 	/// Set the linked bandwidth value
+	/// Shifts all per-band values by delta from previous linked value
 	void setLinkedBandwidth(q31_t bw) {
+		int64_t delta = static_cast<int64_t>(bw) - static_cast<int64_t>(linkedBandwidth_);
 		linkedBandwidth_ = bw;
-		// Apply to all bands (combined with per-band offsets)
 		for (size_t i = 0; i < kNumBands; ++i) {
-			q31_t netBw = std::clamp(static_cast<int64_t>(bw) + bandwidthOffset_[i], static_cast<int64_t>(0),
-			                         static_cast<int64_t>(ONE_Q31));
-			bands_[i].setBandwidth(static_cast<q31_t>(netBw));
+			int64_t newVal = static_cast<int64_t>(bands_[i].getBandwidth()) + delta;
+			bands_[i].setBandwidth(
+			    static_cast<q31_t>(std::clamp(newVal, static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31))));
 		}
 	}
 
 	// ========== Per-Band Offsets ==========
 
-	/// Get threshold offset for a specific band
+	/// Get threshold offset for a specific band (for XML persistence)
+	/// Computes offset dynamically as (band_value - linked_value)
 	[[nodiscard]] q31_t getThresholdOffset(size_t band) const {
-		return (band < kNumBands) ? thresholdOffset_[band] : 0;
+		if (band >= kNumBands) {
+			return 0;
+		}
+		return static_cast<q31_t>(static_cast<int64_t>(bands_[band].getThresholdDown())
+		                          - static_cast<int64_t>(linkedThreshold_));
 	}
 
-	/// Set threshold offset for a specific band
+	/// Set threshold offset for a specific band (for XML persistence)
+	/// When loading from XML, applies offset to reach target per-band value
 	void setThresholdOffset(size_t band, q31_t offset) {
 		if (band < kNumBands) {
-			thresholdOffset_[band] = offset;
+			// Apply offset to linked value to set per-band value
+			q31_t net = static_cast<q31_t>(std::clamp(static_cast<int64_t>(linkedThreshold_) + offset,
+			                                          static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31)));
+			bands_[band].setThresholdDown(net);
 		}
 	}
 
-	/// Get ratio offset for a specific band
-	[[nodiscard]] q31_t getRatioOffset(size_t band) const { return (band < kNumBands) ? ratioOffset_[band] : 0; }
+	/// Get ratio offset for a specific band (for XML persistence)
+	/// Computes offset dynamically as (band_value - linked_value)
+	[[nodiscard]] q31_t getRatioOffset(size_t band) const {
+		if (band >= kNumBands) {
+			return 0;
+		}
+		return static_cast<q31_t>(static_cast<int64_t>(bands_[band].getRatioDown())
+		                          - static_cast<int64_t>(linkedRatio_));
+	}
 
-	/// Set ratio offset for a specific band
+	/// Set ratio offset for a specific band (for XML persistence)
+	/// When loading from XML, applies offset to reach target per-band value
 	void setRatioOffset(size_t band, q31_t offset) {
 		if (band < kNumBands) {
-			ratioOffset_[band] = offset;
+			// Apply offset to linked value to set per-band value
+			q31_t net = static_cast<q31_t>(std::clamp(static_cast<int64_t>(linkedRatio_) + offset,
+			                                          static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31)));
+			bands_[band].setRatioDown(net);
+			bands_[band].setRatioUp(net);
 		}
 	}
 
-	/// Get bandwidth offset for a specific band
+	/// Get bandwidth offset for a specific band (for XML persistence)
+	/// Computes offset dynamically as (band_value - linked_value)
 	[[nodiscard]] q31_t getBandwidthOffset(size_t band) const {
-		return (band < kNumBands) ? bandwidthOffset_[band] : 0;
+		if (band >= kNumBands) {
+			return 0;
+		}
+		return static_cast<q31_t>(static_cast<int64_t>(bands_[band].getBandwidth())
+		                          - static_cast<int64_t>(linkedBandwidth_));
 	}
 
-	/// Set bandwidth offset for a specific band
+	/// Set bandwidth offset for a specific band (for XML persistence)
+	/// When loading from XML, applies offset to reach target per-band value
 	void setBandwidthOffset(size_t band, q31_t offset) {
 		if (band < kNumBands) {
-			bandwidthOffset_[band] = offset;
+			// Apply offset to linked value to set per-band value
+			q31_t net = static_cast<q31_t>(std::clamp(static_cast<int64_t>(linkedBandwidth_) + offset,
+			                                          static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31)));
+			bands_[band].setBandwidth(net);
 		}
 	}
 
-	// ========== Net Values (Linked + Offset) ==========
+	// ========== Net Values (Actual Per-Band Values) ==========
 
-	/// Get net threshold for a specific band (linked + offset, clamped)
+	/// Get actual threshold for a specific band
 	[[nodiscard]] q31_t getNetThreshold(size_t band) const {
-		if (band >= kNumBands) {
-			return 0;
-		}
-		int64_t net = static_cast<int64_t>(getLinkedThreshold()) + thresholdOffset_[band];
-		return static_cast<q31_t>(std::clamp(net, static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31)));
+		return (band < kNumBands) ? bands_[band].getThresholdDown() : 0;
 	}
 
-	/// Get net ratio for a specific band (linked + offset, clamped)
-	[[nodiscard]] q31_t getNetRatio(size_t band) const {
-		if (band >= kNumBands) {
-			return 0;
-		}
-		int64_t net = static_cast<int64_t>(getLinkedRatio()) + ratioOffset_[band];
-		return static_cast<q31_t>(std::clamp(net, static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31)));
-	}
+	/// Get actual ratio for a specific band
+	[[nodiscard]] q31_t getNetRatio(size_t band) const { return (band < kNumBands) ? bands_[band].getRatioDown() : 0; }
 
-	/// Get net bandwidth for a specific band (linked + offset, clamped)
+	/// Get actual bandwidth for a specific band
 	[[nodiscard]] q31_t getNetBandwidth(size_t band) const {
-		if (band >= kNumBands) {
-			return 0;
-		}
-		int64_t net = static_cast<int64_t>(linkedBandwidth_) + bandwidthOffset_[band];
-		return static_cast<q31_t>(std::clamp(net, static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31)));
+		return (band < kNumBands) ? bands_[band].getBandwidth() : 0;
 	}
 
 	/// Reset all filter and compressor states
@@ -1377,12 +1403,9 @@ private:
 	// Enable/disable zone (0 = off, >ONE_Q31/2 = on)
 	q31_t enabledZone_{0};
 
-	// Per-band parameter offsets (added to linked values)
-	std::array<q31_t, kNumBands> thresholdOffset_{};
-	std::array<q31_t, kNumBands> ratioOffset_{};
-	std::array<q31_t, kNumBands> bandwidthOffset_{};
-
-	// Linked bandwidth value (shared across all bands)
+	// Linked values (global controls - per-band offsets are computed dynamically)
+	q31_t linkedThreshold_{ONE_Q31 / 2};
+	q31_t linkedRatio_{0};
 	q31_t linkedBandwidth_{ONE_Q31 / 2};
 
 	// Saturation state for antialiasing (per-band, per-channel)
