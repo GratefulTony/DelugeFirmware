@@ -149,12 +149,15 @@ void ModControllableAudio::initParams(ParamManager* paramManager) {
 	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER].setCurrentValueBasicForSetup(ONE_Q31 / 2);
 	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_THRESHOLD].setCurrentValueBasicForSetup(ONE_Q31 / 2);
 	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_RATIO].setCurrentValueBasicForSetup(0);
+	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_ATTACK].setCurrentValueBasicForSetup(ONE_Q31 / 4);
+	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_RELEASE].setCurrentValueBasicForSetup(ONE_Q31 / 4);
 	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_SKEW].setCurrentValueBasicForSetup(ONE_Q31 / 2);
 	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_LOW_LEVEL].setCurrentValueBasicForSetup(ONE_Q31 / 2);
 	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_MID_LEVEL].setCurrentValueBasicForSetup(ONE_Q31 / 2);
 	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_HIGH_LEVEL].setCurrentValueBasicForSetup(ONE_Q31 / 2);
 	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN].setCurrentValueBasicForSetup(ONE_Q31 / 2);
 	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_VIBE].setCurrentValueBasicForSetup(0);
+	unpatchedParams->params[params::UNPATCHED_MB_COMPRESSOR_BLEND].setCurrentValueBasicForSetup(ONE_Q31); // 100% wet
 }
 
 void ModControllableAudio::applyMultibandCompressorParams(ParamManager* paramManager) {
@@ -192,9 +195,13 @@ void ModControllableAudio::applyMultibandCompressorParams(ParamManager* paramMan
 	// Linked controls for all bands
 	q31_t threshold = unpatchedParams->getValue(params::UNPATCHED_MB_COMPRESSOR_THRESHOLD);
 	q31_t ratio = unpatchedParams->getValue(params::UNPATCHED_MB_COMPRESSOR_RATIO);
+	q31_t attack = unpatchedParams->getValue(params::UNPATCHED_MB_COMPRESSOR_ATTACK);
+	q31_t release = unpatchedParams->getValue(params::UNPATCHED_MB_COMPRESSOR_RELEASE);
 	q31_t skew = unpatchedParams->getValue(params::UNPATCHED_MB_COMPRESSOR_SKEW);
 	multibandCompressor.setAllThresholds(threshold);
 	multibandCompressor.setAllRatios(ratio);
+	multibandCompressor.setAllAttacks(attack);
+	multibandCompressor.setAllReleases(release);
 	multibandCompressor.setUpDownSkew(skew);
 
 	// Per-band output levels
@@ -212,6 +219,12 @@ void ModControllableAudio::applyMultibandCompressorParams(ParamManager* paramMan
 	// Vibe (phase relationships)
 	q31_t vibe = unpatchedParams->getValue(params::UNPATCHED_MB_COMPRESSOR_VIBE);
 	multibandCompressor.setVibe(vibe);
+
+	// Wet/dry blend
+	q31_t blend = unpatchedParams->getValue(params::UNPATCHED_MB_COMPRESSOR_BLEND);
+	FixedPoint<31> blendFP;
+	blendFP.raw() = blend;
+	multibandCompressor.setBlend(blendFP);
 }
 
 bool ModControllableAudio::hasBassAdjusted(ParamManager* paramManager) {
@@ -614,6 +627,29 @@ void ModControllableAudio::writeTagsToFile(Serializer& writer) {
 	writer.writeAttribute("compBlend", compressor.getBlend().raw());
 	writer.closeTag();
 
+	// Multiband compressor per-band offsets (only write if non-zero to save space)
+	for (size_t i = 0; i < 3; ++i) {
+		q31_t thresholdOffset = multibandCompressor.getThresholdOffset(i);
+		q31_t ratioOffset = multibandCompressor.getRatioOffset(i);
+		q31_t bandwidthOffset = multibandCompressor.getBandwidthOffset(i);
+
+		if (thresholdOffset != 0) {
+			char attrName[32];
+			snprintf(attrName, sizeof(attrName), "mbThresholdOffset%zu", i);
+			writer.writeAttributeHex(attrName, thresholdOffset, 8);
+		}
+		if (ratioOffset != 0) {
+			char attrName[32];
+			snprintf(attrName, sizeof(attrName), "mbRatioOffset%zu", i);
+			writer.writeAttributeHex(attrName, ratioOffset, 8);
+		}
+		if (bandwidthOffset != 0) {
+			char attrName[32];
+			snprintf(attrName, sizeof(attrName), "mbBandwidthOffset%zu", i);
+			writer.writeAttributeHex(attrName, bandwidthOffset, 8);
+		}
+	}
+
 	// Stutter
 	writer.writeOpeningTagBeginning("stutter");
 	writer.writeAttribute("quantized", stutterConfig.quantized);
@@ -653,6 +689,10 @@ void ModControllableAudio::writeParamAttributesToFile(Serializer& writer, ParamM
 	                                       writeAutomation, false, valuesForOverride);
 	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorRatio", params::UNPATCHED_MB_COMPRESSOR_RATIO,
 	                                       writeAutomation, false, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorAttack", params::UNPATCHED_MB_COMPRESSOR_ATTACK,
+	                                       writeAutomation, false, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorRelease", params::UNPATCHED_MB_COMPRESSOR_RELEASE,
+	                                       writeAutomation, false, valuesForOverride);
 	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorSkew", params::UNPATCHED_MB_COMPRESSOR_SKEW,
 	                                       writeAutomation, false, valuesForOverride);
 	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorLowLevel", params::UNPATCHED_MB_COMPRESSOR_LOW_LEVEL,
@@ -665,6 +705,8 @@ void ModControllableAudio::writeParamAttributesToFile(Serializer& writer, ParamM
 	                                       params::UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN, writeAutomation, false,
 	                                       valuesForOverride);
 	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorVibe", params::UNPATCHED_MB_COMPRESSOR_VIBE,
+	                                       writeAutomation, false, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorBlend", params::UNPATCHED_MB_COMPRESSOR_BLEND,
 	                                       writeAutomation, false, valuesForOverride);
 
 	unpatchedParams->writeParamAsAttribute(writer, "arpeggiatorGate", params::UNPATCHED_ARP_GATE, writeAutomation);
@@ -805,6 +847,16 @@ bool ModControllableAudio::readParamTagFromFile(Deserializer& reader, char const
 		                           readAutomationUpToPos);
 		reader.exitTag("mbCompressorRatio");
 	}
+	else if (!strcmp(tagName, "mbCompressorAttack")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_ATTACK,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorAttack");
+	}
+	else if (!strcmp(tagName, "mbCompressorRelease")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_RELEASE,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorRelease");
+	}
 	else if (!strcmp(tagName, "mbCompressorSkew")) {
 		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_SKEW,
 		                           readAutomationUpToPos);
@@ -834,6 +886,11 @@ bool ModControllableAudio::readParamTagFromFile(Deserializer& reader, char const
 		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_VIBE,
 		                           readAutomationUpToPos);
 		reader.exitTag("mbCompressorVibe");
+	}
+	else if (!strcmp(tagName, "mbCompressorBlend")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_BLEND,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorBlend");
 	}
 
 	// Arpeggiator stuff
@@ -972,6 +1029,44 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 	else if (!strcmp(tagName, "sineShaperMix")) {
 		sineShaperMix = reader.readTagOrAttributeValueInt();
 		reader.exitTag("sineShaperMix");
+	}
+
+	// Per-band offsets for multiband compressor
+	else if (!strcmp(tagName, "mbThresholdOffset0")) {
+		multibandCompressor.setThresholdOffset(0, reader.readTagOrAttributeValueHex(0));
+		reader.exitTag("mbThresholdOffset0");
+	}
+	else if (!strcmp(tagName, "mbThresholdOffset1")) {
+		multibandCompressor.setThresholdOffset(1, reader.readTagOrAttributeValueHex(0));
+		reader.exitTag("mbThresholdOffset1");
+	}
+	else if (!strcmp(tagName, "mbThresholdOffset2")) {
+		multibandCompressor.setThresholdOffset(2, reader.readTagOrAttributeValueHex(0));
+		reader.exitTag("mbThresholdOffset2");
+	}
+	else if (!strcmp(tagName, "mbRatioOffset0")) {
+		multibandCompressor.setRatioOffset(0, reader.readTagOrAttributeValueHex(0));
+		reader.exitTag("mbRatioOffset0");
+	}
+	else if (!strcmp(tagName, "mbRatioOffset1")) {
+		multibandCompressor.setRatioOffset(1, reader.readTagOrAttributeValueHex(0));
+		reader.exitTag("mbRatioOffset1");
+	}
+	else if (!strcmp(tagName, "mbRatioOffset2")) {
+		multibandCompressor.setRatioOffset(2, reader.readTagOrAttributeValueHex(0));
+		reader.exitTag("mbRatioOffset2");
+	}
+	else if (!strcmp(tagName, "mbBandwidthOffset0")) {
+		multibandCompressor.setBandwidthOffset(0, reader.readTagOrAttributeValueHex(0));
+		reader.exitTag("mbBandwidthOffset0");
+	}
+	else if (!strcmp(tagName, "mbBandwidthOffset1")) {
+		multibandCompressor.setBandwidthOffset(1, reader.readTagOrAttributeValueHex(0));
+		reader.exitTag("mbBandwidthOffset1");
+	}
+	else if (!strcmp(tagName, "mbBandwidthOffset2")) {
+		multibandCompressor.setBandwidthOffset(2, reader.readTagOrAttributeValueHex(0));
+		reader.exitTag("mbBandwidthOffset2");
 	}
 
 	// Arpeggiator

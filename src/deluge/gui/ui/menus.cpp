@@ -614,14 +614,15 @@ UnpatchedParam bitcrushMenu{STRING_FOR_BITCRUSH, params::UNPATCHED_BITCRUSHING, 
 patched_param::Integer foldMenu{STRING_FOR_WAVEFOLD, STRING_FOR_WAVEFOLD, params::LOCAL_FOLD, RenderingStyle::BAR};
 
 // Sine Shaper - sinusoidal waveshaper distortion (drive is learnable)
-UnpatchedParam sineShaperDriveMenu{STRING_FOR_SINE_SHAPER_DRIVE, params::UNPATCHED_SINE_SHAPER_DRIVE,
-                                   RenderingStyle::BAR};
+fx::DynamicsUnpatchedParam sineShaperDriveMenu{STRING_FOR_SINE_SHAPER_DRIVE, params::UNPATCHED_SINE_SHAPER_DRIVE,
+                                               RenderingStyle::BAR};
 fx::SineShaperHarmonic sineShaperHarmonicMenu{STRING_FOR_SINE_SHAPER_HARMONIC};
 fx::SineShaperSymmetry sineShaperSymmetryMenu{STRING_FOR_SINE_SHAPER_SYMMETRY};
 fx::SineShaperMix sineShaperMixMenu{STRING_FOR_SINE_SHAPER_MIX};
 
 // Saturator - XY waveshaper with lookup table (drive is learnable)
-UnpatchedParam saturatorDriveMenu{STRING_FOR_SATURATOR_DRIVE, params::UNPATCHED_SATURATOR_DRIVE, RenderingStyle::BAR};
+fx::DynamicsUnpatchedParam saturatorDriveMenu{STRING_FOR_SATURATOR_DRIVE, params::UNPATCHED_SATURATOR_DRIVE,
+                                              RenderingStyle::BAR};
 fx::SaturatorShapeX saturatorShapeXMenu{STRING_FOR_SATURATOR_SHAPE_X};
 fx::SaturatorShapeY saturatorShapeYMenu{STRING_FOR_SATURATOR_SHAPE_Y};
 fx::SaturatorMix saturatorMixMenu{STRING_FOR_SATURATOR_MIX};
@@ -1444,6 +1445,7 @@ Submenu soundFXMenu{
         &modFXMenu,
         &soundDistortionMenu,
         &noiseMenu,
+        &dottMenu,
     },
 };
 

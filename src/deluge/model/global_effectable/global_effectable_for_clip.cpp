@@ -145,7 +145,7 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 
 	if (compressorMode == CompressorMode::MULTIBAND) {
 		// Multiband mode always runs (has its own threshold controls)
-		// TODO: Re-enable applyMultibandCompressorParams for modulation once menu items use params
+		applyMultibandCompressorParams(paramManagerForClip);
 		multibandCompressor.render(global_effectable_audio, volumePostFX);
 	}
 	else if (compThreshold > 0) {

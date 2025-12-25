@@ -192,12 +192,15 @@ enum UnpatchedShared : ParamType {
 	UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER,
 	UNPATCHED_MB_COMPRESSOR_THRESHOLD,
 	UNPATCHED_MB_COMPRESSOR_RATIO,
+	UNPATCHED_MB_COMPRESSOR_ATTACK,
+	UNPATCHED_MB_COMPRESSOR_RELEASE,
 	UNPATCHED_MB_COMPRESSOR_SKEW,
 	UNPATCHED_MB_COMPRESSOR_LOW_LEVEL,
 	UNPATCHED_MB_COMPRESSOR_MID_LEVEL,
 	UNPATCHED_MB_COMPRESSOR_HIGH_LEVEL,
 	UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN,
 	UNPATCHED_MB_COMPRESSOR_VIBE,
+	UNPATCHED_MB_COMPRESSOR_BLEND,
 	// Distortion FX drive params (learnable)
 	UNPATCHED_SINE_SHAPER_DRIVE,
 	UNPATCHED_SATURATOR_DRIVE,
@@ -283,6 +286,11 @@ bool isParamPitchBend(Kind kind, int32_t paramID);
 bool isParamArpRhythm(Kind kind, int32_t paramID);
 bool isParamStutter(Kind kind, int32_t paramID);
 bool isParamQuantizedStutter(Kind kind, int32_t paramID, ModControllableAudio* modControllableAudio);
+
+/// Returns the number of zones for zone-based parameters (e.g., CHARACTER=8, VIBE=8)
+/// Returns 1 for non-zone-based parameters (no scaling needed)
+/// Used by gold knob handling to scale movements for finer control within zones
+int32_t getGoldKnobZoneCount(Kind kind, int32_t paramID);
 
 bool isVibratoPatchCableShortcut(int32_t xDisplay, int32_t yDisplay);
 bool isSidechainPatchCableShortcut(int32_t xDisplay, int32_t yDisplay);

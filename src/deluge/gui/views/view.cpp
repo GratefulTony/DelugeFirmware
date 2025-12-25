@@ -828,6 +828,12 @@ void View::modEncoderAction_nonExistentParam(int32_t whichModEncoder, int32_t of
 	}
 }
 
+// Zone-based gold knob scaling state
+// Accumulates fractional movements so 8 clicks = 1 step for 8-zone params
+static float zoneScaleAccumulator = 0.0f;
+static int32_t lastZoneScaleParamId = -1;
+static params::Kind lastZoneScaleParamKind = params::Kind::NONE;
+
 void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offset,
                                           ModelStackWithAutoParam* modelStackWithParam, bool noteTailsAllowedBefore) {
 	char modelStackTempMemory[MODEL_STACK_MAX_SIZE];
@@ -835,6 +841,22 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 	ModelStackWithThreeMainThings* tempModelStack = (ModelStackWithThreeMainThings*)modelStackTempMemory;
 
 	params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
+
+	// Apply zone-based scaling for fine control within zones
+	int32_t numZones = params::getGoldKnobZoneCount(kind, modelStackWithParam->paramId);
+	int32_t scaledOffset = offset;
+	if (numZones > 1) {
+		// Reset accumulator if switching to a different param
+		if (modelStackWithParam->paramId != lastZoneScaleParamId || kind != lastZoneScaleParamKind) {
+			zoneScaleAccumulator = 0.0f;
+			lastZoneScaleParamId = modelStackWithParam->paramId;
+			lastZoneScaleParamKind = kind;
+		}
+		// Accumulate fractional movement
+		zoneScaleAccumulator += static_cast<float>(offset) / numZones;
+		scaledOffset = static_cast<int32_t>(zoneScaleAccumulator);
+		zoneScaleAccumulator -= scaledOffset; // Keep fractional remainder
+	}
 
 	int32_t value = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
 	int32_t knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(value, modelStackWithParam);
@@ -846,7 +868,7 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 	else {
 		lowerLimit = std::min(-64_i32, knobPos);
 	}
-	int32_t newKnobPos = knobPos + offset;
+	int32_t newKnobPos = knobPos + scaledOffset;
 	newKnobPos = std::clamp(newKnobPos, lowerLimit, 64_i32);
 
 	// ignore modEncoderTurn for Midi CC if current or new knobPos exceeds 127

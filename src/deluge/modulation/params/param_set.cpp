@@ -417,8 +417,20 @@ bool UnpatchedParamSet::shouldParamIndicateMiddleValue(ModelStackWithParamId con
 	}
 	return false;
 }
+// Helper to check if a param is a multiband compressor param (unipolar, 128-step)
+static bool isMultibandCompressorParam(int32_t paramId) {
+	return paramId >= params::UNPATCHED_MB_COMPRESSOR_CHARACTER && paramId <= params::UNPATCHED_MB_COMPRESSOR_VIBE;
+}
+
 int32_t UnpatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWithAutoParam* modelStack) {
-	if (modelStack && (modelStack->paramId == params::UNPATCHED_COMPRESSOR_THRESHOLD)) {
+	if (modelStack
+	    && (modelStack->paramId == params::UNPATCHED_COMPRESSOR_THRESHOLD
+	        || isMultibandCompressorParam(modelStack->paramId))) {
+		// Unipolar params: map 0..INT32_MAX to knobPos -64..+64
+		// Special case: ensure INT32_MAX maps to exactly +64 (not +63 due to integer division)
+		if (paramValue == 2147483647) {
+			return 64;
+		}
 		return (paramValue >> 24) - 64;
 	}
 	else {
@@ -427,12 +439,14 @@ int32_t UnpatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWit
 }
 
 int32_t UnpatchedParamSet::knobPosToParamValue(int32_t knobPos, ModelStackWithAutoParam* modelStack) {
-	if (modelStack && (modelStack->paramId == params::UNPATCHED_COMPRESSOR_THRESHOLD)) {
-		int32_t paramValue = 2147483647;
-		if (knobPos < 64) {
-			paramValue = (knobPos + 64) << 24;
+	if (modelStack
+	    && (modelStack->paramId == params::UNPATCHED_COMPRESSOR_THRESHOLD
+	        || isMultibandCompressorParam(modelStack->paramId))) {
+		// Unipolar params: map knobPos -64..+64 to 0..INT32_MAX
+		if (knobPos >= 64) {
+			return 2147483647;
 		}
-		return paramValue;
+		return (knobPos + 64) << 24;
 	}
 	else {
 		return ParamSet::knobPosToParamValue(knobPos, modelStack);

@@ -20,6 +20,7 @@
 #include "gui/l10n/l10n.h"
 #include "gui/l10n/strings.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
+#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "util/container/enum_to_string_map.hpp"
 #include <cstring>
@@ -69,6 +70,26 @@ bool isParamQuantizedStutter(Kind kind, int32_t paramID, ModControllableAudio* m
 	       && (modControllableAudio->stutterConfig.useSongStutter
 	               ? currentSong->globalEffectable.stutterConfig.quantized
 	               : modControllableAudio->stutterConfig.quantized);
+}
+
+int32_t getGoldKnobZoneCount(Kind kind, int32_t paramID) {
+	if (kind == Kind::UNPATCHED_SOUND || kind == Kind::UNPATCHED_GLOBAL) {
+		switch (static_cast<UnpatchedShared>(paramID)) {
+		case UNPATCHED_MB_COMPRESSOR_CHARACTER:
+			if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsFineGoldKnobCharacter)) {
+				return 8;
+			}
+			break;
+		case UNPATCHED_MB_COMPRESSOR_VIBE:
+			if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsFineGoldKnobVibe)) {
+				return 8;
+			}
+			break;
+		default:
+			break;
+		}
+	}
+	return 1;
 }
 
 bool isVibratoPatchCableShortcut(int32_t xDisplay, int32_t yDisplay) {
@@ -274,12 +295,15 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 		    [UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER] = STRING_FOR_COMPRESSOR_HIGH_CROSSOVER,
 		    [UNPATCHED_MB_COMPRESSOR_THRESHOLD] = STRING_FOR_THRESHOLD,
 		    [UNPATCHED_MB_COMPRESSOR_RATIO] = STRING_FOR_RATIO,
+		    [UNPATCHED_MB_COMPRESSOR_ATTACK] = STRING_FOR_ATTACK,
+		    [UNPATCHED_MB_COMPRESSOR_RELEASE] = STRING_FOR_RELEASE,
 		    [UNPATCHED_MB_COMPRESSOR_SKEW] = STRING_FOR_COMPRESSOR_UP_DOWN_SKEW,
 		    [UNPATCHED_MB_COMPRESSOR_LOW_LEVEL] = STRING_FOR_COMPRESSOR_LOW_LEVEL,
 		    [UNPATCHED_MB_COMPRESSOR_MID_LEVEL] = STRING_FOR_COMPRESSOR_MID_LEVEL,
 		    [UNPATCHED_MB_COMPRESSOR_HIGH_LEVEL] = STRING_FOR_COMPRESSOR_HIGH_LEVEL,
 		    [UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN] = STRING_FOR_COMPRESSOR_OUTPUT_GAIN,
 		    [UNPATCHED_MB_COMPRESSOR_VIBE] = STRING_FOR_COMPRESSOR_VIBE,
+		    [UNPATCHED_MB_COMPRESSOR_BLEND] = STRING_FOR_BLEND,
 		    [UNPATCHED_SINE_SHAPER_DRIVE] = STRING_FOR_SINE_SHAPER_DRIVE,
 		    [UNPATCHED_SATURATOR_DRIVE] = STRING_FOR_SATURATOR_DRIVE,
 		    [UNPATCHED_ARP_GATE] = STRING_FOR_ARP_GATE_MENU_TITLE,
@@ -494,6 +518,10 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 			return "mbCompressorThreshold";
 		case UNPATCHED_MB_COMPRESSOR_RATIO:
 			return "mbCompressorRatio";
+		case UNPATCHED_MB_COMPRESSOR_ATTACK:
+			return "mbCompressorAttack";
+		case UNPATCHED_MB_COMPRESSOR_RELEASE:
+			return "mbCompressorRelease";
 		case UNPATCHED_MB_COMPRESSOR_SKEW:
 			return "mbCompressorSkew";
 		case UNPATCHED_MB_COMPRESSOR_LOW_LEVEL:
@@ -506,6 +534,8 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 			return "mbCompressorOutputGain";
 		case UNPATCHED_MB_COMPRESSOR_VIBE:
 			return "mbCompressorVibe";
+		case UNPATCHED_MB_COMPRESSOR_BLEND:
+			return "mbCompressorBlend";
 
 		case UNPATCHED_SINE_SHAPER_DRIVE:
 			return "sineShaperDrive";

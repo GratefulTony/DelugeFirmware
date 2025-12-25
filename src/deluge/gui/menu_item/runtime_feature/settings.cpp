@@ -17,6 +17,7 @@
 
 #include "settings.h"
 #include "devSysexSetting.h"
+#include "dynamics_sound_design.h"
 #include "emulated_display.h"
 #include "setting.h"
 #include "shift_is_sticky.h"
@@ -50,33 +51,35 @@ SettingToggle menuAlternativeTapTempoBehaviour(RuntimeFeatureSettingType::Altern
 SettingToggle menuHorizontalMenus(RuntimeFeatureSettingType::HorizontalMenus);
 SettingToggle menuTrimFromStartOfAudioClip(RuntimeFeatureSettingType::TrimFromStartOfAudioClip);
 SettingToggle menuShowBatteryLevel(RuntimeFeatureSettingType::ShowBatteryLevel);
-SettingToggle menuDynamicsSoundDesign(RuntimeFeatureSettingType::DynamicsSoundDesign);
 
-std::array<MenuItem*, RuntimeFeatureSettingType::MaxElement - kNonTopLevelSettings> subMenuEntries{
-    &menuDrumRandomizer,
-    &menuFineTempo,
-    &menuQuantize,
-    &menuCatchNotes,
-    &menuDeleteUnusedKitRows,
-    &menuAltGoldenKnobDelayParams,
-    &menuDevSysexAllowed,
-    &menuSyncScalingAction,
-    &menuHighlightIncomingNotes,
-    &menuDisplayNornsLayout,
-    &menuShiftIsSticky,
-    &menuLightShiftLed,
-    &menuEnableDX7Engine,
-    &menuEmulatedDisplay,
-    &menuEnableKeyboardViewSidebarMenuExit,
-    &menuEnableLaunchEventPlayhead,
-    &menuDisplayChordLayout,
-    &menuAlternativePlaybackStartBehaviour,
-    &menuEnableGridViewLoopPads,
-    &menuAlternativeTapTempoBehaviour,
-    &menuHorizontalMenus,
-    &menuTrimFromStartOfAudioClip,
-    &menuShowBatteryLevel,
-    &menuDynamicsSoundDesign};
+// Number of top-level entries: total settings minus non-top-level minus dynamics submenu entries
+// The 3 dynamics settings are grouped into menuDynamicsSoundDesignSubmenu, so we subtract 2 (3 settings - 1 submenu)
+constexpr size_t kNumTopLevelEntries = RuntimeFeatureSettingType::MaxElement - kNonTopLevelSettings - 2;
+
+std::array<MenuItem*, kNumTopLevelEntries> subMenuEntries{&menuDrumRandomizer,
+                                                          &menuFineTempo,
+                                                          &menuQuantize,
+                                                          &menuCatchNotes,
+                                                          &menuDeleteUnusedKitRows,
+                                                          &menuAltGoldenKnobDelayParams,
+                                                          &menuDevSysexAllowed,
+                                                          &menuSyncScalingAction,
+                                                          &menuHighlightIncomingNotes,
+                                                          &menuDisplayNornsLayout,
+                                                          &menuShiftIsSticky,
+                                                          &menuLightShiftLed,
+                                                          &menuEnableDX7Engine,
+                                                          &menuEmulatedDisplay,
+                                                          &menuEnableKeyboardViewSidebarMenuExit,
+                                                          &menuEnableLaunchEventPlayhead,
+                                                          &menuDisplayChordLayout,
+                                                          &menuAlternativePlaybackStartBehaviour,
+                                                          &menuEnableGridViewLoopPads,
+                                                          &menuAlternativeTapTempoBehaviour,
+                                                          &menuHorizontalMenus,
+                                                          &menuTrimFromStartOfAudioClip,
+                                                          &menuShowBatteryLevel,
+                                                          &menuDynamicsSoundDesignSubmenu};
 
 Settings::Settings(l10n::String name, l10n::String title) : menu_item::Submenu(name, title, subMenuEntries) {
 }

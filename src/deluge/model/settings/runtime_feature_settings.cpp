@@ -205,6 +205,20 @@ void RuntimeFeatureSettings::init() {
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DynamicsSoundDesign],
 	                  STRING_FOR_COMMUNITY_FEATURE_DYNAMICS_SOUND_DESIGN, "dynamicsSoundDesign",
 	                  RuntimeFeatureStateToggle::Off);
+
+	// Fine gold knob control for Character (within Dynamics Sound Design submenu)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DynamicsFineGoldKnobCharacter],
+	                  STRING_FOR_COMMUNITY_FEATURE_DYNAMICS_FINE_GOLD_KNOB_CHARACTER, "dynamicsFineGoldKnobCharacter",
+	                  RuntimeFeatureStateToggle::On);
+
+	// Fine gold knob control for Vibe (within Dynamics Sound Design submenu)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DynamicsFineGoldKnobVibe],
+	                  STRING_FOR_COMMUNITY_FEATURE_DYNAMICS_FINE_GOLD_KNOB_VIBE, "dynamicsFineGoldKnobVibe",
+	                  RuntimeFeatureStateToggle::On);
+
+	// DOTT Post Mod FX - places DOTT after modulation FX in signal chain (default: before)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DOTTPostModFX], STRING_FOR_COMMUNITY_FEATURE_DOTT_POST_MOD_FX,
+	                  "dottPostModFX", RuntimeFeatureStateToggle::Off);
 }
 
 void RuntimeFeatureSettings::readSettingsFromFile() {

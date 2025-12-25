@@ -17,42 +17,18 @@
 #pragma once
 
 #include "gui/menu_item/integer.h"
+#include "gui/menu_item/momentum_encoder.h"
 #include "gui/ui/sound_editor.h"
+#include "hid/display/oled.h"
 #include "model/instrument/kit.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
+#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "processing/sound/sound.h"
 #include "processing/sound/sound_drum.h"
 #include <cstdint>
 
 namespace deluge::gui::menu_item::fx {
-
-// Drive: input gain / saturation amount (0-127)
-class SaturatorDrive final : public IntegerWithOff {
-public:
-	using IntegerWithOff::IntegerWithOff;
-
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->saturatorDrive); }
-	bool usesAffectEntire() override { return true; }
-	void writeCurrentValue() override {
-		int32_t current_value = this->getValue();
-
-		if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
-			Kit* kit = getCurrentKit();
-			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
-				if (thisDrum->type == DrumType::SOUND) {
-					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->saturatorDrive = current_value;
-				}
-			}
-		}
-		else {
-			soundEditor.currentModControllable->saturatorDrive = current_value;
-		}
-	}
-	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
-	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-};
 
 // Shape X: Soft→Hard axis (0-127)
 // Controls knee/clipping aggressiveness
@@ -83,10 +59,13 @@ public:
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
+	}
 };
 
 // Shape Y: Clean→Weird axis (0-127)
-// Controls harmonic character
+// Controls harmonic character with 4 distinct zones
 class SaturatorShapeY final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
@@ -114,6 +93,32 @@ public:
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
+	}
+
+	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
+		menu_item::renderZoneInHorizontalMenu(slot, this->getValue(), 128, 4, getZoneName);
+	}
+
+protected:
+	void drawPixelsForOled() override { menu_item::drawZoneForOled(this->getValue(), 128, 4, getZoneName); }
+
+private:
+	static const char* getZoneName(int32_t zoneIndex) {
+		switch (zoneIndex) {
+		case 0:
+			return "Satur";
+		case 1:
+			return "Tube";
+		case 2:
+			return "Clip";
+		case 3:
+			return "Xover";
+		default:
+			return "?";
+		}
+	}
 };
 
 // Mix: Wet/dry blend (0 = bypass, 127 = full wet)
@@ -141,6 +146,9 @@ public:
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
+	}
 };
 
 } // namespace deluge::gui::menu_item::fx

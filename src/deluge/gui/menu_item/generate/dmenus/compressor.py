@@ -1,15 +1,6 @@
 from dmui.dsl import Menu, Submenu
 
-# === Mode Selection (always visible) ===
-mode = Menu(
-    "audio_compressor::CompressorModeSelection",
-    "compMode",
-    ["{name}"],
-    "compressor/mode.md",
-    name="STRING_FOR_COMPRESSOR_MODE",
-)
-
-# === Single-band compressor items (visible when mode == SINGLE) ===
+# === Single-band compressor items ===
 threshold = Menu(
     "audio_compressor::CompParam",
     "threshold",
@@ -59,13 +50,39 @@ blend = Menu(
     name="STRING_FOR_BLEND",
 )
 
-# === Multiband Master Page items (visible when mode == MULTIBAND) ===
-# Reusing existing doc files for similar parameters
+# === Main Compressor Menu (single-band only) ===
+menu = Submenu(
+    "HorizontalMenu",
+    "audioCompMenu",
+    ["{name}", "%%CHILDREN%%"],
+    "compressor/index.md",
+    [
+        threshold,
+        ratio,
+        blend,
+        attack,
+        release,
+        hpf,
+    ],
+    name="STRING_FOR_COMMUNITY_FEATURE_MASTER_COMPRESSOR",
+)
+
+# === DOTT (Multiband Compressor) items ===
+
+# Mode zone - first item, controls on/off
+dott_mode = Menu(
+    "audio_compressor::ModeZone",
+    "dottMode",
+    ["{name}"],
+    "compressor/ratio.md",  # Reuse existing doc
+    name="STRING_FOR_DOTT_MODE",
+)
+
 linked_threshold = Menu(
     "audio_compressor::LinkedThreshold",
     "mbLinkedThreshold",
     ["{name}"],
-    "compressor/threshold.md",  # Reuse existing doc
+    "compressor/threshold.md",
     name="STRING_FOR_THRESHOLD",
 )
 
@@ -73,7 +90,7 @@ linked_ratio = Menu(
     "audio_compressor::LinkedRatio",
     "mbLinkedRatio",
     ["{name}"],
-    "compressor/ratio.md",  # Reuse existing doc
+    "compressor/ratio.md",
     name="STRING_FOR_RATIO",
 )
 
@@ -81,7 +98,7 @@ linked_attack = Menu(
     "audio_compressor::LinkedAttack",
     "mbLinkedAttack",
     ["{name}"],
-    "compressor/attack.md",  # Reuse existing doc
+    "compressor/attack.md",
     name="STRING_FOR_ATTACK",
 )
 
@@ -89,7 +106,7 @@ linked_release = Menu(
     "audio_compressor::LinkedRelease",
     "mbLinkedRelease",
     ["{name}"],
-    "compressor/release.md",  # Reuse existing doc
+    "compressor/release.md",
     name="STRING_FOR_RELEASE",
 )
 
@@ -97,7 +114,7 @@ character = Menu(
     "audio_compressor::Character",
     "mbCharacter",
     ["{name}"],
-    "compressor/ratio.md",  # Reuse existing doc
+    "compressor/ratio.md",
     name="STRING_FOR_COMPRESSOR_CHARACTER",
 )
 
@@ -105,7 +122,7 @@ up_down_skew = Menu(
     "audio_compressor::UpDownSkew",
     "mbUpDownSkew",
     ["{name}"],
-    "compressor/ratio.md",  # Reuse existing doc
+    "compressor/ratio.md",
     name="STRING_FOR_COMPRESSOR_UP_DOWN_SKEW",
 )
 
@@ -113,8 +130,16 @@ output_gain = Menu(
     "audio_compressor::OutputGain",
     "mbOutputGain",
     ["{name}"],
-    "compressor/blend.md",  # Reuse existing doc
+    "compressor/blend.md",
     name="STRING_FOR_COMPRESSOR_OUTPUT_GAIN",
+)
+
+vibe = Menu(
+    "audio_compressor::Vibe",
+    "mbVibe",
+    ["{name}"],
+    "compressor/ratio.md",
+    name="STRING_FOR_COMPRESSOR_VIBE",
 )
 
 # === Low Band items ===
@@ -138,7 +163,7 @@ low_bw = Menu(
     "audio_compressor::BandBandwidth<0>",
     "mbLowBandwidth",
     ["{name}"],
-    "compressor/ratio.md",  # Reuse existing doc
+    "compressor/ratio.md",
     name="STRING_FOR_COMPRESSOR_LOW_BW",
 )
 
@@ -146,7 +171,7 @@ low_output_level = Menu(
     "audio_compressor::BandOutputLevel<0>",
     "mbLowOutputLevel",
     ["{name}"],
-    "compressor/blend.md",  # Reuse existing doc
+    "compressor/blend.md",
     name="STRING_FOR_COMPRESSOR_LOW_LEVEL",
 )
 
@@ -216,7 +241,7 @@ high_output_level = Menu(
     name="STRING_FOR_COMPRESSOR_HIGH_LEVEL",
 )
 
-# === Crossover page items ===
+# === Crossover items ===
 low_crossover = Menu(
     "audio_compressor::LowCrossover",
     "compLowXover",
@@ -241,62 +266,45 @@ mb_blend = Menu(
     name="STRING_FOR_BLEND",
 )
 
-vibe = Menu(
-    "audio_compressor::Vibe",
-    "mbVibe",
-    ["{name}"],
-    "compressor/ratio.md",  # Reuse existing doc
-    name="STRING_FOR_COMPRESSOR_VIBE",
-)
-
-# === Main Compressor Menu ===
-# All items in one flat horizontal menu, with isRelevant() controlling visibility
-# Order: Mode, then single-band items, then multiband items organized by page
-# Uses specialized CompressorHorizontalMenu to render GR meter in header when in multiband mode
-menu = Submenu(
+# === DOTT Menu (separate FX entry) ===
+# Uses specialized CompressorHorizontalMenu to render GR meter in header
+dott_menu = Submenu(
     "submenu::CompressorHorizontalMenu",
-    "audioCompMenu",
+    "dottMenu",
     ["{name}", "%%CHILDREN%%"],
     "compressor/index.md",
     [
-        # Mode selector (always visible)
-        mode,
-        # Single-band items (visible when mode == SINGLE)
-        threshold,
-        ratio,
-        blend,
-        attack,
-        release,
-        hpf,
-        # Multiband Page 1 (Compression): mode + threshold, ratio, up/down skew
+        # Mode zone - first item (on/off)
+        dott_mode,
+        # Page 1 (Compression): threshold, ratio, up/down skew
         linked_threshold,
         linked_ratio,
         up_down_skew,
-        # Multiband Page 2 (Timing/Dynamics): attack, release, character, vibe
+        # Page 2 (Timing/Dynamics): attack, release, character, vibe
         linked_attack,
         linked_release,
         character,
         vibe,
-        # Multiband Low band page - 4 items
+        # Low band page - 4 items
         low_threshold,
         low_ratio,
         low_bw,
         low_output_level,
-        # Multiband Mid band page - 4 items
+        # Mid band page - 4 items
         mid_threshold,
         mid_ratio,
         mid_bw,
         mid_output_level,
-        # Multiband High band page - 4 items
+        # High band page - 4 items
         high_threshold,
         high_ratio,
         high_bw,
         high_output_level,
-        # Multiband Crossover/Output page - 4 items
+        # Crossover/Output page - 4 items
         low_crossover,
         high_crossover,
         output_gain,
         mb_blend,
     ],
-    name="STRING_FOR_COMMUNITY_FEATURE_MASTER_COMPRESSOR",
+    name="STRING_FOR_DOTT",
 )

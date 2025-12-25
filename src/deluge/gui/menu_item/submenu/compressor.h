@@ -25,8 +25,8 @@
 
 namespace deluge::gui::menu_item::submenu {
 
-/// Specialized HorizontalMenu for the compressor that displays a GR meter in the header
-/// when in multiband mode. The meter shows:
+/// Specialized HorizontalMenu for DOTT that displays a GR meter in the header.
+/// The meter shows:
 /// - 3 bars for Low/Mid/High band gain reduction
 /// - 1 bar for output level
 /// - 1 dot for clip indicator
@@ -35,22 +35,13 @@ class CompressorHorizontalMenu final : public HorizontalMenu {
 public:
 	using HorizontalMenu::HorizontalMenu;
 
-	/// Override title to show "DOTT" when in multiband mode (OTT-style compressor)
-	[[nodiscard]] std::string_view getTitle() const override {
-		if (soundEditor.currentModControllable != nullptr
-		    && soundEditor.currentModControllable->compressorMode == CompressorMode::MULTIBAND) {
-			return "DOTT";
-		}
-		return HorizontalMenu::getTitle();
-	}
-
 	void renderOLED() override {
 		// Call base implementation for standard rendering
 		HorizontalMenu::renderOLED();
 
-		// Only draw meter in multiband mode
+		// Only draw meter when DOTT is enabled
 		if (soundEditor.currentModControllable == nullptr
-		    || soundEditor.currentModControllable->compressorMode != CompressorMode::MULTIBAND) {
+		    || !soundEditor.currentModControllable->multibandCompressor.isEnabled()) {
 			return;
 		}
 
@@ -65,7 +56,7 @@ public:
 
 		// Draw meter on popup canvas after notification is displayed
 		if (soundEditor.currentModControllable != nullptr
-		    && soundEditor.currentModControllable->compressorMode == CompressorMode::MULTIBAND) {
+		    && soundEditor.currentModControllable->multibandCompressor.isEnabled()) {
 			renderGRMeter();
 		}
 	}
