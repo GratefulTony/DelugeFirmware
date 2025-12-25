@@ -834,23 +834,71 @@ public:
 };
 
 /// Mode zone control - first item in DOTT menu
-/// Zone 0 = disabled, Zone 1 = enabled
+/// 4 zones: Off, Allpass 6dB ($), LR2 12dB ($$), Allpass 18dB ($$$)
+/// One encoder click per zone, ordered by CPU cost
 class ModeZone final : public DecimalWithoutScrolling {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
 
+	static constexpr int32_t kNumModes = 4;
+
 	void readCurrentValue() override {
-		q31_t value = soundEditor.currentModControllable->multibandCompressor.getEnabledZone();
-		// Map 0-ONE_Q31 to 0-128 range
-		this->setValue(paramToMenuValue128(value));
+		auto& comp = soundEditor.currentModControllable->multibandCompressor;
+		if (!comp.isEnabled()) {
+			this->setValue(0); // Off
+		}
+		else {
+			// Map crossover type to zone (ordered by cost)
+			// Type 0 = Allpass 6dB -> Zone 1
+			// Type 2 = LR2 12dB -> Zone 2
+			// Type 1 = Allpass 18dB -> Zone 3
+			switch (comp.getCrossoverType()) {
+			case 0:
+				this->setValue(1);
+				break; // Allpass 6dB
+			case 2:
+				this->setValue(2);
+				break; // LR2 12dB
+			case 1:
+				this->setValue(3);
+				break; // Allpass 18dB
+			default:
+				this->setValue(2);
+				break; // Default to LR2
+			}
+		}
 	}
 
 	void writeCurrentValue() override {
-		q31_t value = lshiftAndSaturate<24>(this->getValue());
-		soundEditor.currentModControllable->multibandCompressor.setEnabledZone(value);
+		auto& comp = soundEditor.currentModControllable->multibandCompressor;
+		int32_t zone = this->getValue();
+
+		if (zone == 0) {
+			// Off
+			comp.setEnabledZone(0);
+		}
+		else {
+			// Enable and set crossover type
+			comp.setEnabledZone(ONE_Q31);
+			// Map zone to crossover type (ordered by cost)
+			switch (zone) {
+			case 1:
+				comp.setCrossoverType(0);
+				break; // Allpass 6dB
+			case 2:
+				comp.setCrossoverType(2);
+				break; // LR2 12dB
+			case 3:
+				comp.setCrossoverType(1);
+				break; // Allpass 18dB
+			default:
+				comp.setCrossoverType(2);
+				break; // Default to LR2
+			}
+		}
 	}
 
-	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kNumModes - 1; } // 0-3
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
 	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
@@ -860,11 +908,11 @@ public:
 	}
 
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
-		renderZoneInHorizontalMenu(slot, this->getValue(), kMaxKnobPos, 2, getZoneName);
+		renderZoneInHorizontalMenu(slot, this->getValue(), kNumModes - 1, kNumModes, getZoneName);
 	}
 
 protected:
-	void drawPixelsForOled() override { drawZoneForOled(this->getValue(), kMaxKnobPos, 2, getZoneName); }
+	void drawPixelsForOled() override { drawZoneForOled(this->getValue(), kNumModes - 1, kNumModes, getZoneName); }
 
 private:
 	static const char* getZoneName(int32_t zoneIndex) {
@@ -872,7 +920,11 @@ private:
 		case 0:
 			return "Off";
 		case 1:
-			return "On";
+			return "6dB $";
+		case 2:
+			return "12dB $$";
+		case 3:
+			return "18dB $$$";
 		default:
 			return "?";
 		}

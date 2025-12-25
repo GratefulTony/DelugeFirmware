@@ -20,28 +20,48 @@
 #include "definitions_cxx.hpp"
 #include "dsp/filter/ladder_components.h"
 #include "util/fixedpoint.h"
+#include <array>
 #include <cmath>
 
 namespace deluge::dsp::filter {
 
-/// A 3-band allpass crossover filter using 12dB/oct Linkwitz-Riley slopes.
-/// Uses cascaded first-order allpass filters for perfect phase-coherent reconstruction.
-/// The bands sum back to the original signal with no phase distortion.
+/// Output structure for the three frequency bands
+struct CrossoverBands {
+	q31_t low;
+	q31_t mid;
+	q31_t high;
+};
+
+/// Allpass Subtraction Crossover - 3-band filter with perfect phase-coherent reconstruction.
+/// Also known as "Complementary Allpass Crossover".
+///
+/// The bands sum back EXACTLY to the original signal with no phase distortion.
+/// This is the key advantage over Linkwitz-Riley crossovers which have phase shifts.
+///
+/// Method: LP = (input + allpass) / 2, HP = (input - allpass) / 2
+/// At crossover: both bands are at -3dB (vs -6dB for Linkwitz-Riley)
+///
+/// Characteristics:
+/// - Perfect reconstruction: LOW + MID + HIGH = input (exactly)
+/// - 6dB/oct slopes (gentle, smooth band blending)
+/// - -3dB at crossover frequency
+/// - Minimal CPU cost (~2 first-order allpasses)
+/// - Good for dynamics processing where band isolation isn't critical
+///
+/// For steeper slopes (12dB/oct), use LR2Crossover instead (see lr_crossover.h).
+///
+/// Template parameter ORDER (only ORDER=1 is recommended for 3-band):
+template <int ORDER>
 class AllpassCrossover {
+	static_assert(ORDER == 1 || ORDER == 3 || ORDER == 5, "ORDER must be odd (1, 3, or 5)");
+
 public:
-	/// Output structure for the three frequency bands
-	struct Bands {
-		q31_t low;
-		q31_t mid;
-		q31_t high;
-	};
+	using Bands = CrossoverBands;
 
 	/// Per-channel filter state for the cascaded allpass filters
 	struct ChannelState {
-		BasicFilterComponent apLow1;  // First stage low crossover
-		BasicFilterComponent apLow2;  // Second stage low crossover (for LR2)
-		BasicFilterComponent apHigh1; // First stage high crossover
-		BasicFilterComponent apHigh2; // Second stage high crossover (for LR2)
+		std::array<BasicFilterComponent, ORDER> apLow;  // Low crossover stages
+		std::array<BasicFilterComponent, ORDER> apHigh; // High crossover stages
 	};
 
 	AllpassCrossover() = default;
@@ -67,28 +87,28 @@ public:
 	[[nodiscard]] float getHighCrossoverHz() const { return highCrossoverHz_; }
 
 	/// Process a single mono sample and return the three frequency bands.
-	/// Uses 12dB/oct (LR2) slopes via cascaded allpass filters.
 	///
 	/// @param input The input sample
 	/// @param state Reference to the filter state (use stateL_ or stateR_)
-	/// @return The three frequency bands that sum to the original input
+	/// @return The three frequency bands
 	[[gnu::always_inline]] inline Bands process(q31_t input, ChannelState& state) const {
-		// First stage allpass for each crossover (6dB/oct)
-		q31_t apLow1 = state.apLow1.doAPF(input, lowCoeff_);
-		q31_t apHigh1 = state.apHigh1.doAPF(input, highCoeff_);
+		// Step 1: Low crossover splits input into LOW and REST
+		q31_t apLow = input;
+		for (int i = 0; i < ORDER; ++i) {
+			apLow = state.apLow[i].doAPF(apLow, lowCoeff_);
+		}
+		q31_t low = (input + apLow) >> 1;  // Lowpass
+		q31_t rest = (input - apLow) >> 1; // Highpass (everything above low crossover)
 
-		// Second stage allpass for 12dB/oct LR2 response
-		q31_t apLow = state.apLow2.doAPF(apLow1, lowCoeff_);
-		q31_t apHigh = state.apHigh2.doAPF(apHigh1, highCoeff_);
+		// Step 2: High crossover splits REST into MID and HIGH
+		q31_t apHigh = rest;
+		for (int i = 0; i < ORDER; ++i) {
+			apHigh = state.apHigh[i].doAPF(apHigh, highCoeff_);
+		}
+		q31_t mid = (rest + apHigh) >> 1;  // Lowpass of REST = bandpass overall
+		q31_t high = (rest - apHigh) >> 1; // Highpass of REST = highpass overall
 
-		// Derive the three bands with perfect reconstruction:
-		// low + mid + high = input (mathematically exact)
-		Bands bands;
-		bands.low = (input + apLow) >> 1;
-		bands.high = (input - apHigh) >> 1;
-		bands.mid = (apHigh - apLow) >> 1;
-
-		return bands;
+		return {low, mid, high};
 	}
 
 	/// Process a stereo sample pair
@@ -105,13 +125,13 @@ public:
 
 private:
 	/// Calculate the allpass coefficient for a given frequency.
-	/// Uses the formula: coeff = tan(pi * f / fs) / (1 + tan(pi * f / fs))
-	/// which maps to the "moveability" parameter of BasicFilterComponent::doAPF
+	/// For BasicFilterComponent::doAPF(): coeff = tan(pi * fc / fs) / (1 + tan(pi * fc / fs))
 	[[nodiscard]] static q31_t calculateCoefficient(float freqHz) {
 		float fc = freqHz / static_cast<float>(kSampleRate);
 		// Clamp to valid range to prevent instability
 		fc = std::clamp(fc, 0.001f, 0.49f);
 		float wc = std::tan(3.14159265358979f * fc);
+		// Coefficient for BasicFilterComponent::doAPF()
 		float coeff = wc / (1.0f + wc);
 		return static_cast<q31_t>(coeff * ONE_Q31);
 	}
@@ -125,5 +145,10 @@ private:
 	float lowCrossoverHz_ = 200.0f;
 	float highCrossoverHz_ = 2000.0f;
 };
+
+// Type aliases for convenience (odd orders only - see class documentation)
+using AllpassCrossoverLR1 = AllpassCrossover<1>; // 6dB/oct
+using AllpassCrossoverLR3 = AllpassCrossover<3>; // 18dB/oct
+using AllpassCrossoverLR5 = AllpassCrossover<5>; // 30dB/oct
 
 } // namespace deluge::dsp::filter

@@ -2564,21 +2564,41 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, deluge::dsp::Stere
 
 	processSRRAndBitcrushing(sound_stereo, &postFXVolume, paramManager);
 	processNewDistortions(sound_stereo, paramManager);
+
+	// DOTT (multiband compressor) is independent of the original compressor
+	// Requires: 1) DynamicsSoundDesign community feature ON, and 2) per-sound enable zone set
+	// Can run pre-modFX or post-modFX based on DOTTPostModFX runtime setting
+	bool dynamicsFeatureEnabled =
+	    runtimeFeatureSettings.get(RuntimeFeatureSettingType::DynamicsSoundDesign) == RuntimeFeatureStateToggle::On;
+	bool dottPostModFX =
+	    runtimeFeatureSettings.get(RuntimeFeatureSettingType::DOTTPostModFX) == RuntimeFeatureStateToggle::On;
+	bool dottEnabled = dynamicsFeatureEnabled && multibandCompressor.isEnabled();
+
+	// Apply multiband compressor parameters before rendering
+	if (dottEnabled) {
+		applyMultibandCompressorParams(paramManager);
+	}
+
+	// Pre-modFX DOTT processing (when DOTTPostModFX is OFF)
+	if (!dottPostModFX && dottEnabled) {
+		multibandCompressor.render(sound_stereo, postFXVolume);
+	}
+
 	processFX(sound_stereo, modFXType_, modFXRate, modFXDepth, delayWorkingState, &postFXVolume, paramManager,
 	          !voices_.empty(), reverbSendAmount >> 1);
 	processStutter(sound_stereo, paramManager);
 
 	processReverbSendAndVolume(sound_stereo, reverbBuffer, postFXVolume, postReverbVolume, reverbSendAmount, 0, true);
 
-	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
-	compressor.setThreshold(compThreshold);
-	if (compressorMode == CompressorMode::MULTIBAND) {
-		// Multiband mode always runs (has its own threshold controls)
-		// TODO: Re-enable applyMultibandCompressorParams for modulation once menu items use params
+	// Post-modFX DOTT processing (when DOTTPostModFX is ON)
+	if (dottPostModFX && dottEnabled) {
 		multibandCompressor.render(sound_stereo, postFXVolume);
 	}
-	else if (compThreshold > 0) {
-		// Single-band mode only runs when threshold is set
+
+	// Original single-band compressor (independent of DOTT)
+	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
+	compressor.setThreshold(compThreshold);
+	if (compThreshold > 0) {
 		compressor.renderVolNeutral(sound_stereo, postFXVolume);
 	}
 	else {

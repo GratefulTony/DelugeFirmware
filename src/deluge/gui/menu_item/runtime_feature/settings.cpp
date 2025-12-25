@@ -51,6 +51,7 @@ SettingToggle menuAlternativeTapTempoBehaviour(RuntimeFeatureSettingType::Altern
 SettingToggle menuHorizontalMenus(RuntimeFeatureSettingType::HorizontalMenus);
 SettingToggle menuTrimFromStartOfAudioClip(RuntimeFeatureSettingType::TrimFromStartOfAudioClip);
 SettingToggle menuShowBatteryLevel(RuntimeFeatureSettingType::ShowBatteryLevel);
+SettingToggle menuDOTTPostModFX(RuntimeFeatureSettingType::DOTTPostModFX);
 
 // Number of top-level entries: total settings minus non-top-level minus dynamics submenu entries
 // The 3 dynamics settings are grouped into menuDynamicsSoundDesignSubmenu, so we subtract 2 (3 settings - 1 submenu)
@@ -79,6 +80,7 @@ std::array<MenuItem*, kNumTopLevelEntries> subMenuEntries{&menuDrumRandomizer,
                                                           &menuHorizontalMenus,
                                                           &menuTrimFromStartOfAudioClip,
                                                           &menuShowBatteryLevel,
+                                                          &menuDOTTPostModFX,
                                                           &menuDynamicsSoundDesignSubmenu};
 
 Settings::Settings(l10n::String name, l10n::String title) : menu_item::Submenu(name, title, subMenuEntries) {

@@ -20,6 +20,7 @@
 #include "definitions_cxx.hpp"
 #include "dsp/filter/allpass_crossover.h"
 #include "dsp/filter/ladder_components.h"
+#include "dsp/filter/lr_crossover.h"
 #include "dsp_ng/core/types.hpp"
 #include "gui/ui/ui.h"
 #include "hid/display/display.h"
@@ -370,8 +371,12 @@ public:
 
 	MultibandCompressor() {
 		// Default OTT-style settings
-		crossover_.setLowCrossover(200.0f);
-		crossover_.setHighCrossover(2000.0f);
+		crossoverAllpass1_.setLowCrossover(200.0f);
+		crossoverAllpass1_.setHighCrossover(2000.0f);
+		crossoverAllpass3_.setLowCrossover(200.0f);
+		crossoverAllpass3_.setHighCrossover(2000.0f);
+		crossoverLR2_.setLowCrossover(200.0f);
+		crossoverLR2_.setHighCrossover(2000.0f);
 
 		// Set default parameters for each band
 		// Use setter functions to keep knob values in sync with actual values
@@ -393,16 +398,30 @@ public:
 	}
 
 	/// Set crossover frequency between low and mid bands
-	void setLowCrossover(float freqHz) { crossover_.setLowCrossover(freqHz); }
+	void setLowCrossover(float freqHz) {
+		crossoverAllpass1_.setLowCrossover(freqHz);
+		crossoverAllpass3_.setLowCrossover(freqHz);
+		crossoverLR2_.setLowCrossover(freqHz);
+	}
 
 	/// Set crossover frequency between mid and high bands
-	void setHighCrossover(float freqHz) { crossover_.setHighCrossover(freqHz); }
+	void setHighCrossover(float freqHz) {
+		crossoverAllpass1_.setHighCrossover(freqHz);
+		crossoverAllpass3_.setHighCrossover(freqHz);
+		crossoverLR2_.setHighCrossover(freqHz);
+	}
 
 	/// Get low crossover frequency in Hz
-	[[nodiscard]] float getLowCrossoverHz() const { return crossover_.getLowCrossoverHz(); }
+	[[nodiscard]] float getLowCrossoverHz() const { return crossoverAllpass1_.getLowCrossoverHz(); }
 
 	/// Get high crossover frequency in Hz
-	[[nodiscard]] float getHighCrossoverHz() const { return crossover_.getHighCrossoverHz(); }
+	[[nodiscard]] float getHighCrossoverHz() const { return crossoverAllpass1_.getHighCrossoverHz(); }
+
+	/// Set crossover type: 0=allpass 6dB/oct, 1=allpass 18dB/oct, 2=LR2 12dB/oct
+	void setCrossoverType(uint8_t type) { crossoverType_ = std::min(type, static_cast<uint8_t>(2)); }
+
+	/// Get crossover type: 0=allpass 6dB/oct, 1=allpass 18dB/oct, 2=LR2 12dB/oct
+	[[nodiscard]] uint8_t getCrossoverType() const { return crossoverType_; }
 
 	/// Access a specific band's compressor
 	BandCompressor& getBand(Band band) { return bands_[static_cast<size_t>(band)]; }
@@ -775,9 +794,103 @@ public:
 	/// Get the up/down skew value
 	[[nodiscard]] q31_t getUpDownSkew() const { return upDownSkewKnob_; }
 
+	// ========== Enable/Disable Zone ==========
+
+	/// Check if multiband compressor is enabled
+	[[nodiscard]] bool isEnabled() const { return enabledZone_ > (ONE_Q31 / 2); }
+
+	/// Get the enabled zone value
+	[[nodiscard]] q31_t getEnabledZone() const { return enabledZone_; }
+
+	/// Set the enabled zone value
+	void setEnabledZone(q31_t zone) { enabledZone_ = zone; }
+
+	// ========== Linked Bandwidth ==========
+
+	/// Get the linked bandwidth value (shared across all bands)
+	[[nodiscard]] q31_t getLinkedBandwidth() const { return linkedBandwidth_; }
+
+	/// Set the linked bandwidth value
+	void setLinkedBandwidth(q31_t bw) {
+		linkedBandwidth_ = bw;
+		// Apply to all bands (combined with per-band offsets)
+		for (size_t i = 0; i < kNumBands; ++i) {
+			q31_t netBw = std::clamp(static_cast<int64_t>(bw) + bandwidthOffset_[i], static_cast<int64_t>(0),
+			                         static_cast<int64_t>(ONE_Q31));
+			bands_[i].setBandwidth(static_cast<q31_t>(netBw));
+		}
+	}
+
+	// ========== Per-Band Offsets ==========
+
+	/// Get threshold offset for a specific band
+	[[nodiscard]] q31_t getThresholdOffset(size_t band) const {
+		return (band < kNumBands) ? thresholdOffset_[band] : 0;
+	}
+
+	/// Set threshold offset for a specific band
+	void setThresholdOffset(size_t band, q31_t offset) {
+		if (band < kNumBands) {
+			thresholdOffset_[band] = offset;
+		}
+	}
+
+	/// Get ratio offset for a specific band
+	[[nodiscard]] q31_t getRatioOffset(size_t band) const { return (band < kNumBands) ? ratioOffset_[band] : 0; }
+
+	/// Set ratio offset for a specific band
+	void setRatioOffset(size_t band, q31_t offset) {
+		if (band < kNumBands) {
+			ratioOffset_[band] = offset;
+		}
+	}
+
+	/// Get bandwidth offset for a specific band
+	[[nodiscard]] q31_t getBandwidthOffset(size_t band) const {
+		return (band < kNumBands) ? bandwidthOffset_[band] : 0;
+	}
+
+	/// Set bandwidth offset for a specific band
+	void setBandwidthOffset(size_t band, q31_t offset) {
+		if (band < kNumBands) {
+			bandwidthOffset_[band] = offset;
+		}
+	}
+
+	// ========== Net Values (Linked + Offset) ==========
+
+	/// Get net threshold for a specific band (linked + offset, clamped)
+	[[nodiscard]] q31_t getNetThreshold(size_t band) const {
+		if (band >= kNumBands) {
+			return 0;
+		}
+		int64_t net = static_cast<int64_t>(getLinkedThreshold()) + thresholdOffset_[band];
+		return static_cast<q31_t>(std::clamp(net, static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31)));
+	}
+
+	/// Get net ratio for a specific band (linked + offset, clamped)
+	[[nodiscard]] q31_t getNetRatio(size_t band) const {
+		if (band >= kNumBands) {
+			return 0;
+		}
+		int64_t net = static_cast<int64_t>(getLinkedRatio()) + ratioOffset_[band];
+		return static_cast<q31_t>(std::clamp(net, static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31)));
+	}
+
+	/// Get net bandwidth for a specific band (linked + offset, clamped)
+	[[nodiscard]] q31_t getNetBandwidth(size_t band) const {
+		if (band >= kNumBands) {
+			return 0;
+		}
+		int64_t net = static_cast<int64_t>(linkedBandwidth_) + bandwidthOffset_[band];
+		return static_cast<q31_t>(std::clamp(net, static_cast<int64_t>(0), static_cast<int64_t>(ONE_Q31)));
+	}
+
 	/// Reset all filter and compressor states
 	void reset() {
-		crossover_.reset();
+		crossoverAllpass1_.reset();
+		crossoverAllpass3_.reset();
+		crossoverLR2_.reset();
 		for (auto& band : bands_) {
 			band.reset();
 		}
@@ -810,10 +923,24 @@ public:
 		static std::array<q31_t, SSI_TX_BUFFER_NUM_SAMPLES> bandBufferL[kNumBands];
 		static std::array<q31_t, SSI_TX_BUFFER_NUM_SAMPLES> bandBufferR[kNumBands];
 
-		// Split into bands
+		// Split into bands using selected crossover type:
+		// - 0: Allpass 6dB/oct - gentle slopes, perfect reconstruction, minimal CPU
+		// - 1: Allpass 18dB/oct - steeper, experimental (may have notches)
+		// - 2: LR2 12dB/oct - proper Linkwitz-Riley, ~5x CPU but still cheap (default)
 		for (size_t i = 0; i < buffer.size(); ++i) {
-			filter::AllpassCrossover::Bands bandsL, bandsR;
-			crossover_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
+			filter::CrossoverBands bandsL, bandsR;
+			switch (crossoverType_) {
+			case 0:
+				crossoverAllpass1_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
+				break;
+			case 1:
+				crossoverAllpass3_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
+				break;
+			case 2:
+			default:
+				crossoverLR2_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
+				break;
+			}
 
 			bandBufferL[0][i] = bandsL.low;
 			bandBufferL[1][i] = bandsL.mid;
@@ -842,51 +969,18 @@ public:
 			    bands_[b].calculateGain(static_cast<float>(buffer.size()), songVolumedB, knee_, bandSkew, frameCount_);
 			q31_t gainFixed = static_cast<q31_t>(gain * (1 << 27)); // 4.27 format
 
-			// Apply compression gain and check for saturation
-			q31_t bandPeak = 0;
+			// Apply compression gain
 			for (size_t i = 0; i < buffer.size(); ++i) {
 				bandBufferL[b][i] = multiply_32x32_rshift32(bandBufferL[b][i], gainFixed) << 4;
 				bandBufferR[b][i] = multiply_32x32_rshift32(bandBufferR[b][i], gainFixed) << 4;
-				// Track peak before saturation
-				q31_t absL = (bandBufferL[b][i] < 0) ? -bandBufferL[b][i] : bandBufferL[b][i];
-				q31_t absR = (bandBufferR[b][i] < 0) ? -bandBufferR[b][i] : bandBufferR[b][i];
-				bandPeak = std::max(bandPeak, std::max(absL, absR));
 			}
-
-			// Detect saturation (tanh starts to soft-clip around 0.7 of full scale)
-			// With saturationAmount = 3, signal is shifted left 3 bits before tanh
-			// Threshold is 8x higher than for saturationAmount = 6
-			constexpr q31_t saturationThreshold = static_cast<q31_t>(EFFECTIVE_0DBFS_Q31 * 5.6);
-			if (bandPeak > saturationThreshold) {
-				bandSaturationHoldCounter_[b] = kIndicatorHoldBuffers;
-			}
-			else if (bandSaturationHoldCounter_[b] > 0) {
-				bandSaturationHoldCounter_[b]--;
-			}
-			bandSaturating_[b] = (bandSaturationHoldCounter_[b] > 0);
-
-			// Per-band soft saturation (tanh) with antialiasing
-			// Currently disabled - saves ~35-45% CPU
-			// TODO: Re-enable once performance is acceptable
-			// for (size_t i = 0; i < buffer.size(); ++i) {
-			// 	bandBufferL[b][i] = getTanHAntialiased(bandBufferL[b][i], &saturationStateL_[b], 6);
-			// 	bandBufferR[b][i] = getTanHAntialiased(bandBufferR[b][i], &saturationStateR_[b], 6);
-			// }
-
-			// Track post-saturation peak for metering
-			q31_t postSatPeak = 0;
-			for (size_t i = 0; i < buffer.size(); ++i) {
-				q31_t absL = (bandBufferL[b][i] < 0) ? -bandBufferL[b][i] : bandBufferL[b][i];
-				q31_t absR = (bandBufferR[b][i] < 0) ? -bandBufferR[b][i] : bandBufferR[b][i];
-				postSatPeak = std::max(postSatPeak, std::max(absL, absR));
-			}
-			bandOutputPeak_[b] = std::max(postSatPeak, static_cast<q31_t>(bandOutputPeak_[b] * 0.95f));
 		}
 
 		// Recombine bands with per-band output levels and stereo width
 		// Apply M/S stereo width processing per band (bass always mono)
 		// Apply output gain using 64-bit accumulation to prevent overflow
-		int64_t truePeak = 0; // Track true peak before clamping for accurate metering
+		int64_t truePeak = 0;                              // Track true peak before clamping for accurate metering
+		std::array<q31_t, kNumBands> bandPeakThisBuffer{}; // Per-band peak tracking (post-level)
 		for (size_t i = 0; i < buffer.size(); ++i) {
 			int64_t sumL = 0, sumR = 0;
 
@@ -908,8 +1002,19 @@ public:
 				L = mid + sideScaled;
 				R = mid - sideScaled;
 
-				sumL += static_cast<int64_t>(static_cast<double>(L) * level);
-				sumR += static_cast<int64_t>(static_cast<double>(R) * level);
+				// Apply level and accumulate
+				int64_t scaledL = static_cast<int64_t>(static_cast<double>(L) * level);
+				int64_t scaledR = static_cast<int64_t>(static_cast<double>(R) * level);
+				sumL += scaledL;
+				sumR += scaledR;
+
+				// Track per-band peak (post-level, for accurate saturation indication)
+				int64_t absL = (scaledL < 0) ? -scaledL : scaledL;
+				int64_t absR = (scaledR < 0) ? -scaledR : scaledR;
+				int64_t bandMax = std::max(absL, absR);
+				// Clamp to q31 range for peak storage
+				q31_t peakSample = (bandMax > INT32_MAX) ? INT32_MAX : static_cast<q31_t>(bandMax);
+				bandPeakThisBuffer[b] = std::max(bandPeakThisBuffer[b], peakSample);
 			}
 
 			// Apply output gain in 64-bit (outputGain_ is the only gain control)
@@ -931,6 +1036,21 @@ public:
 			// Apply DC-blocking high-pass filter (removes DC offset from saturation)
 			buffer[i].l = outL - dcBlockL_.doFilter(outL, kDCBlockCoeff);
 			buffer[i].r = outR - dcBlockR_.doFilter(outR, kDCBlockCoeff);
+		}
+
+		// Update per-band output peaks with decay (~50ms) and detect saturation
+		constexpr q31_t saturationThreshold = static_cast<q31_t>(EFFECTIVE_0DBFS_Q31 * 1.33); // ~+2.5dBFS
+		for (size_t b = 0; b < kNumBands; ++b) {
+			bandOutputPeak_[b] = std::max(bandPeakThisBuffer[b], static_cast<q31_t>(bandOutputPeak_[b] * 0.95f));
+
+			// Detect saturation with hold timer (~500ms)
+			if (bandPeakThisBuffer[b] > saturationThreshold) {
+				bandSaturationHoldCounter_[b] = kIndicatorHoldBuffers;
+			}
+			else if (bandSaturationHoldCounter_[b] > 0) {
+				bandSaturationHoldCounter_[b]--;
+			}
+			bandSaturating_[b] = (bandSaturationHoldCounter_[b] > 0);
 		}
 
 		// Track output level using true peak (before clamping) for accurate metering
@@ -1099,7 +1219,14 @@ public:
 	}
 
 private:
-	filter::AllpassCrossover crossover_;
+	// Crossover filters - multiple options:
+	// - AllpassCrossoverLR1: 6dB/oct, perfect reconstruction, minimal CPU
+	// - AllpassCrossoverLR3: 18dB/oct, steeper but may have notches in mid band
+	// - LR2Crossover: 12dB/oct, proper Linkwitz-Riley, ~5x CPU but still cheap
+	filter::AllpassCrossoverLR1 crossoverAllpass1_; // 6dB/oct - gentle, perfect reconstruction
+	filter::AllpassCrossoverLR3 crossoverAllpass3_; // 18dB/oct - steeper, experimental
+	filter::LR2Crossover crossoverLR2_;             // 12dB/oct - proper LR, default
+	uint8_t crossoverType_ = 2;                     // 0=allpass6dB, 1=allpass18dB, 2=LR2(default)
 	std::array<BandCompressor, kNumBands> bands_;
 	FixedPoint<31> wet_{ONE_Q31};
 	float dry_ = 0.0f;
@@ -1125,6 +1252,17 @@ private:
 	float vibePhaseKnee_ = 0.0f;                                     // Phase offset for knee oscillation
 	std::array<float, kNumBands> vibePhaseTiming_{0.0f, 0.0f, 0.0f}; // Phase offsets for timing
 	std::array<float, kNumBands> vibePhaseSkew_{0.0f, 0.0f, 0.0f};   // Phase offsets for skew
+
+	// Enable/disable zone (0 = off, >ONE_Q31/2 = on)
+	q31_t enabledZone_{0};
+
+	// Per-band parameter offsets (added to linked values)
+	std::array<q31_t, kNumBands> thresholdOffset_{};
+	std::array<q31_t, kNumBands> ratioOffset_{};
+	std::array<q31_t, kNumBands> bandwidthOffset_{};
+
+	// Linked bandwidth value (shared across all bands)
+	q31_t linkedBandwidth_{ONE_Q31 / 2};
 
 	// Saturation state for antialiasing (per-band, per-channel)
 	// Initialize to midpoint (2147483648 = 0x80000000) which represents zero signal
