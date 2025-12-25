@@ -18,27 +18,30 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
+#include "dsp/fast_math.h"
 #include "dsp/filter/ladder_components.h"
 #include "util/fixedpoint.h"
 #include <array>
 #include <cmath>
+#include <type_traits>
 
 namespace deluge::dsp::filter {
 
 /// 3-band Linkwitz-Riley crossover filter (LR2 = 12dB/oct slopes).
-/// Uses cascaded first-order Butterworth filters with phase compensation.
+/// Uses cascaded first-order Butterworth filters.
 ///
 /// LR2 characteristics:
 /// - 12dB/oct (40dB/decade) slopes
 /// - -6dB at crossover frequency (power-complementary)
 /// - Flat summed magnitude response
-/// - 180° phase difference between LP and HP (corrected by inversion)
 ///
-/// For 3-band, adds an allpass to LOW band to compensate for the phase
-/// shift introduced by the MID/HIGH crossover.
-///
-/// Cost: ~10 first-order filter ops per sample (vs ~2 for AllpassCrossover)
-/// but gives 12dB/oct slopes vs 6dB/oct.
+/// Template parameter PHASE_COMPENSATED:
+/// - true (default): Adds allpass to LOW band to match MID/HIGH phase.
+///   Cost: 6 filter ops. Perfect phase alignment.
+/// - false: Skips phase compensation for CPU efficiency.
+///   Cost: 4 filter ops. ~90° phase lead in LOW band at high crossover freq.
+///   Inaudible for dynamics processing.
+template <bool PHASE_COMPENSATED = true>
 class LR2Crossover {
 public:
 	using Bands = CrossoverBands;
@@ -79,8 +82,10 @@ private:
 		BasicFilterComponent lpLow1, lpLow2;
 		// High crossover: two cascaded first-order for LR2
 		BasicFilterComponent lpHigh1, lpHigh2;
-		// Phase compensation allpass for LOW band (matches high crossover phase)
-		BasicFilterComponent apComp1, apComp2;
+		// Phase compensation allpass for LOW band (only if PHASE_COMPENSATED)
+		// Conditionally included to save memory when not used
+		std::conditional_t<PHASE_COMPENSATED, BasicFilterComponent, char[0]> apComp1;
+		std::conditional_t<PHASE_COMPENSATED, BasicFilterComponent, char[0]> apComp2;
 	};
 
 	/// Calculate coefficient for first-order Butterworth
@@ -88,7 +93,7 @@ private:
 	[[nodiscard]] static q31_t calculateCoefficient(float freqHz) {
 		float fc = freqHz / static_cast<float>(kSampleRate);
 		fc = std::clamp(fc, 0.001f, 0.49f);
-		float wc = std::tan(3.14159265358979f * fc);
+		float wc = fastTan(3.14159265358979f * fc);
 		float coeff = wc / (1.0f + wc);
 		return static_cast<q31_t>(coeff * ONE_Q31);
 	}
@@ -97,8 +102,7 @@ private:
 		// === Low crossover: split into LOW and REST ===
 		// LR2 lowpass = cascade of two first-order lowpasses
 		q31_t lp1 = state.lpLow1.doFilter(input, lowCoeff_);
-		q31_t lp2 = state.lpLow2.doFilter(lp1, lowCoeff_);
-		q31_t lowRaw = lp2;
+		q31_t lowRaw = state.lpLow2.doFilter(lp1, lowCoeff_);
 
 		// LR2 highpass = input - LR2_lowpass
 		// Note: This gives exact reconstruction: LOW + REST = input
@@ -106,19 +110,24 @@ private:
 
 		// === High crossover: split REST into MID and HIGH ===
 		q31_t lp3 = state.lpHigh1.doFilter(rest, highCoeff_);
-		q31_t lp4 = state.lpHigh2.doFilter(lp3, highCoeff_);
-		q31_t mid = lp4;
+		q31_t mid = state.lpHigh2.doFilter(lp3, highCoeff_);
 
 		// Highpass of REST
 		q31_t high = rest - mid;
 
-		// === Phase compensation for LOW band ===
-		// The MID+HIGH path has phase shift from the high crossover filters.
-		// Apply matching allpass to LOW so all bands stay aligned.
-		// Use two cascaded first-order allpasses at high crossover frequency.
-		q31_t lowComp1 = state.apComp1.doAPF(lowRaw, highCoeff_);
-		q31_t lowComp2 = state.apComp2.doAPF(lowComp1, highCoeff_);
-		q31_t low = lowComp2;
+		// === Phase compensation for LOW band (conditional) ===
+		q31_t low;
+		if constexpr (PHASE_COMPENSATED) {
+			// The MID+HIGH path has phase shift from the high crossover filters.
+			// Apply matching allpass to LOW so all bands stay aligned.
+			q31_t lowComp1 = state.apComp1.doAPF(lowRaw, highCoeff_);
+			low = state.apComp2.doAPF(lowComp1, highCoeff_);
+		}
+		else {
+			// Skip phase compensation for CPU efficiency.
+			// LOW has ~90° phase lead vs MID/HIGH at high crossover frequency.
+			low = lowRaw;
+		}
 
 		return {low, mid, high};
 	}
@@ -132,5 +141,9 @@ private:
 	float lowCrossoverHz_ = 200.0f;
 	float highCrossoverHz_ = 2000.0f;
 };
+
+// Type aliases for convenience
+using LR2CrossoverFull = LR2Crossover<true>;  // With phase compensation (6 filter ops)
+using LR2CrossoverFast = LR2Crossover<false>; // Without phase compensation (4 filter ops)
 
 } // namespace deluge::dsp::filter

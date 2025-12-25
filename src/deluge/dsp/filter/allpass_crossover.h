@@ -18,6 +18,7 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
+#include "dsp/fast_math.h"
 #include "dsp/filter/ladder_components.h"
 #include "util/fixedpoint.h"
 #include <array>
@@ -50,10 +51,11 @@ struct CrossoverBands {
 ///
 /// For steeper slopes (12dB/oct), use LR2Crossover instead (see lr_crossover.h).
 ///
-/// Template parameter ORDER (only ORDER=1 is recommended for 3-band):
+/// Template parameter ORDER (only ORDER=1 is recommended for 3-band: Higher orders dont work properly, but are
+/// interesting for DOTT):
 template <int ORDER>
 class AllpassCrossover {
-	static_assert(ORDER == 1 || ORDER == 3 || ORDER == 5, "ORDER must be odd (1, 3, or 5)");
+	static_assert(ORDER >= 1 && ORDER <= 5, "ORDER must be 1-5");
 
 public:
 	using Bands = CrossoverBands;
@@ -130,7 +132,7 @@ private:
 		float fc = freqHz / static_cast<float>(kSampleRate);
 		// Clamp to valid range to prevent instability
 		fc = std::clamp(fc, 0.001f, 0.49f);
-		float wc = std::tan(3.14159265358979f * fc);
+		float wc = fastTan(3.14159265358979f * fc);
 		// Coefficient for BasicFilterComponent::doAPF()
 		float coeff = wc / (1.0f + wc);
 		return static_cast<q31_t>(coeff * ONE_Q31);
@@ -146,9 +148,10 @@ private:
 	float highCrossoverHz_ = 2000.0f;
 };
 
-// Type aliases for convenience (odd orders only - see class documentation)
-using AllpassCrossoverLR1 = AllpassCrossover<1>; // 6dB/oct
-using AllpassCrossoverLR3 = AllpassCrossover<3>; // 18dB/oct
-using AllpassCrossoverLR5 = AllpassCrossover<5>; // 30dB/oct
+// Type aliases for convenience
+using AllpassCrossoverLR1 = AllpassCrossover<1>; // 6dB/oct - cheapest, recommended
+using AllpassCrossoverLR2 = AllpassCrossover<2>; // 12dB/oct - experimental
+using AllpassCrossoverLR3 = AllpassCrossover<3>; // 18dB/oct - experimental
+using AllpassCrossoverLR5 = AllpassCrossover<5>; // 30dB/oct - experimental
 
 } // namespace deluge::dsp::filter

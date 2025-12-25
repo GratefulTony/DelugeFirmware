@@ -219,6 +219,10 @@ void RuntimeFeatureSettings::init() {
 	// DOTT Post Mod FX - places DOTT after modulation FX in signal chain (default: before)
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DOTTPostModFX], STRING_FOR_COMMUNITY_FEATURE_DOTT_POST_MOD_FX,
 	                  "dottPostModFX", RuntimeFeatureStateToggle::Off);
+
+	// DOTT Analyzer - enables/disables the GR meter animation in DOTT menu (default: on)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DOTTAnalyzer], STRING_FOR_COMMUNITY_FEATURE_DOTT_ANALYZER,
+	                  "dottAnalyzer", RuntimeFeatureStateToggle::On);
 }
 
 void RuntimeFeatureSettings::readSettingsFromFile() {

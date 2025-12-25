@@ -104,6 +104,28 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	midi_knobs = other->midi_knobs; // Could fail if no RAM... not too big a concern
 	delay = other->delay;
 	stutterConfig = other->stutterConfig;
+	// Saturator
+	saturatorDrive = other->saturatorDrive;
+	saturatorShapeX = other->saturatorShapeX;
+	saturatorShapeY = other->saturatorShapeY;
+	saturatorMix = other->saturatorMix;
+	if (saturatorDrive || saturatorMix) {
+		saturator.regenerateTable(saturatorShapeX, saturatorShapeY);
+	}
+	// Disperser
+	disperserFreq = other->disperserFreq;
+	disperserSpread = other->disperserSpread;
+	disperserFeedback = other->disperserFeedback;
+	disperserStages = other->disperserStages;
+	// Multiband compressor state
+	multibandCompressor.setEnabledZone(other->multibandCompressor.getEnabledZone());
+	multibandCompressor.setCrossoverType(other->multibandCompressor.getCrossoverType());
+	// Copy per-band offsets
+	for (size_t i = 0; i < 3; ++i) {
+		multibandCompressor.setThresholdOffset(i, other->multibandCompressor.getThresholdOffset(i));
+		multibandCompressor.setRatioOffset(i, other->multibandCompressor.getRatioOffset(i));
+		multibandCompressor.setBandwidthOffset(i, other->multibandCompressor.getBandwidthOffset(i));
+	}
 }
 
 void ModControllableAudio::initParams(ParamManager* paramManager) {
@@ -560,6 +582,39 @@ void ModControllableAudio::writeAttributesToFile(Serializer& writer) {
 	}
 	if (sineShaperMix) {
 		writer.writeAttribute("sineShaperMix", sineShaperMix);
+	}
+	// Saturator params (only write if non-default)
+	if (saturatorDrive) {
+		writer.writeAttribute("saturatorDrive", saturatorDrive);
+	}
+	if (saturatorShapeX) {
+		writer.writeAttribute("saturatorShapeX", saturatorShapeX);
+	}
+	if (saturatorShapeY) {
+		writer.writeAttribute("saturatorShapeY", saturatorShapeY);
+	}
+	if (saturatorMix) {
+		writer.writeAttribute("saturatorMix", saturatorMix);
+	}
+	// Disperser params (only write if non-default)
+	if (disperserFreq != 64) {
+		writer.writeAttribute("disperserFreq", disperserFreq);
+	}
+	if (disperserSpread) {
+		writer.writeAttribute("disperserSpread", disperserSpread);
+	}
+	if (disperserFeedback != 64) {
+		writer.writeAttribute("disperserFeedback", disperserFeedback);
+	}
+	if (disperserStages) {
+		writer.writeAttribute("disperserStages", disperserStages);
+	}
+	// Multiband compressor state (only write if enabled or non-default crossover type)
+	if (multibandCompressor.isEnabled()) {
+		writer.writeAttribute("mbEnabled", 1);
+	}
+	if (multibandCompressor.getCrossoverType() != 2) { // 2 = LR2 (default)
+		writer.writeAttribute("mbCrossoverType", multibandCompressor.getCrossoverType());
 	}
 }
 
@@ -1029,6 +1084,53 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 	else if (!strcmp(tagName, "sineShaperMix")) {
 		sineShaperMix = reader.readTagOrAttributeValueInt();
 		reader.exitTag("sineShaperMix");
+	}
+	// Saturator params
+	else if (!strcmp(tagName, "saturatorDrive")) {
+		saturatorDrive = reader.readTagOrAttributeValueInt();
+		saturator.regenerateTable(saturatorShapeX, saturatorShapeY); // Rebuild table
+		reader.exitTag("saturatorDrive");
+	}
+	else if (!strcmp(tagName, "saturatorShapeX")) {
+		saturatorShapeX = reader.readTagOrAttributeValueInt();
+		saturator.regenerateTable(saturatorShapeX, saturatorShapeY); // Rebuild table
+		reader.exitTag("saturatorShapeX");
+	}
+	else if (!strcmp(tagName, "saturatorShapeY")) {
+		saturatorShapeY = reader.readTagOrAttributeValueInt();
+		saturator.regenerateTable(saturatorShapeX, saturatorShapeY); // Rebuild table
+		reader.exitTag("saturatorShapeY");
+	}
+	else if (!strcmp(tagName, "saturatorMix")) {
+		saturatorMix = reader.readTagOrAttributeValueInt();
+		reader.exitTag("saturatorMix");
+	}
+	// Disperser params
+	else if (!strcmp(tagName, "disperserFreq")) {
+		disperserFreq = reader.readTagOrAttributeValueInt();
+		reader.exitTag("disperserFreq");
+	}
+	else if (!strcmp(tagName, "disperserSpread")) {
+		disperserSpread = reader.readTagOrAttributeValueInt();
+		reader.exitTag("disperserSpread");
+	}
+	else if (!strcmp(tagName, "disperserFeedback")) {
+		disperserFeedback = reader.readTagOrAttributeValueInt();
+		reader.exitTag("disperserFeedback");
+	}
+	else if (!strcmp(tagName, "disperserStages")) {
+		disperserStages = reader.readTagOrAttributeValueInt();
+		reader.exitTag("disperserStages");
+	}
+	// Multiband compressor state
+	else if (!strcmp(tagName, "mbEnabled")) {
+		int32_t enabled = reader.readTagOrAttributeValueInt();
+		multibandCompressor.setEnabledZone(enabled ? ONE_Q31 : 0);
+		reader.exitTag("mbEnabled");
+	}
+	else if (!strcmp(tagName, "mbCrossoverType")) {
+		multibandCompressor.setCrossoverType(reader.readTagOrAttributeValueInt());
+		reader.exitTag("mbCrossoverType");
 	}
 
 	// Per-band offsets for multiband compressor

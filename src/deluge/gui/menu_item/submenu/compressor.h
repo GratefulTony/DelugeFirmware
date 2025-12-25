@@ -20,8 +20,10 @@
 #include "deluge/gui/l10n/l10n.h"
 #include "deluge/gui/menu_item/horizontal_menu.h"
 #include "gui/ui/sound_editor.h"
+#include "gui/ui_timer_manager.h"
 #include "hid/display/oled.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
+#include "model/settings/runtime_feature_settings.h"
 
 namespace deluge::gui::menu_item::submenu {
 
@@ -35,51 +37,101 @@ class CompressorHorizontalMenu final : public HorizontalMenu {
 public:
 	using HorizontalMenu::HorizontalMenu;
 
+	static constexpr int32_t kMeterRefreshMs = 100; // 10 fps for meter animation
+
+	void beginSession(MenuItem* navigatedBackwardFrom = nullptr) override {
+		HorizontalMenu::beginSession(navigatedBackwardFrom);
+
+		// Always start meter refresh timer - it will check conditions on each tick
+		if (isMeterFeatureEnabled()) {
+			uiTimerManager.setTimer(TimerName::UI_SPECIFIC, kMeterRefreshMs);
+		}
+	}
+
+	void endSession() override {
+		// Stop the meter refresh timer
+		uiTimerManager.unsetTimer(TimerName::UI_SPECIFIC);
+		HorizontalMenu::endSession();
+	}
+
+	ActionResult timerCallback() override {
+		// Always reschedule to keep animation running
+		uiTimerManager.setTimer(TimerName::UI_SPECIFIC, kMeterRefreshMs);
+
+		// Only trigger render if meter feature is enabled and compressor is active
+		// The popup check happens in shouldShowMeter() during actual rendering
+		if (isMeterFeatureEnabled() && soundEditor.currentModControllable != nullptr
+		    && soundEditor.currentModControllable->multibandCompressor.isEnabled()) {
+			// Clear the audio loop's refresh flag
+			(void)soundEditor.currentModControllable->multibandCompressor.checkAndClearMeterRefresh();
+
+			// Request full UI redraw - this triggers the standard OLED render path
+			renderUIsForOled();
+		}
+		return ActionResult::DEALT_WITH;
+	}
+
 	void renderOLED() override {
 		// Call base implementation for standard rendering
 		HorizontalMenu::renderOLED();
 
-		// Only draw meter when DOTT is enabled
-		if (soundEditor.currentModControllable == nullptr
-		    || !soundEditor.currentModControllable->multibandCompressor.isEnabled()) {
-			return;
-		}
-
-		renderGRMeter();
-	}
-
-	/// Override selectEncoderAction to draw meter after each value change
-	/// This ensures the meter is visible when tweaking parameters (popup mode)
-	void selectEncoderAction(int32_t offset) override {
-		// Call base implementation (updates value and shows notification)
-		HorizontalMenu::selectEncoderAction(offset);
-
-		// Draw meter on popup canvas after notification is displayed
-		if (soundEditor.currentModControllable != nullptr
-		    && soundEditor.currentModControllable->multibandCompressor.isEnabled()) {
+		// Draw meter when DOTT and analyzer are enabled
+		// Note: shouldShowMeter() already checks for popup presence
+		if (shouldShowMeter()) {
 			renderGRMeter();
 		}
 	}
 
+	/// Override selectEncoderAction - don't draw meter during value changes
+	/// The popup notification takes priority for readability
+	void selectEncoderAction(int32_t offset) override {
+		// Call base implementation (updates value and shows notification)
+		HorizontalMenu::selectEncoderAction(offset);
+		// Don't draw meter here - popup is showing and needs to be readable
+	}
+
 private:
+	/// Check if meter feature is enabled (runtime setting only)
+	[[nodiscard]] bool isMeterFeatureEnabled() const {
+		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DOTTAnalyzer);
+	}
+
+	/// Check if meter should be displayed (all conditions including popup check)
+	[[nodiscard]] bool shouldShowMeter() const {
+		return soundEditor.currentModControllable != nullptr
+		       && soundEditor.currentModControllable->multibandCompressor.isEnabled() && isMeterFeatureEnabled()
+		       && !OLED::isPopupPresent(); // Don't show during popups
+	}
+
+	// Meter layout constants (shared between clear and render)
+	static constexpr int32_t kMeterHeight = 13;
+	static constexpr int32_t kMeterX = 45;
+	static constexpr int32_t kMeterWidth =
+	    24; // 3 bands(2px each) + 3 gaps(2px) + separator(2px) + master(2px) + clip(4px)
+
+	/// Clear the meter area before redrawing (needed for direct rendering in timer)
+	void clearMeterArea() {
+		OLED::main.clearAreaExact(kMeterX, OLED_MAIN_TOPMOST_PIXEL, kMeterX + kMeterWidth,
+		                          OLED_MAIN_TOPMOST_PIXEL + kMeterHeight);
+	}
+
 	/// Render GR meter with dual bars per band (output level + GR)
 	/// Layout: [L:out|gr] [M:out|gr] [H:out|gr] | [Master] [Clip]
 	void renderGRMeter() {
-		const bool popupShowing = OLED::isPopupPresent();
-		oled_canvas::Canvas& image = popupShowing ? OLED::popup : OLED::main;
-
 		auto& compressor = soundEditor.currentModControllable->multibandCompressor;
 
-		// Use full header height
-		constexpr int32_t meterHeight = 14;
+		// Header height (13px to stay within title area)
+		constexpr int32_t meterHeight = kMeterHeight;
 		constexpr int32_t halfHeight = meterHeight / 2;
 		constexpr int32_t bandGap = 2; // Gap between bands
 
 		// Position - moved left since "DOTT" is short
-		constexpr int32_t meterX = 45;
+		constexpr int32_t meterX = kMeterX;
 		constexpr int32_t meterY = OLED_MAIN_TOPMOST_PIXEL;
 		const int32_t centerY = meterY + halfHeight;
 		const int32_t bottomY = meterY + meterHeight - 1;
+
+		oled_canvas::Canvas& canvas = OLED::main;
 
 		// Scale bipolar GR value to half-height pixels
 		auto scaleBipolar = [](int8_t value, int32_t maxHalfHeight) -> int32_t {
@@ -100,29 +152,29 @@ private:
 			// Bar 1: Output level (unipolar, grows upward from bottom)
 			int32_t outH = scaleUnipolar(outputLevel, meterHeight);
 			for (int32_t dy = 0; dy < outH; dy++) {
-				image.drawPixel(xPos, bottomY - dy);
+				canvas.drawPixel(xPos, bottomY - dy);
 			}
 
 			// Saturation indicator at top of output bar
 			if (saturating) {
-				image.drawPixel(xPos, meterY);
+				canvas.drawPixel(xPos, meterY);
 			}
 
 			// Bar 2: GR (bipolar, from center)
 			xPos += 1;
 			int32_t h = scaleBipolar(grValue, halfHeight);
 			// Draw center tick
-			image.drawPixel(xPos, centerY);
+			canvas.drawPixel(xPos, centerY);
 			if (h > 0) {
 				// Upward compression (gain boost)
 				for (int32_t dy = 1; dy <= h; dy++) {
-					image.drawPixel(xPos, centerY - dy);
+					canvas.drawPixel(xPos, centerY - dy);
 				}
 			}
 			else if (h < 0) {
 				// Downward compression (gain reduction)
 				for (int32_t dy = 1; dy <= -h; dy++) {
-					image.drawPixel(xPos, centerY + dy);
+					canvas.drawPixel(xPos, centerY + dy);
 				}
 			}
 		};
@@ -140,26 +192,26 @@ private:
 		x += 2 + bandGap;
 
 		// Separator (vertical dots at center)
-		image.drawPixel(x, centerY - 1);
-		image.drawPixel(x, centerY);
-		image.drawPixel(x, centerY + 1);
+		canvas.drawPixel(x, centerY - 1);
+		canvas.drawPixel(x, centerY);
+		canvas.drawPixel(x, centerY + 1);
 		x += 2;
 
 		// Master output level bar (2px wide for visibility)
 		uint8_t outLevel = compressor.getOutputLevel();
 		int32_t outH = scaleUnipolar(outLevel, meterHeight);
 		for (int32_t dy = 0; dy < outH; dy++) {
-			image.drawPixel(x, bottomY - dy);
-			image.drawPixel(x + 1, bottomY - dy);
+			canvas.drawPixel(x, bottomY - dy);
+			canvas.drawPixel(x + 1, bottomY - dy);
 		}
 
 		// Master clip indicator - top-right of output meter (2x2 dot when clipping)
 		if (compressor.isClipping()) {
 			int32_t clipX = x + 3;
-			image.drawPixel(clipX, meterY);
-			image.drawPixel(clipX + 1, meterY);
-			image.drawPixel(clipX, meterY + 1);
-			image.drawPixel(clipX + 1, meterY + 1);
+			canvas.drawPixel(clipX, meterY);
+			canvas.drawPixel(clipX + 1, meterY);
+			canvas.drawPixel(clipX, meterY + 1);
+			canvas.drawPixel(clipX + 1, meterY + 1);
 		}
 
 		OLED::markChanged();

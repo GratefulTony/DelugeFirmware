@@ -70,6 +70,7 @@ enum RuntimeFeatureSettingType : uint32_t {
 	DynamicsFineGoldKnobCharacter,
 	DynamicsFineGoldKnobVibe,
 	DOTTPostModFX,
+	DOTTAnalyzer,
 	MaxElement // Keep as boundary
 };
 

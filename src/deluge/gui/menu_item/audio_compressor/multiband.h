@@ -24,7 +24,6 @@
 #include "gui/menu_item/decimal.h"
 #include "gui/menu_item/menu_item_with_cc_learning.h"
 #include "gui/menu_item/momentum_encoder.h"
-#include "gui/menu_item/selection.h"
 #include "gui/menu_item/value_scaling.h"
 #include "gui/ui/sound_editor.h"
 #include "hid/display/oled.h"
@@ -69,34 +68,6 @@ inline q31_t menuValueToParamHighRes(int32_t menuValue) {
 	}
 	return menuValue << kHighResShift;
 }
-
-/// Menu item to select compressor mode (Single or Multiband)
-class CompressorModeSelection final : public Selection {
-public:
-	using Selection::Selection;
-
-	void readCurrentValue() override {
-		this->setValue(static_cast<int32_t>(soundEditor.currentModControllable->compressorMode));
-	}
-
-	void writeCurrentValue() override {
-		soundEditor.currentModControllable->compressorMode = static_cast<CompressorMode>(this->getValue());
-	}
-
-	deluge::vector<std::string_view> getOptions(OptType optType = OptType::FULL) override {
-		if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)) {
-			return {
-			    l10n::getView(l10n::String::STRING_FOR_COMPRESSOR_MODE_SINGLE),
-			    l10n::getView(l10n::String::STRING_FOR_COMPRESSOR_MODE_MULTIBAND),
-			};
-		}
-		return {
-		    l10n::getView(l10n::String::STRING_FOR_COMPRESSOR_MODE_SINGLE),
-		};
-	}
-
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
-};
 
 /// Menu item for low crossover frequency (Hz)
 /// Range: 50Hz to 2000Hz. Clamped to stay below high crossover.
@@ -834,13 +805,13 @@ public:
 };
 
 /// Mode zone control - first item in DOTT menu
-/// 4 zones: Off, Allpass 6dB ($), LR2 12dB ($$), Allpass 18dB ($$$)
-/// One encoder click per zone, ordered by CPU cost
+/// 6 zones: Off, AP 6dB (1st), AP 12dB (2nd), AP 18dB (3rd), LR2 12dB, LR2 Fast
+/// One encoder click per zone, ordered by CPU cost (cheapest to most expensive CW)
 class ModeZone final : public DecimalWithoutScrolling {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
 
-	static constexpr int32_t kNumModes = 4;
+	static constexpr int32_t kNumModes = 6;
 
 	void readCurrentValue() override {
 		auto& comp = soundEditor.currentModControllable->multibandCompressor;
@@ -848,24 +819,9 @@ public:
 			this->setValue(0); // Off
 		}
 		else {
-			// Map crossover type to zone (ordered by cost)
-			// Type 0 = Allpass 6dB -> Zone 1
-			// Type 2 = LR2 12dB -> Zone 2
-			// Type 1 = Allpass 18dB -> Zone 3
-			switch (comp.getCrossoverType()) {
-			case 0:
-				this->setValue(1);
-				break; // Allpass 6dB
-			case 2:
-				this->setValue(2);
-				break; // LR2 12dB
-			case 1:
-				this->setValue(3);
-				break; // Allpass 18dB
-			default:
-				this->setValue(2);
-				break; // Default to LR2
-			}
+			// Crossover types are already ordered by cost: 0=AP1, 1=AP2, 2=AP3, 3=LR2
+			// Zone = crossover type + 1 (zone 0 is Off)
+			this->setValue(comp.getCrossoverType() + 1);
 		}
 	}
 
@@ -878,27 +834,13 @@ public:
 			comp.setEnabledZone(0);
 		}
 		else {
-			// Enable and set crossover type
+			// Enable and set crossover type (zone - 1)
 			comp.setEnabledZone(ONE_Q31);
-			// Map zone to crossover type (ordered by cost)
-			switch (zone) {
-			case 1:
-				comp.setCrossoverType(0);
-				break; // Allpass 6dB
-			case 2:
-				comp.setCrossoverType(2);
-				break; // LR2 12dB
-			case 3:
-				comp.setCrossoverType(1);
-				break; // Allpass 18dB
-			default:
-				comp.setCrossoverType(2);
-				break; // Default to LR2
-			}
+			comp.setCrossoverType(zone - 1);
 		}
 	}
 
-	[[nodiscard]] int32_t getMaxValue() const override { return kNumModes - 1; } // 0-3
+	[[nodiscard]] int32_t getMaxValue() const override { return kNumModes - 1; } // 0-4
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
 	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
@@ -908,23 +850,29 @@ public:
 	}
 
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
-		renderZoneInHorizontalMenu(slot, this->getValue(), kNumModes - 1, kNumModes, getZoneName);
+		// For discrete zones, value IS the zone index. Pass numZones as maxValue so stepsPerZone=1
+		renderZoneInHorizontalMenu(slot, this->getValue(), kNumModes, kNumModes, getZoneName);
 	}
 
 protected:
-	void drawPixelsForOled() override { drawZoneForOled(this->getValue(), kNumModes - 1, kNumModes, getZoneName); }
+	void drawPixelsForOled() override { drawZoneForOled(this->getValue(), kNumModes, kNumModes, getZoneName); }
 
 private:
 	static const char* getZoneName(int32_t zoneIndex) {
+		// Ordered by CPU cost (cheapest first)
 		switch (zoneIndex) {
 		case 0:
 			return "Off";
 		case 1:
-			return "6dB $";
+			return "AP 6dB"; // Allpass 1st order - cheapest (2 ops/ch)
 		case 2:
-			return "12dB $$";
+			return "AP 12dB"; // Allpass 2nd order (4 ops/ch)
 		case 3:
-			return "18dB $$$";
+			return "AP 18dB"; // Allpass 3rd order (6 ops/ch)
+		case 4:
+			return "LR2 Fast"; // LR2 without phase comp (4 ops/ch)
+		case 5:
+			return "LR2"; // LR2 with phase compensation (6 ops/ch)
 		default:
 			return "?";
 		}

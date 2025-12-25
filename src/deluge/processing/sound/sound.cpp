@@ -2577,6 +2577,8 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, deluge::dsp::Stere
 	// Apply multiband compressor parameters before rendering
 	if (dottEnabled) {
 		applyMultibandCompressorParams(paramManager);
+		// Only enable metering calculations when analyzer is visible (saves CPU)
+		multibandCompressor.setMeteringEnabled(runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DOTTAnalyzer));
 	}
 
 	// Pre-modFX DOTT processing (when DOTTPostModFX is OFF)

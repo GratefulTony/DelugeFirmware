@@ -23,6 +23,7 @@
 #include "gui/views/view.h"
 #include "model/action/action.h"
 #include "model/action/action_logger.h"
+#include "model/settings/runtime_feature_settings.h"
 #include "processing/engines/audio_engine.h"
 #include <limits>
 #include <string.h>
@@ -143,16 +144,20 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	processReverbSendAndVolume(global_effectable_audio, reverbBuffer, volumePostFX, postReverbVolume, reverbSendAmount,
 	                           pan, true);
 
-	if (compressorMode == CompressorMode::MULTIBAND) {
-		// Multiband mode always runs (has its own threshold controls)
+	if (multibandCompressor.isEnabled()) {
+		// DOTT runs when enabled (ModeZone != Off)
 		applyMultibandCompressorParams(paramManagerForClip);
+		// Only enable metering calculations when analyzer is visible (saves CPU)
+		multibandCompressor.setMeteringEnabled(runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DOTTAnalyzer));
 		multibandCompressor.render(global_effectable_audio, volumePostFX);
 	}
-	else if (compThreshold > 0) {
-		// Single-band mode only runs when threshold is set
+
+	if (compThreshold > 0) {
+		// Single-band compressor runs when threshold is set
 		compressor.renderVolNeutral(global_effectable_audio, volumePostFX);
 	}
-	else {
+	else if (!multibandCompressor.isEnabled()) {
+		// Only reset if neither compressor is active
 		compressor.reset();
 	}
 

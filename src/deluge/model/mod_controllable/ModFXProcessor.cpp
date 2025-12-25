@@ -17,12 +17,17 @@
 
 #include "ModFXProcessor.h"
 #include "definitions_cxx.hpp"
+#include "io/debug/print.h"
 #include "mem_functions.h"
 #include "memory/general_memory_allocator.h"
 #include "modulation/params/param_set.h"
 #include "processing/engines/audio_engine.h"
 #include "util/comparison.h"
 #include <cstdint>
+
+// TODO:PROFILING-DELETE - Profile mod FX (phaser) for baseline comparison
+// Set to 1 and enable ENABLE_TEXT_OUTPUT in uart.h to profile
+#define MODFX_PROFILE 0
 
 /// NOT GRAIN! - this only does the comb filter based mod fx
 void ModFXProcessor::processModFX(deluge::dsp::StereoBuffer<q31_t> buffer, const ModFXType& modFXType,
@@ -141,10 +146,21 @@ void ModFXProcessor::processModFXBuffer(deluge::dsp::StereoBuffer<q31_t> buffer,
                                         LFOType& modFXLFOWaveType, int32_t modFXDelayOffset,
                                         int32_t thisModFXDelayDepth, int32_t feedback, bool stereo) {
 	if constexpr (modFXType == ModFXType::PHASER) {
+// TODO:PROFILING-DELETE begin
+#if MODFX_PROFILE
+		static Debug::OneOfN profPhaser("PHASER", 1000);
+		profPhaser.start();
+#endif
+		// TODO:PROFILING-DELETE end
 		for (deluge::dsp::StereoSample<q31_t>& sample : buffer) {
 			int32_t lfo = modFXLFO.render(1, modFXLFOWaveType, modFXRate);
 			sample = processOnePhaserSample(sample, modFXDepth, feedback, lfo);
 		}
+// TODO:PROFILING-DELETE begin
+#if MODFX_PROFILE
+		profPhaser.stop();
+#endif
+		// TODO:PROFILING-DELETE end
 		return;
 	}
 	if (stereo) {
