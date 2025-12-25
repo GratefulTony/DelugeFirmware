@@ -58,10 +58,8 @@ public:
 		// Always reschedule to keep animation running
 		uiTimerManager.setTimer(TimerName::UI_SPECIFIC, kMeterRefreshMs);
 
-		// Only trigger render if meter feature is enabled and compressor is active
-		// The popup check happens in shouldShowMeter() during actual rendering
-		if (isMeterFeatureEnabled() && soundEditor.currentModControllable != nullptr
-		    && soundEditor.currentModControllable->multibandCompressor.isEnabled()) {
+		// Timer owns the decision: check ALL conditions before triggering render
+		if (shouldShowMeter()) {
 			// Clear the audio loop's refresh flag
 			(void)soundEditor.currentModControllable->multibandCompressor.checkAndClearMeterRefresh();
 
@@ -75,8 +73,9 @@ public:
 		// Call base implementation for standard rendering
 		HorizontalMenu::renderOLED();
 
-		// Draw meter when DOTT and analyzer are enabled
-		// Note: shouldShowMeter() already checks for popup presence
+		// Draw meter if conditions are met
+		// Note: This is also called from non-timer sources (navigation, etc.)
+		// so we still need the full condition check here
 		if (shouldShowMeter()) {
 			renderGRMeter();
 		}
@@ -91,16 +90,17 @@ public:
 	}
 
 private:
-	/// Check if meter feature is enabled (runtime setting only)
+	/// Check if meter feature is enabled (used by beginSession to decide whether to start timer)
 	[[nodiscard]] bool isMeterFeatureEnabled() const {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DOTTAnalyzer);
 	}
 
-	/// Check if meter should be displayed (all conditions including popup check)
+	/// Authoritative check for meter display - used by both timer and render
+	/// Timer uses this to avoid unnecessary renderUIsForOled() calls
+	/// Render uses this because renderOLED() can also be triggered by navigation/input
 	[[nodiscard]] bool shouldShowMeter() const {
-		return soundEditor.currentModControllable != nullptr
-		       && soundEditor.currentModControllable->multibandCompressor.isEnabled() && isMeterFeatureEnabled()
-		       && !OLED::isPopupPresent(); // Don't show during popups
+		return isMeterFeatureEnabled() && soundEditor.currentModControllable != nullptr
+		       && soundEditor.currentModControllable->multibandCompressor.isEnabled() && !OLED::isPopupPresent();
 	}
 
 	// Meter layout constants (shared between clear and render)
