@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "deluge/dsp/analytic_saturator.h"
 #include "deluge/util/fixedpoint.h"
 #include "dsp_ng/core/types.hpp"
 #include <algorithm>
@@ -35,27 +36,44 @@ namespace deluge::dsp {
  * - Linear zone near origin for clean pass-through at low drive
  * - 256-entry lookup table regenerated when shape changes
  * - Post-filter for anti-aliasing
+ * - Zone 4 (Y >= 128): Analytic parametric saturator with ADAA
  *
  * Shape X (0-127): Soft → Hard (controls knee/clipping aggressiveness)
  * Shape Y (0-127): Clean → Weird (controls harmonic character)
+ * Shape Y (128-255): Zone 4 - Analytic ADAA saturator with combinatoric sweep
  */
 class Saturator {
 public:
 	static constexpr size_t kTableSize = 256;
 	static constexpr size_t kTableMask = kTableSize - 1;
+	static constexpr uint8_t kZone4Threshold = 128; // Y >= 128 triggers Zone 4
 
 	Saturator() { regenerateTable(0, 0); }
 
 	/**
 	 * Regenerate the lookup table based on shape parameters
 	 * Call this when shapeX or shapeY changes (not during audio processing)
-	 * @param shapeX Soft→Hard axis (0-127)
-	 * @param shapeY Clean→Weird axis (0-127)
+	 * @param shapeX Soft→Hard axis (0-127, or 0-255 for Zone 4 drive)
+	 * @param shapeY Clean→Weird axis (0-127 for zones 0-3, 128-255 for Zone 4)
 	 */
 	void regenerateTable(uint8_t shapeX, uint8_t shapeY) {
 		shapeX_ = shapeX;
 		shapeY_ = shapeY;
 
+		// Check if we're in Zone 4 (analytic mode)
+		if (shapeY >= kZone4Threshold) {
+			useAnalytic_ = true;
+			// Derive analytic parameters from X and Y
+			// X maps to drive (0 = linear bypass), Y-128 maps to combinatoric sweep
+			float drive, tanhWeight, polyWeight, chebyWeight, threshold, asymmetry;
+			AnalyticSaturatorXYMapper::deriveParameters(shapeX, shapeY - kZone4Threshold, drive, tanhWeight, polyWeight,
+			                                            chebyWeight, threshold, asymmetry);
+			// Set parameters on single saturator (tables shared, state is per-channel)
+			analyticSat_.setParameters(drive, tanhWeight, polyWeight, chebyWeight, threshold, asymmetry);
+			return;
+		}
+
+		useAnalytic_ = false;
 		float x_norm = shapeX / 127.0f; // 0-1
 		float y_norm = shapeY / 127.0f; // 0-1
 
@@ -75,9 +93,30 @@ public:
 	 * Process a single sample through the saturator
 	 * @param input Sample to process (q31)
 	 * @param drive Input gain (q31, higher = more saturation)
+	 * @param channel 0 for left, 1 for right (used for ADAA state in Zone 4)
 	 * @return Shaped sample (q31)
 	 */
-	[[gnu::always_inline]] inline q31_t process(q31_t input, q31_t drive) {
+	[[gnu::always_inline]] inline q31_t process(q31_t input, q31_t drive, int channel = 0) {
+		// Zone 4: Use analytic saturator with ADAA
+		if (useAnalytic_) {
+			// Convert q31 to float [-1, 1]
+			float inputF = static_cast<float>(input) / 2147483648.0f;
+
+			// Apply external drive scaling (Zone 4 has internal drive from X axis)
+			// External drive provides additional boost
+			float driveScale = 1.0f + (static_cast<float>(drive) / 2147483648.0f + 1.0f) * 2.0f;
+			inputF *= driveScale;
+			inputF = std::clamp(inputF, -1.0f, 1.0f);
+
+			// Process with ADAA - use external state pointer per channel for stereo
+			float* prevXState = (channel == 0) ? &analyticPrevXL_ : &analyticPrevXR_;
+			float outputF = analyticSat_.process(inputF, prevXState);
+
+			// Convert back to q31
+			return static_cast<q31_t>(outputF * 2147483647.0f);
+		}
+
+		// Zones 0-3: Original table-based processing
 		// Apply drive (input gain)
 		// Drive range: 0.0625x (min/CCW) to 8x (max/CW) - 128x total range
 		// Center position (~0) gives approximately 4x gain
@@ -127,20 +166,39 @@ public:
 		return interpolated << 16;
 	}
 
+	/// Check if currently in Zone 4 (analytic mode)
+	[[nodiscard]] bool isAnalyticMode() const { return useAnalytic_; }
+
+	/// Check if effect is transparent (Zone 4 with zero drive)
+	[[nodiscard]] bool isTransparent() const { return useAnalytic_ && analyticSat_.isLinear(); }
+
+	/// Get the analytic saturator for direct parameter access
+	/// Note: L/R channels share parameters and tables, only ADAA state is separate
+	[[nodiscard]] AnalyticSaturator& getAnalyticSaturator() { return analyticSat_; }
+	[[nodiscard]] const AnalyticSaturator& getAnalyticSaturator() const { return analyticSat_; }
+
+	/// Reset ADAA state for both channels (call when starting new audio stream)
+	void resetAnalyticState() {
+		analyticPrevXL_ = 0.0f;
+		analyticPrevXR_ = 0.0f;
+	}
+
 	/**
 	 * Process a sample with wet/dry mix and smoothing filter
 	 * @param input Sample to process
 	 * @param drive Input gain
 	 * @param mix Wet/dry blend (0 = bypass, ONE_Q31 = full wet)
 	 * @param filterState Post-filter state for anti-aliasing
+	 * @param channel 0 for left, 1 for right (used for ADAA state in Zone 4)
 	 * @return Processed sample
 	 */
-	[[gnu::always_inline]] inline q31_t processWithMix(q31_t input, q31_t drive, q31_t mix, q31_t* filterState) {
+	[[gnu::always_inline]] inline q31_t processWithMix(q31_t input, q31_t drive, q31_t mix, q31_t* filterState,
+	                                                   int channel = 0) {
 		if (mix <= 0) {
 			return input; // Full bypass
 		}
 
-		q31_t wet = process(input, drive);
+		q31_t wet = process(input, drive, channel);
 
 		// Simple 1-pole lowpass for anti-aliasing (~12kHz at 44.1kHz)
 		// Using y = (1-a)*y + a*x form to avoid overflow from (x-y) subtraction
@@ -305,6 +363,12 @@ private:
 	std::array<int16_t, kTableSize + 1> table_{};
 	uint8_t shapeX_{0};
 	uint8_t shapeY_{0};
+
+	// Zone 4: Single analytic saturator (shared tables) with separate L/R ADAA state
+	AnalyticSaturator analyticSat_;
+	mutable float analyticPrevXL_{0.0f}; // ADAA state for L channel (mutable for const process)
+	mutable float analyticPrevXR_{0.0f}; // ADAA state for R channel
+	bool useAnalytic_{false};
 };
 
 } // namespace deluge::dsp

@@ -540,8 +540,8 @@ inline void saturateBuffer(StereoBuffer<q31_t> buffer, Saturator& saturator, q31
 	// Seed filter when transitioning from bypass to active, or on first use
 	bool needsSeed = (wasBypassed && *wasBypassed) || (lpfL == 0 && lpfR == 0);
 	if (needsSeed && !buffer.empty()) {
-		lpfL = saturator.process(buffer[0].l, currentDrive);
-		lpfR = saturator.process(buffer[0].r, currentDrive);
+		lpfL = saturator.process(buffer[0].l, currentDrive, 0); // L channel
+		lpfR = saturator.process(buffer[0].r, currentDrive, 1); // R channel
 		if (wasBypassed) {
 			*wasBypassed = false;
 		}
@@ -556,13 +556,13 @@ inline void saturateBuffer(StereoBuffer<q31_t> buffer, Saturator& saturator, q31
 		currentDrive += driveIncrement;
 
 		// Process left channel
-		q31_t wetL = saturator.process(sample.l, currentDrive);
+		q31_t wetL = saturator.process(sample.l, currentDrive, 0); // L channel
 		lpfL = add_saturate(multiply_32x32_rshift32(lpfL, lpfOneMinusAlpha) << 1,
 		                    multiply_32x32_rshift32(wetL, lpfAlpha) << 1);
 		wetL = lpfL;
 
 		// Process right channel
-		q31_t wetR = saturator.process(sample.r, currentDrive);
+		q31_t wetR = saturator.process(sample.r, currentDrive, 1); // R channel
 		lpfR = add_saturate(multiply_32x32_rshift32(lpfR, lpfOneMinusAlpha) << 1,
 		                    multiply_32x32_rshift32(wetR, lpfAlpha) << 1);
 		wetR = lpfR;

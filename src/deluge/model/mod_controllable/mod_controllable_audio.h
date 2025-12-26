@@ -127,7 +127,7 @@ public:
 	deluge::dsp::Saturator saturator; // DSP processor with lookup table
 	uint8_t saturatorDrive{0};        // Input gain / saturation amount (0-127)
 	uint8_t saturatorShapeX{0};       // Soft→Hard axis (0-127)
-	uint8_t saturatorShapeY{0};       // Clean→Weird axis (0-127)
+	uint8_t saturatorShapeY{0};       // Clean→Weird axis (0-255, Y>=128 = Aanalytic zone)
 	uint8_t saturatorMix{0};          // Wet/dry blend (0 = bypass)
 	q31_t saturatorDriveLast{0};      // Previous drive value for smoothing
 	q31_t saturatorFilterL{0};        // Anti-aliasing filter state L

@@ -508,8 +508,8 @@ void ModControllableAudio::processNewDistortions(deluge::dsp::StereoBuffer<q31_t
 
 	if (satMix > 0) {
 		for (auto& sample : buffer) {
-			sample.l = saturator.processWithMix(sample.l, satDrive, satMix, &saturatorFilterL);
-			sample.r = saturator.processWithMix(sample.r, satDrive, satMix, &saturatorFilterR);
+			sample.l = saturator.processWithMix(sample.l, satDrive, satMix, &saturatorFilterL, 0); // L channel
+			sample.r = saturator.processWithMix(sample.r, satDrive, satMix, &saturatorFilterR, 1); // R channel
 		}
 	}
 
