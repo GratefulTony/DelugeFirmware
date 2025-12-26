@@ -74,6 +74,10 @@ public:
 
 	std::array<uint32_t, 2> lastSaturationTanHWorkingValue;
 
+	// Per-voice ADAA state for XY saturator (previous input samples)
+	float saturatorPrevXL{0.0f};
+	float saturatorPrevXR{0.0f};
+
 	int32_t overallOscAmplitudeLastTime;
 	std::array<int32_t, kNumSources> sourceAmplitudesLastTime;
 	std::array<int32_t, kNumModulators> modulatorAmplitudeLastTime;

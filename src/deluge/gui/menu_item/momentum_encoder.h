@@ -23,18 +23,18 @@
 
 namespace deluge::gui::menu_item {
 
-/// Helper for momentum-based encoder acceleration
+/// Helper for velocity-based encoder acceleration
 /// Faster knob movements result in larger step sizes, while slow movements retain fine control
 ///
 /// Usage:
 ///   class MyMenuItem : public SomeBase {
 ///       void selectEncoderAction(int32_t offset) override {
-///           SomeBase::selectEncoderAction(momentum_.getScaledOffset(offset));
+///           SomeBase::selectEncoderAction(velocity_.getScaledOffset(offset));
 ///       }
 ///   private:
-///       mutable MomentumEncoder momentum_;
+///       mutable VelocityEncoder velocity_;
 ///   };
-class MomentumEncoder {
+class VelocityEncoder {
 public:
 	/// Calculate scaled offset based on encoder velocity
 	/// @param offset Raw encoder offset (+1 or -1 typically)
@@ -75,6 +75,9 @@ private:
 	int32_t lastDirection_{0};
 	float velocity_{1.0f};
 };
+
+/// Backward compatibility alias
+using MomentumEncoder = VelocityEncoder;
 
 /// Render a zone-based parameter in horizontal menu
 /// Shows zone name (small text) with position bar below

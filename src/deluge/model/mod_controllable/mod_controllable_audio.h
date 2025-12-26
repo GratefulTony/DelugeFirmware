@@ -24,6 +24,7 @@
 #include "dsp/delay/delay.h"
 #include "dsp/disperser.h"
 #include "dsp/saturator.h"
+#include "dsp/util.hpp" // For SineShaperParams
 #include "dsp_ng/core/types.hpp"
 #include "hid/button.h"
 #include "model/fx/stutterer.h"
@@ -63,7 +64,7 @@ public:
 	                              int32_t readAutomationUpToPos, ArpeggiatorSettings* arpSettings, Song* song);
 	void processSRRAndBitcrushing(deluge::dsp::StereoBuffer<q31_t> buffer, int32_t* postFXVolume,
 	                              ParamManager* paramManager);
-	void processNewDistortions(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager);
+	void processDisperser(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager);
 	static void writeParamAttributesToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,
 	                                       int32_t* valuesForOverride = nullptr);
 	static void writeParamTagsToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,
@@ -114,24 +115,21 @@ public:
 	// Wavefold smoothing state
 	q31_t wavefoldLast{0}; // Previous wavefold value for parameter smoothing
 
-	// Sine shaper distortion params (0-127, converted to q31_t for DSP)
-	uint8_t sineShaperDrive{0};     // Input gain / saturation amount
-	uint8_t sineShaperHarmonic{0};  // Blend between fundamental and 3rd harmonic
-	uint8_t sineShaperSymmetry{64}; // DC bias for asymmetry (64 = center/symmetric)
-	uint8_t sineShaperMix{0};       // Wet/dry blend (0 = bypass)
-	q31_t sineShaperDriveLast{0};   // Previous drive value for parameter smoothing
-	q31_t sineShaperFilterL{0};     // 12kHz lowpass state for left channel
-	q31_t sineShaperFilterR{0};     // 12kHz lowpass state for right channel
+	// Sine shaper parameters and DSP state (struct defined in dsp/util.hpp)
+	deluge::dsp::SineShaperParams sineShaper;
 
 	// Saturator with X/Y shape control
 	deluge::dsp::Saturator saturator; // DSP processor with lookup table
 	uint8_t saturatorDrive{0};        // Input gain / saturation amount (0-127)
 	uint8_t saturatorShapeX{0};       // Soft→Hard axis (0-127)
-	uint8_t saturatorShapeY{0};       // Clean→Weird axis (0-255, Y>=128 = Aanalytic zone)
+	uint16_t saturatorShapeY{0};      // Clean→Weird axis (0-1023, high-res multi-zone)
 	uint8_t saturatorMix{0};          // Wet/dry blend (0 = bypass)
+	bool saturatorAA{false};          // Anti-aliasing enabled (default off, reserved for future use)
 	q31_t saturatorDriveLast{0};      // Previous drive value for smoothing
-	q31_t saturatorFilterL{0};        // Anti-aliasing filter state L
-	q31_t saturatorFilterR{0};        // Anti-aliasing filter state R
+	q31_t saturatorFilterL{0};        // Post-saturation lowpass state L
+	q31_t saturatorFilterR{0};        // Post-saturation lowpass state R
+	float saturatorPrevXL{0.0f};      // ADAA state L (previous input sample)
+	float saturatorPrevXR{0.0f};      // ADAA state R (previous input sample)
 
 	// Disperser (allpass cascade with feedback)
 	deluge::dsp::Disperser disperser; // DSP processor with 16 allpass stages

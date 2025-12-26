@@ -18,6 +18,7 @@
 #include "model/global_effectable/global_effectable_for_clip.h"
 #include "definitions.h"
 #include "definitions_cxx.hpp"
+#include "dsp/util.hpp"
 #include "dsp_ng/core/types.hpp"
 #include "gui/l10n/l10n.h"
 #include "gui/views/view.h"
@@ -129,9 +130,28 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	// Render filters
 	processFilters(global_effectable_audio);
 
+	// Sine Shaper (for audio clips, uses sineShaper struct)
+	if (sineShaper.mix > 0) {
+		q31_t sineDrive = static_cast<q31_t>(sineShaper.drive) << 24;
+		q31_t sineHarmonic = unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC);
+		q31_t sineSymmetry = (static_cast<q31_t>(sineShaper.symmetry) - 64) << 24;
+		q31_t sineMix = static_cast<q31_t>(sineShaper.mix) << 24;
+		deluge::dsp::sineShapeBuffer(global_effectable_audio, sineDrive, &sineShaper.smoothedDrive, &sineShaper.filterL,
+		                             &sineShaper.filterR, sineHarmonic, &sineShaper.smoothedHarmonic, sineSymmetry,
+		                             sineMix);
+	}
+
+	// XY Saturator (for audio clips, uses uint8_t drive member)
+	if (saturatorMix > 0) {
+		q31_t satDrive = static_cast<q31_t>(saturatorDrive) << 24;
+		q31_t satMix = static_cast<q31_t>(saturatorMix) << 24;
+		// Audio clips don't support ADAA toggle - pass nullptr for prevX pointers
+		deluge::dsp::saturateBuffer(global_effectable_audio, saturator, satDrive, &saturatorDriveLast, satMix);
+	}
+
 	// Render FX
 	processSRRAndBitcrushing(global_effectable_audio, &volumePostFX, paramManagerForClip);
-	processNewDistortions(global_effectable_audio, paramManagerForClip);
+	processDisperser(global_effectable_audio, paramManagerForClip);
 	processFXForGlobalEffectable(global_effectable_audio, &volumePostFX, paramManagerForClip, delayWorkingState,
 	                             renderedLastTime, reverbSendAmount);
 	processStutter(global_effectable_audio, paramManagerForClip);

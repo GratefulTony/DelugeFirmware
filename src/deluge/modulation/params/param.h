@@ -97,6 +97,8 @@ enum Local : ParamType {
 	LOCAL_OSC_A_WAVE_INDEX,
 	LOCAL_OSC_B_WAVE_INDEX,
 	LOCAL_PAN,
+	LOCAL_SATURATOR_DRIVE,   // XY distortion drive (additive mod: base + mod)
+	LOCAL_SINE_SHAPER_DRIVE, // Sine shaper drive (additive mod: base + mod)
 
 	// Local exp params begin
 	FIRST_LOCAL_EXP,
@@ -201,9 +203,8 @@ enum UnpatchedShared : ParamType {
 	UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN,
 	UNPATCHED_MB_COMPRESSOR_VIBE,
 	UNPATCHED_MB_COMPRESSOR_BLEND,
-	// Distortion FX drive params (learnable)
-	UNPATCHED_SINE_SHAPER_DRIVE,
-	UNPATCHED_SATURATOR_DRIVE,
+	// Sine shaper zone control (high-res like DOTT vibe)
+	UNPATCHED_SINE_SHAPER_HARMONIC,
 	// Arp
 	UNPATCHED_FIRST_ARP_PARAM,
 	UNPATCHED_ARP_GATE = UNPATCHED_FIRST_ARP_PARAM,
@@ -283,6 +284,7 @@ bool isParamBipolar(Kind kind, int32_t paramID);
 bool isParamPan(Kind kind, int32_t paramID);
 bool isParamPitch(Kind kind, int32_t paramID);
 bool isParamPitchBend(Kind kind, int32_t paramID);
+bool isParamHybridDrive(Kind kind, int32_t paramID);
 bool isParamArpRhythm(Kind kind, int32_t paramID);
 bool isParamStutter(Kind kind, int32_t paramID);
 bool isParamQuantizedStutter(Kind kind, int32_t paramID, ModControllableAudio* modControllableAudio);

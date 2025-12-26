@@ -35,6 +35,7 @@
 #include "storage/flash_storage.h"
 #include "storage/storage_manager.h"
 #include "util/functions.h"
+#include <limits>
 
 namespace params = deluge::modulation::params;
 
@@ -422,10 +423,15 @@ static bool isMultibandCompressorParam(int32_t paramId) {
 	return paramId >= params::UNPATCHED_MB_COMPRESSOR_CHARACTER && paramId <= params::UNPATCHED_MB_COMPRESSOR_VIBE;
 }
 
+// Helper to check if a param is a high-resolution zone-based param (unipolar, 1024-step)
+static bool isHighResZoneParam(int32_t paramId) {
+	return paramId == params::UNPATCHED_SINE_SHAPER_HARMONIC;
+}
+
 int32_t UnpatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWithAutoParam* modelStack) {
 	if (modelStack
 	    && (modelStack->paramId == params::UNPATCHED_COMPRESSOR_THRESHOLD
-	        || isMultibandCompressorParam(modelStack->paramId))) {
+	        || isMultibandCompressorParam(modelStack->paramId) || isHighResZoneParam(modelStack->paramId))) {
 		// Unipolar params: map 0..INT32_MAX to knobPos -64..+64
 		// Special case: ensure INT32_MAX maps to exactly +64 (not +63 due to integer division)
 		if (paramValue == 2147483647) {
@@ -441,7 +447,7 @@ int32_t UnpatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWit
 int32_t UnpatchedParamSet::knobPosToParamValue(int32_t knobPos, ModelStackWithAutoParam* modelStack) {
 	if (modelStack
 	    && (modelStack->paramId == params::UNPATCHED_COMPRESSOR_THRESHOLD
-	        || isMultibandCompressorParam(modelStack->paramId))) {
+	        || isMultibandCompressorParam(modelStack->paramId) || isHighResZoneParam(modelStack->paramId))) {
 		// Unipolar params: map knobPos -64..+64 to 0..INT32_MAX
 		if (knobPos >= 64) {
 			return 2147483647;
@@ -532,6 +538,11 @@ int32_t PatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWithA
 	        || modelStack->paramId == params::LOCAL_OSC_B_PHASE_WIDTH)) {
 		return (paramValue >> 24) - 64;
 	}
+	// Hybrid drive params: bipolar mapping where 0 = center (unity)
+	else if (modelStack && params::isParamHybridDrive(params::Kind::PATCHED, modelStack->paramId)) {
+		// Map INT32_MIN..INT32_MAX to knobPos -64..+64 (bipolar, center = 0)
+		return paramValue >> 25;
+	}
 	else {
 		return ParamSet::paramValueToKnobPos(paramValue, modelStack);
 	}
@@ -546,6 +557,17 @@ int32_t PatchedParamSet::knobPosToParamValue(int32_t knobPos, ModelStackWithAuto
 			paramValue = (knobPos + 64) << 24;
 		}
 		return paramValue;
+	}
+	// Hybrid drive params: bipolar mapping where knobPos 0 = param 0 (unity)
+	else if (modelStack && params::isParamHybridDrive(params::Kind::PATCHED, modelStack->paramId)) {
+		// Map knobPos -64..+64 to INT32_MIN..INT32_MAX (bipolar, center = 0)
+		if (knobPos >= 64) {
+			return std::numeric_limits<int32_t>::max();
+		}
+		else if (knobPos <= -64) {
+			return std::numeric_limits<int32_t>::min();
+		}
+		return knobPos << 25;
 	}
 	else {
 		return ParamSet::knobPosToParamValue(knobPos, modelStack);
@@ -562,6 +584,8 @@ bool PatchedParamSet::shouldParamIndicateMiddleValue(ModelStackWithParamId const
 	case params::LOCAL_MODULATOR_1_PITCH_ADJUST:
 	case params::GLOBAL_DELAY_FEEDBACK:
 	case params::GLOBAL_DELAY_RATE:
+	case params::LOCAL_SATURATOR_DRIVE:
+	case params::LOCAL_SINE_SHAPER_DRIVE:
 		return true;
 	default:
 		return false;

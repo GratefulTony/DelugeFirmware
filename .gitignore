@@ -43,3 +43,6 @@ DOTT_RECOVERY_NOTES.md
 # Design notes (not for commit)
 src/deluge/dsp/compressor/DOTT_SATURATION.md
 src/deluge/dsp/compressor/DOTT_VIBE_SATURATION.md
+
+.claude
+CLAUDE.md

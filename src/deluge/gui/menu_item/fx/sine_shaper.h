@@ -16,15 +16,23 @@
  */
 #pragma once
 #include "gui/menu_item/integer.h"
+#include "gui/menu_item/patched_param/integer.h"
 #include "gui/menu_item/unpatched_param.h"
+#include "gui/menu_item/zone_based.h"
 #include "gui/ui/sound_editor.h"
 #include "model/instrument/kit.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
 #include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
+#include "modulation/params/param.h"
 #include "processing/sound/sound.h"
 #include "processing/sound/sound_drum.h"
 #include <cstdint>
+#include <hid/buttons.h>
+#include <hid/display/display.h>
+#include <limits>
+
+namespace params = deluge::modulation::params;
 
 namespace deluge::gui::menu_item::fx {
 
@@ -38,32 +46,101 @@ public:
 	}
 };
 
-// Harmonic: blend between fundamental and 3rd harmonic (0-127)
-class SineShaperHarmonic final : public IntegerWithOff {
+/// PatchedParam with DynamicsSoundDesign gating for mod-matrix-routable drive parameters.
+/// Used in menus.cpp for sineShaperDriveMenu and saturatorDriveMenu.
+/// Uses bipolar range (-128 to +128) where 0 = unity, negative = below unity, -128 = -inf.
+class DynamicsPatchedParam : public patched_param::Integer {
 public:
-	using IntegerWithOff::IntegerWithOff;
+	static constexpr int32_t kDriveMenuHalfRange = 128;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->sineShaperHarmonic); }
-	bool usesAffectEntire() override { return true; }
-	void writeCurrentValue() override {
-		int32_t current_value = this->getValue();
+	using patched_param::Integer::Integer;
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
+	}
 
-		// If affect-entire button held, do whole kit
-		if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
-			Kit* kit = getCurrentKit();
-			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
-				if (thisDrum->type == DrumType::SOUND) {
-					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->sineShaperHarmonic = current_value;
-				}
-			}
+	/// Override selectEncoderAction to enforce our bipolar range (-128 to +128)
+	/// We bypass Integer::selectEncoderAction to avoid its getMaxValue/getMinValue clamping
+	void selectEncoderAction(int32_t offset) override {
+		int32_t newValue = this->getValue() + offset;
+		// Clamp to our bipolar range
+		if (newValue > kDriveMenuHalfRange) {
+			newValue = kDriveMenuHalfRange;
+		}
+		else if (newValue < -kDriveMenuHalfRange) {
+			newValue = -kDriveMenuHalfRange;
+		}
+		this->setValue(newValue);
+
+		// Trigger value write and display update (mimics Value::selectEncoderAction)
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			Buttons::selectButtonPressUsedUp = true;
+		}
+		writeCurrentValue();
+		if (display->haveOLED()) {
+			renderUIsForOled();
 		}
 		else {
-			soundEditor.currentModControllable->sineShaperHarmonic = current_value;
+			drawValue();
 		}
 	}
-	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
-	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
+
+protected:
+	[[nodiscard]] int32_t getMinValue() const override { return -kDriveMenuHalfRange; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kDriveMenuHalfRange; }
+
+	void readCurrentValue() override {
+		// Scale q31 (-2^31 to 2^31-1) to menu range (-128 to +128)
+		// q31 0 = menu 0 (unity), q31 INT32_MIN = menu -128 (-inf)
+		int32_t q31Value = soundEditor.currentParamManager->getPatchedParamSet()->getValue(getP());
+		// Shift right by 24 bits to get -128 to +127 range
+		this->setValue(q31Value >> 24);
+	}
+
+	int32_t getFinalValue() override {
+		int32_t value = this->getValue();
+		if (value >= kDriveMenuHalfRange) {
+			return std::numeric_limits<int32_t>::max();
+		}
+		else if (value <= -kDriveMenuHalfRange) {
+			return std::numeric_limits<int32_t>::min();
+		}
+		else {
+			// Scale -128..+128 back to q31 range: shift left by 24 bits
+			return value << 24;
+		}
+	}
+};
+
+/// Harmonic zone control - 8 zones with triangle-modulated Chebyshev harmonics
+/// Zone 0: Poly - Cascaded polynomial waveshaping
+/// Zones 1-7: Chebyshev harmonics with triangle modulation
+class SineShaperHarmonic final : public ZoneBasedUnpatchedParam<params::UNPATCHED_SINE_SHAPER_HARMONIC> {
+public:
+	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
+
+	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
+		switch (zoneIndex) {
+		case 0:
+			return "Poly";
+		case 1:
+			return "357"; // T3, T5, T7 blend
+		case 2:
+			return "Cheby 2";
+		case 3:
+			return "Cheby 3";
+		case 4:
+			return "Cheby 4";
+		case 5:
+			return "Cheby 5";
+		case 6:
+			return "Cheby 6";
+		case 7:
+			return "Chaos";
+		default:
+			return "?";
+		}
+	}
+
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
 	}
@@ -74,7 +151,7 @@ class SineShaperSymmetry final : public Integer {
 public:
 	using Integer::Integer;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->sineShaperSymmetry); }
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->sineShaper.symmetry); }
 	bool usesAffectEntire() override { return true; }
 	void writeCurrentValue() override {
 		int32_t current_value = this->getValue();
@@ -84,12 +161,12 @@ public:
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->sineShaperSymmetry = current_value;
+					soundDrum->sineShaper.symmetry = current_value;
 				}
 			}
 		}
 		else {
-			soundEditor.currentModControllable->sineShaperSymmetry = current_value;
+			soundEditor.currentModControllable->sineShaper.symmetry = current_value;
 		}
 	}
 	[[nodiscard]] int32_t getMinValue() const override { return 0; }
@@ -105,7 +182,7 @@ class SineShaperMix final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->sineShaperMix); }
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->sineShaper.mix); }
 	bool usesAffectEntire() override { return true; }
 	void writeCurrentValue() override {
 		int32_t current_value = this->getValue();
@@ -115,12 +192,12 @@ public:
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->sineShaperMix = current_value;
+					soundDrum->sineShaper.mix = current_value;
 				}
 			}
 		}
 		else {
-			soundEditor.currentModControllable->sineShaperMix = current_value;
+			soundEditor.currentModControllable->sineShaper.mix = current_value;
 		}
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }

@@ -177,6 +177,10 @@ bool Voice::noteOn(ModelStackWithSoundFlags* modelStack, int32_t newNoteCodeBefo
 
 		lastSaturationTanHWorkingValue[0] = 2147483648;
 		lastSaturationTanHWorkingValue[1] = 2147483648;
+
+		// Reset ADAA state for XY saturator
+		saturatorPrevXL = 0.0f;
+		saturatorPrevXR = 0.0f;
 	}
 
 	// Porta
@@ -1504,6 +1508,28 @@ skipUnisonPart: {}
 		if (paramFinalValues[params::LOCAL_FOLD] > 0) {
 			dsp::foldBufferPolyApproximation(stereo_osc_buffer, paramFinalValues[params::LOCAL_FOLD]);
 		}
+
+		// Sine Shaper (per-voice, mod-matrix routable drive)
+		if (sound.sineShaper.mix > 0) {
+			q31_t sineDrive = paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE];
+			q31_t sineHarmonic = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC);
+			q31_t sineSymmetry = (static_cast<q31_t>(sound.sineShaper.symmetry) - 64) << 24;
+			q31_t sineMix = static_cast<q31_t>(sound.sineShaper.mix) << 24;
+			dsp::sineShapeBuffer(stereo_osc_buffer, sineDrive, &sound.sineShaper.smoothedDrive,
+			                     &sound.sineShaper.filterL, &sound.sineShaper.filterR, sineHarmonic,
+			                     &sound.sineShaper.smoothedHarmonic, sineSymmetry, sineMix);
+		}
+
+		// XY Saturator (per-voice, mod-matrix routable drive)
+		if (sound.saturatorMix > 0) {
+			q31_t satDrive = paramFinalValues[params::LOCAL_SATURATOR_DRIVE];
+			q31_t satMix = static_cast<q31_t>(sound.saturatorMix) << 24;
+			// ADAA disabled - direct table lookup provides sufficient quality
+			// Per-voice ADAA state preserved for future use (saturatorPrevXL, saturatorPrevXR)
+			dsp::saturateBuffer(stereo_osc_buffer, sound.saturator, satDrive, &sound.saturatorDriveLast, satMix,
+			                    nullptr, nullptr);
+		}
+
 		// Filters
 		filterSet.renderLongStereo(stereo_osc_buffer);
 
@@ -1588,6 +1614,26 @@ skipUnisonPart: {}
 			q31_t foldAmount = paramFinalValues[params::LOCAL_FOLD];
 
 			dsp::foldBufferPolyApproximation(std::span{oscBuffer, n}, foldAmount);
+		}
+
+		// Sine Shaper (per-voice, mod-matrix routable drive) - mono path
+		if (sound.sineShaper.mix > 0) {
+			q31_t sineDrive = paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE];
+			q31_t sineHarmonic = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC);
+			q31_t sineSymmetry = (static_cast<q31_t>(sound.sineShaper.symmetry) - 64) << 24;
+			q31_t sineMix = static_cast<q31_t>(sound.sineShaper.mix) << 24;
+			dsp::sineShapeBuffer(std::span{oscBuffer, n}, sineDrive, &sound.sineShaper.smoothedDrive,
+			                     &sound.sineShaper.filterL, sineHarmonic, &sound.sineShaper.smoothedHarmonic,
+			                     sineSymmetry, sineMix);
+		}
+
+		// XY Saturator (per-voice, mod-matrix routable drive) - mono path
+		if (sound.saturatorMix > 0) {
+			q31_t satDrive = paramFinalValues[params::LOCAL_SATURATOR_DRIVE];
+			q31_t satMix = static_cast<q31_t>(sound.saturatorMix) << 24;
+			// ADAA disabled - direct table lookup provides sufficient quality
+			dsp::saturateBuffer(std::span{oscBuffer, n}, sound.saturator, satDrive, &sound.saturatorDriveLast, satMix,
+			                    nullptr);
 		}
 
 		filterSet.renderLong(std::span{oscBuffer, n});

@@ -613,16 +613,17 @@ UnpatchedParam srrMenu{STRING_FOR_DECIMATION, params::UNPATCHED_SAMPLE_RATE_REDU
 UnpatchedParam bitcrushMenu{STRING_FOR_BITCRUSH, params::UNPATCHED_BITCRUSHING, RenderingStyle::BAR};
 patched_param::Integer foldMenu{STRING_FOR_WAVEFOLD, STRING_FOR_WAVEFOLD, params::LOCAL_FOLD, RenderingStyle::BAR};
 
-// Sine Shaper - sinusoidal waveshaper distortion (drive is learnable)
-fx::DynamicsUnpatchedParam sineShaperDriveMenu{STRING_FOR_SINE_SHAPER_DRIVE, params::UNPATCHED_SINE_SHAPER_DRIVE,
-                                               RenderingStyle::BAR};
+// Sine Shaper - sinusoidal waveshaper distortion
+fx::DynamicsPatchedParam sineShaperDriveMenu{STRING_FOR_SINE_SHAPER_DRIVE, STRING_FOR_SINE_SHAPER_DRIVE,
+                                             params::LOCAL_SINE_SHAPER_DRIVE, RenderingStyle::BAR};
 fx::SineShaperHarmonic sineShaperHarmonicMenu{STRING_FOR_SINE_SHAPER_HARMONIC};
 fx::SineShaperSymmetry sineShaperSymmetryMenu{STRING_FOR_SINE_SHAPER_SYMMETRY};
 fx::SineShaperMix sineShaperMixMenu{STRING_FOR_SINE_SHAPER_MIX};
 
-// Saturator - XY waveshaper with lookup table (drive is learnable)
-fx::DynamicsUnpatchedParam saturatorDriveMenu{STRING_FOR_SATURATOR_DRIVE, params::UNPATCHED_SATURATOR_DRIVE,
-                                              RenderingStyle::BAR};
+// Saturator - XY waveshaper with lookup table
+// Uses SaturatorDrive to toggle AA on gold knob press
+fx::SaturatorDrive saturatorDriveMenu{STRING_FOR_SATURATOR_DRIVE, STRING_FOR_SATURATOR_DRIVE,
+                                      params::LOCAL_SATURATOR_DRIVE, RenderingStyle::BAR};
 fx::SaturatorShapeX saturatorShapeXMenu{STRING_FOR_SATURATOR_SHAPE_X};
 fx::SaturatorShapeY saturatorShapeYMenu{STRING_FOR_SATURATOR_SHAPE_Y};
 fx::SaturatorMix saturatorMixMenu{STRING_FOR_SATURATOR_MIX};

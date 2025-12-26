@@ -68,6 +68,8 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_PARAM_GLOBAL_REVERB_AMOUNT, "Reverb amount"},
         {STRING_FOR_PARAM_GLOBAL_DELAY_RATE, "Delay rate"},
         {STRING_FOR_PARAM_GLOBAL_DELAY_FEEDBACK, "Delay amount"},
+        {STRING_FOR_PARAM_LOCAL_SATURATOR_DRIVE, "Saturator drive"},
+        {STRING_FOR_PARAM_LOCAL_SINE_SHAPER_DRIVE, "Sine shaper drive"},
         {STRING_FOR_PARAM_GLOBAL_VOLUME_POST_REVERB_SEND, "Sidechain Level"},
         {STRING_FOR_WAVEFOLDER, "Wavefolder"},
         {STRING_FOR_PARAM_LOCAL_OSC_A_VOLUME, "Osc1 level"},

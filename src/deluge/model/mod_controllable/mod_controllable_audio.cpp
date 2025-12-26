@@ -92,10 +92,10 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	lpfMode = other->lpfMode;
 	hpfMode = other->hpfMode;
 	clippingAmount = other->clippingAmount;
-	sineShaperDrive = other->sineShaperDrive;
-	sineShaperHarmonic = other->sineShaperHarmonic;
-	sineShaperSymmetry = other->sineShaperSymmetry;
-	sineShaperMix = other->sineShaperMix;
+	// Copy sine shaper params (DSP state will be reset)
+	sineShaper.drive = other->sineShaper.drive;
+	sineShaper.symmetry = other->sineShaper.symmetry;
+	sineShaper.mix = other->sineShaper.mix;
 	modFXType_ = other->modFXType_;
 	bassFreq = other->bassFreq; // Eventually, these shouldn't be variables like this
 	trebleFreq = other->trebleFreq;
@@ -481,39 +481,9 @@ void ModControllableAudio::processSRRAndBitcrushing(deluge::dsp::StereoBuffer<q3
 	}
 }
 
-void ModControllableAudio::processNewDistortions(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager) {
+void ModControllableAudio::processDisperser(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager) {
 	using namespace deluge::dsp;
 
-	UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
-
-	// Sine Shaper -----------------------------------------------------------------------------
-	// Get drive from unpatched param (MIDI learnable)
-	q31_t sineDrive = unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_DRIVE);
-
-	// Convert uint8_t params (0-127) to q31_t
-	// Note: sineShaperHarmonic, sineShaperSymmetry, sineShaperMix are still uint8_t
-	q31_t sineHarmonic = static_cast<q31_t>(sineShaperHarmonic) << 24;
-	q31_t sineSymmetry = (static_cast<q31_t>(sineShaperSymmetry) - 64) << 24; // Center at 0
-	q31_t sineMix = static_cast<q31_t>(sineShaperMix) << 24;
-
-	if (sineMix > 0) {
-		sineShapeBuffer(buffer, sineDrive, &sineShaperDriveLast, &sineShaperFilterL, &sineShaperFilterR, sineHarmonic,
-		                sineSymmetry, sineMix);
-	}
-
-	// Saturator -------------------------------------------------------------------------------
-	// Get drive from unpatched param (MIDI learnable)
-	q31_t satDrive = unpatchedParams->getValue(params::UNPATCHED_SATURATOR_DRIVE);
-	q31_t satMix = static_cast<q31_t>(saturatorMix) << 24;
-
-	if (satMix > 0) {
-		for (auto& sample : buffer) {
-			sample.l = saturator.processWithMix(sample.l, satDrive, satMix, &saturatorFilterL, 0); // L channel
-			sample.r = saturator.processWithMix(sample.r, satDrive, satMix, &saturatorFilterR, 1); // R channel
-		}
-	}
-
-	// Disperser -------------------------------------------------------------------------------
 	if (disperserStages > 0) {
 		// Convert uint8_t params to q31_t for the DSP
 		q31_t dispFreq = static_cast<q31_t>(disperserFreq) << 24;
@@ -571,17 +541,15 @@ void ModControllableAudio::writeAttributesToFile(Serializer& writer) {
 		writer.writeAttribute("clippingAmount", clippingAmount);
 	}
 	// Sine shaper params (only write if non-default)
-	if (sineShaperDrive) {
-		writer.writeAttribute("sineShaperDrive", sineShaperDrive);
+	// Note: sineShaperHarmonic is now saved via UNPATCHED_SINE_SHAPER_HARMONIC param system
+	if (sineShaper.drive) {
+		writer.writeAttribute("sineShaperDrive", sineShaper.drive);
 	}
-	if (sineShaperHarmonic) {
-		writer.writeAttribute("sineShaperHarmonic", sineShaperHarmonic);
+	if (sineShaper.symmetry != 64) {
+		writer.writeAttribute("sineShaperSymmetry", sineShaper.symmetry);
 	}
-	if (sineShaperSymmetry != 64) {
-		writer.writeAttribute("sineShaperSymmetry", sineShaperSymmetry);
-	}
-	if (sineShaperMix) {
-		writer.writeAttribute("sineShaperMix", sineShaperMix);
+	if (sineShaper.mix) {
+		writer.writeAttribute("sineShaperMix", sineShaper.mix);
 	}
 	// Saturator params (only write if non-default)
 	if (saturatorDrive) {
@@ -1070,19 +1038,29 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 		reader.exitTag("clippingAmount");
 	}
 	else if (!strcmp(tagName, "sineShaperDrive")) {
-		sineShaperDrive = reader.readTagOrAttributeValueInt();
+		sineShaper.drive = reader.readTagOrAttributeValueInt();
 		reader.exitTag("sineShaperDrive");
 	}
 	else if (!strcmp(tagName, "sineShaperHarmonic")) {
-		sineShaperHarmonic = reader.readTagOrAttributeValueInt();
+		// Legacy format: migrate to unpatched param system
+		int32_t legacyValue = reader.readTagOrAttributeValueInt();
 		reader.exitTag("sineShaperHarmonic");
+		// Migrate: old 0-127 range to full q31 high-res (0-1024 menu maps to full q31)
+		// legacyValue << 24 gives us the old scaling, but new system uses full q31
+		// Scale: 127 (old max) -> INT32_MAX (new max)
+		if (paramManager && legacyValue > 0) {
+			q31_t newValue = static_cast<q31_t>(static_cast<int64_t>(legacyValue) * 2147483647 / 127);
+			paramManager->getUnpatchedParamSet()
+			    ->params[params::UNPATCHED_SINE_SHAPER_HARMONIC]
+			    .setCurrentValueBasicForSetup(newValue);
+		}
 	}
 	else if (!strcmp(tagName, "sineShaperSymmetry")) {
-		sineShaperSymmetry = reader.readTagOrAttributeValueInt();
+		sineShaper.symmetry = reader.readTagOrAttributeValueInt();
 		reader.exitTag("sineShaperSymmetry");
 	}
 	else if (!strcmp(tagName, "sineShaperMix")) {
-		sineShaperMix = reader.readTagOrAttributeValueInt();
+		sineShaper.mix = reader.readTagOrAttributeValueInt();
 		reader.exitTag("sineShaperMix");
 	}
 	// Saturator params

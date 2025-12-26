@@ -119,6 +119,8 @@ int32_t getParamNeutralValue(int32_t p) {
 	case params::LOCAL_PAN:
 	case params::LOCAL_OSC_A_PHASE_WIDTH:
 	case params::LOCAL_OSC_B_PHASE_WIDTH:
+	case params::LOCAL_SATURATOR_DRIVE: // Bipolar: 0 = unity, negative = attenuation
+	case params::LOCAL_SINE_SHAPER_DRIVE:
 		return 0;
 
 	case params::LOCAL_ENV_0_ATTACK:
