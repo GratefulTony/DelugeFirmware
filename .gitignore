@@ -39,3 +39,6 @@ __pycache__
 
 # Recovery notes (not for commit)
 DOTT_RECOVERY_NOTES.md
+
+# Design notes (not for commit)
+src/deluge/dsp/compressor/DOTT_SATURATION.md

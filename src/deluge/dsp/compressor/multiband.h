@@ -99,7 +99,7 @@ public:
 	}
 
 	/// Set per-band output level (0 to ONE_Q31) - applied after compression
-	/// CCW = -inf, 12:00 = 0dB, CW = +16dB
+	/// CCW = -inf, 12:00 = 0dB, CW = +20dB
 	/// This controls the mix balance of bands (like OTT's L/M/H sliders)
 	void setOutputLevel(q31_t g) {
 		outputLevelKnob_ = g;
@@ -109,8 +109,8 @@ public:
 			outputLevel_ = normalized * 2.0f;
 		}
 		else {
-			// 0.5 to 1.0 maps to 1.0x to 6.31x (0dB to +16dB)
-			outputLevel_ = 1.0f + (normalized - 0.5f) * 2.0f * 5.31f;
+			// 0.5 to 1.0 maps to 1.0x to 10.0x (0dB to +20dB)
+			outputLevel_ = 1.0f + (normalized - 0.5f) * 2.0f * 9.0f;
 		}
 	}
 
@@ -264,8 +264,9 @@ public:
 		}
 
 		// Convert to linear gain, clamped to prevent overflow
+		// Range: -20dB (0.1x) to +30dB (31.6x) for aggressive upward compression
 		float gain = fastExp(envelope_);
-		return std::clamp(gain, 0.1f, 10.0f);
+		return std::clamp(gain, 0.1f, 31.6f);
 	}
 
 	/// Update the level from stereo band buffers
@@ -273,14 +274,17 @@ public:
 	/// @param bufferR Right channel samples
 	/// @param numSamples Number of samples in each buffer
 	/// @param response 0.0 = tight (~2ms, catches transients), 1.0 = punchy (~145ms, lets transients through)
+	/// @param maxStride Maximum stride for this band (computed from crossover frequency Nyquist)
 	/// Optimized: response-based stride and alpha are matched for consistent behavior
-	void updateLevel(const q31_t* bufferL, const q31_t* bufferR, size_t numSamples, float response) {
+	void updateLevel(const q31_t* bufferL, const q31_t* bufferR, size_t numSamples, float response,
+	                 size_t maxStride = 32) {
 		q31_t peak = 0;
 
 		// Response-based downsampling: tight needs fine resolution, punchy doesn't
 		// stride = 2 (tight) to 32 (punchy) - matched to alpha for consistent behavior
 		// At 44.1kHz: stride 2 = 0.045ms resolution, stride 32 = 0.73ms resolution
-		const size_t stride = 2 + static_cast<size_t>(response * 30.0f);
+		// maxStride is pre-computed based on band's max frequency (Nyquist limit)
+		const size_t stride = std::min(2 + static_cast<size_t>(response * 30.0f), maxStride);
 		for (size_t i = 0; i < numSamples; i += stride) {
 			q31_t L = bufferL[i];
 			q31_t R = bufferR[i];
@@ -417,6 +421,9 @@ public:
 		crossoverAllpass3_.setLowCrossover(freqHz);
 		crossoverLR2_.setLowCrossover(freqHz);
 		crossoverLR2Fast_.setLowCrossover(freqHz);
+		// Update max stride for low band (Nyquist = sampleRate/2/stride >= lowCrossover)
+		// stride <= sampleRate / (2 * lowCrossover)
+		maxStridePerBand_[0] = std::clamp(static_cast<size_t>(kSampleRate / (2.0f * freqHz)), size_t{2}, size_t{32});
 	}
 
 	/// Set crossover frequency between mid and high bands
@@ -426,6 +433,9 @@ public:
 		crossoverAllpass3_.setHighCrossover(freqHz);
 		crossoverLR2_.setHighCrossover(freqHz);
 		crossoverLR2Fast_.setHighCrossover(freqHz);
+		// Update max stride for mid band (Nyquist = sampleRate/2/stride >= highCrossover)
+		// stride <= sampleRate / (2 * highCrossover)
+		maxStridePerBand_[1] = std::clamp(static_cast<size_t>(kSampleRate / (2.0f * freqHz)), size_t{2}, size_t{32});
 	}
 
 	/// Get low crossover frequency in Hz
@@ -1071,11 +1081,13 @@ public:
 		float songVolumedB = fastLog(static_cast<float>(finalVolume) + 1e-10f);
 
 		// Process each band - envelope detection
-		// updateLevel now combines L+R inline with 4x downsampling - no temp buffer needed
+		// updateLevel now combines L+R inline, stride varies by band to prevent undersampling
+		// maxStridePerBand_ is computed from crossover frequencies (updated in setLow/HighCrossover)
 		std::array<float, kNumBands> bandGains;
 		for (size_t b = 0; b < kNumBands; ++b) {
-			// Calculate level for the band (L+R combined inline, 4x downsampled)
-			bands_[b].updateLevel(bandBufferL[b].data(), bandBufferR[b].data(), buffer.size(), response_);
+			// Calculate level for the band (L+R combined inline, stride varies by band)
+			bands_[b].updateLevel(bandBufferL[b].data(), bandBufferR[b].data(), buffer.size(), response_,
+			                      maxStridePerBand_[b]);
 
 			// Calculate compression gain
 			// Use character-derived knee and add per-band skew offset to global skew
@@ -1095,18 +1107,15 @@ public:
 		// This combines compression gain, per-band output level, stereo width, and output gain
 		// into a single pass over the data, reducing memory bandwidth
 
-		// Pre-compute combined gain = compression gain * output level (4.28 format)
-		// This fuses the gain apply loop into the recombine loop
-		std::array<q31_t, kNumBands> bandCombinedGain;
+		// Pre-compute combined gain = compression gain * output level (as float)
+		// Using float avoids fixed-point overflow issues at high gains
+		std::array<float, kNumBands> bandCombinedGain;
 		for (size_t b = 0; b < kNumBands; ++b) {
-			float combined = bandGains[b] * bands_[b].getOutputLevelLinear();
-			bandCombinedGain[b] = static_cast<q31_t>(combined * (1 << 28));
+			bandCombinedGain[b] = bandGains[b] * bands_[b].getOutputLevelLinear();
 		}
-		// Pre-compute output gain as fixed-point (4.28 format)
-		q31_t outputGainFixed = static_cast<q31_t>(outputGain_ * (1 << 28));
 
 		// Pre-compute stereo width as fixed-point for mid/high bands (bass is always mono)
-		// Using Q31 format for width (0 = mono, ONE_Q31 = full stereo)
+		// Width is 0-1 range, no overflow risk
 		q31_t widthFixed = static_cast<q31_t>(width_ * ONE_Q31f);
 
 		int64_t truePeak = 0;                              // Track true peak before clamping for accurate metering
@@ -1114,34 +1123,31 @@ public:
 		const bool doMetering = meteringEnabled_;
 
 		for (size_t i = 0; i < buffer.size(); ++i) {
-			// Use 32-bit accumulator with multiply_32x32_rshift32 (like single-band compressor)
-			// This is faster and uses ARM SMMUL/SMMLA instructions efficiently
-			q31_t sumL = 0, sumR = 0;
+			// Use 64-bit accumulator to prevent overflow when summing high-gain bands
+			int64_t sumL = 0, sumR = 0;
 
 			// Band 0 (bass): Always mono - skip M/S processing entirely
-			// Fused: applies compression gain + output level in one multiply
 			{
 				q31_t L = bandBufferL[0][i];
 				q31_t R = bandBufferR[0][i];
 				q31_t mono = (L >> 1) + (R >> 1); // Sum to mono
-				q31_t scaled = multiply_32x32_rshift32(mono, bandCombinedGain[0]) << 4;
+				int64_t scaled = static_cast<int64_t>(static_cast<float>(mono) * bandCombinedGain[0]);
 				sumL += scaled;
 				sumR += scaled;
 
 				if (doMetering) {
-					q31_t peak = (scaled < 0) ? -scaled : scaled;
+					q31_t peak = static_cast<q31_t>(std::abs(scaled));
 					bandPeakThisBuffer[0] = std::max(bandPeakThisBuffer[0], peak);
 				}
 			}
 
 			// Bands 1-2 (mid/high): Apply stereo width via M/S processing
-			// Fused: applies compression gain + output level in one multiply
 			for (size_t b = 1; b < kNumBands; ++b) {
 				q31_t L = bandBufferL[b][i];
 				q31_t R = bandBufferR[b][i];
 
 				// M/S encoding: M = (L+R)/2, S = (L-R)/2
-				// Width scaling: S_out = S * width (using fixed-point)
+				// Width scaling: S_out = S * width
 				// Decoding: L_out = M + S_out, R_out = M - S_out
 				q31_t mid = (L >> 1) + (R >> 1);
 				q31_t side = (L >> 1) - (R >> 1);
@@ -1149,23 +1155,33 @@ public:
 				L = mid + sideScaled;
 				R = mid - sideScaled;
 
-				// Apply combined gain (compression + level) using 32-bit multiply
-				q31_t scaledL = multiply_32x32_rshift32(L, bandCombinedGain[b]) << 4;
-				q31_t scaledR = multiply_32x32_rshift32(R, bandCombinedGain[b]) << 4;
+				// Apply combined gain using float
+				int64_t scaledL = static_cast<int64_t>(static_cast<float>(L) * bandCombinedGain[b]);
+				int64_t scaledR = static_cast<int64_t>(static_cast<float>(R) * bandCombinedGain[b]);
 				sumL += scaledL;
 				sumR += scaledR;
 
 				// Track per-band peak only if metering is enabled
 				if (doMetering) {
-					q31_t absL = (scaledL < 0) ? -scaledL : scaledL;
-					q31_t absR = (scaledR < 0) ? -scaledR : scaledR;
+					q31_t absL = static_cast<q31_t>(std::abs(scaledL));
+					q31_t absR = static_cast<q31_t>(std::abs(scaledR));
 					bandPeakThisBuffer[b] = std::max(bandPeakThisBuffer[b], std::max(absL, absR));
 				}
 			}
 
-			// Apply output gain using 32-bit multiply (matches single-band compressor pattern)
-			q31_t outL = multiply_32x32_rshift32(sumL, outputGainFixed) << 4;
-			q31_t outR = multiply_32x32_rshift32(sumR, outputGainFixed) << 4;
+			// Saturate band sum to q31_t range
+			q31_t sumL_sat =
+			    static_cast<q31_t>(std::clamp(sumL, static_cast<int64_t>(INT32_MIN), static_cast<int64_t>(INT32_MAX)));
+			q31_t sumR_sat =
+			    static_cast<q31_t>(std::clamp(sumR, static_cast<int64_t>(INT32_MIN), static_cast<int64_t>(INT32_MAX)));
+
+			// Apply output gain using float, clamp to prevent overflow
+			int64_t outL64 = static_cast<int64_t>(static_cast<float>(sumL_sat) * outputGain_);
+			int64_t outR64 = static_cast<int64_t>(static_cast<float>(sumR_sat) * outputGain_);
+			q31_t outL = static_cast<q31_t>(
+			    std::clamp(outL64, static_cast<int64_t>(INT32_MIN), static_cast<int64_t>(INT32_MAX)));
+			q31_t outR = static_cast<q31_t>(
+			    std::clamp(outR64, static_cast<int64_t>(INT32_MIN), static_cast<int64_t>(INT32_MAX)));
 
 			// Track true peak (only if metering enabled)
 			if (doMetering) {
@@ -1458,6 +1474,10 @@ public:
 
 private:
 	bool meteringEnabled_{true}; // Metering calculations enabled (can be disabled to save CPU)
+
+	// Per-band max stride for peak detection (computed from crossover frequencies)
+	// High band fixed at 4 (Nyquist ~5512Hz), low/mid computed dynamically
+	std::array<size_t, kNumBands> maxStridePerBand_{32, 11, 4};
 };
 
 } // namespace deluge::dsp
