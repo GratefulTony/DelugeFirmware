@@ -123,19 +123,19 @@ public:
 		case 0:
 			return "Poly";
 		case 1:
-			return "357"; // T3, T5, T7 blend
+			return "357"; // T3, T5, T7 blend (stereo via Twist knob)
 		case 2:
-			return "Cheby 2";
-		case 3:
 			return "Cheby 3";
-		case 4:
+		case 3:
 			return "Cheby 4";
-		case 5:
+		case 4:
 			return "Cheby 5";
-		case 6:
+		case 5:
 			return "Cheby 6";
-		case 7:
+		case 6:
 			return "Chaos";
+		case 7:
+			return "---";
 		default:
 			return "?";
 		}
@@ -146,32 +146,34 @@ public:
 	}
 };
 
-// Symmetry: DC bias for asymmetry (0-127, 64 = center/symmetric)
-class SineShaperSymmetry final : public Integer {
+/// Twist zone control - multi-purpose 8 zones with different stereo/asymmetry behaviors
+/// Zone 0: Asym - DC bias for even harmonics (asymmetric clipping)
+/// Zone 1: Wide - Full stereo coefficient spread
+/// Zone 2: Narrow - Scaled-down stereo spread
+/// Zones 3-7: Reserved for future expansion
+class SineShaperTwist final : public ZoneBasedUnpatchedParam<params::UNPATCHED_SINE_SHAPER_SYMMETRY> {
 public:
-	using Integer::Integer;
+	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->sineShaper.symmetry); }
-	bool usesAffectEntire() override { return true; }
-	void writeCurrentValue() override {
-		int32_t current_value = this->getValue();
-
-		if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
-			Kit* kit = getCurrentKit();
-			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
-				if (thisDrum->type == DrumType::SOUND) {
-					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->sineShaper.symmetry = current_value;
-				}
-			}
-		}
-		else {
-			soundEditor.currentModControllable->sineShaper.symmetry = current_value;
+	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
+		switch (zoneIndex) {
+		case 0:
+			return "Asym";
+		case 1:
+			return "Wide";
+		case 2:
+			return "Narrow";
+		case 3:
+		case 4:
+		case 5:
+		case 6:
+		case 7:
+			return "---";
+		default:
+			return "?";
 		}
 	}
-	[[nodiscard]] int32_t getMinValue() const override { return 0; }
-	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
-	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
+
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
 	}

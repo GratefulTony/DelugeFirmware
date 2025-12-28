@@ -271,8 +271,9 @@ skipPastOscSyncStuff:
 		// 0% (CCW, default): perfect triangle (one complete cycle, no dead zone)
 		// 100% (CW): narrow compressed pulses with dead zone
 
-		// Minimum phaseWidth ensures we don't skip the active region entirely
-		constexpr uint32_t kMinPhaseWidth = 0x00800000; // ~0.2% duty cycle minimum
+		constexpr uint32_t kMinPhaseWidth = 0x00800000;       // ~0.2% duty cycle minimum
+		constexpr uint32_t kFullCycleThreshold = 0xFFFFFFF0u; // Near-max = no dead zone
+
 		uint32_t phaseWidth = 0xFFFFFFFF - (pulseWidth << 1);
 		if (phaseWidth < kMinPhaseWidth) {
 			phaseWidth = kMinPhaseWidth;
@@ -283,18 +284,52 @@ skipPastOscSyncStuff:
 		int32_t* thisSample = bufferStart;
 		amplitudeIncrement <<= 1;
 
-		do {
-			phaseNow += phaseIncrement;
-			int32_t value = triangleWithDeadzoneBipolar(phaseNow, phaseWidth);
+		bool fullCycle = (phaseWidth >= kFullCycleThreshold);
 
+		// Precompute reciprocal for phase scaling (only used in dead zone path)
+		// Replaces per-sample 64-bit divide with per-sample 64-bit multiply
+		uint64_t phaseScaler = fullCycle ? 0 : (0xFFFFFFFFFFFFFFFFULL / phaseWidth);
+
+		// Four tight loops - all branching hoisted out
+		if (fullCycle) {
 			if (applyAmplitude) {
-				amplitudeNow += amplitudeIncrement;
-				*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, value, amplitudeNow);
+				do {
+					phaseNow += phaseIncrement;
+					amplitudeNow += amplitudeIncrement;
+					*thisSample =
+					    multiply_accumulate_32x32_rshift32_rounded(*thisSample, getTriangle(phaseNow), amplitudeNow);
+				} while (++thisSample != bufferEnd);
 			}
 			else {
-				*thisSample = value << 1;
+				do {
+					phaseNow += phaseIncrement;
+					*thisSample = getTriangle(phaseNow) << 1;
+				} while (++thisSample != bufferEnd);
 			}
-		} while (++thisSample != bufferEnd);
+		}
+		else {
+			if (applyAmplitude) {
+				do {
+					phaseNow += phaseIncrement;
+					amplitudeNow += amplitudeIncrement;
+					int32_t value = (phaseNow >= phaseWidth)
+					                    ? 0
+					                    : getTriangle(static_cast<uint32_t>(((uint64_t)phaseNow * phaseScaler) >> 32)
+					                                  + 0x40000000u);
+					*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, value, amplitudeNow);
+				} while (++thisSample != bufferEnd);
+			}
+			else {
+				do {
+					phaseNow += phaseIncrement;
+					int32_t value = (phaseNow >= phaseWidth)
+					                    ? 0
+					                    : getTriangle(static_cast<uint32_t>(((uint64_t)phaseNow * phaseScaler) >> 32)
+					                                  + 0x40000000u);
+					*thisSample = value << 1;
+				} while (++thisSample != bufferEnd);
+			}
+		}
 		return;
 	}
 

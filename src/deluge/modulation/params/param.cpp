@@ -91,7 +91,8 @@ int32_t getGoldKnobZoneCount(Kind kind, int32_t paramID) {
 			}
 			break;
 		case UNPATCHED_SINE_SHAPER_HARMONIC:
-			// Always 8 zones for sine shaper harmonic (like vibe)
+		case UNPATCHED_SINE_SHAPER_SYMMETRY:
+			// Always 8 zones for sine shaper params (like vibe)
 			return 8;
 		default:
 			break;
@@ -317,6 +318,7 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 		    [UNPATCHED_MB_COMPRESSOR_VIBE] = STRING_FOR_COMPRESSOR_VIBE,
 		    [UNPATCHED_MB_COMPRESSOR_BLEND] = STRING_FOR_BLEND,
 		    [UNPATCHED_SINE_SHAPER_HARMONIC] = STRING_FOR_SINE_SHAPER_HARMONIC,
+		    [UNPATCHED_SINE_SHAPER_SYMMETRY] = STRING_FOR_SINE_SHAPER_SYMMETRY,
 		    [UNPATCHED_ARP_GATE] = STRING_FOR_ARP_GATE_MENU_TITLE,
 		    [UNPATCHED_ARP_RHYTHM] = STRING_FOR_ARP_RHYTHM_MENU_TITLE,
 		    [UNPATCHED_ARP_SEQUENCE_LENGTH] = STRING_FOR_ARP_SEQUENCE_LENGTH_MENU_TITLE,
@@ -551,6 +553,8 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 		// Sine shaper
 		case UNPATCHED_SINE_SHAPER_HARMONIC:
 			return "sineShaperHarmonic";
+		case UNPATCHED_SINE_SHAPER_SYMMETRY:
+			return "sineShaperSymmetry";
 
 		case UNPATCHED_ARP_GATE:
 			return "arpGate";

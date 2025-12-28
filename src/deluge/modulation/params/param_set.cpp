@@ -425,7 +425,7 @@ static bool isMultibandCompressorParam(int32_t paramId) {
 
 // Helper to check if a param is a high-resolution zone-based param (unipolar, 1024-step)
 static bool isHighResZoneParam(int32_t paramId) {
-	return paramId == params::UNPATCHED_SINE_SHAPER_HARMONIC;
+	return paramId == params::UNPATCHED_SINE_SHAPER_HARMONIC || paramId == params::UNPATCHED_SINE_SHAPER_SYMMETRY;
 }
 
 int32_t UnpatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWithAutoParam* modelStack) {

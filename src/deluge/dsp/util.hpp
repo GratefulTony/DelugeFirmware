@@ -33,6 +33,10 @@ namespace deluge::dsp {
 /// Smoothing time constant (~100ms at 44.1kHz with 128-sample buffers)
 constexpr q31_t kSmoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31);
 
+/// DC blocker coefficient for 5Hz cutoff at 44.1kHz
+/// alpha = 2 * pi * fc / fs = 2 * pi * 5 / 44100 ≈ 0.000712
+constexpr q31_t kDcBlockerAlpha = static_cast<q31_t>(0.000712 * ONE_Q31);
+
 /// Context for per-sample parameter smoothing during buffer processing
 /// Provides click-free parameter interpolation over one buffer
 struct SmoothingContext {
@@ -50,6 +54,16 @@ inline SmoothingContext prepareSmoothing(q31_t state, q31_t target, size_t buffe
 	q31_t targetSmoothed = state + multiply_32x32_rshift32(target - state, kSmoothingAlpha) * 2;
 	int32_t increment = (targetSmoothed - state) / static_cast<int32_t>(bufferSize);
 	return {state, increment, targetSmoothed};
+}
+
+/// Simple buffer-rate smoothing (once per buffer, not per-sample)
+/// Updates state in place and returns the smoothed value
+/// @param state Pointer to smoothed state (updated in place)
+/// @param target Target parameter value
+/// @return Smoothed value for this buffer
+[[gnu::always_inline]] inline q31_t smoothParam(q31_t* state, q31_t target) {
+	*state = *state + multiply_32x32_rshift32(target - *state, kSmoothingAlpha) * 2;
+	return *state;
 }
 
 // ============================================================================
@@ -225,19 +239,19 @@ inline void wavefoldBufferEnhanced(StereoBuffer<q31_t> buffer, q31_t level, q31_
 struct Zone1Weights;
 
 /// Sine shaper parameters and DSP state for one sound instance
-/// Note: harmonic param uses UNPATCHED_SINE_SHAPER_HARMONIC (1024 resolution)
+/// Note: harmonic uses UNPATCHED_SINE_SHAPER_HARMONIC, twist uses UNPATCHED_SINE_SHAPER_SYMMETRY
 struct SineShaperParams {
 	// User-facing parameters (0-127, converted to q31_t for DSP)
 	uint8_t drive{0};     // Input gain / saturation amount
-	uint8_t symmetry{64}; // DC bias for asymmetry (64 = center/symmetric)
+	uint8_t symmetry{64}; // DEPRECATED: kept for XML backwards compat, use Twist param instead
 	uint8_t mix{0};       // Wet/dry blend (0 = bypass)
-	// DSP smoothing state
+	// DSP smoothing state (per-sound, shared across voices)
 	q31_t smoothedDrive{0};    // Previous drive value for parameter smoothing
 	q31_t smoothedHarmonic{0}; // Previous harmonic value for parameter smoothing
-	q31_t filterL{0};          // Lowpass state for left channel (unused, kept for API compat)
-	q31_t filterR{0};          // Lowpass state for right channel (unused, kept for API compat)
+	q31_t smoothedTwist{0};    // Previous Twist param value for parameter smoothing
+	// Note: DC blocker state is per-voice (in Voice) or per-clip (in GlobalEffectableForClip)
 	// Weight caching for Zone 1 (hoisted computation)
-	bool weightsNeedUpdate{true};                // Set true when harmonic or symmetry changes
+	bool weightsNeedUpdate{true};                // Set true when harmonic changes
 	q31_t cachedHarmonic{0};                     // Harmonic value weights were computed for
 	float cachedW3{0}, cachedW5{0}, cachedW7{0}; // Cached normalized weights
 };
@@ -360,16 +374,10 @@ struct Zone1Weights {
  *   c5 = 3.2w5 + 16w7
  *   c7 = -64w7/7
  *
- * @param harmonic The harmonic parameter value
+ * @param posInZone Position 0.0 to 1.0 within the zone
  * @return Precomputed blended coefficients for Horner's method evaluation
  */
-inline Zone1Weights computeZone1Weights(q31_t harmonic) {
-	// Calculate position within zone 1 (0.0 to 1.0)
-	// Zone 1 spans harmonic values from 1/8 to 2/8 of full range
-	constexpr float zoneStart = 1.0f / 8.0f;
-	constexpr float zoneEnd = 2.0f / 8.0f;
-	float paramNorm = static_cast<float>(harmonic) / static_cast<float>(ONE_Q31);
-	float posInZone = (paramNorm - zoneStart) / (zoneEnd - zoneStart);
+inline Zone1Weights computeZone1WeightsFromPos(float posInZone) {
 	posInZone = std::clamp(posInZone, 0.0f, 1.0f);
 
 	// Convert float phase to uint32_t
@@ -383,22 +391,31 @@ inline Zone1Weights computeZone1Weights(q31_t harmonic) {
 		return static_cast<uint32_t>(f * kPhaseScale);
 	};
 
-	// phaseWidth: 60% active, 40% dead zone (scale: 0x80000000 = 50%)
-	constexpr uint32_t kDuty = 0x99999999u;
+	// phaseWidth: 50% active, 50% dead zone (more contrast between harmonics)
+	constexpr uint32_t kDuty = 0x80000000u;
+
+	// Irrational frequencies prevent dead zones from aligning (avoids all-zero weights)
+	constexpr float kFreqW3 = 5.38516f; // √29  (~5.4 cycles)
+	constexpr float kFreqW5 = 6.28318f; // 2π   (~6.3 cycles)
+	constexpr float kFreqW7 = 7.38906f; // e²   (~7.4 cycles)
 
 	// Get triangle weights as q31, convert to float for coefficient computation
 	constexpr float kInvQ31 = 1.0f / static_cast<float>(ONE_Q31);
-	float w3 = static_cast<float>(triangleWithDeadzone(toPhase(posInZone * 3.0f + 0.0f), kDuty)) * kInvQ31;
-	float w5 = static_cast<float>(triangleWithDeadzone(toPhase(posInZone * 4.0f + 0.25f), kDuty)) * kInvQ31;
-	float w7 = static_cast<float>(triangleWithDeadzone(toPhase(posInZone * 5.0f + 0.5f), kDuty)) * kInvQ31;
+	float w3 = static_cast<float>(triangleWithDeadzone(toPhase(posInZone * kFreqW3 + 0.0f), kDuty)) * kInvQ31;
+	float w5 = static_cast<float>(triangleWithDeadzone(toPhase(posInZone * kFreqW5 + 0.25f), kDuty)) * kInvQ31;
+	float w7 = static_cast<float>(triangleWithDeadzone(toPhase(posInZone * kFreqW7 + 0.5f), kDuty)) * kInvQ31;
+
+	// Minimum weight floor prevents discontinuity when all triangles are in dead zones
+	constexpr float kMinWeight = 0.08f;
+	w3 = std::max(w3, kMinWeight);
+	w5 = std::max(w5, kMinWeight);
+	w7 = std::max(w7, kMinWeight);
 
 	// Normalize weights so they sum to 1
 	float wSum = w3 + w5 + w7;
-	if (wSum > 0.001f) {
-		w3 /= wSum;
-		w5 /= wSum;
-		w7 /= wSum;
-	}
+	w3 /= wSum;
+	w5 /= wSum;
+	w7 /= wSum;
 
 	// Compute blended polynomial coefficients
 	// c1 = w3 + w5 + w7 = 1.0 (by normalization)
@@ -411,6 +428,69 @@ inline Zone1Weights computeZone1Weights(q31_t harmonic) {
 	float c7 = -w7 * (64.0f / 7.0f);
 
 	return {c1, c3, c5, c7};
+}
+
+/**
+ * Helper to compute position within a zone from harmonic param value
+ */
+inline float computePosInZone(q31_t harmonic, int32_t zoneIndex) {
+	float zoneStart = static_cast<float>(zoneIndex) / 8.0f;
+	float zoneEnd = static_cast<float>(zoneIndex + 1) / 8.0f;
+	float paramNorm = static_cast<float>(harmonic) / static_cast<float>(ONE_Q31);
+	return std::clamp((paramNorm - zoneStart) / (zoneEnd - zoneStart), 0.0f, 1.0f);
+}
+
+/**
+ * Compute Zone 2 "357s" stereo R-channel coefficient offsets
+ * Uses triangle-based parameter phasing for L/R decorrelation
+ *
+ * @param baseWeights The L-channel weights (from computeZone1Weights)
+ * @param posInZone Position within zone (0.0 to 1.0)
+ * @param stereoWidth Stereo spread amount (0.0 to 1.0, from UI 0-127)
+ * @return R-channel weights with phase-based offsets
+ */
+inline Zone1Weights computeZone2StereoOffsets(const Zone1Weights& baseWeights, float posInZone, float stereoWidth) {
+	if (stereoWidth <= 0.001f) {
+		return baseWeights; // No stereo spread, return identical weights
+	}
+
+	// Triangle-based offsets with irrational frequencies for L/R decorrelation
+	// Low frequencies vary with posInZone (Harmonic knob position)
+	constexpr float kFreqC3 = 3.14159f; // π
+	constexpr float kFreqC5 = 2.23607f; // √5
+	constexpr float kFreqC7 = 1.73205f; // √3
+
+	// High frequencies vary with stereoWidth itself - adjacent width values
+	// produce different offset patterns (like dott multiband vibe/feel interaction)
+	constexpr float kWidthFreqC3 = 7.28318f; // 2π + small offset
+	constexpr float kWidthFreqC5 = 11.0902f; // 5√5
+	constexpr float kWidthFreqC7 = 8.66025f; // 5√3
+
+	// Simple triangle: phase wraps, outputs -1 to +1
+	auto triangle = [](float phase) {
+		phase = phase - static_cast<int>(phase);
+		if (phase < 0.0f) {
+			phase += 1.0f;
+		}
+		return (phase < 0.5f) ? (phase * 4.0f - 1.0f) : (3.0f - phase * 4.0f);
+	};
+
+	// Compute offset amounts scaled by stereo width
+	// Max offset ~30% of coefficient magnitude at full width (was 10%, too subtle)
+	constexpr float kMaxOffset = 0.3f;
+	float scale = stereoWidth * kMaxOffset;
+
+	// Phase combines posInZone (slow) + stereoWidth (fast wiggle)
+	float phaseC3 = posInZone * kFreqC3 + stereoWidth * kWidthFreqC3;
+	float phaseC5 = posInZone * kFreqC5 + stereoWidth * kWidthFreqC5 + 0.33f;
+	float phaseC7 = posInZone * kFreqC7 + stereoWidth * kWidthFreqC7 + 0.67f;
+
+	float offsetC3 = triangle(phaseC3) * scale * std::abs(baseWeights.c3);
+	float offsetC5 = triangle(phaseC5) * scale * std::abs(baseWeights.c5);
+	float offsetC7 = triangle(phaseC7) * scale * std::abs(baseWeights.c7);
+
+	return {baseWeights.c1, // c1 stays at 1.0
+	        baseWeights.c3 + offsetC3, baseWeights.c5 + offsetC5, baseWeights.c7 + offsetC7};
 }
 
 /**
@@ -511,7 +591,8 @@ inline void chebyshevRecurrence(q31_t x, int32_t maxOrder, q31_t& T3, q31_t& T5,
 inline q31_t sineShapeCore(q31_t input, q31_t drive, q31_t harmonic, q31_t symmetry,
                            const Zone1Weights* zone1Weights = nullptr) {
 	// Apply symmetry (DC offset for even harmonics)
-	q31_t biased = add_saturate(input, symmetry >> 3);
+	// >> 7 gives very subtle effect, builds gradually across zone
+	q31_t biased = add_saturate(input, symmetry >> 7);
 
 	// === Drive calculation for hybrid param (bipolar, additive modulation) ===
 	// drive range: INT32_MIN to INT32_MAX (center=0 is unity)
@@ -682,14 +763,14 @@ inline q31_t sineShape(q31_t input, q31_t drive, q31_t harmonic, q31_t symmetry,
  * @param buffer Audio buffer to process in place
  * @param drive Current target drive value
  * @param smoothedDrive Pointer to smoothed drive state (updated in place)
- * @param filterState Unused (kept for API compatibility)
+ * @param dcBlocker Pointer to DC blocker state (updated in place)
  * @param harmonic Harmonic zone selection (0-1024 mapped to 8 zones)
  * @param smoothedHarmonic Pointer to smoothed harmonic state (updated in place)
  * @param symmetry DC bias for asymmetry (even harmonics)
  * @param mix Wet/dry blend - if 0, buffer is not modified (CPU optimization)
  * @param wasBypassed Pointer to bypass state flag (updated in place) - set to true initially
  */
-inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothedDrive, q31_t* filterState,
+inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothedDrive, q31_t* dcBlocker,
                             q31_t harmonic, q31_t* smoothedHarmonic, q31_t symmetry, q31_t mix,
                             bool* wasBypassed = nullptr) {
 	// Early out - if mix is 0, do nothing (important CPU optimization)
@@ -700,10 +781,9 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 		return;
 	}
 
-	// Buffer-rate smoothing (~344 Hz at 128 samples) is fast enough to avoid clicks
-	q31_t smoothedDriveValue = *smoothedDrive + multiply_32x32_rshift32(drive - *smoothedDrive, kSmoothingAlpha) * 2;
-	q31_t smoothedHarmonicValue =
-	    *smoothedHarmonic + multiply_32x32_rshift32(harmonic - *smoothedHarmonic, kSmoothingAlpha) * 2;
+	// Buffer-rate smoothing for drive and harmonic
+	q31_t smoothedDriveValue = smoothParam(smoothedDrive, drive);
+	q31_t smoothedHarmonicValue = smoothParam(smoothedHarmonic, harmonic);
 
 	// Mark as no longer bypassed if transitioning
 	if (wasBypassed && *wasBypassed) {
@@ -711,8 +791,6 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 	}
 
 	// Determine crossfade mode based on smoothed harmonic
-	// Zone 0 (Poly): Traditional wet/dry crossfade
-	// Zones 1+ (Chebyshev): Harmonic extraction crossfade where mix=1 gives (wet - dry)
 	constexpr q31_t kZone1Threshold = ONE_Q31 / 8;
 	constexpr q31_t kZone2Threshold = ONE_Q31 / 4;
 	bool useChebyshevCrossfade = (smoothedHarmonicValue >= kZone1Threshold);
@@ -722,51 +800,64 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 	const Zone1Weights* zone1WeightsPtr = nullptr;
 	Zone1Weights zone1Weights;
 	if (inZone1) {
-		zone1Weights = computeZone1Weights(smoothedHarmonicValue);
+		float posInZone = computePosInZone(smoothedHarmonicValue, 1);
+		zone1Weights = computeZone1WeightsFromPos(posInZone);
 		zone1WeightsPtr = &zone1Weights;
 	}
 
+	// Local copy of DC blocker state for efficient per-sample update
+	q31_t dcState = *dcBlocker;
+
 	for (auto& sample : buffer) {
-		// Get shaped (wet) signal with hoisted Zone 1 weights
+		// Get shaped (wet) signal
 		q31_t shaped = sineShapeCore(sample, smoothedDriveValue, smoothedHarmonicValue, symmetry, zone1WeightsPtr);
 
+		q31_t mixed;
 		if (useChebyshevCrossfade) {
 			// Chebyshev zones: traditional wet/dry crossfade
 			// At mix=0: pure dry, mix=1: pure wet
 			q31_t dryCoeff = ONE_Q31 - multiply_32x32_rshift32(mix, ONE_Q31) * 2; // 1 - mix
 			q31_t dryPart = multiply_32x32_rshift32(sample, dryCoeff) << 1;
 			q31_t wetPart = multiply_32x32_rshift32(shaped, mix) << 1;
-			sample = add_saturate(dryPart, wetPart);
+			mixed = add_saturate(dryPart, wetPart);
 		}
 		else {
 			// Zone 0: Traditional wet/dry crossfade
 			q31_t invMix = ONE_Q31 - mix;
 			q31_t dryPart = multiply_32x32_rshift32(sample, invMix) << 1;
 			q31_t wetPart = multiply_32x32_rshift32(shaped, mix) << 1;
-			sample = add_saturate(dryPart, wetPart);
+			mixed = add_saturate(dryPart, wetPart);
 		}
+
+		// DC blocker (5Hz highpass) - removes DC offset from asymmetry
+		dcState += multiply_32x32_rshift32(mixed - dcState, kDcBlockerAlpha) * 2;
+		sample = mixed - dcState;
 	}
 
-	*smoothedDrive = smoothedDriveValue;
-	*smoothedHarmonic = smoothedHarmonicValue;
+	*dcBlocker = dcState;
 }
 
 /**
  * Process a stereo buffer through the sine shaper with parameter smoothing
+ *
+ * Drive and harmonic are smoothed internally; symmetry and stereoWidth should
+ * be computed from an already-smoothed Twist param at the call site.
+ *
  * @param buffer Stereo audio buffer to process in place
  * @param drive Current target drive value
  * @param smoothedDrive Pointer to smoothed drive state (updated in place)
- * @param filterL Unused (kept for API compatibility)
- * @param filterR Unused (kept for API compatibility)
+ * @param dcBlockerL Pointer to left channel DC blocker state (updated in place)
+ * @param dcBlockerR Pointer to right channel DC blocker state (updated in place)
  * @param harmonic Harmonic zone selection (0-1024 mapped to 8 zones)
  * @param smoothedHarmonic Pointer to smoothed harmonic state (updated in place)
- * @param symmetry DC bias for asymmetry (even harmonics)
+ * @param symmetry DC bias for asymmetry (computed from smoothed Twist)
  * @param mix Wet/dry blend - if 0, buffer is not modified (CPU optimization)
+ * @param stereoWidth Stereo coefficient spread (0.0-1.0, 0 = mono, from smoothed Twist)
  * @param wasBypassed Pointer to bypass state flag (updated in place) - set to true initially
  */
-inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoothedDrive, q31_t* filterL,
-                            q31_t* filterR, q31_t harmonic, q31_t* smoothedHarmonic, q31_t symmetry, q31_t mix,
-                            bool* wasBypassed = nullptr) {
+inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoothedDrive, q31_t* dcBlockerL,
+                            q31_t* dcBlockerR, q31_t harmonic, q31_t* smoothedHarmonic, q31_t symmetry, q31_t mix,
+                            float stereoWidth, bool* wasBypassed = nullptr) {
 	// Early out - if mix is 0, do nothing (important CPU optimization)
 	if (mix <= 0 || buffer.empty()) {
 		if (wasBypassed) {
@@ -775,10 +866,10 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 		return;
 	}
 
-	// Buffer-rate smoothing (~344 Hz at 128 samples) is fast enough to avoid clicks
-	q31_t smoothedDriveValue = *smoothedDrive + multiply_32x32_rshift32(drive - *smoothedDrive, kSmoothingAlpha) * 2;
-	q31_t smoothedHarmonicValue =
-	    *smoothedHarmonic + multiply_32x32_rshift32(harmonic - *smoothedHarmonic, kSmoothingAlpha) * 2;
+	// Buffer-rate smoothing for drive and harmonic
+	// Note: symmetry and stereoWidth are already derived from smoothed Twist at call site
+	q31_t smoothedDriveValue = smoothParam(smoothedDrive, drive);
+	q31_t smoothedHarmonicValue = smoothParam(smoothedHarmonic, harmonic);
 
 	// Mark as no longer bypassed if transitioning
 	if (wasBypassed && *wasBypassed) {
@@ -786,49 +877,71 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	}
 
 	// Determine crossfade mode based on smoothed harmonic
-	// Zone 0 (Poly): Traditional wet/dry crossfade
-	// Zones 1+ (Chebyshev): Harmonic extraction crossfade where mix=1 gives (wet - dry)
 	constexpr q31_t kZone1Threshold = ONE_Q31 / 8;
 	constexpr q31_t kZone2Threshold = ONE_Q31 / 4;
 	bool useChebyshevCrossfade = (smoothedHarmonicValue >= kZone1Threshold);
 	bool inZone1 = (smoothedHarmonicValue >= kZone1Threshold && smoothedHarmonicValue < kZone2Threshold);
 
 	// Hoist Zone 1 weight calculation - computed once per buffer using smoothed harmonic
-	const Zone1Weights* zone1WeightsPtr = nullptr;
-	Zone1Weights zone1Weights;
+	const Zone1Weights* zone1WeightsLPtr = nullptr;
+	const Zone1Weights* zone1WeightsRPtr = nullptr;
+	Zone1Weights zone1WeightsL;
+	Zone1Weights zone1WeightsR;
+
 	if (inZone1) {
-		zone1Weights = computeZone1Weights(smoothedHarmonicValue);
-		zone1WeightsPtr = &zone1Weights;
+		float posInZone = computePosInZone(smoothedHarmonicValue, 1);
+		zone1WeightsL = computeZone1WeightsFromPos(posInZone);
+		zone1WeightsLPtr = &zone1WeightsL;
+
+		// Apply stereo offsets (stereoWidth is 0.0-1.0 from smoothed Twist)
+		if (stereoWidth > 0.001f) {
+			zone1WeightsR = computeZone2StereoOffsets(zone1WeightsL, posInZone, stereoWidth);
+			zone1WeightsRPtr = &zone1WeightsR;
+		}
+		else {
+			zone1WeightsRPtr = &zone1WeightsL; // Same for both channels
+		}
 	}
 
+	// Local copy of DC blocker state for efficient per-sample update
+	q31_t dcStateL = *dcBlockerL;
+	q31_t dcStateR = *dcBlockerR;
+
 	for (auto& sample : buffer) {
-		// Process left channel with hoisted Zone 1 weights
-		q31_t shapedL = sineShapeCore(sample.l, smoothedDriveValue, smoothedHarmonicValue, symmetry, zone1WeightsPtr);
+		// Process left channel with L weights
+		q31_t shapedL = sineShapeCore(sample.l, smoothedDriveValue, smoothedHarmonicValue, symmetry, zone1WeightsLPtr);
 
-		// Process right channel with hoisted Zone 1 weights
-		q31_t shapedR = sineShapeCore(sample.r, smoothedDriveValue, smoothedHarmonicValue, symmetry, zone1WeightsPtr);
+		// Process right channel with R weights
+		q31_t shapedR = sineShapeCore(sample.r, smoothedDriveValue, smoothedHarmonicValue, symmetry, zone1WeightsRPtr);
 
+		q31_t mixedL, mixedR;
 		if (useChebyshevCrossfade) {
 			// Chebyshev zones: traditional wet/dry crossfade
 			// At mix=0: pure dry, mix=1: pure wet
 			q31_t dryCoeff = ONE_Q31 - multiply_32x32_rshift32(mix, ONE_Q31) * 2; // 1 - mix
-			sample.l = add_saturate(multiply_32x32_rshift32(sample.l, dryCoeff) << 1,
-			                        multiply_32x32_rshift32(shapedL, mix) << 1);
-			sample.r = add_saturate(multiply_32x32_rshift32(sample.r, dryCoeff) << 1,
-			                        multiply_32x32_rshift32(shapedR, mix) << 1);
+			mixedL = add_saturate(multiply_32x32_rshift32(sample.l, dryCoeff) << 1,
+			                      multiply_32x32_rshift32(shapedL, mix) << 1);
+			mixedR = add_saturate(multiply_32x32_rshift32(sample.r, dryCoeff) << 1,
+			                      multiply_32x32_rshift32(shapedR, mix) << 1);
 		}
 		else {
 			// Zone 0: Traditional wet/dry crossfade
 			q31_t invMix = ONE_Q31 - mix;
-			sample.l = add_saturate(multiply_32x32_rshift32(sample.l, invMix) << 1,
-			                        multiply_32x32_rshift32(shapedL, mix) << 1);
-			sample.r = add_saturate(multiply_32x32_rshift32(sample.r, invMix) << 1,
-			                        multiply_32x32_rshift32(shapedR, mix) << 1);
+			mixedL = add_saturate(multiply_32x32_rshift32(sample.l, invMix) << 1, multiply_32x32_rshift32(shapedL, mix)
+			                                                                          << 1);
+			mixedR = add_saturate(multiply_32x32_rshift32(sample.r, invMix) << 1, multiply_32x32_rshift32(shapedR, mix)
+			                                                                          << 1);
 		}
+
+		// DC blocker (5Hz highpass) - removes DC offset from asymmetry
+		dcStateL += multiply_32x32_rshift32(mixedL - dcStateL, kDcBlockerAlpha) * 2;
+		dcStateR += multiply_32x32_rshift32(mixedR - dcStateR, kDcBlockerAlpha) * 2;
+		sample.l = mixedL - dcStateL;
+		sample.r = mixedR - dcStateR;
 	}
 
-	*smoothedDrive = smoothedDriveValue;
-	*smoothedHarmonic = smoothedHarmonicValue;
+	*dcBlockerL = dcStateL;
+	*dcBlockerR = dcStateR;
 }
 
 // ============================================================================

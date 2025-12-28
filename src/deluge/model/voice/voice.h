@@ -78,6 +78,10 @@ public:
 	float saturatorPrevXL{0.0f};
 	float saturatorPrevXR{0.0f};
 
+	// Per-voice DC blocker state for sine shaper (removes DC from asymmetry)
+	int32_t sineShaperDcBlockerL{0};
+	int32_t sineShaperDcBlockerR{0};
+
 	int32_t overallOscAmplitudeLastTime;
 	std::array<int32_t, kNumSources> sourceAmplitudesLastTime;
 	std::array<int32_t, kNumModulators> modulatorAmplitudeLastTime;

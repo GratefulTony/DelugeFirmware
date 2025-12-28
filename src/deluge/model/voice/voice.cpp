@@ -181,6 +181,10 @@ bool Voice::noteOn(ModelStackWithSoundFlags* modelStack, int32_t newNoteCodeBefo
 		// Reset ADAA state for XY saturator
 		saturatorPrevXL = 0.0f;
 		saturatorPrevXR = 0.0f;
+
+		// Reset DC blocker state for sine shaper
+		sineShaperDcBlockerL = 0;
+		sineShaperDcBlockerR = 0;
 	}
 
 	// Porta
@@ -1513,11 +1517,39 @@ skipUnisonPart: {}
 		if (sound.sineShaper.mix > 0) {
 			q31_t sineDrive = paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE];
 			q31_t sineHarmonic = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC);
-			q31_t sineSymmetry = (static_cast<q31_t>(sound.sineShaper.symmetry) - 64) << 24;
+			q31_t sineTwist = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SINE_SHAPER_SYMMETRY);
 			q31_t sineMix = static_cast<q31_t>(sound.sineShaper.mix) << 24;
-			dsp::sineShapeBuffer(stereo_osc_buffer, sineDrive, &sound.sineShaper.smoothedDrive,
-			                     &sound.sineShaper.filterL, &sound.sineShaper.filterR, sineHarmonic,
-			                     &sound.sineShaper.smoothedHarmonic, sineSymmetry, sineMix);
+
+			// Smooth Twist at source - derived values (symmetry, stereoWidth) inherit smoothness
+			q31_t smoothedTwist = dsp::smoothParam(&sound.sineShaper.smoothedTwist, sineTwist);
+
+			// Twist param: Zone 0 = Asym (DC offset), Zone 1 = Wide stereo, Zone 2 = Narrow stereo
+			constexpr q31_t kZone1Threshold = ONE_Q31 / 8;
+			constexpr q31_t kZone2Threshold = ONE_Q31 / 4;
+			constexpr q31_t kZone3Threshold = (ONE_Q31 / 8) * 3;
+
+			q31_t sineSymmetry = 0;
+			float stereoWidth = 0.0f;
+
+			if (smoothedTwist < kZone1Threshold) {
+				// Zone 0: Asymmetry - DC offset for even harmonics
+				sineSymmetry = smoothedTwist << 3;
+			}
+			else if (smoothedTwist < kZone2Threshold) {
+				// Zone 1: Wide stereo - full resolution float width (0.0 to 1.0)
+				q31_t posInZone = (smoothedTwist - kZone1Threshold) << 3;
+				stereoWidth = static_cast<float>(posInZone) / static_cast<float>(ONE_Q31);
+			}
+			else if (smoothedTwist < kZone3Threshold) {
+				// Zone 2: Narrow stereo - half width (0.0 to 0.5)
+				q31_t posInZone = (smoothedTwist - kZone2Threshold) << 3;
+				stereoWidth = static_cast<float>(posInZone) / static_cast<float>(ONE_Q31) * 0.5f;
+			}
+			// Zones 3-7: Reserved, no effect
+
+			dsp::sineShapeBuffer(stereo_osc_buffer, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperDcBlockerL,
+			                     &sineShaperDcBlockerR, sineHarmonic, &sound.sineShaper.smoothedHarmonic, sineSymmetry,
+			                     sineMix, stereoWidth);
 		}
 
 		// XY Saturator (per-voice, mod-matrix routable drive)
@@ -1620,11 +1652,19 @@ skipUnisonPart: {}
 		if (sound.sineShaper.mix > 0) {
 			q31_t sineDrive = paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE];
 			q31_t sineHarmonic = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC);
-			q31_t sineSymmetry = (static_cast<q31_t>(sound.sineShaper.symmetry) - 64) << 24;
+			q31_t sineTwist = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SINE_SHAPER_SYMMETRY);
 			q31_t sineMix = static_cast<q31_t>(sound.sineShaper.mix) << 24;
+
+			// Smooth Twist at source
+			q31_t smoothedTwist = dsp::smoothParam(&sound.sineShaper.smoothedTwist, sineTwist);
+
+			// Mono path: only Zone 0 (Asym) has effect, stereo zones are ignored
+			constexpr q31_t kZone1Threshold = ONE_Q31 / 8;
+			q31_t sineSymmetry = (smoothedTwist < kZone1Threshold) ? (smoothedTwist << 3) : 0;
+
 			dsp::sineShapeBuffer(std::span{oscBuffer, n}, sineDrive, &sound.sineShaper.smoothedDrive,
-			                     &sound.sineShaper.filterL, sineHarmonic, &sound.sineShaper.smoothedHarmonic,
-			                     sineSymmetry, sineMix);
+			                     &sineShaperDcBlockerL, sineHarmonic, &sound.sineShaper.smoothedHarmonic, sineSymmetry,
+			                     sineMix);
 		}
 
 		// XY Saturator (per-voice, mod-matrix routable drive) - mono path

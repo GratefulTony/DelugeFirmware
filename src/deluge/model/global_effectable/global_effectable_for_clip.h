@@ -55,6 +55,10 @@ public:
 
 	std::array<uint32_t, 2> lastSaturationTanHWorkingValue = {2147483648u, 2147483648u};
 
+	// Per-clip DC blocker state for sine shaper (removes DC from asymmetry)
+	int32_t sineShaperDcBlockerL{0};
+	int32_t sineShaperDcBlockerR{0};
+
 protected:
 	int32_t getParameterFromKnob(int32_t whichModEncoder) final;
 	void renderOutput(ModelStackWithTimelineCounter* modelStack, ParamManager* paramManagerForClip,

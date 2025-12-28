@@ -134,11 +134,35 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	if (sineShaper.mix > 0) {
 		q31_t sineDrive = static_cast<q31_t>(sineShaper.drive) << 24;
 		q31_t sineHarmonic = unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC);
-		q31_t sineSymmetry = (static_cast<q31_t>(sineShaper.symmetry) - 64) << 24;
+		q31_t sineTwist = unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_SYMMETRY);
 		q31_t sineMix = static_cast<q31_t>(sineShaper.mix) << 24;
-		deluge::dsp::sineShapeBuffer(global_effectable_audio, sineDrive, &sineShaper.smoothedDrive, &sineShaper.filterL,
-		                             &sineShaper.filterR, sineHarmonic, &sineShaper.smoothedHarmonic, sineSymmetry,
-		                             sineMix);
+
+		// Smooth Twist at source - derived values (symmetry, stereoWidth) inherit smoothness
+		q31_t smoothedTwist = deluge::dsp::smoothParam(&sineShaper.smoothedTwist, sineTwist);
+
+		// Twist param: Zone 0 = Asym (DC offset), Zone 1 = Wide stereo, Zone 2 = Narrow stereo
+		constexpr q31_t kZone1Threshold = ONE_Q31 / 8;
+		constexpr q31_t kZone2Threshold = ONE_Q31 / 4;
+		constexpr q31_t kZone3Threshold = (ONE_Q31 / 8) * 3;
+
+		q31_t sineSymmetry = 0;
+		float stereoWidth = 0.0f;
+
+		if (smoothedTwist < kZone1Threshold) {
+			sineSymmetry = smoothedTwist << 3;
+		}
+		else if (smoothedTwist < kZone2Threshold) {
+			q31_t posInZone = (smoothedTwist - kZone1Threshold) << 3;
+			stereoWidth = static_cast<float>(posInZone) / static_cast<float>(ONE_Q31);
+		}
+		else if (smoothedTwist < kZone3Threshold) {
+			q31_t posInZone = (smoothedTwist - kZone2Threshold) << 3;
+			stereoWidth = static_cast<float>(posInZone) / static_cast<float>(ONE_Q31) * 0.5f;
+		}
+
+		deluge::dsp::sineShapeBuffer(global_effectable_audio, sineDrive, &sineShaper.smoothedDrive,
+		                             &sineShaperDcBlockerL, &sineShaperDcBlockerR, sineHarmonic,
+		                             &sineShaper.smoothedHarmonic, sineSymmetry, sineMix, stereoWidth);
 	}
 
 	// XY Saturator (for audio clips, uses uint8_t drive member)

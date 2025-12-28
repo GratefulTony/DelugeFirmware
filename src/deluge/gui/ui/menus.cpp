@@ -617,7 +617,7 @@ patched_param::Integer foldMenu{STRING_FOR_WAVEFOLD, STRING_FOR_WAVEFOLD, params
 fx::DynamicsPatchedParam sineShaperDriveMenu{STRING_FOR_SINE_SHAPER_DRIVE, STRING_FOR_SINE_SHAPER_DRIVE,
                                              params::LOCAL_SINE_SHAPER_DRIVE, RenderingStyle::BAR};
 fx::SineShaperHarmonic sineShaperHarmonicMenu{STRING_FOR_SINE_SHAPER_HARMONIC};
-fx::SineShaperSymmetry sineShaperSymmetryMenu{STRING_FOR_SINE_SHAPER_SYMMETRY};
+fx::SineShaperTwist sineShaperTwistMenu{STRING_FOR_SINE_SHAPER_SYMMETRY};
 fx::SineShaperMix sineShaperMixMenu{STRING_FOR_SINE_SHAPER_MIX};
 
 // Saturator - XY waveshaper with lookup table
@@ -644,7 +644,7 @@ HorizontalMenu soundDistortionMenu{
         // Sine Shaper
         &sineShaperDriveMenu,
         &sineShaperHarmonicMenu,
-        &sineShaperSymmetryMenu,
+        &sineShaperTwistMenu,
         &sineShaperMixMenu,
         // Saturator
         &saturatorDriveMenu,
@@ -840,7 +840,7 @@ HorizontalMenu globalDistortionMenu{
         // Sine Shaper
         &sineShaperDriveMenu,
         &sineShaperHarmonicMenu,
-        &sineShaperSymmetryMenu,
+        &sineShaperTwistMenu,
         &sineShaperMixMenu,
         // Saturator
         &saturatorDriveMenu,
@@ -910,7 +910,7 @@ HorizontalMenu audioClipDistortionMenu{
         // Sine Shaper
         &sineShaperDriveMenu,
         &sineShaperHarmonicMenu,
-        &sineShaperSymmetryMenu,
+        &sineShaperTwistMenu,
         &sineShaperMixMenu,
         // Saturator
         &saturatorDriveMenu,
