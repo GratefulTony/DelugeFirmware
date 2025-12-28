@@ -19,6 +19,7 @@
 
 #include "dsp/fast_math.h"
 #include "util/fixedpoint.h"
+#include "util/waves.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -657,41 +658,24 @@ struct AnalyticSaturatorXYMapper {
 	// 0.75 = 75% active, 25% gap (more blending, smoother)
 	// 1.0  = 100% active, no gaps (original continuous triangle)
 	// =================================================================
-	static constexpr float kDutyCycle = 0.5f;
+	static constexpr float kPhaseWidth = 0.5f;
 
-	/// Duty-cycle controlled triangle wave with dead zones
-	/// Uses offset + clamp + renormalization approach:
-	/// 1. Generate bipolar triangle (-1 → +1 → -1)
-	/// 2. Add offset based on duty cycle
-	/// 3. Clamp negatives to 0 (half-rectify)
-	/// 4. Renormalize so peak is always 1.0
-	///
-	/// @param phase Oscillator phase (will be wrapped to 0-1)
-	/// @param duty Active portion of cycle (0-1), rest is dead zone at 0
-	///
-	/// Visual (duty=0.5, one period):
-	///         /\
-	///   _____/  \_____
-	///   |gap|    |gap|
-	///
-	static float triangle(float phase, float duty = kDutyCycle) {
+	/// PhaseWidth-controlled triangle wave with dead zones
+	/// Wrapper for triangleWithDeadzone from util/waves.h
+	/// @param phase Float phase (0-N cycles, wraps naturally)
+	/// @param width Active portion (0-1), rest is dead zone at 0
+	/// @return Float value 0-1
+	static float triangle(float phase, float width = kPhaseWidth) {
+		constexpr float kPhaseScale = 4294967296.0f;
+		constexpr float kInvQ31 = 1.0f / static_cast<float>(0x7FFFFFFF);
+		// Wrap to [0,1) before scaling to avoid UB from float->uint32 overflow
 		phase = std::fmod(phase, 1.0f);
-		if (phase < 0.0f)
+		if (phase < 0.0f) {
 			phase += 1.0f;
-
-		// Bipolar triangle: -1 at phase 0, +1 at phase 0.5, -1 at phase 1.0
-		float bipolar = (phase < 0.5f) ? (-1.0f + phase * 4.0f) : (3.0f - phase * 4.0f);
-
-		// Offset based on duty cycle: duty 0.5 → offset 0, duty 1.0 → offset +1
-		float offset = duty * 2.0f - 1.0f;
-		float shifted = bipolar + offset;
-
-		// Clamp negatives to 0 (creates the dead zones)
-		float clamped = std::fmax(shifted, 0.0f);
-
-		// Renormalize so peak is 1.0 (peak of shifted signal is 1 + offset)
-		float peak = 1.0f + offset;
-		return (peak > 0.001f) ? (clamped / peak) : 0.0f;
+		}
+		uint32_t phaseU32 = static_cast<uint32_t>(phase * kPhaseScale);
+		uint32_t phaseWidth = static_cast<uint32_t>(width * 4294967295.0f);
+		return static_cast<float>(triangleWithDeadzone(phaseU32, phaseWidth)) * kInvQ31;
 	}
 
 	/// Derive parameters from X (0-127) and Y (0-1023) with combinatoric sweep

@@ -752,6 +752,9 @@ char const* oscTypeToString(OscType oscType) {
 	case OscType::TRIANGLE:
 		return "triangle";
 
+	case OscType::TRIANGLE_PW:
+		return "trianglePW";
+
 	case OscType::SAMPLE:
 		return "sample";
 
@@ -809,6 +812,9 @@ OscType stringToOscType(char const* string) {
 	}
 	else if (!strcmp(string, "dx7")) {
 		return OscType::DX7;
+	}
+	else if (!strcmp(string, "trianglePW")) {
+		return OscType::TRIANGLE_PW;
 	}
 	else {
 		return OscType::TRIANGLE;
@@ -1502,6 +1508,7 @@ bool shouldDoPanning(int32_t panAmount, int32_t* amplitudeL, int32_t* amplitudeR
 uint32_t getOscInitialPhaseForZero(OscType waveType) {
 	switch (waveType) {
 	case OscType::TRIANGLE:
+	case OscType::TRIANGLE_PW:
 		return 1073741824;
 
 	default:
