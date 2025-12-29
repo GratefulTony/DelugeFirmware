@@ -123,11 +123,11 @@ public:
 		case 0:
 			return "Poly";
 		case 1:
-			return "357"; // T3, T5, T7 blend with unbounded output (edgy)
+			return "3579"; // T3, T5, T7/T9 blend with unbounded output (edgy)
 		case 2:
-			return "357wm"; // T3, T5, T7 with sine input waveshaping (warm)
+			return "3579wm"; // T3, T5, T7/T9 with sine input waveshaping (warm)
 		case 3:
-			return "---"; // Reserved
+			return "FM"; // Cascaded sine waveshaping
 		case 4:
 			return "Cheby 5";
 		case 5:

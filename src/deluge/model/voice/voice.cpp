@@ -1530,9 +1530,9 @@ skipUnisonPart: {}
 
 			dsp::sineShapeBuffer(stereo_osc_buffer, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperDcBlockerL,
 			                     &sineShaperDcBlockerR, sineHarmonic, twistParams.symmetry, sineMix,
-			                     twistParams.stereoWidth, twistParams.evenAmount, twistParams.rectAmount,
-			                     twistParams.feedbackAmount, &sineShaperFeedbackL, &sineShaperFeedbackR,
-			                     &sound.sineShaper);
+			                     twistParams.stereoWidth, twistParams.stereoFreqMult, twistParams.stereoPhaseOffset,
+			                     twistParams.evenAmount, twistParams.rectAmount, twistParams.feedbackAmount,
+			                     &sineShaperFeedbackL, &sineShaperFeedbackR, &sound.sineShaper);
 		}
 
 		// XY Saturator (per-voice, mod-matrix routable drive)
