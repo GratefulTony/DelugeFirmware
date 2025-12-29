@@ -123,15 +123,15 @@ public:
 		case 0:
 			return "Poly";
 		case 1:
-			return "357"; // T3, T5, T7 blend (stereo via Twist knob)
+			return "357"; // T3, T5, T7 blend with unbounded output (edgy)
 		case 2:
-			return "Cheby 3";
+			return "357wm"; // T3, T5, T7 with sine input waveshaping (warm)
 		case 3:
-			return "Cheby 4";
+			return "---"; // Reserved
 		case 4:
 			return "Cheby 5";
 		case 5:
-			return "Cheby 6";
+			return "Cheby 7";
 		case 6:
 			return "Chaos";
 		case 7:
@@ -146,12 +146,15 @@ public:
 	}
 };
 
-/// Twist zone control - multi-purpose 8 zones with different stereo/asymmetry behaviors
+/// Twist zone control - 8 zones with different modifiers
 /// Zone 0: Asym - DC bias for even harmonics (asymmetric clipping)
-/// Zone 1: Wide - Full stereo coefficient spread
-/// Zone 2: Narrow - Scaled-down stereo spread
-/// Zones 3-7: Reserved for future expansion
-class SineShaperTwist final : public ZoneBasedUnpatchedParam<params::UNPATCHED_SINE_SHAPER_SYMMETRY> {
+/// Zone 1: Wide - Stereo coefficient spread
+/// Zone 2: Even - Self-mul for even harmonics (3→6, 5→10, 7→14)
+/// Zone 3: Rect - Rectifier blend (pure octave up)
+/// Zone 4: Reserved
+/// Zone 5: Fdbk - Output→input feedback (thickening to chaos)
+/// Zones 6-7: Reserved
+class SineShaperTwist final : public ZoneBasedUnpatchedParam<params::UNPATCHED_SINE_SHAPER_TWIST> {
 public:
 	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
 
@@ -162,13 +165,15 @@ public:
 		case 1:
 			return "Wide";
 		case 2:
-			return "Narrow";
+			return "Even";
 		case 3:
+			return "Rect";
 		case 4:
-		case 5:
 		case 6:
 		case 7:
 			return "---";
+		case 5:
+			return "Fdbk";
 		default:
 			return "?";
 		}

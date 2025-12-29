@@ -674,6 +674,7 @@ struct AnalyticSaturatorXYMapper {
 			phase += 1.0f;
 		}
 		uint32_t phaseU32 = static_cast<uint32_t>(phase * kPhaseScale);
+		// width is fraction of cycle that's active
 		uint32_t phaseWidth = static_cast<uint32_t>(width * 4294967295.0f);
 		return static_cast<float>(triangleWithDeadzone(phaseU32, phaseWidth)) * kInvQ31;
 	}

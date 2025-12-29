@@ -82,6 +82,10 @@ public:
 	int32_t sineShaperDcBlockerL{0};
 	int32_t sineShaperDcBlockerR{0};
 
+	// Per-voice feedback state for sine shaper (Twist Zone 5)
+	int32_t sineShaperFeedbackL{0};
+	int32_t sineShaperFeedbackR{0};
+
 	int32_t overallOscAmplitudeLastTime;
 	std::array<int32_t, kNumSources> sourceAmplitudesLastTime;
 	std::array<int32_t, kNumModulators> modulatorAmplitudeLastTime;
