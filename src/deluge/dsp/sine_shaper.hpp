@@ -901,89 +901,90 @@ inline q31_t sineShapeCore(q31_t input, q31_t drive, q31_t harmonic, q31_t symme
 		shaped = static_cast<q31_t>(scaled) >> 6;
 	}
 	else if (zone == 3) {
-		// === Zone 3 "FM": 4-mode FM synthesis blend ===
-		// Uses same triangle-phased weights as Zone 1/2 for smooth morphing
-		// Mode 0 (Add):  sin(x) + sin(ratio·x)     - layered octaves
-		// Mode 1 (Ring): sin(x) × sin(ratio·x)     - metallic, bell-like
-		// Mode 2 (FM):   sin(x + d·sin(ratio·x))   - classic DX7-style
-		// Mode 3 (Fold): sin(k·sin(x))             - wavefolder
+		// === Zone 3 "FM": 4-mode FM synthesis blend (pure q31) ===
+		// Mode 0 (Add):  sin(x) + sin(2x)        - layered octaves
+		// Mode 1 (Ring): sin(x) × sin(2x+90°)    - metallic, bell-like
+		// Mode 2 (FM):   sin(x + d·sin(2x))      - classic DX7-style
+		// Mode 3 (Fold): sin(k·sin(x))           - wavefolder
 
-		// Get weights: precomputed (per-buffer) or fallback to per-sample
-		float w0, w1, w2, w3;
-		float inputGainMult = 1.0f;
+		// Get weights and convert to q31 for blending
+		// Weights are pre-normalized (sum to 1.0) from computeBlendWeights4
+		q31_t w0q, w1q, w2q, w3q;
+		q31_t inputGainQ; // q29 format: 1.0→0x20000000, 4.0→0x80000000
+
 		if (zone3Weights != nullptr) {
-			// Use precomputed weights (stereo comes from separate L/R BlendWeights4)
-			w0 = zone3Weights->w0;
-			w1 = zone3Weights->w1;
-			w2 = zone3Weights->w2;
-			w3 = zone3Weights->w3;
-			inputGainMult = zone3Weights->inputGainMult;
+			// Convert float weights (0.0-1.0) to q31
+			w0q = static_cast<q31_t>(zone3Weights->w0 * ONE_Q31);
+			w1q = static_cast<q31_t>(zone3Weights->w1 * ONE_Q31);
+			w2q = static_cast<q31_t>(zone3Weights->w2 * ONE_Q31);
+			w3q = static_cast<q31_t>(zone3Weights->w3 * ONE_Q31);
+			// inputGainMult (1.0-4.0) → q29 so 4.0 fits in q31
+			inputGainQ = static_cast<q31_t>(zone3Weights->inputGainMult * (ONE_Q31 >> 2));
 		}
 		else {
-			// Fallback: compute weights per sample with inline stereo
+			// Fallback: compute weights per sample
 			float posInZone = computePosInZone(harmonic, zone);
 			BlendWeights4 weights = computeBlendWeights4(posInZone);
-			w0 = weights.w0;
-			w1 = weights.w1;
-			w2 = weights.w2;
-			w3 = weights.w3;
-			// Mono fallback: no stereo (stereo comes from precomputed L/R weights)
-			inputGainMult = 1.0f + posInZone * 3.0f;
+			w0q = static_cast<q31_t>(weights.w0 * ONE_Q31);
+			w1q = static_cast<q31_t>(weights.w1 * ONE_Q31);
+			w2q = static_cast<q31_t>(weights.w2 * ONE_Q31);
+			w3q = static_cast<q31_t>(weights.w3 * ONE_Q31);
+			// inputGainMult = 1.0 + posInZone * 3.0 (range 1.0-4.0)
+			float inputGainMult = 1.0f + posInZone * 3.0f;
+			inputGainQ = static_cast<q31_t>(inputGainMult * (ONE_Q31 >> 2));
 		}
 
-		constexpr float kInvQ31 = 1.0f / static_cast<float>(ONE_Q31);
+		// Apply input gain: driven (q31) × inputGainQ (q29) → result in q29, shift to q31
+		// This creates intentional overflow/wrapping for harmonic content at high gains
+		q31_t gained = multiply_32x32_rshift32(driven, inputGainQ) << 2;
 
-		// Apply additional input gain for Zone 3 (ramps up through zone)
-		float inputFGained = inputF * inputGainMult;
+		// Phase calculation: 256 cycles at full scale
+		// Cast to uint32 first to avoid signed shift UB, then shift for × 256
+		uint32_t phase1 = static_cast<uint32_t>(gained) << 8;
+		q31_t sine1 = getSine(phase1);
 
-		// Primary sine: drive-controlled phase depth
-		float phase1F = inputFGained * 256.0f;
-		uint32_t phase1 = static_cast<uint32_t>(static_cast<int64_t>(phase1F));
-		int32_t sine1Raw = getSine(phase1);
-		float sine1 = static_cast<float>(sine1Raw) * kInvQ31; // [-1, 1]
+		// Secondary sine at 2x frequency (octave up)
+		uint32_t phase2 = phase1 << 1;
+		q31_t sine2 = getSine(phase2);
 
-		// Secondary sine: 2x frequency (octave up) for harmonically-related content
-		float phase2F = inputFGained * 2.0f * 256.0f;
-		uint32_t phase2 = static_cast<uint32_t>(static_cast<int64_t>(phase2F));
-		int32_t sine2Raw = getSine(phase2);
-		float sine2 = static_cast<float>(sine2Raw) * kInvQ31; // [-1, 1]
+		// === Mode 0: Add ===
+		// (sine1 + sine2) * 0.375 = (sine1 + sine2) * 3/8
+		// Add with >> 2 headroom to prevent overflow, then scale by 3/2
+		q31_t sumHalf = (sine1 >> 2) + (sine2 >> 2);
+		constexpr q31_t kThreeHalves = static_cast<q31_t>(0.75 * ONE_Q31); // 3/4 in q31 = 3/2 after <<1
+		q31_t modeAdd = multiply_32x32_rshift32(sumHalf, kThreeHalves) << 1;
 
-		// Compute all 4 modes - all scaled to peak at ~0.75 for headroom
-		// No clamping needed with proper gain staging
-
-		// Mode 0: Add - sum of fundamental and octave
-		// (1+1) * 0.375 = 0.75 max
-		float modeAdd = (sine1 + sine2) * 0.375f;
-
-		// Mode 1: Ring - product creates sum/difference frequencies
-		// 90° phase offset on sine2 aligns Ring peaks with Add to prevent cancellation
+		// === Mode 1: Ring ===
+		// sine1 × sine2Ring × 0.75 (with 90° offset on sine2)
 		uint32_t phase2Ring = phase2 + 0x40000000u; // +90° (quarter cycle)
-		int32_t sine2RingRaw = getSine(phase2Ring);
-		float sine2Ring = static_cast<float>(sine2RingRaw) * kInvQ31;
-		float modeRing = sine1 * sine2Ring * 0.75f;
+		q31_t sine2Ring = getSine(phase2Ring);
+		q31_t product = multiply_32x32_rshift32(sine1, sine2Ring) << 1; // sine1 × sine2Ring
+		q31_t modeRing = multiply_32x32_rshift32(product, kThreeHalves) << 1;
 
-		// Mode 2: FM - phase modulation with sine2 as modulator
-		float fmDepth = 0.5f;
-		uint32_t fmPhase = static_cast<uint32_t>(static_cast<int64_t>(phase1F + sine2 * fmDepth * 256.0f));
-		int32_t fmSineRaw = getSine(fmPhase);
-		float modeFM = static_cast<float>(fmSineRaw) * kInvQ31 * 0.75f;
+		// === Mode 2: FM ===
+		// sin(phase1 + sine2 × depth × fullCycle) × 0.75
+		// fmDepth = 0.5 cycles: sine2 (q31) → phase offset = sine2 >> 1 (half cycle in uint32)
+		uint32_t fmPhase = phase1 + static_cast<uint32_t>(sine2 >> 1);
+		q31_t fmSine = getSine(fmPhase);
+		q31_t modeFM = multiply_32x32_rshift32(fmSine, kThreeHalves) << 1;
 
-		// Mode 3: Fold - cascaded sine creates dense harmonics
-		float foldGain = 2.0f;
-		uint32_t foldPhase = static_cast<uint32_t>(static_cast<int64_t>(sine1 * foldGain * 256.0f));
-		int32_t foldSineRaw = getSine(foldPhase);
-		float modeFold = static_cast<float>(foldSineRaw) * kInvQ31 * 0.75f;
+		// === Mode 3: Fold ===
+		// sin(sine1 × 2 cycles) × 0.75
+		// foldGain = 2.0: sine1 << 1 gives 2 cycles worth of phase
+		uint32_t foldPhase = static_cast<uint32_t>(sine1) << 1;
+		q31_t foldSine = getSine(foldPhase);
+		q31_t modeFold = multiply_32x32_rshift32(foldSine, kThreeHalves) << 1;
 
-		// Blend by triangle-phased weights (normalized to prevent clipping)
-		float weightSum = w0 + w1 + w2 + w3;
-		float invWeightSum = (weightSum > 0.0f) ? (1.0f / weightSum) : 1.0f;
-		float result = (w0 * modeAdd + w1 * modeRing + w2 * modeFM + w3 * modeFold) * invWeightSum;
+		// === Blend with pre-normalized weights ===
+		// Weights sum to 1.0, so result = w0×mode0 + w1×mode1 + w2×mode2 + w3×mode3
+		q31_t blended = 0;
+		blended = add_saturate(blended, multiply_32x32_rshift32(modeAdd, w0q) << 1);
+		blended = add_saturate(blended, multiply_32x32_rshift32(modeRing, w1q) << 1);
+		blended = add_saturate(blended, multiply_32x32_rshift32(modeFM, w2q) << 1);
+		blended = add_saturate(blended, multiply_32x32_rshift32(modeFold, w3q) << 1);
 
-		// Scale to q31, clamp, then apply >> 7 attenuation (matches original gain staging)
-		// Uses double to avoid float→int UB when result * ONE_Q31 > INT32_MAX
-		double scaled = static_cast<double>(result) * static_cast<double>(ONE_Q31);
-		scaled = std::clamp(scaled, static_cast<double>(INT32_MIN), static_cast<double>(INT32_MAX));
-		shaped = static_cast<q31_t>(scaled) >> 7;
+		// Apply >> 7 attenuation (matches original gain staging)
+		shaped = blended >> 7;
 	}
 	else {
 		// === Zones 4-7: Placeholder (reserved) ===
