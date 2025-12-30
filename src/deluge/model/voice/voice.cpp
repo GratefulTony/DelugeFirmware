@@ -1531,8 +1531,9 @@ skipUnisonPart: {}
 			dsp::sineShapeBuffer(stereo_osc_buffer, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperDcBlockerL,
 			                     &sineShaperDcBlockerR, sineHarmonic, twistParams.symmetry, sineMix,
 			                     twistParams.stereoWidth, twistParams.stereoFreqMult, twistParams.stereoPhaseOffset,
-			                     twistParams.evenAmount, twistParams.rectAmount, twistParams.feedbackAmount,
-			                     &sineShaperFeedbackL, &sineShaperFeedbackR, &sound.sineShaper);
+			                     twistParams.evenAmount, twistParams.rectAmount, twistParams.rect2Amount,
+			                     twistParams.feedbackAmount, &sineShaperFeedbackL, &sineShaperFeedbackR,
+			                     &sound.sineShaper);
 		}
 
 		// XY Saturator (per-voice, mod-matrix routable drive)
@@ -1647,8 +1648,8 @@ skipUnisonPart: {}
 
 			dsp::sineShapeBuffer(std::span{oscBuffer, n}, sineDrive, &sound.sineShaper.smoothedDrive,
 			                     &sineShaperDcBlockerL, sineHarmonic, twistParams.symmetry, sineMix,
-			                     twistParams.evenAmount, twistParams.rectAmount, twistParams.feedbackAmount,
-			                     &sineShaperFeedbackL, &sound.sineShaper);
+			                     twistParams.evenAmount, twistParams.rectAmount, twistParams.rect2Amount,
+			                     twistParams.feedbackAmount, &sineShaperFeedbackL, &sound.sineShaper);
 		}
 
 		// XY Saturator (per-voice, mod-matrix routable drive) - mono path
