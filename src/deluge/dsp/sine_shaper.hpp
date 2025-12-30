@@ -68,9 +68,18 @@ struct SineShaperVoiceState {
 	// Feedback LPF state (tames harsh high harmonics in feedback loop)
 	q31_t feedbackLpfL{0};
 	q31_t feedbackLpfR{0};
+	// Feedback HPF state (removes fundamental from feedback to prevent runaway)
+	q31_t feedbackHpfL{0};
+	q31_t feedbackHpfR{0};
 	// Zone 1 stereo LFO phase accumulator (0.0 to 1.0, wraps)
 	float stereoLfoPhase{0.0f};
 };
+
+/// Output HPF coefficient for ~100Hz cutoff at 44.1kHz
+/// alpha = 2π * fc / fs = 2π * 100 / 44100 ≈ 0.01425
+/// Replaces 5Hz DC blocker - removes sub-bass rumble from waveshaping
+/// Feedback taps post-HPF so inherits the filtering
+constexpr q31_t kOutputHpfAlpha = static_cast<q31_t>(0.01425 * ONE_Q31);
 
 // Number of harmonic zones (0 = Poly, 1-7 = Chebyshev with triangle modulation)
 constexpr int32_t kNumHarmonicZones = 8;
@@ -869,6 +878,7 @@ inline q31_t sineShapeCore(q31_t input, q31_t drive, q31_t harmonic, q31_t symme
 			x = static_cast<float>(sinValue) * kInvQ31;
 		}
 		else {
+			// Zone 1: use raw input (allows overdrive for intended harmonic character)
 			x = rawX;
 		}
 
@@ -884,8 +894,11 @@ inline q31_t sineShapeCore(q31_t input, q31_t drive, q31_t harmonic, q31_t symme
 		// Shared polynomial evaluation - changes here apply to both zones
 		float result = evaluate3579Polynomial(x, *weights);
 
-		// Scale output back to q31 range (no post-gain)
-		shaped = static_cast<q31_t>(result * static_cast<float>(ONE_Q31)) >> 6;
+		// Scale to q31, clamp, then apply >> 6 attenuation (matches original gain staging)
+		// Uses double to avoid float→int UB when result * ONE_Q31 > INT32_MAX
+		double scaled = static_cast<double>(result) * static_cast<double>(ONE_Q31);
+		scaled = std::clamp(scaled, static_cast<double>(INT32_MIN), static_cast<double>(INT32_MAX));
+		shaped = static_cast<q31_t>(scaled) >> 6;
 	}
 	else if (zone == 3) {
 		// === Zone 3 "FM": 4-mode FM synthesis blend ===
@@ -966,8 +979,11 @@ inline q31_t sineShapeCore(q31_t input, q31_t drive, q31_t harmonic, q31_t symme
 		float invWeightSum = (weightSum > 0.0f) ? (1.0f / weightSum) : 1.0f;
 		float result = (w0 * modeAdd + w1 * modeRing + w2 * modeFM + w3 * modeFold) * invWeightSum;
 
-		// Scale output back to q31 range (matched to reference level)
-		shaped = static_cast<q31_t>(result * static_cast<float>(ONE_Q31)) >> 7;
+		// Scale to q31, clamp, then apply >> 7 attenuation (matches original gain staging)
+		// Uses double to avoid float→int UB when result * ONE_Q31 > INT32_MAX
+		double scaled = static_cast<double>(result) * static_cast<double>(ONE_Q31);
+		scaled = std::clamp(scaled, static_cast<double>(INT32_MIN), static_cast<double>(INT32_MAX));
+		shaped = static_cast<q31_t>(scaled) >> 7;
 	}
 	else {
 		// === Zones 4-7: Placeholder (reserved) ===
@@ -1139,13 +1155,14 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 	q31_t dcState = voiceState ? voiceState->dcBlockerL : 0;
 	q31_t fbState = voiceState ? voiceState->feedbackL : 0;
 	q31_t fbLpfState = voiceState ? voiceState->feedbackLpfL : 0;
+	q31_t fbHpfState = voiceState ? voiceState->feedbackHpfL : 0;
 	q31_t currentDrive = driveCtx.current;
 
 	// Scale feedback amount for moderate self-oscillation range
 	// At max (1.0), feedback is ~0.9 of output (just below self-oscillation)
 	// In Zone 0, feedback is inversely proportional to harmonic position (more cascade = less feedback)
-	// Also reduce feedback by up to 20% as drive increases (tames high-drive feedback)
-	constexpr float kFeedbackScale = 0.9f;
+	// Also reduce feedback by up to 10% as drive increases (tames high-drive feedback)
+	constexpr float kFeedbackScale = 0.25f;
 	float fbScale = kFeedbackScale;
 	constexpr q31_t kZone0End = ONE_Q31 / 8;
 	if (smoothedHarmonic < kZone0End) {
@@ -1161,9 +1178,11 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 		// Apply feedback to input (before shaping)
 		q31_t inputWithFb = sample;
 		if (fbAmount > 0) {
-			// Hard clip feedback to prevent runaway (~-6dB from full scale)
-			q31_t clippedFb = signed_saturate<22>(multiply_32x32_rshift32(fbState, fbAmount) << 1);
-			inputWithFb = add_saturate(sample, clippedFb);
+			// Apply feedback directly (HPF on tap prevents fundamental buildup)
+			q31_t fb = signed_saturate<22>(multiply_32x32_rshift32(fbState, fbAmount) << 1);
+			inputWithFb = add_saturate(sample, fb);
+			// Clamp combined signal to q31 range
+			inputWithFb = std::clamp(inputWithFb, -ONE_Q31, ONE_Q31);
 		}
 
 		// Get shaped (wet) signal with all modifiers (drive + weights interpolated per-sample)
@@ -1185,10 +1204,6 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 			zone1Weights.c9 = (c9Ctx.current += c9Ctx.increment);
 		}
 
-		// LPF the feedback tap to tame harsh high harmonics
-		fbLpfState += multiply_32x32_rshift32(shaped - fbLpfState, kFeedbackLpfAlpha) << 1;
-		fbState = fbLpfState;
-
 		q31_t mixed;
 		if (useChebyshevCrossfade) {
 			// Chebyshev zones: traditional wet/dry crossfade
@@ -1206,9 +1221,19 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 			mixed = add_saturate(dryPart, wetPart);
 		}
 
-		// DC blocker (5Hz highpass) - removes DC offset from asymmetry
-		dcState += multiply_32x32_rshift32(mixed - dcState, kDcBlockerAlpha) * 2;
-		sample = mixed - dcState;
+		// 100Hz HPF (replaces 5Hz DC blocker) - removes sub-bass rumble
+		dcState += multiply_32x32_rshift32(mixed - dcState, kOutputHpfAlpha) * 2;
+		q31_t hpfOut = mixed - dcState;
+		sample = hpfOut;
+
+		// Rect2 peak limiting on HPF'd output for feedback: y = x - sign(x) * x² * k
+		// Taps post-HPF so feedback inherits high-pass filtering
+		// k=2: sign flips at |x| > 0.5, providing soft folding for stability
+		{
+			q31_t x2 = multiply_32x32_rshift32(hpfOut, hpfOut) << 1;
+			q31_t rect2Term = x2 << 1; // k=2.0
+			fbState = (hpfOut >= 0) ? (hpfOut - rect2Term) : (hpfOut + rect2Term);
+		}
 	}
 
 	// Write back state if voiceState is not null
@@ -1216,6 +1241,7 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 		voiceState->dcBlockerL = dcState;
 		voiceState->feedbackL = fbState;
 		voiceState->feedbackLpfL = fbLpfState;
+		voiceState->feedbackHpfL = fbHpfState;
 	}
 	if (inZone0) {
 		// Zone 0: write back smoothed phaseHarmonic (stored in smoothedC1)
@@ -1437,6 +1463,8 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	q31_t fbStateR = voiceState ? voiceState->feedbackR : 0;
 	q31_t fbLpfStateL = voiceState ? voiceState->feedbackLpfL : 0;
 	q31_t fbLpfStateR = voiceState ? voiceState->feedbackLpfR : 0;
+	q31_t fbHpfStateL = voiceState ? voiceState->feedbackHpfL : 0;
+	q31_t fbHpfStateR = voiceState ? voiceState->feedbackHpfR : 0;
 	q31_t currentDrive = driveCtx.current;
 	q31_t driveL = currentDrive;
 	q31_t driveR = currentDrive;
@@ -1444,8 +1472,8 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	// Scale feedback amount for moderate self-oscillation range
 	// At max (1.0), feedback is ~0.9 of output (just below self-oscillation)
 	// In Zone 0, feedback is inversely proportional to harmonic position (more cascade = less feedback)
-	// Also reduce feedback by up to 20% as drive increases (tames high-drive feedback)
-	constexpr float kFeedbackScale = 0.9f;
+	// Also reduce feedback by up to 10% as drive increases (tames high-drive feedback)
+	constexpr float kFeedbackScale = 0.25f;
 	float fbScale = kFeedbackScale;
 	constexpr q31_t kZone0End = ONE_Q31 / 8;
 	if (smoothedHarmonic < kZone0End) {
@@ -1466,11 +1494,14 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 		q31_t inputL = sample.l;
 		q31_t inputR = sample.r;
 		if (fbAmount > 0) {
-			// Hard clip feedback to prevent runaway (~-6dB from full scale)
-			q31_t clippedFbL = signed_saturate<22>(multiply_32x32_rshift32(fbStateL, fbAmount) << 1);
-			q31_t clippedFbR = signed_saturate<22>(multiply_32x32_rshift32(fbStateR, fbAmount) << 1);
-			inputL = add_saturate(sample.l, clippedFbL);
-			inputR = add_saturate(sample.r, clippedFbR);
+			// Apply feedback directly (HPF on tap prevents fundamental buildup)
+			q31_t fbL = signed_saturate<22>(multiply_32x32_rshift32(fbStateL, fbAmount) << 1);
+			q31_t fbR = signed_saturate<22>(multiply_32x32_rshift32(fbStateR, fbAmount) << 1);
+			inputL = add_saturate(sample.l, fbL);
+			inputR = add_saturate(sample.r, fbR);
+			// Clamp combined signal to q31 range
+			inputL = std::clamp(inputL, -ONE_Q31, ONE_Q31);
+			inputR = std::clamp(inputR, -ONE_Q31, ONE_Q31);
 		}
 
 		// Process left channel with L drive
@@ -1524,12 +1555,6 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 			zone3WeightsR.inputGainMult = gain;
 		}
 
-		// LPF the feedback tap to tame harsh high harmonics
-		fbLpfStateL += multiply_32x32_rshift32(shapedL - fbLpfStateL, kFeedbackLpfAlpha) << 1;
-		fbLpfStateR += multiply_32x32_rshift32(shapedR - fbLpfStateR, kFeedbackLpfAlpha) << 1;
-		fbStateL = fbLpfStateL;
-		fbStateR = fbLpfStateR;
-
 		q31_t mixedL, mixedR;
 		if (useChebyshevCrossfade) {
 			// Chebyshev zones: traditional wet/dry crossfade
@@ -1549,11 +1574,26 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 			                                                                          << 1);
 		}
 
-		// DC blocker (5Hz highpass) - removes DC offset from asymmetry
-		dcStateL += multiply_32x32_rshift32(mixedL - dcStateL, kDcBlockerAlpha) * 2;
-		dcStateR += multiply_32x32_rshift32(mixedR - dcStateR, kDcBlockerAlpha) * 2;
-		sample.l = mixedL - dcStateL;
-		sample.r = mixedR - dcStateR;
+		// 100Hz HPF (replaces 5Hz DC blocker) - removes sub-bass rumble
+		dcStateL += multiply_32x32_rshift32(mixedL - dcStateL, kOutputHpfAlpha) * 2;
+		dcStateR += multiply_32x32_rshift32(mixedR - dcStateR, kOutputHpfAlpha) * 2;
+		q31_t hpfOutL = mixedL - dcStateL;
+		q31_t hpfOutR = mixedR - dcStateR;
+		sample.l = hpfOutL;
+		sample.r = hpfOutR;
+
+		// Rect2 peak limiting on HPF'd output for feedback: y = x - sign(x) * x² * k
+		// Taps post-HPF so feedback inherits high-pass filtering
+		// k=2: sign flips at |x| > 0.5, providing soft folding for stability
+		{
+			q31_t x2L = multiply_32x32_rshift32(hpfOutL, hpfOutL) << 1;
+			q31_t rect2TermL = x2L << 1; // k=2.0
+			fbStateL = (hpfOutL >= 0) ? (hpfOutL - rect2TermL) : (hpfOutL + rect2TermL);
+
+			q31_t x2R = multiply_32x32_rshift32(hpfOutR, hpfOutR) << 1;
+			q31_t rect2TermR = x2R << 1; // k=2.0
+			fbStateR = (hpfOutR >= 0) ? (hpfOutR - rect2TermR) : (hpfOutR + rect2TermR);
+		}
 	}
 
 	// Write back state if voiceState is not null
@@ -1564,6 +1604,8 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 		voiceState->feedbackR = fbStateR;
 		voiceState->feedbackLpfL = fbLpfStateL;
 		voiceState->feedbackLpfR = fbLpfStateR;
+		voiceState->feedbackHpfL = fbHpfStateL;
+		voiceState->feedbackHpfR = fbHpfStateR;
 	}
 	if (inZone0) {
 		// Zone 0: write back smoothed phaseHarmonic (stored in smoothedC1)
