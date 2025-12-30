@@ -101,6 +101,53 @@ inline FloatSmoothingContext prepareSmoothingFloat(float state, float target, si
 }
 
 // ============================================================================
+// Float Triangle Waveforms
+// ============================================================================
+
+/// Pure float triangle with deadzone - faster than wrapping q31 version
+/// Used for per-buffer coefficient calculations (sine shaper, multiband, saturator)
+/// @param phase Phase in cycles (wraps automatically via floor)
+/// @param duty Active portion 0.0-1.0 (default 1.0 = full triangle, no deadzone)
+/// @return Output 0.0 to 1.0
+inline float triangleFloat(float phase, float duty = 1.0f) {
+	phase = phase - std::floor(phase); // Wrap to 0-1
+	float halfDuty = duty * 0.5f;
+
+	if (phase < halfDuty) {
+		return phase / halfDuty; // Rising: 0→1
+	}
+	else if (phase < duty) {
+		return (duty - phase) / halfDuty; // Falling: 1→0
+	}
+	return 0.0f; // Deadzone
+}
+
+/// Bipolar float triangle with deadzone - returns -1.0 to +1.0
+/// First half of duty is positive (0→+1→0), second half is negative (0→-1→0)
+/// @param phase Phase in cycles (wraps automatically)
+/// @param duty Active portion 0.0-1.0 (split evenly between positive and negative)
+/// @return Output -1.0 to +1.0
+inline float triangleBipolarFloat(float phase, float duty = 1.0f) {
+	phase = phase - std::floor(phase);
+	float quarterDuty = duty * 0.25f;
+	float halfDuty = duty * 0.5f;
+
+	if (phase < quarterDuty) {
+		return phase / quarterDuty; // Rising positive: 0→+1
+	}
+	else if (phase < halfDuty) {
+		return (halfDuty - phase) / quarterDuty; // Falling positive: +1→0
+	}
+	else if (phase < halfDuty + quarterDuty) {
+		return -(phase - halfDuty) / quarterDuty; // Falling negative: 0→-1
+	}
+	else if (phase < duty) {
+		return -(duty - phase) / quarterDuty; // Rising negative: -1→0
+	}
+	return 0.0f; // Deadzone
+}
+
+// ============================================================================
 // Wavefolder
 // ============================================================================
 

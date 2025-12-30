@@ -294,23 +294,9 @@ struct BlendWeights4 {
 inline BlendWeights4 computeBlendWeights4(float posInZone) {
 	posInZone = std::clamp(posInZone, 0.0f, 1.0f);
 
-	// Convert float phase to uint32_t for triangle functions
-	constexpr float kPhaseScale = 4294967296.0f;
-	auto toPhase = [](float f) {
-		f = std::fmod(f, 1.0f);
-		if (f < 0.0f) {
-			f += 1.0f;
-		}
-		return static_cast<uint32_t>(f * kPhaseScale);
-	};
-
-	constexpr float kInvQ31 = 1.0f / static_cast<float>(ONE_Q31);
 	constexpr float kMinWeight = 0.01f; // -40dB floor (prevents div by zero)
-
-	// Log scaling: each encoder step produces roughly equal dB change
-	// 40dB dynamic range: weight = 10^((linearTri - 1) * 2) = fastExp((linearTri - 1) * 4.605)
-	constexpr float kLogScale = 4.605f;           // 2 * ln(10) for 40dB range
-	constexpr uint32_t kPhaseWidth = 0xCCCCCCCCu; // 80% duty
+	constexpr float kLogScale = 4.605f; // 2 * ln(10) for 40dB range
+	constexpr float kDuty = 0.8f;       // 80% duty cycle
 
 	// Triangle frequencies: ~2 cycles/zone with irrational ratios to avoid periodicity
 	constexpr float kFreqW0 = 2.019f;   // √29/2 * 0.75 (~2.0 cycles/zone)
@@ -325,18 +311,17 @@ inline BlendWeights4 computeBlendWeights4(float posInZone) {
 		return std::fmax(kMinWeight, fastExp((linear - 1.0f) * kLogScale));
 	};
 
-	float tri0 = static_cast<float>(triangleWithDeadzone(toPhase(posInZone * kFreqW0 + 0.0f), kPhaseWidth)) * kInvQ31;
-	float tri1 = static_cast<float>(triangleWithDeadzone(toPhase(posInZone * kFreqW1 + 0.25f), kPhaseWidth)) * kInvQ31;
+	// Pure float triangles - no q31 conversion overhead
+	float tri0 = triangleFloat(posInZone * kFreqW0, kDuty);
+	float tri1 = triangleFloat(posInZone * kFreqW1 + 0.25f, kDuty);
 	float w0 = linearToLog(tri0);
 	float w1 = linearToLog(tri1);
 
-	// w2 and w3 from bipolar triangle with dead zone: positive = w2, negative = w3
-	// Same 70% duty, split: 35% w2, 35% w3, 30% silent
-	int32_t modeTriangle = triangleWithDeadzoneBipolar(toPhase(posInZone * kFreqW2_3 + 0.5f), kPhaseWidth);
-	float tri23 = static_cast<float>(std::abs(modeTriangle)) * kInvQ31;
-	float w23_log = linearToLog(tri23);
-	float w2 = (modeTriangle > 0) ? w23_log : kMinWeight;
-	float w3 = (modeTriangle < 0) ? w23_log : kMinWeight;
+	// w2 and w3 from bipolar triangle: positive = w2, negative = w3
+	float tri23 = triangleBipolarFloat(posInZone * kFreqW2_3 + 0.5f, kDuty);
+	float w23_log = linearToLog(std::abs(tri23));
+	float w2 = (tri23 > 0.0f) ? w23_log : kMinWeight;
+	float w3 = (tri23 < 0.0f) ? w23_log : kMinWeight;
 
 	// Normalize weights to sum to 1.0
 	float wSum = w0 + w1 + w2 + w3;
@@ -710,21 +695,13 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist) {
 	constexpr q31_t kZone4 = ONE_Q31 / 2;       // 4/8
 	constexpr q31_t kZone5 = (ONE_Q31 / 8) * 5; // 5/8
 	constexpr q31_t kZone6 = (ONE_Q31 / 4) * 3; // 6/8
-	constexpr uint32_t kFullDuty = 0xFFFFFFFFu; // 100% duty triangle
-	constexpr float kInvQ31 = 1.0f / static_cast<float>(ONE_Q31);
-
-	// Triangle helper: normalized 0→1 from triangleWithDeadzone
-	auto tri = [&](float phase) {
-		uint32_t p = static_cast<uint32_t>(std::fmod(phase, 1.0f) * 4294967296.0f);
-		return static_cast<float>(triangleWithDeadzone(p, kFullDuty)) * kInvQ31;
-	};
 
 	SineShaperTwistParams params;
 
 	if (smoothedTwist < kZone1) {
 		// Zone 0: Twist - phase modulator for Harmonic knob only
 		float pos = static_cast<float>(smoothedTwist) / static_cast<float>(kZone1);
-		params.phaseHarmonic = tri(pos * 2.0f) * 0.5f; // 2 cycles, ±0.5 offset
+		params.phaseHarmonic = triangleFloat(pos * 2.0f) * 0.5f; // 2 cycles, ±0.5 offset
 	}
 	else if (smoothedTwist < kZone2) {
 		// Zone 1: Width - stereo spread with animated phase evolution
@@ -1432,7 +1409,6 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	q31_t stereoDriveOffset = 0;
 
 	if (!useChebyshevCrossfade && stereoWidth > 0.0f) {
-		constexpr float kTwoPi = 6.283185f;
 		// LFO frequency: 0.1Hz min to 2Hz max (linear ramp through Wide zone)
 		constexpr float kMinLfoHz = 0.1f;
 		constexpr float kMaxLfoHz = 2.0f;
@@ -1452,7 +1428,8 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 		}
 
 		// LFO output modulates drive offset (bipolar: L+, R-)
-		float stereoMod = std::sin(phase * kTwoPi);
+		// Triangle for efficient CPU and consistent with other parameter modulation
+		float stereoMod = triangleBipolarFloat(phase);
 		stereoDriveOffset = static_cast<q31_t>(stereoWidth * stereoMod * static_cast<float>(kZone0StereoDriveScale));
 	}
 
