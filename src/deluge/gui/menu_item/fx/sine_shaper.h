@@ -161,21 +161,19 @@ public:
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
 		case 0:
-			return "Asym";
+			return "Twist";
 		case 1:
-			return "Wide";
+			return "Width";
 		case 2:
-			return "Even";
+			return "Evens";
 		case 3:
-			return "Rect";
+			return "Asym";
 		case 4:
-		case 6:
-		case 7:
-			return "---";
+			return "Rect";
 		case 5:
 			return "Fdbk";
 		default:
-			return "?";
+			return "---";
 		}
 	}
 

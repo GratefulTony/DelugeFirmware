@@ -24,7 +24,7 @@
 #include "dsp/delay/delay.h"
 #include "dsp/disperser.h"
 #include "dsp/saturator.h"
-#include "dsp/util.hpp" // For SineShaperParams
+#include "dsp/sine_shaper.hpp" // For SineShaperParams
 #include "dsp_ng/core/types.hpp"
 #include "hid/button.h"
 #include "model/fx/stutterer.h"

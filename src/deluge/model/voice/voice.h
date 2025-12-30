@@ -19,6 +19,7 @@
 
 #include "definitions_cxx.hpp"
 #include "dsp/filter/filter_set.h"
+#include "dsp/sine_shaper.hpp"
 #include "model/voice/voice_sample_playback_guide.h"
 #include "model/voice/voice_unison_part.h"
 #include "modulation/envelope.h"
@@ -78,13 +79,8 @@ public:
 	float saturatorPrevXL{0.0f};
 	float saturatorPrevXR{0.0f};
 
-	// Per-voice DC blocker state for sine shaper (removes DC from asymmetry)
-	int32_t sineShaperDcBlockerL{0};
-	int32_t sineShaperDcBlockerR{0};
-
-	// Per-voice feedback state for sine shaper (Twist Zone 5)
-	int32_t sineShaperFeedbackL{0};
-	int32_t sineShaperFeedbackR{0};
+	// Per-voice sine shaper state (DC blocker, feedback, feedback LPF, stereo LFO)
+	deluge::dsp::SineShaperVoiceState sineShaperState;
 
 	int32_t overallOscAmplitudeLastTime;
 	std::array<int32_t, kNumSources> sourceAmplitudesLastTime;

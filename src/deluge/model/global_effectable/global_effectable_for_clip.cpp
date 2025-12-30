@@ -143,11 +143,11 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 
 		auto twistParams = deluge::dsp::computeSineShaperTwistParams(smoothedTwist);
 
-		deluge::dsp::sineShapeBuffer(
-		    global_effectable_audio, sineDrive, &sineShaper.smoothedDrive, &sineShaperDcBlockerL, &sineShaperDcBlockerR,
-		    sineHarmonic, twistParams.symmetry, sineMix, twistParams.stereoWidth, twistParams.stereoFreqMult,
-		    twistParams.stereoPhaseOffset, twistParams.evenAmount, twistParams.rectAmount, twistParams.rect2Amount,
-		    twistParams.feedbackAmount, &sineShaperFeedbackL, &sineShaperFeedbackR, &sineShaper);
+		deluge::dsp::sineShapeBuffer(global_effectable_audio, sineDrive, &sineShaper.smoothedDrive, &sineShaperState,
+		                             sineHarmonic, twistParams.symmetry, sineMix, twistParams.stereoWidth,
+		                             twistParams.stereoFreqMult, twistParams.stereoPhaseOffset, twistParams.evenAmount,
+		                             twistParams.rectAmount, twistParams.rect2Amount, twistParams.feedbackAmount,
+		                             &sineShaper, twistParams.phaseHarmonic);
 	}
 
 	// XY Saturator (for audio clips, uses uint8_t drive member)

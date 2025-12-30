@@ -182,11 +182,8 @@ bool Voice::noteOn(ModelStackWithSoundFlags* modelStack, int32_t newNoteCodeBefo
 		saturatorPrevXL = 0.0f;
 		saturatorPrevXR = 0.0f;
 
-		// Reset DC blocker and feedback state for sine shaper
-		sineShaperDcBlockerL = 0;
-		sineShaperDcBlockerR = 0;
-		sineShaperFeedbackL = 0;
-		sineShaperFeedbackR = 0;
+		// Reset sine shaper state (DC blocker, feedback, feedback LPF, stereo LFO)
+		sineShaperState = deluge::dsp::SineShaperVoiceState{};
 	}
 
 	// Porta
@@ -1528,12 +1525,11 @@ skipUnisonPart: {}
 
 			auto twistParams = dsp::computeSineShaperTwistParams(smoothedTwist);
 
-			dsp::sineShapeBuffer(stereo_osc_buffer, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperDcBlockerL,
-			                     &sineShaperDcBlockerR, sineHarmonic, twistParams.symmetry, sineMix,
-			                     twistParams.stereoWidth, twistParams.stereoFreqMult, twistParams.stereoPhaseOffset,
-			                     twistParams.evenAmount, twistParams.rectAmount, twistParams.rect2Amount,
-			                     twistParams.feedbackAmount, &sineShaperFeedbackL, &sineShaperFeedbackR,
-			                     &sound.sineShaper);
+			dsp::sineShapeBuffer(stereo_osc_buffer, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperState,
+			                     sineHarmonic, twistParams.symmetry, sineMix, twistParams.stereoWidth,
+			                     twistParams.stereoFreqMult, twistParams.stereoPhaseOffset, twistParams.evenAmount,
+			                     twistParams.rectAmount, twistParams.rect2Amount, twistParams.feedbackAmount,
+			                     &sound.sineShaper, twistParams.phaseHarmonic);
 		}
 
 		// XY Saturator (per-voice, mod-matrix routable drive)
@@ -1646,10 +1642,10 @@ skipUnisonPart: {}
 			// Mono path: Zone 0 (Asym) works, Zone 1 (Wide stereo) ignored
 			auto twistParams = dsp::computeSineShaperTwistParams(smoothedTwist);
 
-			dsp::sineShapeBuffer(std::span{oscBuffer, n}, sineDrive, &sound.sineShaper.smoothedDrive,
-			                     &sineShaperDcBlockerL, sineHarmonic, twistParams.symmetry, sineMix,
-			                     twistParams.evenAmount, twistParams.rectAmount, twistParams.rect2Amount,
-			                     twistParams.feedbackAmount, &sineShaperFeedbackL, &sound.sineShaper);
+			dsp::sineShapeBuffer(std::span{oscBuffer, n}, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperState,
+			                     sineHarmonic, twistParams.symmetry, sineMix, twistParams.evenAmount,
+			                     twistParams.rectAmount, twistParams.rect2Amount, twistParams.feedbackAmount,
+			                     &sound.sineShaper, twistParams.phaseHarmonic);
 		}
 
 		// XY Saturator (per-voice, mod-matrix routable drive) - mono path

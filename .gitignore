@@ -46,3 +46,6 @@ src/deluge/dsp/compressor/DOTT_VIBE_SATURATION.md
 
 .claude
 CLAUDE.md
+
+# PR documentation (not for commit)
+DYNAMICS_SOUND_DESIGN_PR.md
