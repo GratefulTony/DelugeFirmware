@@ -94,5 +94,6 @@ extern uint32_t z, w, jcong;
 	uint32_t scaledPhase = static_cast<uint32_t>((static_cast<uint64_t>(phase) * phaseScaler) >> 32);
 
 	// Offset so waveform starts at 0 (quarter cycle)
-	return getTriangle(scaledPhase + 0x40000000u);
+	// Use getTriangleSmall for amplitude matching with OscType::TRIANGLE
+	return getTriangleSmall(scaledPhase + 0x40000000u);
 }

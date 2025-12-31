@@ -30,7 +30,7 @@ Oscillator::renderOsc(OscType type, int32_t amplitude, int32_t* bufferStart, int
                       uint32_t phaseIncrement, uint32_t pulseWidth, uint32_t* startPhase, bool applyAmplitude,
                       int32_t amplitudeIncrement, bool doOscSync, uint32_t resetterPhase,
                       uint32_t resetterPhaseIncrement, uint32_t retriggerPhase, int32_t waveIndexIncrement,
-                      int sourceWaveIndexLastTime, WaveTable* waveTable) {
+                      int sourceWaveIndexLastTime, WaveTable* waveTable, uint64_t* prevPhaseScaler) {
 
 	// We save a decent bit of processing power by grabbing a local copy of the phase to work with, and just
 	// incrementing the startPhase once
@@ -285,18 +285,35 @@ skipPastOscSyncStuff:
 
 		uint64_t phaseScaler = computeTrianglePhaseScaler(phaseWidth);
 
+		// Interpolate phaseScaler from previous block to current to avoid crackling during modulation
+		// Only ONE 64-bit division per block (same as before), but now we interpolate per-sample
+		uint64_t phaseScalerNow;
+		int64_t phaseScalerIncrement;
+		if (prevPhaseScaler != nullptr) {
+			phaseScalerNow = *prevPhaseScaler;
+			phaseScalerIncrement = static_cast<int64_t>(phaseScaler - *prevPhaseScaler) / numSamples;
+			*prevPhaseScaler = phaseScaler; // Update for next block
+		}
+		else {
+			// No interpolation available, use constant scaler (original behavior)
+			phaseScalerNow = phaseScaler;
+			phaseScalerIncrement = 0;
+		}
+
 		if (applyAmplitude) {
 			do {
 				phaseNow += phaseIncrement;
 				amplitudeNow += amplitudeIncrement;
-				int32_t value = triangleWithDeadzoneBipolar(phaseNow, phaseWidth, phaseScaler);
+				phaseScalerNow += phaseScalerIncrement;
+				int32_t value = triangleWithDeadzoneBipolar(phaseNow, phaseWidth, phaseScalerNow);
 				*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, value, amplitudeNow);
 			} while (++thisSample != bufferEnd);
 		}
 		else {
 			do {
 				phaseNow += phaseIncrement;
-				int32_t value = triangleWithDeadzoneBipolar(phaseNow, phaseWidth, phaseScaler);
+				phaseScalerNow += phaseScalerIncrement;
+				int32_t value = triangleWithDeadzoneBipolar(phaseNow, phaseWidth, phaseScalerNow);
 				*thisSample = value << 1;
 			} while (++thisSample != bufferEnd);
 		}

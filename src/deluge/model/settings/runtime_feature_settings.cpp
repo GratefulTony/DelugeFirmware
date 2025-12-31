@@ -216,9 +216,9 @@ void RuntimeFeatureSettings::init() {
 	                  STRING_FOR_COMMUNITY_FEATURE_DYNAMICS_FINE_GOLD_KNOB_VIBE, "dynamicsFineGoldKnobVibe",
 	                  RuntimeFeatureStateToggle::On);
 
-	// DOTT Post Mod FX - places DOTT after modulation FX in signal chain (default: before)
-	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DOTTPostModFX], STRING_FOR_COMMUNITY_FEATURE_DOTT_POST_MOD_FX,
-	                  "dottPostModFX", RuntimeFeatureStateToggle::Off);
+	// Mod FX Post DOTT - places modulation FX after DOTT and stutter (default: off, ModFX before stutter/DOTT)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::ModFXPostDOTT], STRING_FOR_COMMUNITY_FEATURE_MOD_FX_POST_DOTT,
+	                  "modFXPostDOTT", RuntimeFeatureStateToggle::Off);
 
 	// DOTT Analyzer - enables/disables the GR meter animation in DOTT menu (default: on)
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DOTTAnalyzer], STRING_FOR_COMMUNITY_FEATURE_DOTT_ANALYZER,

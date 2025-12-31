@@ -1345,7 +1345,8 @@ cantBeDoingOscSyncForFirstOsc:
 					    phaseIncrements[s], pulseWidth, &unisonParts[u].sources[s].oscPos, false, 0,
 					    doingOscSyncThisOscillator, oscSyncPos[u], phaseIncrements[0], sound.oscRetriggerPhase[s],
 					    sourceWaveIndexIncrements[s], sourceWaveIndexesLastTime[s],
-					    static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile));
+					    static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile),
+					    &unisonParts[u].sources[s].prevPhaseScaler);
 
 					// Sine and triangle waves come out bigger in fixed-amplitude rendering (for arbitrary reasons), so
 					// we need to compensate
@@ -1523,7 +1524,7 @@ skipUnisonPart: {}
 			// Harmonic not smoothed: per-sample weight smoothing handles Zone 1/2, zone boundaries allowed to click
 			q31_t smoothedTwist = dsp::smoothParam(&sound.sineShaper.smoothedTwist, sineTwist);
 
-			auto twistParams = dsp::computeSineShaperTwistParams(smoothedTwist);
+			auto twistParams = dsp::computeSineShaperTwistParams(smoothedTwist, &sound.sineShaper);
 
 			// Subtractive mode WITHOUT filters runs at >> 4 attenuation vs FM's << 3 boost
 			// Pre-boost input and post-attenuate wet to normalize waveshaper operating point
@@ -1642,7 +1643,7 @@ skipUnisonPart: {}
 			q31_t smoothedTwist = dsp::smoothParam(&sound.sineShaper.smoothedTwist, sineTwist);
 
 			// Mono path: Zone 0 (Asym) works, Zone 1 (Wide stereo) ignored
-			auto twistParams = dsp::computeSineShaperTwistParams(smoothedTwist);
+			auto twistParams = dsp::computeSineShaperTwistParams(smoothedTwist, &sound.sineShaper);
 
 			// Subtractive mode WITHOUT filters runs at >> 4 attenuation vs FM's << 3 boost
 			// Pre-boost input and post-attenuate wet to normalize waveshaper operating point
@@ -2508,7 +2509,8 @@ dontUseCache: {}
 			    sound.sources[s].oscType, sourceAmplitude, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
 			    pulseWidth, &unisonParts[u].sources[s].oscPos, true, amplitudeIncrement, doOscSync,
 			    oscSyncPosThisUnison, oscSyncPhaseIncrementsThisUnison, oscRetriggerPhase, waveIndexIncrement,
-			    sourceWaveIndexesLastTime[s], static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile));
+			    sourceWaveIndexesLastTime[s], static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile),
+			    &unisonParts[u].sources[s].prevPhaseScaler);
 
 			if (stereoBuffer) {
 				// TODO: if render buffer was typed we could use addPannedMono()

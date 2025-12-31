@@ -27,6 +27,7 @@
 #include "modulation/params/param.h"
 #include "processing/sound/sound.h"
 #include "processing/sound/sound_drum.h"
+#include "util/d_string.h"
 #include <cstdint>
 #include <hid/buttons.h>
 #include <hid/display/display.h>
@@ -114,6 +115,7 @@ protected:
 /// Harmonic zone control - 8 zones with triangle-modulated Chebyshev harmonics
 /// Zone 0: Poly - Cascaded polynomial waveshaping
 /// Zones 1-7: Chebyshev harmonics with triangle modulation
+/// Secret menu: Push encoder to adjust metaPhaseHarmonic (per-patch phase offset)
 class SineShaperHarmonic final : public ZoneBasedUnpatchedParam<params::UNPATCHED_SINE_SHAPER_HARMONIC> {
 public:
 	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
@@ -141,19 +143,34 @@ public:
 		}
 	}
 
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust metaPhaseHarmonic (unbounded, wraps via fmod in DSP)
+			Buttons::selectButtonPressUsedUp = true;
+			float& phase = soundEditor.currentModControllable->sineShaper.metaPhaseHarmonic;
+			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			// Show current value on display
+			char buffer[12];
+			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
+			display->displayPopup(buffer);
+		}
+		else {
+			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
+		}
+	}
+
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
 	}
 };
 
-/// Twist zone control - 8 zones with different modifiers
-/// Zone 0: Asym - DC bias for even harmonics (asymmetric clipping)
-/// Zone 1: Wide - Stereo coefficient spread
-/// Zone 2: Even - Self-mul for even harmonics (3→6, 5→10, 7→14)
-/// Zone 3: Rect - Rectifier blend (pure octave up)
-/// Zone 4: Reserved
-/// Zone 5: Fdbk - Output→input feedback (thickening to chaos)
-/// Zones 6-7: Reserved
+/// Twist zone control - 5 zones with different modifiers
+/// Zone 0: Width - Stereo spread with animated phase evolution
+/// Zone 1: Evens - Asymmetric compression for even harmonics
+/// Zone 2: Rect - Blended rectifier (rect + rect2 with overlap)
+/// Zone 3: Fdbk - Output→input feedback (thickening to chaos)
+/// Zone 4: Twist - Phase modulator for Harmonic zones (meta-control)
+/// Secret menu: Push encoder to adjust metaPhase (per-patch phase offset for meta zone)
 class SineShaperTwist final : public ZoneBasedUnpatchedParam<params::UNPATCHED_SINE_SHAPER_TWIST> {
 public:
 	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
@@ -161,19 +178,33 @@ public:
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
 		case 0:
-			return "Twist";
-		case 1:
 			return "Width";
-		case 2:
+		case 1:
 			return "Evens";
-		case 3:
-			return "Asym";
-		case 4:
+		case 2:
 			return "Rect";
-		case 5:
+		case 3:
 			return "Fdbk";
+		case 4:
+			return "Twist";
 		default:
 			return "---";
+		}
+	}
+
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust metaPhase (unbounded, wraps via fmod in DSP)
+			Buttons::selectButtonPressUsedUp = true;
+			float& phase = soundEditor.currentModControllable->sineShaper.metaPhase;
+			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			// Show current value on display
+			char buffer[12];
+			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
+			display->displayPopup(buffer);
+		}
+		else {
+			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
 		}
 	}
 

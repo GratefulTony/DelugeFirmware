@@ -103,8 +103,9 @@ public:
 			int32_t prevY = mid_y;
 			for (int32_t x = start_x; x <= end_x; x++) {
 				int32_t value = triangleWithDeadzoneBipolar(phase, displayPhaseWidth);
-				// Map value (-0x7FFFFFFF to +0x7FFFFFFF) to y (end_y to start_y)
-				int32_t y = mid_y - ((value >> 24) * half_height >> 7);
+				// Map value (-0x3FFFFFFF to +0x3FFFFFFF) to y (end_y to start_y)
+				// getTriangleSmall outputs half-scale, so shift by 30 total instead of 31
+				int32_t y = mid_y - ((value >> 23) * half_height >> 7);
 				image.drawLine(x - 1, prevY, x, y);
 				prevY = y;
 				phase += phaseInc;

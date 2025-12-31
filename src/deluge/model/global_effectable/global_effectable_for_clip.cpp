@@ -141,7 +141,7 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 		// Harmonic not smoothed: per-sample weight smoothing handles Zone 1/2, zone boundaries allowed to click
 		q31_t smoothedTwist = deluge::dsp::smoothParam(&sineShaper.smoothedTwist, sineTwist);
 
-		auto twistParams = deluge::dsp::computeSineShaperTwistParams(smoothedTwist);
+		auto twistParams = deluge::dsp::computeSineShaperTwistParams(smoothedTwist, &sineShaper);
 
 		deluge::dsp::sineShapeBuffer(global_effectable_audio, sineDrive, &sineShaper.smoothedDrive, &sineShaperState,
 		                             sineHarmonic, sineMix, twistParams, &sineShaper);
@@ -158,9 +158,34 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	// Render FX
 	processSRRAndBitcrushing(global_effectable_audio, &volumePostFX, paramManagerForClip);
 	processDisperser(global_effectable_audio, paramManagerForClip);
-	processFXForGlobalEffectable(global_effectable_audio, &volumePostFX, paramManagerForClip, delayWorkingState,
-	                             renderedLastTime, reverbSendAmount);
+
+	// Check if ModFX should run after DOTT and stutter
+	bool modFXPostDOTT =
+	    runtimeFeatureSettings.get(RuntimeFeatureSettingType::ModFXPostDOTT) == RuntimeFeatureStateToggle::On;
+	bool dottEnabled = multibandCompressor.isEnabled();
+
+	// Default order: ModFX → Stutter → DOTT → Reverb
+	// With ModFXPostDOTT: Stutter → DOTT → ModFX → Reverb
+	if (!modFXPostDOTT) {
+		processFXForGlobalEffectable(global_effectable_audio, &volumePostFX, paramManagerForClip, delayWorkingState,
+		                             renderedLastTime, reverbSendAmount);
+	}
+
 	processStutter(global_effectable_audio, paramManagerForClip);
+
+	// DOTT (multiband compressor) - runs after stutter
+	if (dottEnabled) {
+		applyMultibandCompressorParams(paramManagerForClip);
+		multibandCompressor.setMeteringEnabled(runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DOTTAnalyzer));
+		multibandCompressor.render(global_effectable_audio);
+	}
+
+	// ModFX after DOTT when setting is ON
+	if (modFXPostDOTT) {
+		processFXForGlobalEffectable(global_effectable_audio, &volumePostFX, paramManagerForClip, delayWorkingState,
+		                             renderedLastTime, reverbSendAmount);
+	}
+
 	// record before pan/compression/volume to keep volumes consistent
 	if (recorder != nullptr && recorder->status < RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
 		// we need to double it because for reasons I don't understand audio clips max volume is half the sample volume
@@ -169,14 +194,6 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 
 	processReverbSendAndVolume(global_effectable_audio, reverbBuffer, volumePostFX, postReverbVolume, reverbSendAmount,
 	                           pan, true);
-
-	if (multibandCompressor.isEnabled()) {
-		// DOTT runs when enabled (ModeZone != Off) - acts as a distortion/saturation unit
-		applyMultibandCompressorParams(paramManagerForClip);
-		// Only enable metering calculations when analyzer is visible (saves CPU)
-		multibandCompressor.setMeteringEnabled(runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DOTTAnalyzer));
-		multibandCompressor.render(global_effectable_audio);
-	}
 
 	if (compThreshold > 0) {
 		// Single-band compressor runs when threshold is set

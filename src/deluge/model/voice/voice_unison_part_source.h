@@ -41,6 +41,7 @@ public:
 	uint32_t oscPos; // FKA phase. No longer used for Sample playback / rate conversion position. Only waves, including
 	                 // wavetable.
 	uint32_t phaseIncrementStoredValue;
+	uint64_t prevPhaseScaler{0x100000001ULL}; // Previous scaler for TRIANGLE_PW smoothing (init = full cycle scaler)
 	int32_t carrierFeedback;
 	bool active;
 	VoiceSample* voiceSample = nullptr;

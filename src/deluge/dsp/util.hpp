@@ -43,23 +43,26 @@ constexpr q31_t kDcBlockerAlpha = static_cast<q31_t>(0.000712 * ONE_Q31);
 /// Tames harsh high harmonics in feedback loop
 constexpr q31_t kFeedbackLpfAlpha = static_cast<q31_t>(0.58 * ONE_Q31);
 
-/// Context for per-sample parameter smoothing during buffer processing
-/// Provides click-free parameter interpolation over one buffer
+/// Per-sample IIR alpha for q31 parameter smoothing (~40ms time constant at 44.1kHz)
+/// Matches float kPerSampleAlpha for consistent behavior across q31/float params
+constexpr q31_t kPerSampleAlphaQ31 = static_cast<q31_t>(0.0005 * ONE_Q31);
+
+/// Context for per-sample IIR parameter smoothing during buffer processing
+/// Provides click-free parameter interpolation without linear ramp discontinuities
 struct SmoothingContext {
-	q31_t current;     // Current interpolated value (increment each sample)
-	int32_t increment; // Per-sample increment
-	q31_t target;      // Target smoothed value (write back to state after buffer)
+	q31_t current; // Current smoothed value (IIR update each sample)
+	q31_t alpha;   // Per-sample IIR coefficient
+	q31_t target;  // Target value (write back to state after buffer)
 };
 
-/// Prepare parameter smoothing for buffer processing
+/// Prepare parameter smoothing for per-sample IIR processing
 /// @param state Current smoothed state value
 /// @param target Target parameter value
-/// @param bufferSize Number of samples in buffer
+/// @param bufferSize Number of samples in buffer (unused, kept for API compat)
 /// @return SmoothingContext for use during buffer processing
-inline SmoothingContext prepareSmoothing(q31_t state, q31_t target, size_t bufferSize) {
-	q31_t targetSmoothed = state + multiply_32x32_rshift32(target - state, kSmoothingAlpha) * 2;
-	int32_t increment = (targetSmoothed - state) / static_cast<int32_t>(bufferSize);
-	return {state, increment, targetSmoothed};
+inline SmoothingContext prepareSmoothing(q31_t state, q31_t target, [[maybe_unused]] size_t bufferSize) {
+	// Per-sample IIR smoothing - no intermediate target, smoother convergence
+	return {state, kPerSampleAlphaQ31, target};
 }
 
 /// Simple buffer-rate smoothing (once per buffer, not per-sample)
@@ -72,24 +75,27 @@ inline SmoothingContext prepareSmoothing(q31_t state, q31_t target, size_t buffe
 	return *state;
 }
 
-/// Float version of SmoothingContext for per-sample coefficient interpolation
+/// Float version of SmoothingContext for per-sample IIR coefficient interpolation
 struct FloatSmoothingContext {
-	float current;   // Current interpolated value (increment each sample)
-	float increment; // Per-sample increment
-	float target;    // Target value (write back to state after buffer)
+	float current; // Current smoothed value (IIR update each sample)
+	float alpha;   // Per-sample IIR coefficient
+	float target;  // Target value (write back to state after buffer)
 };
 
-/// Prepare float smoothing for per-sample coefficient interpolation
+/// Per-sample IIR alpha for coefficient smoothing (~40ms time constant at 44.1kHz)
+/// Faster response for snappier knob feel while maintaining smooth transitions
+/// τ = -1 / (fs × ln(1-α)) → α = 1 - exp(-1/(τ × fs))
+/// With τ = 0.04s: α ≈ 0.0005
+constexpr float kPerSampleAlpha = 0.0005f;
+
+/// Prepare float smoothing for per-sample IIR coefficient interpolation
 /// @param state Current smoothed state value
 /// @param target Target coefficient value
-/// @param bufferSize Number of samples in buffer
+/// @param bufferSize Number of samples in buffer (unused, kept for API compat)
 /// @return FloatSmoothingContext for use during buffer processing
-inline FloatSmoothingContext prepareSmoothingFloat(float state, float target, size_t bufferSize) {
-	// Use same alpha as buffer-rate smoothing to determine target
-	constexpr float kAlpha = 0.03f; // Match kSmoothingAlpha
-	float targetSmoothed = state + (target - state) * kAlpha;
-	float increment = (targetSmoothed - state) / static_cast<float>(bufferSize);
-	return {state, increment, targetSmoothed};
+inline FloatSmoothingContext prepareSmoothingFloat(float state, float target, [[maybe_unused]] size_t bufferSize) {
+	// Per-sample IIR smoothing - no intermediate target, smoother convergence
+	return {state, kPerSampleAlpha, target};
 }
 
 /// Float version of buffer-rate smoothing for coefficient smoothing
@@ -304,7 +310,8 @@ inline void foldBufferPolyApproximationSmoothed(std::span<q31_t> buffer, q31_t l
 	auto ctx = prepareSmoothing(*smoothedLevel, level, buffer.size());
 
 	for (auto& sample : buffer) {
-		ctx.current += ctx.increment;
+		// Per-sample IIR update
+		ctx.current += multiply_32x32_rshift32(ctx.target - ctx.current, ctx.alpha) * 2;
 		if (ctx.current > 0) {
 			q31_t fold_level = add_saturate(ctx.current, FOLD_MIN);
 			q31_t x = lshiftAndSaturateUnknown(multiply_32x32_rshift32(fold_level, sample), 8);
@@ -312,7 +319,7 @@ inline void foldBufferPolyApproximationSmoothed(std::span<q31_t> buffer, q31_t l
 		}
 	}
 
-	*smoothedLevel = ctx.target;
+	*smoothedLevel = ctx.current; // Write back final smoothed value
 }
 
 inline void foldBufferPolyApproximationSmoothed(StereoBuffer<q31_t> buffer, q31_t level, q31_t* smoothedLevel) {
@@ -409,7 +416,8 @@ inline void saturateBuffer(std::span<q31_t> buffer, Saturator& saturator, q31_t 
 	auto ctx = prepareSmoothing(*smoothedDrive, drive, buffer.size());
 
 	for (auto& sample : buffer) {
-		ctx.current += ctx.increment;
+		// Per-sample IIR update
+		ctx.current += multiply_32x32_rshift32(ctx.target - ctx.current, ctx.alpha) * 2;
 
 		// Get saturated (wet) signal - prevX enables ADAA when non-null
 		q31_t wet = saturator.process(sample, ctx.current, prevX);
@@ -420,7 +428,7 @@ inline void saturateBuffer(std::span<q31_t> buffer, Saturator& saturator, q31_t 
 		sample = add_saturate(dry, wet);
 	}
 
-	*smoothedDrive = ctx.target;
+	*smoothedDrive = ctx.current; // Write back final smoothed value
 }
 
 /**
@@ -444,7 +452,8 @@ inline void saturateBuffer(StereoBuffer<q31_t> buffer, Saturator& saturator, q31
 	auto ctx = prepareSmoothing(*smoothedDrive, drive, buffer.size());
 
 	for (auto& sample : buffer) {
-		ctx.current += ctx.increment;
+		// Per-sample IIR update
+		ctx.current += multiply_32x32_rshift32(ctx.target - ctx.current, ctx.alpha) * 2;
 
 		// Process left channel - prevXL enables ADAA when non-null
 		q31_t wetL = saturator.process(sample.l, ctx.current, prevXL);
@@ -462,7 +471,7 @@ inline void saturateBuffer(StereoBuffer<q31_t> buffer, Saturator& saturator, q31
 		sample.r = add_saturate(dryR, wetR);
 	}
 
-	*smoothedDrive = ctx.target;
+	*smoothedDrive = ctx.current; // Write back final smoothed value
 }
 
 } // namespace deluge::dsp
