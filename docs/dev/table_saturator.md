@@ -1,8 +1,8 @@
-# Analytic Saturator - Design Document
+# Table Saturator - Design Document
 
 ## Overview
 
-The Analytic Saturator is an experimental Zone 4 addition to the XY Saturator, featuring:
+The Table Saturator is an experimental Zone 4 addition to the XY Saturator, featuring:
 - **3 Basis Functions**: Tanh (warm), Polynomial (bright), Chebyshev T5 (fold/synthy)
 - **ADAA (Antiderivative Antialiasing)**: Reduces aliasing artifacts
 - **Parametric XY Control**: X maps to drive, Y sweeps combinatorically through parameter space
@@ -12,7 +12,7 @@ The Analytic Saturator is an experimental Zone 4 addition to the XY Saturator, f
 
 ### Files
 
-- `src/deluge/dsp/analytic_saturator.h` - Core parametric saturator with ADAA
+- `src/deluge/dsp/table_saturator.h` - Core parametric saturator with ADAA
 - `src/deluge/dsp/saturator.h` - Wrapper class, integrates Zone 4 with existing zones
 - `src/deluge/dsp/fast_math.h` - Fast math approximations (fastTanh, fastExp, etc.)
 - `src/deluge/gui/menu_item/fx/saturator.h` - Menu item with MomentumEncoder
@@ -20,14 +20,14 @@ The Analytic Saturator is an experimental Zone 4 addition to the XY Saturator, f
 
 ### Key Classes
 
-#### AnalyticSaturator
+#### TableSaturator
 Core saturator with cached lookup tables:
 - `fTable_[513]` - f(x) waveshaping function values
 - `FTable_[513]` - F(x) antiderivative values for ADAA
 - Tables regenerate only when parameters change (dirty flag)
 - External state pointer pattern for multi-channel efficiency
 
-#### AnalyticSaturatorXYMapper
+#### TableSaturatorXYMapper
 Derives saturator parameters from XY position using triangle wave phasing:
 - X (0-127): Maps to drive (0 = bypass, 127 = full saturation)
 - Y (0-127): Combinatoric sweep through basis weights, threshold, asymmetry
@@ -56,16 +56,16 @@ The antiderivative is computed via trapezoidal integration during table generati
 
 ### Stereo Handling
 
-One AnalyticSaturator instance (shared tables) with separate ADAA state per channel:
+One TableSaturator instance (shared tables) with separate ADAA state per channel:
 ```cpp
 // In Saturator class:
-AnalyticSaturator analyticSat_;      // Shared tables
-float analyticPrevXL_{0.0f};         // L channel ADAA state
-float analyticPrevXR_{0.0f};         // R channel ADAA state
+TableSaturator tableSat_;      // Shared tables
+float tablePrevXL_{0.0f};      // L channel ADAA state
+float tablePrevXR_{0.0f};      // R channel ADAA state
 
 // In process():
-float* prevXState = (channel == 0) ? &analyticPrevXL_ : &analyticPrevXR_;
-float output = analyticSat_.process(input, prevXState);
+float* prevXState = (channel == 0) ? &tablePrevXL_ : &tablePrevXR_;
+float output = tableSat_.process(input, prevXState);
 ```
 
 ## Zone Layout
@@ -74,7 +74,7 @@ float output = analyticSat_.process(input, prevXState);
 - **Zone 1 (Y 32-63)**: Asymmetric tube (even harmonics)
 - **Zone 2 (Y 64-95)**: Hard clip with linear zone
 - **Zone 3 (Y 96-127)**: Crossover distortion
-- **Zone 4 (Y 128-255)**: Analytic ADAA saturator ("Aanalytic")
+- **Zone 4 (Y 128-255)**: Table-based ADAA saturator
 
 ## Known Issues (WIP)
 

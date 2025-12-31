@@ -103,13 +103,20 @@ inline FloatSmoothingContext prepareSmoothingFloat(float state, float target, si
 // ============================================================================
 // Float Triangle Waveforms
 // ============================================================================
+// Two families of triangle waves:
+//
+// 1. Simple triangle (2 segments per cycle): -1→+1→-1 or 0→1→0
+//    - triangleSimple: phase 0=-1, phase 0.5=+1, phase 1=-1
+//    - triangleSimpleUnipolar: phase 0=0, phase 0.5=1, phase 1=0
+//
+// 2. Sine-like triangle (4 segments per cycle, matches sine zero crossings):
+//    - triangleFloat: 0→+1→0→-1→0 (starts at 0, peak at 0.25)
 
-/// Pure float triangle with deadzone - faster than wrapping q31 version
-/// Used for per-buffer coefficient calculations (sine shaper, multiband, saturator)
+/// Simple unipolar triangle - 2 segments: 0→1→0 (peak at phase=0.5)
 /// @param phase Phase in cycles (wraps automatically via floor)
 /// @param duty Active portion 0.0-1.0 (default 1.0 = full triangle, no deadzone)
 /// @return Output 0.0 to 1.0
-inline float triangleFloat(float phase, float duty = 1.0f) {
+inline float triangleSimpleUnipolar(float phase, float duty = 1.0f) {
 	phase = phase - std::floor(phase); // Wrap to 0-1
 	float halfDuty = duty * 0.5f;
 
@@ -122,12 +129,21 @@ inline float triangleFloat(float phase, float duty = 1.0f) {
 	return 0.0f; // Deadzone
 }
 
-/// Bipolar float triangle with deadzone - returns -1.0 to +1.0
-/// First half of duty is positive (0→+1→0), second half is negative (0→-1→0)
+/// Simple bipolar triangle - 2 segments: -1→+1→-1 (peak at phase=0.5)
+/// This is the shape multiband compressor uses for OWLTT oscillations.
 /// @param phase Phase in cycles (wraps automatically)
-/// @param duty Active portion 0.0-1.0 (split evenly between positive and negative)
+/// @param duty Active portion 0.0-1.0 (default 1.0 = full triangle, no deadzone)
 /// @return Output -1.0 to +1.0
-inline float triangleBipolarFloat(float phase, float duty = 1.0f) {
+[[gnu::always_inline]] inline float triangleSimple(float phase, float duty = 1.0f) {
+	return triangleSimpleUnipolar(phase, duty) * 2.0f - 1.0f;
+}
+
+/// Sine-like bipolar triangle - 4 segments: 0→+1→0→-1→0
+/// Matches sine wave zero crossings: starts at 0, peak at 0.25, zero at 0.5, trough at 0.75
+/// @param phase Phase in cycles (wraps automatically)
+/// @param duty Active portion 0.0-1.0 (default 1.0 = full wave, no deadzone)
+/// @return Output -1.0 to +1.0
+inline float triangleFloat(float phase, float duty = 1.0f) {
 	phase = phase - std::floor(phase);
 	float quarterDuty = duty * 0.25f;
 	float halfDuty = duty * 0.5f;
@@ -145,6 +161,59 @@ inline float triangleBipolarFloat(float phase, float duty = 1.0f) {
 		return -(duty - phase) / quarterDuty; // Rising negative: -1→0
 	}
 	return 0.0f; // Deadzone
+}
+
+// ============================================================================
+// Multi-Zone Knob Helpers
+// ============================================================================
+// Utilities for parameters that divide their range into discrete zones,
+// each with distinct behavior. Used by sine shaper, multiband compressor,
+// analytic saturator, etc.
+
+/// Result of zone calculation - index and position within zone
+struct ZoneInfo {
+	int32_t index;  ///< Zone index (0 to numZones-1)
+	float position; ///< Position within zone (0.0 to 1.0)
+};
+
+/// Normalize q31 parameter to 0.0-1.0 float
+[[gnu::always_inline]] inline float normalizeQ31(q31_t value) {
+	return static_cast<float>(value) / static_cast<float>(ONE_Q31);
+}
+
+/// Compute zone index and position from normalized parameter (0.0-1.0)
+/// @param normalized Parameter value normalized to 0.0-1.0 range
+/// @param numZones Number of zones (typically 8)
+/// @return ZoneInfo with index (0 to numZones-1) and position (0.0-1.0)
+[[gnu::always_inline]] inline ZoneInfo computeZone(float normalized, int32_t numZones) {
+	float zoneFloat = normalized * static_cast<float>(numZones);
+	int32_t index = std::min(numZones - 1, static_cast<int32_t>(zoneFloat));
+	float position = zoneFloat - static_cast<float>(index);
+	return {index, position};
+}
+
+/// Compute zone index and position directly from q31 parameter
+/// @param param Parameter value in q31 format (0 to ONE_Q31)
+/// @param numZones Number of zones (typically 8)
+/// @return ZoneInfo with index (0 to numZones-1) and position (0.0-1.0)
+[[gnu::always_inline]] inline ZoneInfo computeZoneQ31(q31_t param, int32_t numZones) {
+	return computeZone(normalizeQ31(param), numZones);
+}
+
+/// Convert zone position (0.0-1.0) to display value (0-127)
+[[gnu::always_inline]] inline int32_t zonePositionToDisplay(float position) {
+	return static_cast<int32_t>(position * 127.0f);
+}
+
+/// Compute position within a specific zone from global normalized position
+/// @param normalized Global parameter value (0.0-1.0)
+/// @param zoneIndex Target zone index
+/// @param numZones Total number of zones
+/// @return Position within zone (0.0-1.0), clamped
+[[gnu::always_inline]] inline float positionInZone(float normalized, int32_t zoneIndex, int32_t numZones) {
+	float zoneSize = 1.0f / static_cast<float>(numZones);
+	float zoneStart = static_cast<float>(zoneIndex) * zoneSize;
+	return std::clamp((normalized - zoneStart) / zoneSize, 0.0f, 1.0f);
 }
 
 // ============================================================================

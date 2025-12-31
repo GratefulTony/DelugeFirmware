@@ -2585,7 +2585,7 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, deluge::dsp::Stere
 
 	// Pre-modFX DOTT processing (when DOTTPostModFX is OFF)
 	if (!dottPostModFX && dottEnabled) {
-		multibandCompressor.render(sound_stereo, postFXVolume);
+		multibandCompressor.render(sound_stereo);
 	}
 
 	processFX(sound_stereo, modFXType_, modFXRate, modFXDepth, delayWorkingState, &postFXVolume, paramManager,
@@ -2596,7 +2596,7 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, deluge::dsp::Stere
 
 	// Post-modFX DOTT processing (when DOTTPostModFX is ON)
 	if (dottPostModFX && dottEnabled) {
-		multibandCompressor.render(sound_stereo, postFXVolume);
+		multibandCompressor.render(sound_stereo);
 	}
 
 	// Original single-band compressor (independent of DOTT)

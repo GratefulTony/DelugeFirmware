@@ -124,7 +124,7 @@ protected:
 	}
 
 private:
-	mutable MomentumEncoder velocity_;
+	mutable VelocityEncoder velocity_;
 
 	// Zone names reflecting the 6 basis functions explored across Y axis
 	// Basis functions: Tanh(warm), Poly(bright), HardKnee(clip), Cheby(fold), SineFold(gold), Rect(diode)

@@ -19,7 +19,6 @@
 
 #include "dsp/fast_math.h"
 #include "util/fixedpoint.h"
-#include "util/waves.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -28,34 +27,62 @@
 namespace deluge::dsp {
 
 /**
- * Analytic Parametric Saturator with ADAA (Antiderivative Antialiasing)
+ * Parameters for table-based saturator - consolidated for efficient passing
+ *
+ * All parameters are normalized 0-1 range:
+ * - drive: Overall intensity (0 = bypass)
+ * - tanhWeight: Tanh basis weight (warm, smooth)
+ * - polyWeight: Polynomial basis weight (bright, edgy)
+ * - hardKneeWeight: Hard knee basis weight (crisp, aggressive)
+ * - chebyWeight: Chebyshev T5 basis weight (fold, synthy)
+ * - sineFoldWeight: Sine folder basis weight (harmonic-rich)
+ * - rectifierWeight: Rectifier basis weight (diode, asymmetric)
+ * - threshold: Linear zone size (1 = all linear, 0 = always saturate)
+ * - asymmetry: Even harmonics (0.5 = symmetric)
+ */
+struct SaturatorParams {
+	float drive{0.0f};
+	float tanhWeight{1.0f};
+	float polyWeight{0.0f};
+	float hardKneeWeight{0.0f};
+	float chebyWeight{0.0f};
+	float sineFoldWeight{0.0f};
+	float rectifierWeight{0.0f};
+	float threshold{1.0f};
+	float asymmetry{0.5f};
+
+	/// Clamp all parameters to valid 0-1 range
+	void clamp() {
+		drive = std::clamp(drive, 0.0f, 1.0f);
+		tanhWeight = std::clamp(tanhWeight, 0.0f, 1.0f);
+		polyWeight = std::clamp(polyWeight, 0.0f, 1.0f);
+		hardKneeWeight = std::clamp(hardKneeWeight, 0.0f, 1.0f);
+		chebyWeight = std::clamp(chebyWeight, 0.0f, 1.0f);
+		sineFoldWeight = std::clamp(sineFoldWeight, 0.0f, 1.0f);
+		rectifierWeight = std::clamp(rectifierWeight, 0.0f, 1.0f);
+		threshold = std::clamp(threshold, 0.0f, 1.0f);
+		asymmetry = std::clamp(asymmetry, 0.0f, 1.0f);
+	}
+
+	bool operator!=(const SaturatorParams& o) const {
+		return drive != o.drive || tanhWeight != o.tanhWeight || polyWeight != o.polyWeight
+		       || hardKneeWeight != o.hardKneeWeight || chebyWeight != o.chebyWeight
+		       || sineFoldWeight != o.sineFoldWeight || rectifierWeight != o.rectifierWeight || threshold != o.threshold
+		       || asymmetry != o.asymmetry;
+	}
+};
+
+/**
+ * Table-based Parametric Saturator with ADAA (Antiderivative Antialiasing)
  *
  * Features:
- * - 6 basis functions for rich harmonic exploration:
- *   1. Tanh (warm) - smooth saturation, odd harmonics
- *   2. Polynomial (bright) - soft clip x - x³/3, edgy character
- *   3. Hard knee (crisp) - aggressive limiting with sharp transition
- *   4. Chebyshev T5 (fold) - wavefolder, adds 5th harmonic richness
- *   5. Sine folder (synth) - sin(πx/2), smooth harmonic-rich folding
- *   6. Rectifier (diode) - asymmetric half-wave, even harmonics
+ * - 6 basis functions for rich harmonic exploration
  * - Drive parameter where 0 = linear bypass (transparent)
- * - Separate weights for each basis function (combinatoric via parameter phasing)
+ * - Separate weights for each basis function
  * - Cached f(x) and F(x) tables for fast lookup
- * - Tables only regenerate when parameters change
  * - First-order ADAA using cached antiderivative table
- *
- * Parameters:
- * - drive (0-1): Overall intensity, 0 = bypass
- * - tanhWeight (0-1): Weight for tanh basis (warm, smooth)
- * - polyWeight (0-1): Weight for polynomial basis (bright, edgy)
- * - hardKneeWeight (0-1): Weight for hard knee basis (crisp, aggressive)
- * - chebyWeight (0-1): Weight for Chebyshev T5 basis (fold, synthy)
- * - sineFoldWeight (0-1): Weight for sine folder basis (harmonic-rich)
- * - rectifierWeight (0-1): Weight for rectifier basis (diode, asymmetric)
- * - threshold (0-1): Linear zone size (1=all linear, 0=always saturate)
- * - asymmetry (0-1): Even harmonics (0.5=symmetric)
  */
-class AnalyticSaturator {
+class TableSaturator {
 public:
 	// =============================================================================
 	// A/B TEST CONFIGURATION - Change these for testing different modes
@@ -72,120 +99,23 @@ public:
 	static constexpr size_t kTableMask = kTableSize - 1;
 	static constexpr float kTableScale = static_cast<float>(kTableSize) / 2.0f;
 
-	AnalyticSaturator() { regenerateTables(); }
+	TableSaturator() { regenerateTables(); }
 
-	/// Set drive (0 = linear bypass, 1 = full saturation)
-	void setDrive(float drive) {
-		drive = std::clamp(drive, 0.0f, 1.0f);
-		if (drive != drive_) {
-			drive_ = drive;
+	/// Set all parameters at once using struct
+	void setParameters(const SaturatorParams& p) {
+		SaturatorParams clamped = p;
+		clamped.clamp();
+		if (clamped != params_) {
+			params_ = clamped;
 			tablesDirty_ = true;
 		}
 	}
 
-	/// Set tanh basis weight (warm, smooth saturation)
-	void setTanhWeight(float weight) {
-		weight = std::clamp(weight, 0.0f, 1.0f);
-		if (weight != tanhWeight_) {
-			tanhWeight_ = weight;
-			tablesDirty_ = true;
-		}
-	}
-
-	/// Set polynomial basis weight (bright, edgy saturation)
-	void setPolyWeight(float weight) {
-		weight = std::clamp(weight, 0.0f, 1.0f);
-		if (weight != polyWeight_) {
-			polyWeight_ = weight;
-			tablesDirty_ = true;
-		}
-	}
-
-	/// Set hard knee basis weight (crisp, aggressive limiting)
-	void setHardKneeWeight(float weight) {
-		weight = std::clamp(weight, 0.0f, 1.0f);
-		if (weight != hardKneeWeight_) {
-			hardKneeWeight_ = weight;
-			tablesDirty_ = true;
-		}
-	}
-
-	/// Set Chebyshev T5 basis weight (fold, synthy waveshape)
-	void setChebyWeight(float weight) {
-		weight = std::clamp(weight, 0.0f, 1.0f);
-		if (weight != chebyWeight_) {
-			chebyWeight_ = weight;
-			tablesDirty_ = true;
-		}
-	}
-
-	/// Set sine folder basis weight (harmonic-rich folding)
-	void setSineFoldWeight(float weight) {
-		weight = std::clamp(weight, 0.0f, 1.0f);
-		if (weight != sineFoldWeight_) {
-			sineFoldWeight_ = weight;
-			tablesDirty_ = true;
-		}
-	}
-
-	/// Set rectifier basis weight (diode-like asymmetric)
-	void setRectifierWeight(float weight) {
-		weight = std::clamp(weight, 0.0f, 1.0f);
-		if (weight != rectifierWeight_) {
-			rectifierWeight_ = weight;
-			tablesDirty_ = true;
-		}
-	}
-
-	/// Set threshold for linear zone (1 = all linear, 0 = no linear zone)
-	void setThreshold(float threshold) {
-		threshold = std::clamp(threshold, 0.0f, 1.0f);
-		if (threshold != threshold_) {
-			threshold_ = threshold;
-			tablesDirty_ = true;
-		}
-	}
-
-	/// Set asymmetry (0.5 = symmetric, 0 or 1 = asymmetric/even harmonics)
-	void setAsymmetry(float asymmetry) {
-		asymmetry = std::clamp(asymmetry, 0.0f, 1.0f);
-		if (asymmetry != asymmetry_) {
-			asymmetry_ = asymmetry;
-			tablesDirty_ = true;
-		}
-	}
-
-	/// Set all parameters at once (more efficient than individual setters)
-	void setParameters(float drive, float tanhWeight, float polyWeight, float hardKneeWeight, float chebyWeight,
-	                   float sineFoldWeight, float rectifierWeight, float threshold, float asymmetry) {
-		drive = std::clamp(drive, 0.0f, 1.0f);
-		tanhWeight = std::clamp(tanhWeight, 0.0f, 1.0f);
-		polyWeight = std::clamp(polyWeight, 0.0f, 1.0f);
-		hardKneeWeight = std::clamp(hardKneeWeight, 0.0f, 1.0f);
-		chebyWeight = std::clamp(chebyWeight, 0.0f, 1.0f);
-		sineFoldWeight = std::clamp(sineFoldWeight, 0.0f, 1.0f);
-		rectifierWeight = std::clamp(rectifierWeight, 0.0f, 1.0f);
-		threshold = std::clamp(threshold, 0.0f, 1.0f);
-		asymmetry = std::clamp(asymmetry, 0.0f, 1.0f);
-
-		if (drive != drive_ || tanhWeight != tanhWeight_ || polyWeight != polyWeight_
-		    || hardKneeWeight != hardKneeWeight_ || chebyWeight != chebyWeight_ || sineFoldWeight != sineFoldWeight_
-		    || rectifierWeight != rectifierWeight_ || threshold != threshold_ || asymmetry != asymmetry_) {
-			drive_ = drive;
-			tanhWeight_ = tanhWeight;
-			polyWeight_ = polyWeight;
-			hardKneeWeight_ = hardKneeWeight;
-			chebyWeight_ = chebyWeight;
-			sineFoldWeight_ = sineFoldWeight;
-			rectifierWeight_ = rectifierWeight;
-			threshold_ = threshold;
-			asymmetry_ = asymmetry;
-			tablesDirty_ = true;
-		}
-	}
+	/// Get current parameters
+	[[nodiscard]] const SaturatorParams& getParameters() const { return params_; }
 
 	/// Check if effect is effectively bypassed (transparent)
-	[[nodiscard]] bool isLinear() const { return drive_ < 0.001f || threshold_ > 0.999f; }
+	[[nodiscard]] bool isLinear() const { return params_.drive < 0.001f || params_.threshold > 0.999f; }
 
 	/// Process a single sample with ADAA (uses internal state)
 	/// @param x Input sample in range [-1, 1]
@@ -193,7 +123,7 @@ public:
 	[[gnu::always_inline]] float process(float x) { return process(x, &prevX_); }
 
 	/// Process a single sample with ADAA using external state
-	/// This allows one AnalyticSaturator (one set of tables) to serve multiple channels
+	/// This allows one TableSaturator (one set of tables) to serve multiple channels
 	/// @param x Input sample in range [-1, 1]
 	/// @param prevXState Pointer to previous sample state (updated in place)
 	/// @return Processed sample (peak-normalized)
@@ -325,16 +255,6 @@ public:
 		tablesDirty_ = true;
 	}
 
-	/// Get current parameters
-	[[nodiscard]] float getDrive() const { return drive_; }
-	[[nodiscard]] float getTanhWeight() const { return tanhWeight_; }
-	[[nodiscard]] float getPolyWeight() const { return polyWeight_; }
-	[[nodiscard]] float getHardKneeWeight() const { return hardKneeWeight_; }
-	[[nodiscard]] float getChebyWeight() const { return chebyWeight_; }
-	[[nodiscard]] float getSineFoldWeight() const { return sineFoldWeight_; }
-	[[nodiscard]] float getRectifierWeight() const { return rectifierWeight_; }
-	[[nodiscard]] float getThreshold() const { return threshold_; }
-	[[nodiscard]] float getAsymmetry() const { return asymmetry_; }
 	[[nodiscard]] float getNormalizationGain() const { return normalizationGain_; }
 
 private:
@@ -357,20 +277,20 @@ private:
 
 		// Compute effective parameters
 		// Drive affects steepness (k) and threshold reduction
-		float k = 1.0f + drive_ * 9.0f;                // Steepness: 1 to 10
-		float T = threshold_ * (1.0f - drive_ * 0.8f); // Threshold shrinks with drive
-		T = std::fmax(T, 0.05f);                       // Never fully zero
+		float k = 1.0f + params_.drive * 9.0f;                       // Steepness: 1 to 10
+		float T = params_.threshold * (1.0f - params_.drive * 0.8f); // Threshold shrinks with drive
+		T = std::fmax(T, 0.05f);                                     // Never fully zero
 
 		// Asymmetry ratio for positive vs negative
-		float asymRatio = 0.5f + asymmetry_; // 0.5 to 1.5
+		float asymRatio = 0.5f + params_.asymmetry; // 0.5 to 1.5
 
 		// Precompute inverse normalization factors for tanh (using fast approximation)
 		float invTanhNormPos = 1.0f / std::fmax(0.01f, fastTanh(k * asymRatio));
 		float invTanhNormNeg = 1.0f / std::fmax(0.01f, fastTanh(k * (2.0f - asymRatio)));
 
 		// Precompute weight normalization for all 6 basis functions
-		float weightSum =
-		    tanhWeight_ + polyWeight_ + hardKneeWeight_ + chebyWeight_ + sineFoldWeight_ + rectifierWeight_;
+		float weightSum = params_.tanhWeight + params_.polyWeight + params_.hardKneeWeight + params_.chebyWeight
+		                  + params_.sineFoldWeight + params_.rectifierWeight;
 		float invWeightSum = (weightSum > 0.001f) ? (1.0f / weightSum) : 1.0f;
 		bool hasWeights = (weightSum >= 0.001f);
 
@@ -400,7 +320,7 @@ private:
 				// At drive=1: intensity=2 (2x overdrive, moderate saturation)
 				// This pushes the input beyond 1.0 to create actual clipping/folding
 				// ==========================================================
-				float intensity = 1.0f + drive_ * 1.0f;
+				float intensity = 1.0f + params_.drive * 1.0f;
 				float overdriven = norm * intensity;
 
 				// Asymmetric k for positive/negative
@@ -453,8 +373,8 @@ private:
 				// tanh(x/a)*sin(b*x)/y + tanh(x) with multiple folds
 				// Higher frequency sine for richer harmonics
 				// =========================================================
-				constexpr float kSineFoldA = 0.4f;                      // Tanh envelope softness
-				float sineFoldB = 3.14159265f * (1.0f + drive_ * 1.0f); // 1-2 folds
+				constexpr float kSineFoldA = 0.4f;                             // Tanh envelope softness
+				float sineFoldB = 3.14159265f * (1.0f + params_.drive * 1.0f); // 1-2 folds
 				float sineFold_raw =
 				    fastTanh(overdriven / kSineFoldA) * std::sin(sineFoldB * overdriven) + fastTanh(overdriven) * 0.3f;
 				float sineFold_out = std::fabs(sineFold_raw);
@@ -464,7 +384,7 @@ private:
 				// BASIS 6: Rectifier (diode) - asymmetric, even harmonics
 				// Full-wave rectifier with variable bias for rich even harmonics
 				// =========================================================
-				float bias = 0.2f * drive_; // Adds DC offset for even harmonics
+				float bias = 0.2f * params_.drive; // Adds DC offset for even harmonics
 				float rect_raw = std::fabs(overdriven + bias) - bias;
 				float rect_out = fastTanh(rect_raw * 2.0f); // Soft limit
 
@@ -474,10 +394,10 @@ private:
 					basis_out = norm;
 				}
 				else {
-					basis_out =
-					    (tanh_out * tanhWeight_ + poly_out * polyWeight_ + hardClip_out * hardKneeWeight_
-					     + cheby_out * chebyWeight_ + sineFold_out * sineFoldWeight_ + rect_out * rectifierWeight_)
-					    * invWeightSum;
+					basis_out = (tanh_out * params_.tanhWeight + poly_out * params_.polyWeight
+					             + hardClip_out * params_.hardKneeWeight + cheby_out * params_.chebyWeight
+					             + sineFold_out * params_.sineFoldWeight + rect_out * params_.rectifierWeight)
+					            * invWeightSum;
 				}
 
 				// ==========================================================
@@ -486,7 +406,7 @@ private:
 				// At drive=1: output = basis_out (full nonlinear character)
 				// This unifies X-axis control across all basis functions
 				// ==========================================================
-				basis_out = norm + (basis_out - norm) * drive_;
+				basis_out = norm + (basis_out - norm) * params_.drive;
 
 				// Map back to output range
 				f_val = sign * (T + (1.0f - T) * std::fabs(basis_out));
@@ -616,16 +536,8 @@ private:
 	std::array<float, kTableSize + 1> fTable_{}; // f(x) values
 	std::array<float, kTableSize + 1> FTable_{}; // F(x) antiderivative values
 
-	// Parameters
-	float drive_{0.0f};
-	float tanhWeight_{1.0f}; // Default to pure tanh (warm)
-	float polyWeight_{0.0f};
-	float hardKneeWeight_{0.0f};
-	float chebyWeight_{0.0f};
-	float sineFoldWeight_{0.0f};
-	float rectifierWeight_{0.0f};
-	float threshold_{1.0f};
-	float asymmetry_{0.5f};
+	// Parameters (consolidated struct)
+	SaturatorParams params_;
 
 	// State
 	bool tablesDirty_{true};
@@ -650,7 +562,7 @@ private:
  *
  * Result: distinct character zones at low Y, fragmented/chaotic at high Y
  */
-struct AnalyticSaturatorXYMapper {
+struct TableSaturatorXYMapper {
 	// =================================================================
 	// Duty cycle controls the active/gap ratio of basis oscillators
 	// 0.25 = 25% active, 75% gap (very sparse, distinct characters)
@@ -660,88 +572,50 @@ struct AnalyticSaturatorXYMapper {
 	// =================================================================
 	static constexpr float kPhaseWidth = 0.5f;
 
-	/// PhaseWidth-controlled triangle wave with dead zones
-	/// Wrapper for triangleWithDeadzone from util/waves.h
-	/// @param phase Float phase (0-N cycles, wraps naturally)
+	/// Pure float triangle wave with dead zones (2-segment unipolar: 0→1→0)
+	/// @param phase Float phase (0-N cycles, wraps via floor)
 	/// @param width Active portion (0-1), rest is dead zone at 0
 	/// @return Float value 0-1
 	static float triangle(float phase, float width = kPhaseWidth) {
-		constexpr float kPhaseScale = 4294967296.0f;
-		constexpr float kInvQ31 = 1.0f / static_cast<float>(0x7FFFFFFF);
-		// Wrap to [0,1) before scaling to avoid UB from float->uint32 overflow
-		phase = std::fmod(phase, 1.0f);
-		if (phase < 0.0f) {
-			phase += 1.0f;
+		phase = phase - std::floor(phase); // Wrap to [0,1)
+		float halfWidth = width * 0.5f;
+		if (phase < halfWidth) {
+			return phase / halfWidth; // Rising: 0→1
 		}
-		uint32_t phaseU32 = static_cast<uint32_t>(phase * kPhaseScale);
-		// width is fraction of cycle that's active
-		uint32_t phaseWidth = static_cast<uint32_t>(width * 4294967295.0f);
-		return static_cast<float>(triangleWithDeadzone(phaseU32, phaseWidth)) * kInvQ31;
+		else if (phase < width) {
+			return (width - phase) / halfWidth; // Falling: 1→0
+		}
+		return 0.0f; // Dead zone
 	}
 
 	/// Derive parameters from X (0-127) and Y (0-1023) with combinatoric sweep
 	/// @param x X position (0-127), maps to drive (0 = linear bypass)
 	/// @param y Y position (0-1023), creates high-res combinatoric parameter sweep
-	/// @param outDrive Output drive parameter
-	/// @param outTanhWeight Output tanh basis weight (warm)
-	/// @param outPolyWeight Output polynomial basis weight (bright)
-	/// @param outHardKneeWeight Output hard knee basis weight (crisp)
-	/// @param outChebyWeight Output Chebyshev T5 basis weight (fold)
-	/// @param outSineFoldWeight Output sine folder basis weight (gold)
-	/// @param outRectifierWeight Output rectifier basis weight (diode)
-	/// @param outThreshold Output threshold parameter
-	/// @param outAsymmetry Output asymmetry parameter
-	static void deriveParameters(uint8_t x, uint16_t y, float& outDrive, float& outTanhWeight, float& outPolyWeight,
-	                             float& outHardKneeWeight, float& outChebyWeight, float& outSineFoldWeight,
-	                             float& outRectifierWeight, float& outThreshold, float& outAsymmetry) {
-		// X maps directly to drive (0 = bypass/linear, 127 = full)
-		outDrive = static_cast<float>(x) / 127.0f;
+	/// @return SaturatorParams with all derived values
+	static SaturatorParams deriveParameters(uint8_t x, uint16_t y) {
+		SaturatorParams p;
+		p.drive = static_cast<float>(x) / 127.0f;
 
-		// Y creates combinatoric sweep using triangle waves with different periods
-		// 1024 steps for high-resolution zone exploration
 		float yNorm = static_cast<float>(y) / 1023.0f;
 
-		// =================================================================
-		// Accelerating interference pattern: frequency increases with Y
-		// At Y=0: slow, gradual parameter changes (easy to find sweet spots)
-		// At Y=1023: fast, chaotic interference (rich exploration)
-		// freq(y) = base_freq * (1 + y² * accel), quadratic for smooth ramp
-		// =================================================================
-		constexpr float kAccelFactor = 3.0f; // Max 4x frequency at Y=1023
+		// Accelerating interference: slow at Y=0, fast at Y=1023
+		constexpr float kAccelFactor = 3.0f;
 		float freqMult = 1.0f + yNorm * yNorm * kAccelFactor;
 
-		// =================================================================
 		// 6 Basis weights with irrational period ratios for dense coverage
-		// Each basis has a unique period ensuring all combinations are explored
-		// =================================================================
+		p.tanhWeight = 0.2f + triangle(yNorm * 3.0f * freqMult) * 0.8f;
+		p.polyWeight = triangle(yNorm * 2.718f * freqMult + 0.167f);
+		p.hardKneeWeight = triangle(yNorm * 2.236f * freqMult + 0.333f);
+		p.chebyWeight = triangle(yNorm * 3.14159f * freqMult + 0.5f);
+		p.sineFoldWeight = triangle(yNorm * 2.618f * freqMult + 0.667f);
+		p.rectifierWeight = triangle(yNorm * 1.732f * freqMult + 0.833f);
 
-		// Basis 1: Tanh (warm) - period 3, always has minimum weight for smooth foundation
-		outTanhWeight = 0.2f + triangle(yNorm * 3.0f * freqMult) * 0.8f; // 0.2 to 1.0
+		p.threshold = triangle(yNorm * 2.5f * freqMult + 0.25f);
 
-		// Basis 2: Polynomial (bright) - period e (2.718)
-		outPolyWeight = triangle(yNorm * 2.718f * freqMult + 0.167f); // 0 to 1.0
-
-		// Basis 3: Hard knee (crisp) - period √5 (2.236)
-		outHardKneeWeight = triangle(yNorm * 2.236f * freqMult + 0.333f); // 0 to 1.0
-
-		// Basis 4: Chebyshev T5 (fold) - period π (3.14159)
-		outChebyWeight = triangle(yNorm * 3.14159f * freqMult + 0.5f); // 0 to 1.0
-
-		// Basis 5: Sine folder/Gold (harmonic) - period φ² (2.618)
-		outSineFoldWeight = triangle(yNorm * 2.618f * freqMult + 0.667f); // 0 to 1.0
-
-		// Basis 6: Rectifier (diode) - period √3 (1.732)
-		outRectifierWeight = triangle(yNorm * 1.732f * freqMult + 0.833f); // 0 to 1.0
-
-		// Threshold: period ~2.5, also accelerates
-		// Interacts with basis weights to create soft/hard variants
-		outThreshold = triangle(yNorm * 2.5f * freqMult + 0.25f);
-
-		// Asymmetry: period φ (1.618, golden ratio), slower acceleration
-		// Subtle parameter, uses sqrt of freqMult for gentler variation
 		float asymFreqMult = 1.0f + yNorm * yNorm * (kAccelFactor * 0.5f);
-		float asymPhase = triangle(yNorm * 1.618f * asymFreqMult);
-		outAsymmetry = 0.3f + asymPhase * 0.4f; // Range 0.3 to 0.7 (subtle asymmetry)
+		p.asymmetry = 0.3f + triangle(yNorm * 1.618f * asymFreqMult) * 0.4f;
+
+		return p;
 	}
 
 	/// Derive parameters with phase offsets for DOTT vibe/feel integration
@@ -749,31 +623,30 @@ struct AnalyticSaturatorXYMapper {
 	/// @param y Y position (0-1023)
 	/// @param phaseOffset Phase offset for parameter interference (from vibe knob)
 	/// @param periodScale Period scaling for parameter sweep rate (from feel knob)
-	static void deriveParametersWithPhase(uint8_t x, uint16_t y, float phaseOffset, float periodScale, float& outDrive,
-	                                      float& outTanhWeight, float& outPolyWeight, float& outHardKneeWeight,
-	                                      float& outChebyWeight, float& outSineFoldWeight, float& outRectifierWeight,
-	                                      float& outThreshold, float& outAsymmetry) {
-		outDrive = static_cast<float>(x) / 127.0f;
+	/// @return SaturatorParams with all derived values
+	static SaturatorParams deriveParametersWithPhase(uint8_t x, uint16_t y, float phaseOffset, float periodScale) {
+		SaturatorParams p;
+		p.drive = static_cast<float>(x) / 127.0f;
 
 		float yNorm = static_cast<float>(y) / 1023.0f;
 
-		// Accelerating frequency: slow at Y=0, fast at Y=1023
 		constexpr float kAccelFactor = 3.0f;
 		float freqMult = 1.0f + yNorm * yNorm * kAccelFactor;
 
 		// Apply phase offsets and period scaling for interference patterns
-		// Phase offsets create evolving timbral changes under automation
-		outTanhWeight = 0.2f + triangle(yNorm * 3.0f * freqMult * periodScale + phaseOffset * 0.0f) * 0.8f;
-		outPolyWeight = triangle(yNorm * 2.718f * freqMult * periodScale + phaseOffset * 0.167f);
-		outHardKneeWeight = triangle(yNorm * 2.236f * freqMult * periodScale + phaseOffset * 0.333f);
-		outChebyWeight = triangle(yNorm * 3.14159f * freqMult * periodScale + phaseOffset * 0.5f);
-		outSineFoldWeight = triangle(yNorm * 2.618f * freqMult * periodScale + phaseOffset * 0.667f);
-		outRectifierWeight = triangle(yNorm * 1.732f * freqMult * periodScale + phaseOffset * 0.833f);
+		p.tanhWeight = 0.2f + triangle(yNorm * 3.0f * freqMult * periodScale + phaseOffset * 0.0f) * 0.8f;
+		p.polyWeight = triangle(yNorm * 2.718f * freqMult * periodScale + phaseOffset * 0.167f);
+		p.hardKneeWeight = triangle(yNorm * 2.236f * freqMult * periodScale + phaseOffset * 0.333f);
+		p.chebyWeight = triangle(yNorm * 3.14159f * freqMult * periodScale + phaseOffset * 0.5f);
+		p.sineFoldWeight = triangle(yNorm * 2.618f * freqMult * periodScale + phaseOffset * 0.667f);
+		p.rectifierWeight = triangle(yNorm * 1.732f * freqMult * periodScale + phaseOffset * 0.833f);
 
-		outThreshold = triangle(yNorm * 2.5f * freqMult * periodScale + phaseOffset * 0.25f);
+		p.threshold = triangle(yNorm * 2.5f * freqMult * periodScale + phaseOffset * 0.25f);
+
 		float asymFreqMult = 1.0f + yNorm * yNorm * (kAccelFactor * 0.5f);
-		float asymPhase = triangle(yNorm * 1.618f * asymFreqMult * periodScale + phaseOffset * 0.618f);
-		outAsymmetry = 0.3f + asymPhase * 0.4f;
+		p.asymmetry = 0.3f + triangle(yNorm * 1.618f * asymFreqMult * periodScale + phaseOffset * 0.618f) * 0.4f;
+
+		return p;
 	}
 };
 

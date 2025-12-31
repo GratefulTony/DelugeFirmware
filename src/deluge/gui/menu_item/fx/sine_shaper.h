@@ -121,21 +121,21 @@ public:
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
 		case 0:
-			return "Poly";
-		case 1:
 			return "3579"; // T3, T5, T7/T9 blend with unbounded output (edgy)
-		case 2:
+		case 1:
 			return "3579wm"; // T3, T5, T7/T9 with sine input waveshaping (warm)
+		case 2:
+			return "FM"; // Add, Ring, FM, Fold at 2x
 		case 3:
-			return "FM"; // Cascaded sine waveshaping
+			return "Fold"; // Wavefolder k=1,2,3,4
 		case 4:
-			return "Cheby 5";
+			return "Ring"; // Ring mod n=2,3,4,5
 		case 5:
-			return "Cheby 7";
+			return "Add"; // Additive n=2,3,4,5
 		case 6:
-			return "Chaos";
+			return "Mod"; // FM depths d=0.25,0.5,0.75,1.0
 		case 7:
-			return "---";
+			return "Poly"; // Cascaded polynomial waveshaping (most expensive)
 		default:
 			return "?";
 		}

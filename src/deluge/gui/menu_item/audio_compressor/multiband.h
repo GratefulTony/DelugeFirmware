@@ -415,7 +415,7 @@ public:
 	}
 
 	void selectEncoderAction(int32_t offset) override {
-		DecimalWithoutScrolling::selectEncoderAction(momentum_.getScaledOffset(offset));
+		DecimalWithoutScrolling::selectEncoderAction(velocity_.getScaledOffset(offset));
 	}
 
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
@@ -449,7 +449,7 @@ private:
 		}
 	}
 
-	mutable MomentumEncoder momentum_;
+	mutable VelocityEncoder velocity_;
 };
 
 /// Up/Down ratio skew control (balance between upward and downward compression)
@@ -543,7 +543,7 @@ public:
 	}
 
 	void selectEncoderAction(int32_t offset) override {
-		DecimalWithoutScrolling::selectEncoderAction(momentum_.getScaledOffset(offset));
+		DecimalWithoutScrolling::selectEncoderAction(velocity_.getScaledOffset(offset));
 	}
 
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
@@ -577,7 +577,7 @@ private:
 		}
 	}
 
-	mutable MomentumEncoder momentum_;
+	mutable VelocityEncoder velocity_;
 };
 
 /// Global output gain control

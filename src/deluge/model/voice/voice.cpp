@@ -1525,11 +1525,13 @@ skipUnisonPart: {}
 
 			auto twistParams = dsp::computeSineShaperTwistParams(smoothedTwist);
 
+			// Subtractive mode WITHOUT filters runs at >> 4 attenuation vs FM's << 3 boost
+			// Pre-boost input and post-attenuate wet to normalize waveshaper operating point
+			// Only boost when filters are OFF (with filters, filterGain handles level)
+			bool boostSubtractive = (synthMode == SynthMode::SUBTRACTIVE) && !sound.hasFilters();
+
 			dsp::sineShapeBuffer(stereo_osc_buffer, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperState,
-			                     sineHarmonic, twistParams.symmetry, sineMix, twistParams.stereoWidth,
-			                     twistParams.stereoFreqMult, twistParams.stereoPhaseOffset, twistParams.evenAmount,
-			                     twistParams.rectAmount, twistParams.rect2Amount, twistParams.feedbackAmount,
-			                     &sound.sineShaper, twistParams.phaseHarmonic);
+			                     sineHarmonic, sineMix, twistParams, &sound.sineShaper, nullptr, boostSubtractive);
 		}
 
 		// XY Saturator (per-voice, mod-matrix routable drive)
@@ -1642,10 +1644,13 @@ skipUnisonPart: {}
 			// Mono path: Zone 0 (Asym) works, Zone 1 (Wide stereo) ignored
 			auto twistParams = dsp::computeSineShaperTwistParams(smoothedTwist);
 
+			// Subtractive mode WITHOUT filters runs at >> 4 attenuation vs FM's << 3 boost
+			// Pre-boost input and post-attenuate wet to normalize waveshaper operating point
+			// Only boost when filters are OFF (with filters, filterGain handles level)
+			bool boostSubtractive = (synthMode == SynthMode::SUBTRACTIVE) && !sound.hasFilters();
+
 			dsp::sineShapeBuffer(std::span{oscBuffer, n}, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperState,
-			                     sineHarmonic, twistParams.symmetry, sineMix, twistParams.evenAmount,
-			                     twistParams.rectAmount, twistParams.rect2Amount, twistParams.feedbackAmount,
-			                     &sound.sineShaper, twistParams.phaseHarmonic);
+			                     sineHarmonic, sineMix, twistParams, &sound.sineShaper, nullptr, boostSubtractive);
 		}
 
 		// XY Saturator (per-voice, mod-matrix routable drive) - mono path

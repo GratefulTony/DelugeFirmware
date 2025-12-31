@@ -38,6 +38,7 @@
 #include "model/instrument/kit.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
 #include "model/sample/sample_recorder.h"
+#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "model/voice/voice.h"
 #include "model/voice/voice_sample.h"
@@ -865,6 +866,15 @@ void renderSongFX(size_t numSamples) { // LPF and stutter for song (must happen 
 				masterVolumeAdjustmentR = multiply_32x32_rshift32(masterVolumeAdjustmentR, amplitudeR) << 2;
 			}
 		}
+
+		// Master DOTT (distortion/saturation) - runs pre-compressor
+		if (currentSong->globalEffectable.multibandCompressor.isEnabled()) {
+			currentSong->globalEffectable.applyMultibandCompressorParams(&currentSong->paramManager);
+			currentSong->globalEffectable.multibandCompressor.setMeteringEnabled(
+			    runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DOTTAnalyzer));
+			currentSong->globalEffectable.multibandCompressor.render(renderingBuffer);
+		}
+
 		logAction("mastercomp start");
 
 		int32_t songVolume =
@@ -874,7 +884,6 @@ void renderSongFX(size_t numSamples) { // LPF and stutter for song (must happen 
 		    >> 1;
 		// there used to be a static subtraction of 2 nepers (natural log based dB), this is the multiplicative
 		// equivalent
-		// Note: Song-level DOTT not yet implemented - would need to be in series with RMS compressor
 		currentSong->globalEffectable.compressor.render(renderingBuffer, masterVolumeAdjustmentL >> 1,
 		                                                masterVolumeAdjustmentR >> 1, songVolume >> 3);
 		masterVolumeAdjustmentL = ONE_Q31;

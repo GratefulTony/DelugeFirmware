@@ -70,34 +70,6 @@ extern uint32_t z, w, jcong;
 }
 
 /**
- * Unipolar triangle with dead zone - 0 → +max → 0, then silence
- *
- * @param phase Full 32-bit phase accumulator
- * @param phaseWidth Active region width (dead zone from phaseWidth to end of cycle)
- * @param phaseScaler Precomputed scaler from computeTrianglePhaseScaler(), or 0 to compute internally
- * @return Q31 unipolar value (0 to 0x7FFFFFFF)
- */
-[[gnu::always_inline]] inline int32_t triangleWithDeadzone(uint32_t phase, uint32_t phaseWidth,
-                                                           uint64_t phaseScaler = 0) {
-	if (phase >= phaseWidth) {
-		return 0;
-	}
-
-	// Compute scaler if not precomputed (control-rate path)
-	if (phaseScaler == 0) {
-		phaseScaler = 0xFFFFFFFFFFFFFFFFULL / phaseWidth;
-	}
-
-	// Scale phase to [0, 0xFFFFFFFF] range
-	uint32_t scaledPhase = static_cast<uint32_t>((static_cast<uint64_t>(phase) * phaseScaler) >> 32);
-
-	// Fold at midpoint and scale to unipolar [0, 0x7FFFFFFF]
-	// scaledPhase 0..0x7FFFFFFF = rising, 0x80000000..0xFFFFFFFF = falling
-	uint32_t pos = (scaledPhase < 0x80000000u) ? scaledPhase : (0xFFFFFFFFu - scaledPhase);
-	return static_cast<int32_t>(pos);
-}
-
-/**
  * Bipolar triangle with dead zone - one complete cycle then silence
  *
  * Waveform: 0 → +max → 0 → -max → 0 within phaseWidth, then 0

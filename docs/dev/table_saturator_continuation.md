@@ -1,18 +1,18 @@
-# Analytic Saturator - Continuation Prompt
+# Table Saturator - Continuation Prompt
 
 ## Context
 
-Working on Zone 4 of the XY Saturator - an analytic parametric saturator with ADAA.
+Working on Zone 4 of the XY Saturator - a table-based parametric saturator with ADAA.
 
 ## Current State
 
 **Commit**: `612414b0` on `feat/multiband_compressor` branch
 
 **Key Files**:
-- `src/deluge/dsp/analytic_saturator.h` - Core implementation
+- `src/deluge/dsp/table_saturator.h` - Core implementation
 - `src/deluge/dsp/saturator.h` - Integration wrapper
 - `src/deluge/dsp/fast_math.h` - Fast math (fastTanh)
-- `docs/dev/analytic_saturator.md` - Design document
+- `docs/dev/table_saturator.md` - Design document
 
 ## Bugs to Debug
 
@@ -69,18 +69,18 @@ X=0 correctly bypasses (transparent) because `drive_ = 0` triggers `isLinear()` 
 
 ### External drive in Saturator::process() (saturator.h ~line 100-116)
 ```cpp
-if (useAnalytic_) {
+if (useTable_) {
     float inputF = static_cast<float>(input) / 2147483648.0f;
     float driveScale = 1.0f + (static_cast<float>(drive) / 2147483648.0f + 1.0f) * 2.0f;
     inputF *= driveScale;
     inputF = std::clamp(inputF, -1.0f, 1.0f);
-    float* prevXState = (channel == 0) ? &analyticPrevXL_ : &analyticPrevXR_;
-    float outputF = analyticSat_.process(inputF, prevXState);
+    float* prevXState = (channel == 0) ? &tablePrevXL_ : &tablePrevXR_;
+    float outputF = tableSat_.process(inputF, prevXState);
     return static_cast<q31_t>(outputF * 2147483647.0f);
 }
 ```
 
-### Basis function computation (analytic_saturator.h ~line 268-291)
+### Basis function computation (table_saturator.h ~line 268-291)
 ```cpp
 // Basis 1: Tanh - SCALED by kEff
 float tanh_out = fastTanh(kEff * norm) * invTanhNorm;
@@ -94,7 +94,7 @@ float n2 = norm * norm;
 float cheby_out = norm * (5.0f + n2 * (-20.0f + n2 * 16.0f));
 ```
 
-### Parameter derivation (analytic_saturator.h ~line 395-418)
+### Parameter derivation (table_saturator.h ~line 395-418)
 ```cpp
 outDrive = static_cast<float>(x) / 127.0f;  // X -> drive
 outTanhWeight = triangle(yNorm * 3.0f);

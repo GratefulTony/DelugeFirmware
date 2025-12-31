@@ -864,6 +864,7 @@ Submenu globalFXMenu{
         &stutterMenu,
         &globalModFXMenu,
         &globalDistortionMenu,
+        &dottMenu,
     },
 };
 
@@ -1889,7 +1890,7 @@ deluge::vector<HorizontalMenu*> horizontalMenusChainForKit = {
 	&kitClipMasterMenu,
 	&globalFiltersMenuGroup, &globalEQMenu, &globalModFXMenu,
 	&globalReverbMenuGroup, &globalDelayMenu, &globalDistortionMenu,
-	&globalSidechainMenu, &audioCompMenu, &stutterMenu,
+	&dottMenu, &globalSidechainMenu, &audioCompMenu, &stutterMenu,
 	&arpMenuGroupKit, &randomizerMenu
 };
 
@@ -1897,14 +1898,14 @@ deluge::vector<HorizontalMenu*> horizontalMenusChainForSong = {
 	&songMasterMenu,
 	&globalFiltersMenuGroup, &globalEQMenu, &globalModFXMenu,
 	&globalReverbMenuGroup, &globalDelayMenu, &globalDistortionMenu,
-	&audioCompMenu, &stutterMenu
+	&dottMenu, &audioCompMenu, &stutterMenu
 };
 
 deluge::vector<HorizontalMenu*> horizontalMenusChainForAudioClip = {
 	&audioClipMasterMenu, &audioClipSampleMenu,
 	&globalFiltersMenuGroup, &eqMenu, &globalModFXMenu,
 	&globalReverbMenuGroup, &globalDelayMenu, &audioClipDistortionMenu,
-	&globalSidechainMenu, &audioCompMenu, &stutterMenu
+	&dottMenu, &globalSidechainMenu, &audioCompMenu, &stutterMenu
 };
 
 deluge::vector<HorizontalMenu*> horizontalMenusChainForMidiOrCv = {

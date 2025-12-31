@@ -53,15 +53,16 @@ public:
 
 		// Calculate multiplier based on time between encoder events
 		// Faster turning = smaller elapsed time = higher multiplier
+		// Thresholds tuned for comfortable encoder turning speeds (~50-150ms per click)
 		float mult = 1.0f;
-		if (elapsed < 800) { // Very fast (<18ms)
-			mult = 8.0f;
+		if (elapsed < 1500) { // Very fast (<34ms)
+			mult = 12.0f;
 		}
-		else if (elapsed < 1500) { // Fast (<34ms)
-			mult = 4.0f;
+		else if (elapsed < 3500) { // Fast (<79ms)
+			mult = 6.0f;
 		}
-		else if (elapsed < 3000) { // Medium (<68ms)
-			mult = 2.0f;
+		else if (elapsed < 6500) { // Medium (<147ms)
+			mult = 3.0f;
 		}
 
 		// Smooth the velocity to avoid abrupt changes

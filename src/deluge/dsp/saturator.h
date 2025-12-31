@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include "deluge/dsp/analytic_saturator.h"
+#include "deluge/dsp/table_saturator.h"
 #include "deluge/util/fixedpoint.h"
 #include "dsp_ng/core/types.hpp"
 #include <algorithm>
@@ -27,11 +27,11 @@
 namespace deluge::dsp {
 
 /**
- * XY Saturator using analytic waveshaping with table-based lookup
+ * XY Saturator using table-based waveshaping with lookup
  *
  * Features:
  * - X/Y shape control for creative distortion curves
- * - Analytic parametric saturator with optional ADAA
+ * - Table-based parametric saturator with optional ADAA
  * - Gain-compensated drive for predictable unity at 12 o'clock
  *
  * Shape X (0-127): Controls waveshaping intensity/drive
@@ -50,16 +50,7 @@ public:
 	void regenerateTable(uint8_t shapeX, uint16_t shapeY) {
 		shapeX_ = shapeX;
 		shapeY_ = shapeY;
-
-		// Derive analytic parameters from X and Y
-		float drive, tanhWeight, polyWeight, hardKneeWeight, chebyWeight, sineFoldWeight, rectifierWeight;
-		float threshold, asymmetry;
-		AnalyticSaturatorXYMapper::deriveParameters(shapeX, shapeY, drive, tanhWeight, polyWeight, hardKneeWeight,
-		                                            chebyWeight, sineFoldWeight, rectifierWeight, threshold, asymmetry);
-
-		// Set parameters on saturator (tables shared, state is per-channel)
-		analyticSat_.setParameters(drive, tanhWeight, polyWeight, hardKneeWeight, chebyWeight, sineFoldWeight,
-		                           rectifierWeight, threshold, asymmetry);
+		tableSat_.setParameters(TableSaturatorXYMapper::deriveParameters(shapeX, shapeY));
 	}
 
 	/**
@@ -95,7 +86,7 @@ public:
 		inputF = std::clamp(inputF, -1.0f, 1.0f);
 
 		// Process with optional ADAA (anti-derivative anti-aliasing)
-		float outputF = prevX ? analyticSat_.process(inputF, prevX) : analyticSat_.processNoAA(inputF);
+		float outputF = prevX ? tableSat_.process(inputF, prevX) : tableSat_.processNoAA(inputF);
 
 		// Apply post-attenuation and scale back to 0dBFS reference level
 		outputF *= kPostGain * kEffective0dBFS;
@@ -105,14 +96,14 @@ public:
 	}
 
 	/// Check if effect is transparent (zero drive in waveshaper)
-	[[nodiscard]] bool isTransparent() const { return analyticSat_.isLinear(); }
+	[[nodiscard]] bool isTransparent() const { return tableSat_.isLinear(); }
 
-	/// Get the analytic saturator for direct parameter access
-	[[nodiscard]] AnalyticSaturator& getAnalyticSaturator() { return analyticSat_; }
-	[[nodiscard]] const AnalyticSaturator& getAnalyticSaturator() const { return analyticSat_; }
+	/// Get the table saturator for direct parameter access
+	[[nodiscard]] TableSaturator& getTableSaturator() { return tableSat_; }
+	[[nodiscard]] const TableSaturator& getTableSaturator() const { return tableSat_; }
 
-	/// Reset analytic saturator tables (call when shape parameters change)
-	void resetAnalyticState() { analyticSat_.reset(); }
+	/// Reset table saturator state (call when shape parameters change)
+	void resetTableState() { tableSat_.reset(); }
 
 	[[nodiscard]] uint8_t getShapeX() const { return shapeX_; }
 	[[nodiscard]] uint16_t getShapeY() const { return shapeY_; }
@@ -121,8 +112,8 @@ private:
 	uint8_t shapeX_{0};
 	uint16_t shapeY_{0};
 
-	// Analytic saturator with table-based waveshaping (shared for L/R)
-	AnalyticSaturator analyticSat_;
+	// Table-based saturator with cached waveshaping (shared for L/R)
+	TableSaturator tableSat_;
 };
 
 } // namespace deluge::dsp

@@ -22,6 +22,7 @@
 #include "dsp/filter/allpass_crossover.h"
 #include "dsp/filter/ladder_components.h"
 #include "dsp/filter/lr_crossover.h"
+#include "dsp/util.hpp"
 #include "dsp_ng/core/types.hpp"
 #include "io/debug/print.h"
 #include "util/fixedpoint.h"
@@ -538,19 +539,13 @@ public:
 		}
 		characterKnob_ = c;
 		characterComputed_ = true;
-		float t = float(c) / ONE_Q31f; // 0.0 to 1.0
 
 		// Determine zone (0-7) and position within zone (0.0-1.0)
-		float zoneFloat = t * kNumCharacterZones;
-		int zone = std::min(kNumCharacterZones - 1, static_cast<int>(zoneFloat));
-		float zonePos = zoneFloat - zone; // 0-1 within zone
+		auto [zone, zonePos] = computeZoneQ31(c, kNumCharacterZones);
 
-		// Triangle wave: cheap periodic function for OWLTT zone oscillations
-		// Input: phase (any value), Output: -1 to +1
-		auto triangle = [](float phase) {
-			float p = phase - std::floor(phase); // Wrap to 0-1
-			return 1.0f - 4.0f * std::abs(p - 0.5f);
-		};
+		// 4-segment triangle for OWLTT zone oscillations: -1→0→+1→0→-1 (peak at 0.5)
+		// Original: 1.0f - 4.0f * std::abs(p - 0.5f) = triangleFloat shifted by -0.25
+		auto triangle = [](float phase) { return triangleFloat(phase - 0.25f); };
 
 		// === Compute derived parameters based on zone ===
 		// Each zone has characteristic curves for width, knee, timing, skew
@@ -682,18 +677,14 @@ public:
 
 	/// Get current character zone for display
 	[[nodiscard]] CharacterZone getCharacterZone() const {
-		float t = float(characterKnob_) / ONE_Q31f;
-		int zone = std::min(kNumCharacterZones - 1, static_cast<int>(t * kNumCharacterZones));
-		return static_cast<CharacterZone>(zone);
+		auto info = computeZoneQ31(characterKnob_, kNumCharacterZones);
+		return static_cast<CharacterZone>(info.index);
 	}
 
 	/// Get position within current zone (0-127 for display)
 	[[nodiscard]] int32_t getCharacterZonePosition() const {
-		float t = float(characterKnob_) / ONE_Q31f;
-		float zoneFloat = t * kNumCharacterZones;
-		int zone = static_cast<int>(zoneFloat);
-		float zonePos = zoneFloat - zone;
-		return static_cast<int32_t>(zonePos * 127.0f);
+		auto info = computeZoneQ31(characterKnob_, kNumCharacterZones);
+		return zonePositionToDisplay(info.position);
 	}
 
 	/// Get stereo width (0=mono, 1=full stereo) - bass always mono regardless
@@ -724,18 +715,13 @@ public:
 		vibeKnob_ = v;
 		// Invalidate character cache - OWLTT zone depends on vibe phases
 		characterComputed_ = false;
-		float t = float(v) / ONE_Q31f; // 0.0 to 1.0
 
 		// Determine zone (0-7) and position within zone (0.0-1.0)
-		float zoneFloat = t * kNumVibeZones;
-		int zone = std::min(kNumVibeZones - 1, static_cast<int>(zoneFloat));
-		float zonePos = zoneFloat - zone; // 0-1 within zone
+		auto [zone, zonePos] = computeZoneQ31(v, kNumVibeZones);
 
-		// Triangle wave for Chaos zone oscillations
-		auto triangle = [](float phase) {
-			float p = phase - std::floor(phase);
-			return 1.0f - 4.0f * std::abs(p - 0.5f);
-		};
+		// 4-segment triangle for vibe zone oscillations: -1→0→+1→0→-1 (peak at 0.5)
+		// Original: 1.0f - 4.0f * std::abs(p - 0.5f) = triangleFloat shifted by -0.25
+		auto triangle = [](float phase) { return triangleFloat(phase - 0.25f); };
 
 		// Compute phase offsets based on zone
 		switch (zone) {
@@ -812,18 +798,14 @@ public:
 
 	/// Get current vibe zone for display
 	[[nodiscard]] VibeZone getVibeZone() const {
-		float t = float(vibeKnob_) / ONE_Q31f;
-		int zone = std::min(kNumVibeZones - 1, static_cast<int>(t * kNumVibeZones));
-		return static_cast<VibeZone>(zone);
+		auto info = computeZoneQ31(vibeKnob_, kNumVibeZones);
+		return static_cast<VibeZone>(info.index);
 	}
 
 	/// Get position within current vibe zone (0-127 for display)
 	[[nodiscard]] int32_t getVibeZonePosition() const {
-		float t = float(vibeKnob_) / ONE_Q31f;
-		float zoneFloat = t * kNumVibeZones;
-		int zone = static_cast<int>(zoneFloat);
-		float zonePos = zoneFloat - zone;
-		return static_cast<int32_t>(zonePos * 127.0f);
+		auto info = computeZoneQ31(vibeKnob_, kNumVibeZones);
+		return zonePositionToDisplay(info.position);
 	}
 
 	/// Get the linked threshold value
@@ -969,9 +951,9 @@ public:
 	/// Render the multiband compressor in-place
 	/// Pure dynamics processor - output gain knob is the only gain control.
 	/// At 1:1 ratio with output gain at unity, this is transparent.
+	/// Thresholds are absolute (referenced to full scale), independent of track volume.
 	/// @param buffer Stereo audio buffer to process
-	/// @param finalVolume Reference volume level for threshold calculation (log domain)
-	void render(StereoBuffer<q31_t> buffer, q31_t finalVolume) {
+	void render(StereoBuffer<q31_t> buffer) {
 		if (buffer.empty()) {
 			return;
 		}
@@ -1077,8 +1059,9 @@ public:
 #endif
 		// TODO:PROFILING-DELETE end
 
-		// Calculate song volume in dB for threshold reference
-		float songVolumedB = fastLog(static_cast<float>(finalVolume) + 1e-10f);
+		// Fixed threshold reference - thresholds are absolute, independent of track volume
+		// Using full scale (ONE_Q31) as reference: log(2^31) ≈ 21.49
+		constexpr float kThresholdRefdB = 21.49f;
 
 		// Process each band - envelope detection
 		// updateLevel now combines L+R inline, stride varies by band to prevent undersampling
@@ -1092,8 +1075,8 @@ public:
 			// Calculate compression gain
 			// Use character-derived knee and add per-band skew offset to global skew
 			float bandSkew = std::clamp(upDownSkew_ + skewOffset_[b], -1.0f, 1.0f);
-			bandGains[b] =
-			    bands_[b].calculateGain(static_cast<float>(buffer.size()), songVolumedB, knee_, bandSkew, frameCount_);
+			bandGains[b] = bands_[b].calculateGain(static_cast<float>(buffer.size()), kThresholdRefdB, knee_, bandSkew,
+			                                       frameCount_);
 		}
 
 // TODO:PROFILING-DELETE begin

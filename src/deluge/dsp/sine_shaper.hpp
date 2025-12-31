@@ -35,7 +35,7 @@ namespace deluge::dsp {
 // - Mix: Wet/dry blend (0 = bypass processing entirely)
 
 // Forward declaration for cached weights
-struct Zone1Weights;
+struct ShaperWeights;
 
 /// Sine shaper parameters and DSP state for one sound instance
 /// Note: harmonic uses UNPATCHED_SINE_SHAPER_HARMONIC, twist uses UNPATCHED_SINE_SHAPER_TWIST
@@ -48,9 +48,7 @@ struct SineShaperParams {
 	q31_t smoothedDrive{0};    // Previous drive value for parameter smoothing
 	q31_t smoothedHarmonic{0}; // Previous harmonic value for parameter smoothing
 	q31_t smoothedTwist{0};    // Previous Twist param value for parameter smoothing
-	// Smoothed zone coefficients (prevents clicks when triangle weights jump)
-	// Reused by Zone 0 (phaseHarmonic), Zone 1/2 (c1,c3,c5,c7,c9), Zone 3 (w0,w1,w2,w3,inputGain)
-	// L channel (c1/inputGain shared with R)
+	// Smoothed zone coefficients - reused across zones, zone boundary glitches are acceptable
 	float smoothedC1{1.0f}, smoothedC3L{0}, smoothedC5L{0}, smoothedC7L{0}, smoothedC9L{0};
 	// R channel (c1R = c1, so only c3R/c5R/c7R/c9R needed)
 	float smoothedC3R{0}, smoothedC5R{0}, smoothedC7R{0}, smoothedC9R{0};
@@ -65,12 +63,6 @@ struct SineShaperVoiceState {
 	// Feedback recirculation state (Twist Zone 5)
 	q31_t feedbackL{0};
 	q31_t feedbackR{0};
-	// Feedback LPF state (tames harsh high harmonics in feedback loop)
-	q31_t feedbackLpfL{0};
-	q31_t feedbackLpfR{0};
-	// Feedback HPF state (removes fundamental from feedback to prevent runaway)
-	q31_t feedbackHpfL{0};
-	q31_t feedbackHpfR{0};
 	// Zone 1 stereo LFO phase accumulator (0.0 to 1.0, wraps)
 	float stereoLfoPhase{0.0f};
 };
@@ -81,190 +73,17 @@ struct SineShaperVoiceState {
 /// Feedback taps post-HPF so inherits the filtering
 constexpr q31_t kOutputHpfAlpha = static_cast<q31_t>(0.01425 * ONE_Q31);
 
-// Number of harmonic zones (0 = Poly, 1-7 = Chebyshev with triangle modulation)
+/// Subtractive mode boost amount (bits)
+/// Subtractive runs at >> 4 attenuation vs FM's << 3 boost (7 bits difference)
+/// Start with 4 bits (~24dB) as conservative estimate, tune empirically
+/// Pre-boost input, post-attenuate wet to normalize waveshaper operating point
+constexpr int32_t kSubtractiveBoostBits = 4;
+
+// Number of harmonic zones (0-6 = various, 7 = Poly)
 constexpr int32_t kNumHarmonicZones = 8;
 
-/**
- * Harmonic zone mapper for sine shaper
- *
- * Zone 0: Poly - Uses cascaded polynomial (existing behavior)
- * Zones 1-7: Chebyshev - Triangle-modulated blend of T3, T5, T7, T9
- *
- * Triangle oscillators with irrational periods create non-repeating patterns.
- * Duty cycles create dead zones where harmonics are OFF (saves compute).
- * Higher zones emphasize higher harmonics via phase offsets.
- */
-struct SineShaperHarmonicMapper {
-	// Phase width for each harmonic (active region width)
-	// 70% duty balances harmonic variety with smooth transitions
-	static constexpr uint32_t kPhaseWidthT3 = 0xB3333333u; // 70% duty
-	static constexpr uint32_t kPhaseWidthT5 = 0xB3333333u; // 70% duty
-	static constexpr uint32_t kPhaseWidthT7 = 0x99999999u; // 60% duty
-	static constexpr uint32_t kPhaseWidthT9 = 0x80000000u; // 50% duty
-
-	// Irrational period ratios for non-repeating patterns (halved for smoother transitions)
-	static constexpr float kPeriodT3 = 1.359f;  // e/2
-	static constexpr float kPeriodT5 = 1.5708f; // π/2
-	static constexpr float kPeriodT7 = 1.118f;  // √5/2
-	static constexpr float kPeriodT9 = 0.809f;  // φ/2 (golden ratio)
-
-	// Phase offsets to spread harmonics across the parameter range
-	static constexpr float kPhaseT3 = 0.0f;
-	static constexpr float kPhaseT5 = 0.25f;
-	static constexpr float kPhaseT7 = 0.5f;
-	static constexpr float kPhaseT9 = 0.75f;
-
-	/// Derive harmonic weights from zone parameter
-	/// @param harmonicParam Raw harmonic parameter (0 to ONE_Q31)
-	/// @param outZone Output zone number (0-7)
-	/// @param outT3 Output T3 weight (q31)
-	/// @param outT5 Output T5 weight
-	/// @param outT7 Output T7 weight
-	/// @param outT9 Output T9 weight
-	static void deriveWeights(q31_t harmonicParam, int32_t& outZone, q31_t& outT3, q31_t& outT5, q31_t& outT7,
-	                          q31_t& outT9, float phaseOffset = 0.0f) {
-		float paramNorm = static_cast<float>(harmonicParam) / static_cast<float>(ONE_Q31);
-		outZone = std::min(static_cast<int32_t>(paramNorm * kNumHarmonicZones), kNumHarmonicZones - 1);
-
-		if (outZone == 0) {
-			outT3 = outT5 = outT7 = outT9 = 0;
-			return;
-		}
-
-		float chebyPos = (paramNorm - 1.0f / kNumHarmonicZones) * (kNumHarmonicZones / (kNumHarmonicZones - 1.0f));
-		chebyPos = std::clamp(chebyPos, 0.0f, 1.0f);
-		float freqMult = (outZone == 7) ? 2.0f : 1.0f;
-
-		constexpr float kPhaseScale = 4294967296.0f;
-		auto toPhase = [](float f) {
-			f = std::fmod(f, 1.0f);
-			return static_cast<uint32_t>((f < 0.0f ? f + 1.0f : f) * kPhaseScale);
-		};
-
-		// phaseOffset shifts all triangle oscillators together
-		outT3 = triangleWithDeadzone(toPhase(chebyPos * kPeriodT3 * freqMult + kPhaseT3 + phaseOffset), kPhaseWidthT3);
-		outT5 = triangleWithDeadzone(toPhase(chebyPos * kPeriodT5 * freqMult + kPhaseT5 + phaseOffset), kPhaseWidthT5);
-		outT7 = triangleWithDeadzone(toPhase(chebyPos * kPeriodT7 * freqMult + kPhaseT7 + phaseOffset), kPhaseWidthT7);
-		outT9 = triangleWithDeadzone(toPhase(chebyPos * kPeriodT9 * freqMult + kPhaseT9 + phaseOffset), kPhaseWidthT9);
-	}
-};
-
-// ============================================================================
 // Zone 1 "357" Chebyshev Harmonic Extraction
-// ============================================================================
-//
-// FUNDAMENTAL CANCELLATION - CRITICAL DESIGN CONSTRAINT
-// =====================================================
-//
-// The normalized Chebyshev polynomials Hn(x) are designed to extract pure
-// harmonics from a sinusoidal input. For x = sin(θ):
-//
-//   H3(sin(θ)) = sin(3θ)/3   (pure 3rd harmonic)
-//   H5(sin(θ)) = sin(5θ)/5   (pure 5th harmonic)
-//   H7(sin(θ)) = sin(7θ)/7   (pure 7th harmonic)
-//
-// The polynomial form H3(x) = x - (4/3)x³ achieves this by having the linear
-// term (x) exactly cancel the fundamental energy produced by the cubic term.
-// This cancellation is mathematically precise when evaluated at sin(θ).
-//
-// LOW INPUT LEVEL PROBLEM
-// =======================
-//
-// **At low input levels, fundamental cancellation FAILS.**
-//
-// The polynomial P(x) = c1*x + c3*x³ + c5*x⁵ + c7*x⁷ behaves differently
-// depending on input amplitude:
-//
-//   At |x| ≈ 1.0:  All terms contribute, cancellation works
-//   At |x| = 0.5:  c3*x³ = c3*0.125, much smaller than c1*x = c1*0.5
-//   At |x| = 0.1:  c3*x³ = c3*0.001, negligible vs c1*x = c1*0.1
-//
-// For small x, P(x) ≈ c1*x (pure fundamental pass-through).
-//
-// Numerical example with pure H3 (c1=1, c3=-4/3):
-//   x=1.0:  P(x) = 1 - 1.33 = -0.33  (harmonics dominate)
-//   x=0.5:  P(x) = 0.5 - 0.17 = 0.33 (66% fundamental)
-//   x=0.1:  P(x) = 0.1 - 0.0013 ≈ 0.1 (99% fundamental!)
-//
-// This is a fundamental limitation of polynomial waveshapers - they become
-// LINEAR at low input levels. The Drive parameter must push the signal into
-// the polynomial's nonlinear region for harmonic extraction to work.
-//
-// HIGH INPUT LEVEL SOLUTION (OUTPUT WAVEFOLDING)
-// ===============================================
-//
-// When the polynomial OUTPUT exceeds [-1, 1], we use wavefolding to map it
-// back. Unlike input folding, output folding preserves the Chebyshev harmonic
-// extraction because the polynomial sees the actual (overdriven) sine wave.
-//
-// Key insight: Input folding distorts the waveform BEFORE the polynomial,
-// creating harmonics similar to hard clipping. Output folding lets the
-// polynomial do its harmonic extraction first, then bounds the result.
-//
-// Formula: phase = fmod(result + 1, 4); if (phase < 0) phase += 4; result = 1 - fabs(phase - 2)
-//
-// At moderate drive: polynomial output stays in [-1, 1], no folding occurs
-// At high drive: polynomial blows up (T7(2) ≈ 5000), folding kicks in
-//
-// Benefits vs input folding:
-// - Preserves Chebyshev harmonic extraction at moderate drives
-// - Folding only activates when polynomial exceeds bounds
-// - Musical character when overdriven (Buchla/Serge wavefolder sound)
-//
-// WHY NOT JUST SKIP FUNDAMENTAL CANCELLATION?
-// ============================================
-//
-// Without the c1 linear term (using only c3*x³ + c5*x⁵ + c7*x⁷), each power
-// of x produces BOTH fundamental and harmonics when applied to sin(θ):
-//
-//   sin³(θ) = (3sin(θ) - sin(3θ))/4    → 75% fundamental + 25% 3rd harmonic
-//   sin⁵(θ) = (10sin(θ) - 5sin(3θ) + sin(5θ))/16  → 62.5% fundamental + ...
-//
-// The fundamental components from x³, x⁵, x⁷ are IN-PHASE with the input.
-// This creates a mix knob problem:
-//
-//   100% wet: fundamental + harmonics (from polynomial)
-//   50% mix:  0.5*dry + 0.5*(fundamental + harmonics) = 1.0× fundamental + 0.5× harmonics
-//   0% dry:   fundamental only
-//
-// The constructive interference at mid-mix values causes non-linear output
-// level swings. Mix 50% can be LOUDER than either 0% or 100%.
-//
-// With fundamental cancellation (c1 = w3+w5+w7), the wet signal contains
-// only harmonics (at optimal drive), making the mix knob behavior predictable:
-//
-//   100% wet: harmonics only
-//   50% mix:  0.5*dry + 0.5*harmonics (linear blend)
-//   0% dry:   fundamental only
-//
-// DESIGN DECISION
-// ===============
-//
-// We KEEP fundamental cancellation despite its limitations because:
-//
-// 1. Predictable mix behavior (no output level surprises at mid-mix values)
-// 2. Clean harmonic extraction at moderate drive levels
-// 3. The "sweet spot" drive requirement is acceptable for a sound design tool
-//
-// Accepted limitations:
-//
-// 1. LOW DRIVE: Polynomial becomes linear, outputs scaled fundamental.
-//    At 100% mix this produces quiet fundamental instead of silence.
-//    → Accepted as inherent to polynomial waveshaping physics.
-//
-// 2. HIGH DRIVE: Wavefolding adds its own harmonic character.
-//    → Accepted. The classic Buchla/Serge wavefolder sound adds musical
-//      complexity rather than harsh clipping artifacts when overdriven.
-//
-// 3. OPTIMAL RANGE: Effect works best when input amplitude is near ±1.0.
-//    → Users should adjust Drive to find the harmonic extraction sweet spot.
-//
-// Future enhancement: Per-buffer envelope follower to normalize input,
-// ensuring polynomial always operates in optimal region regardless of
-// input level. This would eliminate the low-drive fundamental leakage
-// at the cost of ~10 additional cycles per sample.
-//
-// ============================================================================
+// See docs/dev/sine_shaper_chebyshev.md for detailed design rationale
 
 /**
  * Generic 4-weight blend for triangle-phased parameter morphing
@@ -274,11 +93,10 @@ struct SineShaperHarmonicMapper {
  * to create smooth, non-periodic transitions through parameter space.
  */
 struct BlendWeights4 {
-	float w0;                  // First mode weight (Zone 1/2: T3, Zone 3: Add)
-	float w1;                  // Second mode weight (Zone 1/2: T5, Zone 3: Ring)
-	float w2;                  // Third mode weight (Zone 1/2: T7, Zone 3: FM)
-	float w3;                  // Fourth mode weight (Zone 1/2: T9, Zone 3: Fold)
-	float inputGainMult{1.0f}; // Zone 3 input gain multiplier (unused in Zone 1/2)
+	float w0; // First mode weight (Zone 1/2: T3, Zone 3: Add)
+	float w1; // Second mode weight (Zone 1/2: T5, Zone 3: Ring)
+	float w2; // Third mode weight (Zone 1/2: T7, Zone 3: FM)
+	float w3; // Fourth mode weight (Zone 1/2: T9, Zone 3: Fold)
 };
 
 /**
@@ -312,13 +130,15 @@ inline BlendWeights4 computeBlendWeights4(float posInZone) {
 	};
 
 	// Pure float triangles - no q31 conversion overhead
-	float tri0 = triangleFloat(posInZone * kFreqW0, kDuty);
-	float tri1 = triangleFloat(posInZone * kFreqW1 + 0.25f, kDuty);
+	// tri0/tri1: unipolar (0→1) for linearToLog input
+	float tri0 = triangleSimpleUnipolar(posInZone * kFreqW0, kDuty);
+	float tri1 = triangleSimpleUnipolar(posInZone * kFreqW1 + 0.25f, kDuty);
 	float w0 = linearToLog(tri0);
 	float w1 = linearToLog(tri1);
 
 	// w2 and w3 from bipolar triangle: positive = w2, negative = w3
-	float tri23 = triangleBipolarFloat(posInZone * kFreqW2_3 + 0.5f, kDuty);
+	// tri23: bipolar (0→+1→0→-1→0) for sign-based weight selection
+	float tri23 = triangleFloat(posInZone * kFreqW2_3 + 0.5f, kDuty);
 	float w23_log = linearToLog(std::abs(tri23));
 	float w2 = (tri23 > 0.0f) ? w23_log : kMinWeight;
 	float w3 = (tri23 < 0.0f) ? w23_log : kMinWeight;
@@ -343,84 +163,12 @@ inline BlendWeights4 computeBlendWeights4(float posInZone) {
  * Bipolar harmonic: positive uses w7 (7th), negative uses w9 (9th) - never both.
  * H9 contributes to c7 via its x⁷ term, so c7 is always computed.
  */
-struct Zone1Weights {
+struct ShaperWeights {
 	float c1; // Coefficient for x (cancels fundamental from higher-order terms)
 	float c3; // Coefficient for x³
 	float c5; // Coefficient for x⁵
 	float c7; // Coefficient for x⁷ (from w7 or w9's H9 contribution)
 	float c9; // Coefficient for x⁹ (only when w9 active, else 0)
-};
-
-/**
- * Zone 1 coefficients with stereo offset deltas
- * Symmetric stereo: L = center - delta, R = center + delta
- *
- * Uses Jacobian to avoid R normalization. Zero-sum weight deltas preserve c1.
- */
-struct Zone1CoeffsWithOffsets {
-	Zone1Weights coeffs; // Center coefficients (mono reference)
-	float dc3;           // Coefficient delta for c3
-	float dc5;           // Coefficient delta for c5
-	float dc7;           // Coefficient delta for c7
-	float dc9;           // Coefficient delta for c9
-
-	/// Valid coefficient ranges for normalized Chebyshev blend (weights sum to 1)
-	static constexpr float kMinC3 = -13.33f; // pure w9: -40/3
-	static constexpr float kMaxC3 = -1.33f;  // pure w3: -4/3
-	static constexpr float kMinC5 = 0.0f;    // pure w3
-	static constexpr float kMaxC5 = 48.0f;   // pure w9
-	static constexpr float kMinC7 = -64.0f;  // pure w9
-	static constexpr float kMaxC7 = 0.0f;    // no w7/w9
-	static constexpr float kMinC9 = 0.0f;    // no w9
-	static constexpr float kMaxC9 = 28.44f;  // pure w9: 256/9
-
-	/// Get L-channel coefficients with attenuation-only stereo
-	/// Stereo attenuates harmonics differently per channel - never boosts above center
-	/// This ensures L output ≤ center output, preventing clipping surprises
-	/// @param stereoWidth Spread envelope (0-1, peaks at 25-75% of Wide zone)
-	/// @param freqMult Oscillation frequency multiplier (1× normal, up to 4× on down slope)
-	/// @param phaseOffset Continuous phase evolution (0-1 across Wide zone)
-	[[nodiscard]] Zone1Weights getL(float stereoWidth, float freqMult = 1.0f, float phaseOffset = 0.0f) const {
-		// Attenuation-only stereo: scale coefficients toward zero, never away from zero
-		// L attenuates odd harmonics (3, 7) when mod > 0, even (5, 9) when mod < 0
-		// R does opposite, creating complementary stereo image
-
-		// 100% duty triangle: linear ramp -1 to +1 to -1 (no dead zone)
-		uint32_t phase = static_cast<uint32_t>(phaseOffset * freqMult * 4294967296.0f);
-		float mod = static_cast<float>(getTriangle(phase)) / static_cast<float>(ONE_Q31);
-
-		// Attenuation factors: 1.0 = full strength, lower = attenuated
-		// max(0, mod) attenuates when mod positive, max(0, -mod) when negative
-		float atten3 = 1.0f - stereoWidth * 0.5f * std::fmax(0.0f, mod);
-		float atten5 = 1.0f - stereoWidth * 0.5f * std::fmax(0.0f, -mod);
-		float atten7 = atten3; // 7 pairs with 3
-		float atten9 = atten5; // 9 pairs with 5
-
-		return {coeffs.c1, // c1 unchanged (fundamental)
-		        coeffs.c3 * atten3, coeffs.c5 * atten5, coeffs.c7 * atten7, coeffs.c9 * atten9};
-	}
-
-	/// Get R-channel coefficients with attenuation-only stereo
-	/// Complementary to L: when L attenuates 3/7, R attenuates 5/9 (and vice versa)
-	/// @param stereoWidth Spread envelope (0-1, peaks at 25-75% of Wide zone)
-	/// @param freqMult Oscillation frequency multiplier (1× normal, up to 4× on down slope)
-	/// @param phaseOffset Continuous phase evolution (0-1 across Wide zone)
-	[[nodiscard]] Zone1Weights getR(float stereoWidth, float freqMult = 1.0f, float phaseOffset = 0.0f) const {
-		// R uses opposite attenuation pattern to L for stereo difference
-
-		// 100% duty triangle: linear ramp -1 to +1 to -1 (no dead zone)
-		uint32_t phase = static_cast<uint32_t>(phaseOffset * freqMult * 4294967296.0f);
-		float mod = static_cast<float>(getTriangle(phase)) / static_cast<float>(ONE_Q31);
-
-		// Opposite of L: attenuate 3/7 when mod < 0, attenuate 5/9 when mod > 0
-		float atten3 = 1.0f - stereoWidth * 0.5f * std::fmax(0.0f, -mod);
-		float atten5 = 1.0f - stereoWidth * 0.5f * std::fmax(0.0f, mod);
-		float atten7 = atten3;
-		float atten9 = atten5;
-
-		return {coeffs.c1, // c1 unchanged (fundamental)
-		        coeffs.c3 * atten3, coeffs.c5 * atten5, coeffs.c7 * atten7, coeffs.c9 * atten9};
-	}
 };
 
 /**
@@ -441,7 +189,7 @@ struct Zone1CoeffsWithOffsets {
  * @param w7 Weight for 7th harmonic (0 when using 9th)
  * @param w9 Weight for 9th harmonic (0 when using 7th)
  */
-inline Zone1Weights weightsToCoeffs(float w3, float w5, float w7, float w9) {
+inline ShaperWeights weightsToCoeffs(float w3, float w5, float w7, float w9) {
 	// Coefficients derived from weighted sum of normalized Chebyshev polynomials
 	float c1 = w3 + w5 + w7 + w9;
 	float c3 = -(w3 * (4.0f / 3.0f) + w5 * 4.0f + w7 * 8.0f + w9 * (40.0f / 3.0f));
@@ -452,115 +200,18 @@ inline Zone1Weights weightsToCoeffs(float w3, float w5, float w7, float w9) {
 }
 
 /**
- * Compute Zone 1 coefficients with stereo offsets from harmonic parameter
- * Should be called once per block, not per sample
+ * Compute Zone 1/2 blended polynomial coefficients from position in zone
  *
- * Base weights: unipolar triangles + epsilon, normalized (safe division)
- * Deltas: continuous BIPOLAR triangles (no epsilon/floor needed, symmetric L/R)
- * Jacobian: converts weight deltas to coefficient deltas, avoids R normalization
+ * Uses triangle-phased weight blending with irrational frequencies
+ * to create smooth, non-periodic transitions through harmonic space.
  *
- * 7th vs 9th harmonic selection: determined by bipolar triangle at posInZone.
- * When the triangle is positive, use 7th; when negative, use 9th.
- * This naturally alternates as posInZone sweeps through the zone.
- *
- * @param posInZone Position 0.0 to 1.0 within the zone
- * @return L coefficients + coefficient deltas for R
- */
-inline Zone1CoeffsWithOffsets computeZone1CoeffsWithOffsets(float posInZone) {
-	posInZone = std::clamp(posInZone, 0.0f, 1.0f);
-
-	// === Base weights: use shared 4-weight blend computation ===
-	BlendWeights4 weights = computeBlendWeights4(posInZone);
-	float w3 = weights.w0;
-	float w5 = weights.w1;
-	float w7 = weights.w2;
-	float w9 = weights.w3;
-
-	// Convert float phase to uint32_t for triangle functions (needed for stereo deltas)
-	constexpr float kPhaseScale = 4294967296.0f;
-	auto toPhase = [](float f) {
-		f = std::fmod(f, 1.0f);
-		if (f < 0.0f) {
-			f += 1.0f;
-		}
-		return static_cast<uint32_t>(f * kPhaseScale);
-	};
-
-	constexpr float kInvQ31 = 1.0f / static_cast<float>(ONE_Q31);
-
-	// Compute L coefficients
-	Zone1Weights coeffsL = weightsToCoeffs(w3, w5, w7, w9);
-
-	// === Stereo deltas: continuous BIPOLAR triangles (no dead zone, no epsilon) ===
-	// These don't need epsilon because we never divide by them
-	// Bipolar means sometimes L gets more, sometimes R gets more (symmetric)
-	// Each harmonic group has independent triangle for varied stereo image
-	constexpr float kDeltaFreq3 = 3.14159f;    // π
-	constexpr float kDeltaFreq5 = 2.71828f;    // e
-	constexpr float kDeltaFreqHigher = 1.618f; // φ (golden ratio) - independent from 3 and 5
-	constexpr float kDeltaScale = 0.35f;       // Scale factor for stereo spread
-
-	// getTriangle returns bipolar q31 (-2^31 to 2^31-1), continuous (no dead zone)
-	float dw3_raw = static_cast<float>(getTriangle(toPhase(posInZone * kDeltaFreq3 + 0.1f))) * kInvQ31 * kDeltaScale;
-	float dw5_raw = static_cast<float>(getTriangle(toPhase(posInZone * kDeltaFreq5 + 0.6f))) * kInvQ31 * kDeltaScale;
-	float dwHigher_raw =
-	    static_cast<float>(getTriangle(toPhase(posInZone * kDeltaFreqHigher + 0.3f))) * kInvQ31 * kDeltaScale;
-
-	// Normalize to zero sum (ensures dc1 = 0, preserving c1)
-	float dwSum = dw3_raw + dw5_raw + dwHigher_raw;
-	float dwOffset = dwSum / 3.0f;
-	float dw3 = dw3_raw - dwOffset;
-	float dw5 = dw5_raw - dwOffset;
-	float dwHigher = dwHigher_raw - dwOffset;
-
-	// 7 and 9 share stereo offset (only one active at a time based on triangle sign)
-	float dw7 = dwHigher;
-	float dw9 = dwHigher;
-
-	// Apply Jacobian to get coefficient deltas (using full formulas including w9 terms):
-	// dc1 = dw3 + dw5 + dw7 + dw9 = 0 (by construction)
-	// dc3 = -(4/3)*dw3 - 4*dw5 - 8*dw7 - (40/3)*dw9
-	// dc5 = 3.2*dw5 + 16*dw7 + 48*dw9
-	// dc7 = -(64/7)*dw7 - 64*dw9
-	// dc9 = (256/9)*dw9
-	float dc3 = -(4.0f / 3.0f) * dw3 - 4.0f * dw5 - 8.0f * dw7 - (40.0f / 3.0f) * dw9;
-	float dc5 = 3.2f * dw5 + 16.0f * dw7 + 48.0f * dw9;
-	float dc7 = -(64.0f / 7.0f) * dw7 - 64.0f * dw9;
-	float dc9 = (256.0f / 9.0f) * dw9;
-
-	// Clamp coefficient deltas to prevent polynomial output exceeding bounds
-	// Limits are ~25% of each coefficient's valid range to allow stereo spread
-	// without pushing R channel coefficients outside valid polynomial bounds
-	constexpr float kMaxDc3 = 3.0f;  // c3 range: [-13.3, -1.3]
-	constexpr float kMaxDc5 = 12.0f; // c5 range: [0, 48]
-	constexpr float kMaxDc7 = 16.0f; // c7 range: [-64, 0]
-	constexpr float kMaxDc9 = 7.0f;  // c9 range: [0, 28.4]
-	dc3 = std::clamp(dc3, -kMaxDc3, kMaxDc3);
-	dc5 = std::clamp(dc5, -kMaxDc5, kMaxDc5);
-	dc7 = std::clamp(dc7, -kMaxDc7, kMaxDc7);
-	dc9 = std::clamp(dc9, -kMaxDc9, kMaxDc9);
-
-	return {coeffsL, dc3, dc5, dc7, dc9};
-}
-
-/**
- * Compute Zone 1 mono weights from harmonic parameter (legacy/mono path)
  * @param posInZone Position 0.0 to 1.0 within the zone
  * @return Precomputed blended coefficients for Horner's method evaluation
  */
-inline Zone1Weights computeZone1WeightsFromPos(float posInZone) {
-	// For mono, use center coefficients (no stereo offset)
-	return computeZone1CoeffsWithOffsets(posInZone).coeffs;
-}
-
-/**
- * Helper to compute position within a zone from harmonic param value
- */
-inline float computePosInZone(q31_t harmonic, int32_t zoneIndex) {
-	float zoneStart = static_cast<float>(zoneIndex) / 8.0f;
-	float zoneEnd = static_cast<float>(zoneIndex + 1) / 8.0f;
-	float paramNorm = static_cast<float>(harmonic) / static_cast<float>(ONE_Q31);
-	return std::clamp((paramNorm - zoneStart) / (zoneEnd - zoneStart), 0.0f, 1.0f);
+inline ShaperWeights computeShaperWeightsFromPos(float posInZone) {
+	posInZone = std::clamp(posInZone, 0.0f, 1.0f);
+	BlendWeights4 weights = computeBlendWeights4(posInZone);
+	return weightsToCoeffs(weights.w0, weights.w1, weights.w2, weights.w3);
 }
 
 /**
@@ -577,88 +228,10 @@ inline float computePosInZone(q31_t harmonic, int32_t zoneIndex) {
  * @param weights Precomputed polynomial coefficients
  * @return Polynomial result (may exceed [-1, 1] for Zone 1)
  */
-[[gnu::always_inline]] inline float evaluate3579Polynomial(float x, const Zone1Weights& weights) {
+[[gnu::always_inline]] inline float evaluate3579Polynomial(float x, const ShaperWeights& weights) {
 	float x2 = x * x;
 	// Horner's method: x * (c1 + x² * (c3 + x² * (c5 + x² * (c7 + c9*x²))))
 	return x * (weights.c1 + x2 * (weights.c3 + x2 * (weights.c5 + x2 * (weights.c7 + weights.c9 * x2))));
-}
-
-/**
- * Compute Chebyshev polynomials using recurrence relation
- * Tn(x) = 2x·Tn-1(x) - Tn-2(x)
- *
- * @param x Input sample (q31, range -ONE_Q31 to ONE_Q31)
- * @param maxOrder Maximum order to compute (3, 5, 7, or 9)
- * @param T3 Output T3(x)
- * @param T5 Output T5(x)
- * @param T7 Output T7(x)
- * @param T9 Output T9(x)
- */
-inline void chebyshevRecurrence(q31_t x, int32_t maxOrder, q31_t& T3, q31_t& T5, q31_t& T7, q31_t& T9) {
-	// Chebyshev recurrence: Tn = 2x·Tn-1 - Tn-2
-	// To compute 2x·Tn-1 in q31:
-	//   multiply_32x32_rshift32_rounded(x, Tn-1) gives x·Tn-1
-	//   Then << 1 gives 2x·Tn-1
-	// We use a helper macro for clarity.
-#define CHEBY_STEP(Tprev1, Tprev2) ((multiply_32x32_rshift32_rounded(x, Tprev1) << 2) - Tprev2)
-
-	// T0 = 1, T1 = x
-	q31_t Tprev2 = ONE_Q31; // T(n-2)
-	q31_t Tprev1 = x;       // T(n-1)
-	q31_t Tcurr;
-
-	// T2 = 2x·T1 - T0 = 2x² - 1
-	Tcurr = CHEBY_STEP(Tprev1, Tprev2);
-	Tprev2 = Tprev1;
-	Tprev1 = Tcurr;
-
-	// T3 = 2x·T2 - T1
-	Tcurr = CHEBY_STEP(Tprev1, Tprev2);
-	T3 = Tcurr;
-	if (maxOrder <= 3) {
-		return;
-	}
-	Tprev2 = Tprev1;
-	Tprev1 = Tcurr;
-
-	// T4 = 2x·T3 - T2
-	Tcurr = CHEBY_STEP(Tprev1, Tprev2);
-	Tprev2 = Tprev1;
-	Tprev1 = Tcurr;
-
-	// T5 = 2x·T4 - T3
-	Tcurr = CHEBY_STEP(Tprev1, Tprev2);
-	T5 = Tcurr;
-	if (maxOrder <= 5) {
-		return;
-	}
-	Tprev2 = Tprev1;
-	Tprev1 = Tcurr;
-
-	// T6 = 2x·T5 - T4
-	Tcurr = CHEBY_STEP(Tprev1, Tprev2);
-	Tprev2 = Tprev1;
-	Tprev1 = Tcurr;
-
-	// T7 = 2x·T6 - T5
-	Tcurr = CHEBY_STEP(Tprev1, Tprev2);
-	T7 = Tcurr;
-	if (maxOrder <= 7) {
-		return;
-	}
-	Tprev2 = Tprev1;
-	Tprev1 = Tcurr;
-
-	// T8 = 2x·T7 - T6
-	Tcurr = CHEBY_STEP(Tprev1, Tprev2);
-	Tprev2 = Tprev1;
-	Tprev1 = Tcurr;
-
-	// T9 = 2x·T8 - T7
-	Tcurr = CHEBY_STEP(Tprev1, Tprev2);
-	T9 = Tcurr;
-
-#undef CHEBY_STEP
 }
 
 /**
@@ -729,7 +302,7 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist) {
 		params.rect2Amount = rect2W;
 	}
 	else if (smoothedTwist < kZone6) {
-		// Zone 5: Feedback (capped at 25%) - TODO: scale inversely with mode0 harmonic
+		// Zone 5: Feedback (capped at 25%)
 		float pos = static_cast<float>(smoothedTwist - kZone5) / static_cast<float>(kZone6 - kZone5);
 		params.feedbackAmount = pos * 0.25f;
 	}
@@ -746,25 +319,27 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist) {
  * - Drive INT32_MAX = 4x overdrive (maximum)
  *
  * Harmonic parameter selects zones:
- * - Zone 0 (Poly): Cascaded polynomial waveshaping
- * - Zones 1-7 (Chebyshev): Triangle-modulated blend of T3, T5, T7, T9
+ * - Zones 0-1 (Chebyshev): Triangle-modulated blend of T3, T5, T7, T9
+ * - Zones 2-6 (FM): Various FM synthesis modes
+ * - Zone 7 (Poly): Cascaded polynomial waveshaping
  *
  * Post-gain compensation ensures peak output matches wavefolder.
  *
- * @param zone1Weights Optional precomputed Zone 1 weights (hoisted from buffer loop)
- *                     If nullptr and in Zone 1, weights are computed per sample
- * @param zone3Weights Optional precomputed Zone 3 weights (BlendWeights4 with inputGainMult)
- *                     If nullptr and in Zone 3, weights are computed per sample (mono)
+ * @param zone1Weights Optional precomputed weights (hoisted from buffer loop)
+ *                     All zones repurpose this struct (zone boundary glitches acceptable):
+ *                       Zone 0/1: c1-c9 = Chebyshev polynomial coefficients
+ *                       Zones 2-6: c1=inputGainMult, c3=w0, c5=w1, c7=w2, c9=w3
+ *                       Zone 7: c1=cascadeBlend, c3=selfMulBlend
+ *                     If nullptr, values are computed per sample
  * @param evenAmount Self-mul for even harmonics (Twist Zone 2, 0.0 to 4.0)
  * @param rectAmount Rectifier blend toward |result| (Twist Zone 3, 0.0 to 1.0)
  * @param rect2Amount Peak-cutting rectifier (Twist Zone 4, 0.0 to 1.0)
  */
 inline q31_t sineShapeCore(q31_t input, q31_t drive, q31_t harmonic, q31_t symmetry,
-                           const Zone1Weights* zone1Weights = nullptr, const BlendWeights4* zone3Weights = nullptr,
-                           float evenAmount = 0.0f, float rectAmount = 0.0f, float rect2Amount = 0.0f,
-                           float phaseHarmonic = 0.0f) {
+                           const ShaperWeights* zone1Weights = nullptr, float evenAmount = 0.0f,
+                           float rectAmount = 0.0f, float rect2Amount = 0.0f, float phaseHarmonic = 0.0f) {
 	// Apply symmetry (DC offset for even harmonics)
-	// >> 12 accounts for drive (up to 4x) and input scaling (<< 8 Zone 0, << 9 Zone 1/2)
+	// >> 12 accounts for drive (up to 4x) and input scaling (<< 8 Zone 7 Poly, float for zones 0-6)
 	// At max: 0.024% DC → after 4x drive and 512x scaling = ~50% DC offset
 	q31_t biased = add_saturate(input, symmetry >> 12);
 
@@ -784,15 +359,13 @@ inline q31_t sineShapeCore(q31_t input, q31_t drive, q31_t harmonic, q31_t symme
 	float inputFClamped = std::clamp(inputF, -kMaxQ31, kMaxQ31);
 	q31_t driven = static_cast<q31_t>(inputFClamped);
 
-	// === Derive harmonic zone and weights ===
-	int32_t zone;
-	q31_t wT3, wT5, wT7, wT9;
-	SineShaperHarmonicMapper::deriveWeights(harmonic, zone, wT3, wT5, wT7, wT9, phaseHarmonic);
+	// === Derive harmonic zone ===
+	int32_t zone = computeZoneQ31(harmonic, kNumHarmonicZones).index;
 
 	q31_t shaped;
 
-	if (zone == 0) {
-		// === Zone 0: Polynomial waveshaping with cascade blend + self-multiplication ===
+	if (zone == 7) {
+		// === Zone 7: Polynomial waveshaping with cascade blend + self-multiplication ===
 		//
 		// IMPORTANT: This must remain q31-based. Float conversion was attempted but failed.
 		//
@@ -808,11 +381,12 @@ inline q31_t sineShapeCore(q31_t input, q31_t drive, q31_t harmonic, q31_t symme
 
 		q31_t scaledInput = lshiftAndSaturateUnknown(multiply_32x32_rshift32_rounded(ONE_Q31, driven), 8);
 
-		// Twist (phaseHarmonic) blends in self-multiplication pre-waveshaping
+		// zone1Weights repurposed for Zone 7 (Poly): c1=cascadeBlend, c3=selfMulBlend
+		// Zone boundary glitches are acceptable - smoothing is per-zone, not cross-zone
+		float selfMulBlend = zone1Weights->c3;
+
 		// Self-mul = input * |input| adds even harmonics before polynomial
-		// phaseHarmonic ±0.5 → blend 0-1
-		if (phaseHarmonic > -0.49f) {
-			float selfMulBlend = phaseHarmonic + 0.5f; // 0 to 1
+		if (selfMulBlend > 0.01f) {
 			q31_t absInput = (scaledInput < 0) ? -scaledInput : scaledInput;
 			q31_t selfMulInput = multiply_32x32_rshift32_rounded(scaledInput, absInput) << 1;
 			q31_t blendQ = static_cast<q31_t>(selfMulBlend * static_cast<float>(ONE_Q31));
@@ -821,27 +395,42 @@ inline q31_t sineShapeCore(q31_t input, q31_t drive, q31_t harmonic, q31_t symme
 
 		shaped = polynomialOscillatorApproximation(scaledInput) >> 8;
 
-		// Cascaded polynomial adds more harmonics via second pass
-		// Scale so blend reaches maximum at end of zone 0 (1/8 of range)
-		q31_t cascadeBlend = (harmonic >= ONE_Q31 / 8) ? ONE_Q31 : (harmonic << 3);
+		// zone1Weights->c1 = cascadeBlend (0-1 float)
+		q31_t cascadeBlend = static_cast<q31_t>(zone1Weights->c1 * static_cast<float>(ONE_Q31));
 
 		if (cascadeBlend > 0) {
 			q31_t moreHarmonics = polynomialOscillatorApproximation(shaped << 7) >> 7;
 			shaped = shaped + multiply_32x32_rshift32_rounded(moreHarmonics - shaped, cascadeBlend) * 2;
 		}
-	}
-	else if (zone == 1 || zone == 2) {
-		// === Zone 1 "357" / Zone 2 "357wm": Blended Chebyshev T3, T5, T7 ===
-		// Zone 1: Raw input, unbounded output (edgy, platform-dependent overflow)
-		// Zone 2: Sine-preprocessed input, bounded output (warm, FM-like)
 
+		// -3dB to match other zones (poly is naturally hotter)
+		constexpr q31_t kMinus3dB = static_cast<q31_t>(0.707 * ONE_Q31);
+		shaped = multiply_32x32_rshift32(shaped, kMinus3dB) << 1;
+	}
+	else if (zone == 0 || zone == 1) {
+		// === Zone 0 "3579" / Zone 1 "3579wm": Blended Chebyshev T3, T5, T7, T9 ===
+		// Zone 0: Raw input - clean, precise Chebyshev harmonics
+		// Zone 1: Sine-preprocessed input - warmer, FM-like character
+		//
+		// Gain staging design:
+		// - Chebyshev polynomials produce clean harmonics when |x| ≤ 1.0
+		// - At |x| = 1.0: maximum harmonic energy, still mathematically clean
+		// - At |x| > 1.0: polynomial explodes exponentially (not usable)
+		// - Hard saturation keeps rawX bounded to ±1.0, preserving full clean range
+		// - Soft clipping would compress the signal before reaching |x| = 1.0,
+		//   reducing clean headroom and preventing maximum harmonic energy
+		// - The "harsh" sound past threshold is flat-topped input, not polynomial
+		//   explosion - it's feedback that you've exceeded the operating point
+		//
+		// << 9 puts sweet spot at ~80% drive knob (+8dB), giving room to
+		// back off for subtle harmonics while harsh feedback indicates overdrive.
 		q31_t scaledInput = lshiftAndSaturateUnknown(multiply_32x32_rshift32_rounded(ONE_Q31, driven), 9);
 		float rawX = static_cast<float>(scaledInput) / static_cast<float>(ONE_Q31);
 
-		// Zone 2 applies sine waveshaping via lookup table to bound input to [-1, 1]
+		// Zone 1 applies sine waveshaping via lookup table to bound input to [-1, 1]
 		// Factor increased by 50%: sin(x * 3π/4) instead of sin(x * π/2) for more coloration
 		float x;
-		if (zone == 2) {
+		if (zone == 1) {
 			// Convert q31 input to phase for sin(x * 3π/4) using lookup table
 			// Phase = scaledInput * 0.75 (3π/4 is 3/8 of full cycle, scaled for q31 input)
 			int32_t phaseInt = (scaledInput >> 1) + (scaledInput >> 2); // * 0.75
@@ -855,119 +444,107 @@ inline q31_t sineShapeCore(q31_t input, q31_t drive, q31_t harmonic, q31_t symme
 			x = static_cast<float>(sinValue) * kInvQ31;
 		}
 		else {
-			// Zone 1: use raw input (allows overdrive for intended harmonic character)
+			// Zone 0: use raw input (allows overdrive for intended harmonic character)
 			x = rawX;
 		}
 
-		// Use precomputed blended coefficients if available (hoisted from buffer loop)
-		Zone1Weights fallbackWeights;
-		const Zone1Weights* weights = zone1Weights;
-		if (!weights) {
-			float posInZone = computePosInZone(harmonic, zone);
-			fallbackWeights = computeZone1WeightsFromPos(posInZone);
-			weights = &fallbackWeights;
-		}
-
+		// Use precomputed blended coefficients (hoisted from buffer loop)
 		// Shared polynomial evaluation - changes here apply to both zones
-		float result = evaluate3579Polynomial(x, *weights);
+		float result = evaluate3579Polynomial(x, *zone1Weights);
 
-		// Scale to q31, clamp, then apply >> 6 attenuation (matches original gain staging)
-		// Uses double to avoid float→int UB when result * ONE_Q31 > INT32_MAX
-		double scaled = static_cast<double>(result) * static_cast<double>(ONE_Q31);
+		// Gain staging: match other zones' output level
+		// Chebyshev peak varies by weight blend - tune empirically
+		// Previous: >> 7 too quiet, 3.0 too loud, 0.5 still loud, 0.1 9dB hot, 0.035 3.5dB hot, 0.023 1.5dB quiet
+		constexpr float kChebyBoost = 0.027f; // Tune empirically (+1.5dB from 0.023)
+		constexpr float kMinus3dB = 0.707f;   // Match other zones
+		constexpr float kChebyGain = kChebyBoost * kMinus3dB;
+
+		double scaled = static_cast<double>(result * kChebyGain) * static_cast<double>(ONE_Q31);
 		scaled = std::clamp(scaled, static_cast<double>(INT32_MIN), static_cast<double>(INT32_MAX));
-		shaped = static_cast<q31_t>(scaled) >> 6;
+		shaped = static_cast<q31_t>(scaled);
 	}
-	else if (zone == 3) {
-		// === Zone 3 "FM": 4-mode FM synthesis blend (pure q31) ===
-		// Mode 0 (Add):  sin(x) + sin(2x)        - layered octaves
-		// Mode 1 (Ring): sin(x) × sin(2x+90°)    - metallic, bell-like
-		// Mode 2 (FM):   sin(x + d·sin(2x))      - classic DX7-style
-		// Mode 3 (Fold): sin(k·sin(x))           - wavefolder
+	else if (zone >= 2 && zone <= 6) {
+		// === Zones 2-6: Matrix-based FM synthesis (shared infrastructure) ===
+		// Zone 2 (FM):   Add, Ring, FM, Fold - mixed character
+		// Zone 3 (Fold): k=1,2,3,4 - wavefolder depths
+		// Zone 4 (Ring): n=2,3,4,5 - ring mod frequency ratios
+		// Zone 5 (Add):  n=2,3,4,5 - additive frequency ratios
+		// Zone 6 (Mod):  FM depths d=0.25,0.5,0.75,1.0
 
-		// Get weights and convert to q31 for blending
-		// Weights are pre-normalized (sum to 1.0) from computeBlendWeights4
-		q31_t w0q, w1q, w2q, w3q;
-		q31_t inputGainQ; // q29 format: 1.0→0x20000000, 4.0→0x80000000
+		// Shared: extract weights (c3=w0, c5=w1, c7=w2, c9=w3)
+		q31_t w0q = static_cast<q31_t>(zone1Weights->c3 * ONE_Q31);
+		q31_t w1q = static_cast<q31_t>(zone1Weights->c5 * ONE_Q31);
+		q31_t w2q = static_cast<q31_t>(zone1Weights->c7 * ONE_Q31);
+		q31_t w3q = static_cast<q31_t>(zone1Weights->c9 * ONE_Q31);
+		// inputGainMult (1.0-4.0) → q29 so 4.0 fits in q31
+		q31_t inputGainQ = static_cast<q31_t>(zone1Weights->c1 * (ONE_Q31 >> 2));
 
-		if (zone3Weights != nullptr) {
-			// Convert float weights (0.0-1.0) to q31
-			w0q = static_cast<q31_t>(zone3Weights->w0 * ONE_Q31);
-			w1q = static_cast<q31_t>(zone3Weights->w1 * ONE_Q31);
-			w2q = static_cast<q31_t>(zone3Weights->w2 * ONE_Q31);
-			w3q = static_cast<q31_t>(zone3Weights->w3 * ONE_Q31);
-			// inputGainMult (1.0-4.0) → q29 so 4.0 fits in q31
-			inputGainQ = static_cast<q31_t>(zone3Weights->inputGainMult * (ONE_Q31 >> 2));
-		}
-		else {
-			// Fallback: compute weights per sample
-			float posInZone = computePosInZone(harmonic, zone);
-			BlendWeights4 weights = computeBlendWeights4(posInZone);
-			w0q = static_cast<q31_t>(weights.w0 * ONE_Q31);
-			w1q = static_cast<q31_t>(weights.w1 * ONE_Q31);
-			w2q = static_cast<q31_t>(weights.w2 * ONE_Q31);
-			w3q = static_cast<q31_t>(weights.w3 * ONE_Q31);
-			// inputGainMult = 1.0 + posInZone * 3.0 (range 1.0-4.0)
-			float inputGainMult = 1.0f + posInZone * 3.0f;
-			inputGainQ = static_cast<q31_t>(inputGainMult * (ONE_Q31 >> 2));
-		}
-
-		// Apply input gain: driven (q31) × inputGainQ (q29) → result in q29, shift to q31
-		// This creates intentional overflow/wrapping for harmonic content at high gains
+		// Shared: apply input gain and compute base phase
 		q31_t gained = multiply_32x32_rshift32(driven, inputGainQ) << 2;
-
-		// Phase calculation: 256 cycles at full scale
-		// Cast to uint32 first to avoid signed shift UB, then shift for × 256
 		uint32_t phase1 = static_cast<uint32_t>(gained) << 8;
 		q31_t sine1 = getSine(phase1);
+		// Peak scaling: multiply_32x32_rshift32(ONE_Q31, ONE_Q31) = 0.5 peak
+		// Ring mod naturally gives 0.5, others need kScale=1.0 to match
+		constexpr q31_t kScale = ONE_Q31;
 
-		// Secondary sine at 2x frequency (octave up)
-		uint32_t phase2 = phase1 << 1;
-		q31_t sine2 = getSine(phase2);
+		// Zone-specific: compute 4 modes (each peaks at ~0.5)
+		q31_t m0, m1, m2, m3;
 
-		// === Mode 0: Add ===
-		// (sine1 + sine2) * 0.375 = (sine1 + sine2) * 3/8
-		// Add with >> 2 headroom to prevent overflow, then scale by 3/2
-		q31_t sumHalf = (sine1 >> 2) + (sine2 >> 2);
-		constexpr q31_t kThreeHalves = static_cast<q31_t>(0.75 * ONE_Q31); // 3/4 in q31 = 3/2 after <<1
-		q31_t modeAdd = multiply_32x32_rshift32(sumHalf, kThreeHalves) << 1;
+		if (zone == 2) {
+			// FM: Add(×2), Ring(×2), FM(×2), Fold(×2)
+			uint32_t phase2 = phase1 << 1;
+			q31_t sine2 = getSine(phase2);
+			// Add: (s1+s2)/2 scaled to 0.5 peak
+			m0 = multiply_32x32_rshift32((sine1 >> 1) + (sine2 >> 1), kScale);
+			// Ring: s1 × s2(+90°) scaled to 0.5 peak
+			m1 = multiply_32x32_rshift32(sine1, getSine(phase2 + 0x40000000u));
+			// FM: sin(p1 + s2>>1) scaled to 0.5 peak
+			m2 = multiply_32x32_rshift32(getSine(phase1 + static_cast<uint32_t>(sine2 >> 1)), kScale);
+			// Fold: sin(s1<<1) scaled to 0.5 peak
+			m3 = multiply_32x32_rshift32(getSine(static_cast<uint32_t>(sine1) << 1), kScale);
+		}
+		else if (zone == 3) {
+			// Fold: k=1,2,3,4 (increasing fold depth) - all peak at 0.5
+			m0 = multiply_32x32_rshift32(getSine(static_cast<uint32_t>(sine1)), kScale);
+			m1 = multiply_32x32_rshift32(getSine(static_cast<uint32_t>(sine1) << 1), kScale);
+			m2 = multiply_32x32_rshift32(getSine(static_cast<uint32_t>(sine1) + (static_cast<uint32_t>(sine1) << 1)),
+			                             kScale);
+			m3 = multiply_32x32_rshift32(getSine(static_cast<uint32_t>(sine1) << 2), kScale);
+		}
+		else if (zone == 4) {
+			// Ring: sin(x) × sin(nx) for n=2,3,4,5 - ring mod peaks at 0.5
+			m0 = multiply_32x32_rshift32(sine1, getSine(phase1 << 1));
+			m1 = multiply_32x32_rshift32(sine1, getSine(phase1 + (phase1 << 1)));
+			m2 = multiply_32x32_rshift32(sine1, getSine(phase1 << 2));
+			m3 = multiply_32x32_rshift32(sine1, getSine((phase1 << 2) + phase1));
+		}
+		else if (zone == 5) {
+			// Add: sin(x) + sin(nx) for n=2,3,4,5 - sum scaled to 0.5 peak
+			q31_t s2 = getSine(phase1 << 1);
+			q31_t s3 = getSine(phase1 + (phase1 << 1));
+			q31_t s4 = getSine(phase1 << 2);
+			q31_t s5 = getSine((phase1 << 2) + phase1);
+			m0 = multiply_32x32_rshift32((sine1 >> 1) + (s2 >> 1), kScale);
+			m1 = multiply_32x32_rshift32((sine1 >> 1) + (s3 >> 1), kScale);
+			m2 = multiply_32x32_rshift32((sine1 >> 1) + (s4 >> 1), kScale);
+			m3 = multiply_32x32_rshift32((sine1 >> 1) + (s5 >> 1), kScale);
+		}
+		else { // zone == 6
+			// Mod: FM with depths d=0.25,0.5,0.75,1.0 (modulator at 2x) - all peak at 0.5
+			q31_t mod = getSine(phase1 << 1);
+			m0 = multiply_32x32_rshift32(getSine(phase1 + static_cast<uint32_t>(mod >> 2)), kScale);
+			m1 = multiply_32x32_rshift32(getSine(phase1 + static_cast<uint32_t>(mod >> 1)), kScale);
+			m2 = multiply_32x32_rshift32(getSine(phase1 + static_cast<uint32_t>((mod >> 1) + (mod >> 2))), kScale);
+			m3 = multiply_32x32_rshift32(getSine(phase1 + static_cast<uint32_t>(mod)), kScale);
+		}
 
-		// === Mode 1: Ring ===
-		// sine1 × sine2Ring × 0.75 (with 90° offset on sine2)
-		uint32_t phase2Ring = phase2 + 0x40000000u; // +90° (quarter cycle)
-		q31_t sine2Ring = getSine(phase2Ring);
-		q31_t product = multiply_32x32_rshift32(sine1, sine2Ring) << 1; // sine1 × sine2Ring
-		q31_t modeRing = multiply_32x32_rshift32(product, kThreeHalves) << 1;
-
-		// === Mode 2: FM ===
-		// sin(phase1 + sine2 × depth × fullCycle) × 0.75
-		// fmDepth = 0.5 cycles: sine2 (q31) → phase offset = sine2 >> 1 (half cycle in uint32)
-		uint32_t fmPhase = phase1 + static_cast<uint32_t>(sine2 >> 1);
-		q31_t fmSine = getSine(fmPhase);
-		q31_t modeFM = multiply_32x32_rshift32(fmSine, kThreeHalves) << 1;
-
-		// === Mode 3: Fold ===
-		// sin(sine1 × 2 cycles) × 0.75
-		// foldGain = 2.0: sine1 << 1 gives 2 cycles worth of phase
-		uint32_t foldPhase = static_cast<uint32_t>(sine1) << 1;
-		q31_t foldSine = getSine(foldPhase);
-		q31_t modeFold = multiply_32x32_rshift32(foldSine, kThreeHalves) << 1;
-
-		// === Blend with pre-normalized weights ===
-		// Weights sum to 1.0, so result = w0×mode0 + w1×mode1 + w2×mode2 + w3×mode3
+		// Shared: blend with normalized weights and apply attenuation
 		q31_t blended = 0;
-		blended = add_saturate(blended, multiply_32x32_rshift32(modeAdd, w0q) << 1);
-		blended = add_saturate(blended, multiply_32x32_rshift32(modeRing, w1q) << 1);
-		blended = add_saturate(blended, multiply_32x32_rshift32(modeFM, w2q) << 1);
-		blended = add_saturate(blended, multiply_32x32_rshift32(modeFold, w3q) << 1);
-
-		// Apply >> 7 attenuation (matches original gain staging)
+		blended = add_saturate(blended, multiply_32x32_rshift32(m0, w0q) << 1);
+		blended = add_saturate(blended, multiply_32x32_rshift32(m1, w1q) << 1);
+		blended = add_saturate(blended, multiply_32x32_rshift32(m2, w2q) << 1);
+		blended = add_saturate(blended, multiply_32x32_rshift32(m3, w3q) << 1);
 		shaped = blended >> 7;
-	}
-	else {
-		// === Zones 4-7: Placeholder (reserved) ===
-		// Simple passthrough with gain matching (no post-gain)
-		q31_t scaledInput = lshiftAndSaturateUnknown(multiply_32x32_rshift32_rounded(ONE_Q31, driven), 9);
-		shaped = scaledInput >> 6;
 	}
 
 	// === Even harmonics (Twist Zone 2) ===
@@ -1011,58 +588,24 @@ inline q31_t sineShapeCore(q31_t input, q31_t drive, q31_t harmonic, q31_t symme
 }
 
 /**
- * Full sine shaping with wet/dry mix (legacy single-sample version)
- */
-inline q31_t sineShape(q31_t input, q31_t drive, q31_t harmonic, q31_t symmetry, q31_t mix) {
-	if (mix <= 0) {
-		return input;
-	}
-
-	q31_t shaped = sineShapeCore(input, drive, harmonic, symmetry);
-
-	// Chebyshev zones (1+) use harmonic extraction crossfade
-	constexpr q31_t kZone1Threshold = ONE_Q31 / 8;
-	if (harmonic >= kZone1Threshold) {
-		// dryCoeff = 1 - mix: traditional wet/dry crossfade for Chebyshev zones
-		// At mix=0: pure dry, mix=1: pure wet
-		q31_t dryCoeff = ONE_Q31 - multiply_32x32_rshift32(mix, ONE_Q31) * 2;
-		q31_t dryPart = multiply_32x32_rshift32(input, dryCoeff) << 1;
-		q31_t wetPart = multiply_32x32_rshift32(shaped, mix) << 1;
-		return add_saturate(dryPart, wetPart);
-	}
-	else {
-		// Zone 0: Traditional wet/dry crossfade
-		q31_t invMix = ONE_Q31 - mix;
-		q31_t dryPart = multiply_32x32_rshift32(input, invMix) << 1;
-		q31_t wetPart = multiply_32x32_rshift32(shaped, mix) << 1;
-		return add_saturate(dryPart, wetPart);
-	}
-}
-
-/**
  * Process a mono buffer through the sine shaper with parameter smoothing
- *
- * Drive and Harmonic are smoothed internally.
- * Twist should be smoothed at the call site for consistent handling.
  *
  * @param buffer Audio buffer to process in place
  * @param drive Current target drive value
  * @param smoothedDrive Pointer to smoothed drive state (updated in place)
  * @param voiceState Pointer to per-voice state (DC blocker, feedback, etc.)
- * @param harmonic Raw harmonic value (smoothed internally via params->smoothedHarmonic)
- * @param symmetry DC bias for asymmetry (Twist Zone 3)
+ * @param harmonic Raw harmonic value (smoothed internally)
  * @param mix Wet/dry blend - if 0, buffer is not modified (CPU optimization)
- * @param evenAmount Self-mul for even harmonics (Twist Zone 2, 0.0 to 4.0)
- * @param rectAmount Rectifier blend (Twist Zone 4, 0.0 to 1.0)
- * @param feedbackAmount Feedback depth (Twist Zone 5, 0.0 to 0.25)
- * @param params Pointer to SineShaperParams for coefficient smoothing (required)
- * @param phaseHarmonic Twist zone 0 offset for Harmonic knob (default 0)
+ * @param twist Twist parameters (symmetry, even, rect, feedback, phaseHarmonic)
+ * @param params Pointer to SineShaperParams for coefficient smoothing
  * @param wasBypassed Pointer to bypass state flag (updated in place)
+ * @param boostSubtractive If true, pre-boost input and post-attenuate wet to normalize
+ *                         subtractive mode signal levels to match FM mode operating point
  */
 inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothedDrive,
-                            SineShaperVoiceState* voiceState, q31_t harmonic, q31_t symmetry, q31_t mix,
-                            float evenAmount, float rectAmount, float rect2Amount, float feedbackAmount,
-                            SineShaperParams* params, float phaseHarmonic = 0.0f, bool* wasBypassed = nullptr) {
+                            SineShaperVoiceState* voiceState, q31_t harmonic, q31_t mix,
+                            const SineShaperTwistParams& twist, SineShaperParams* params, bool* wasBypassed = nullptr,
+                            bool boostSubtractive = false) {
 	// Early out - if mix is 0, do nothing (important CPU optimization)
 	if (mix <= 0 || buffer.empty()) {
 		if (wasBypassed) {
@@ -1075,7 +618,7 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 	auto driveCtx = prepareSmoothing(*smoothedDrive, drive, buffer.size());
 	*smoothedDrive = driveCtx.target; // Write back smoothed state
 
-	// Smooth harmonic internally (fixes Zone 0 clicking from cascadeBlend/selfMulBlend jumps)
+	// Smooth harmonic internally (fixes Zone 7 clicking from cascadeBlend/selfMulBlend jumps)
 	// Note: 7th vs 9th harmonic selection is now computed internally by computeZone1*
 	// based on a bipolar triangle at the posInZone - no need for external flag
 	q31_t smoothedHarmonic = smoothParam(&params->smoothedHarmonic, harmonic);
@@ -1085,101 +628,119 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 		*wasBypassed = false;
 	}
 
-	// Determine crossfade mode based on smoothed harmonic
-	constexpr q31_t kZone1Threshold = ONE_Q31 / 8; // Zone 1 starts at 1/8
-	constexpr q31_t kZone2Threshold = ONE_Q31 / 4; // Zone 2 starts at 2/8
-	bool inZone0 = (smoothedHarmonic < kZone1Threshold);
-	bool useChebyshevCrossfade = !inZone0;
-	bool inZone1 = (smoothedHarmonic >= kZone1Threshold && smoothedHarmonic < kZone2Threshold);
-	bool inZone2 = (smoothedHarmonic >= kZone2Threshold);
+	// Determine zone from smoothed harmonic
+	auto zoneInfo = computeZoneQ31(smoothedHarmonic, kNumHarmonicZones);
+	int32_t zone = zoneInfo.index;
+	float posInZone = zoneInfo.position;
+	// Poly (zone 7) uses different crossfade, all others use Chebyshev-style
+	bool useChebyshevCrossfade = (zone != 7);
 
 	// Hoist zone weight calculation with per-sample coefficient interpolation
 	// Per-sample smoothing eliminates zipper noise from triangle weight changes
-	// Zone 0 reuses c1Ctx for phaseHarmonic smoothing (zones are orthogonal)
-	Zone1Weights zone1Weights;
-	FloatSmoothingContext c1Ctx{0, 0, 0}, c3Ctx{0, 0, 0}, c5Ctx{0, 0, 0}, c7Ctx{0, 0, 0}, c9Ctx{0, 0, 0};
-	bool usePerSampleWeights = (inZone0 || inZone1 || inZone2);
-	float currentPhaseHarmonic = phaseHarmonic;
+	// Zone boundary glitches are acceptable - smoothing is per-zone, not cross-zone
+	// All zones use same smoothing path and repurpose ShaperWeights:
+	//   Zone 7 (Poly): c1=cascadeBlend, c3=selfMulBlend
+	//   Zone 0/1 (Chebyshev): c1-c9 = Chebyshev coefficients
+	//   Zones 2-6 (FM): c1=inputGainMult, c3=w0, c5=w1, c7=w2, c9=w3
+	ShaperWeights shaperWeights{0, 0, 0, 0, 0};
+	ShaperWeights targetWeights{0, 0, 0, 0, 0};
 
-	if (inZone0) {
-		// Zone 0: smooth phaseHarmonic using c1Ctx (reused since Zone 0 doesn't use Chebyshev coeffs)
-		c1Ctx = prepareSmoothingFloat(params->smoothedC1, phaseHarmonic, buffer.size());
-		currentPhaseHarmonic = c1Ctx.current;
+	if (zone == 7) {
+		// Zone 7 (Poly): c1=cascadeBlend, c3=selfMulBlend
+		targetWeights.c1 = posInZone;
+		targetWeights.c3 = std::clamp(twist.phaseHarmonic + 0.5f, 0.0f, 1.0f);
 	}
-	else if (inZone1 || inZone2) {
-		int32_t zoneIndex = inZone1 ? 1 : 2;
-		float posInZone = computePosInZone(smoothedHarmonic, zoneIndex);
-		// Apply phaseHarmonic offset (from Twist zone) - wraps around [0,1]
-		posInZone = std::fmod(posInZone + phaseHarmonic + 1.0f, 1.0f);
-		Zone1Weights targetWeights = computeZone1WeightsFromPos(posInZone);
-
-		// Prepare per-sample interpolation contexts
-		c1Ctx = prepareSmoothingFloat(params->smoothedC1, targetWeights.c1, buffer.size());
-		c3Ctx = prepareSmoothingFloat(params->smoothedC3L, targetWeights.c3, buffer.size());
-		c5Ctx = prepareSmoothingFloat(params->smoothedC5L, targetWeights.c5, buffer.size());
-		c7Ctx = prepareSmoothingFloat(params->smoothedC7L, targetWeights.c7, buffer.size());
-		c9Ctx = prepareSmoothingFloat(params->smoothedC9L, targetWeights.c9, buffer.size());
-
-		// Initialize weights for first sample
-		zone1Weights.c1 = c1Ctx.current;
-		zone1Weights.c3 = c3Ctx.current;
-		zone1Weights.c5 = c5Ctx.current;
-		zone1Weights.c7 = c7Ctx.current;
-		zone1Weights.c9 = c9Ctx.current;
+	else if (zone == 0 || zone == 1) {
+		float pos = std::fmod(posInZone + twist.phaseHarmonic + 1.0f, 1.0f);
+		targetWeights = computeShaperWeightsFromPos(pos);
 	}
+	else if (zone >= 2 && zone <= 6) {
+		// Zones 2-6 (FM): c1=inputGainMult, c3=w0, c5=w1, c7=w2, c9=w3
+		// All use same weight structure, differ only in DSP applied in sineShapeCore
+		float pos = std::fmod(posInZone + twist.phaseHarmonic + 1.0f, 1.0f);
+		BlendWeights4 w = computeBlendWeights4(pos);
+		targetWeights.c1 = 1.0f + pos * 3.0f; // inputGainMult 1.0-4.0
+		targetWeights.c3 = w.w0;
+		targetWeights.c5 = w.w1;
+		targetWeights.c7 = w.w2;
+		targetWeights.c9 = w.w3;
+	}
+
+	// Single smoothing path for all zones
+	FloatSmoothingContext c1Ctx = prepareSmoothingFloat(params->smoothedC1, targetWeights.c1, buffer.size());
+	FloatSmoothingContext c3Ctx = prepareSmoothingFloat(params->smoothedC3L, targetWeights.c3, buffer.size());
+	FloatSmoothingContext c5Ctx = prepareSmoothingFloat(params->smoothedC5L, targetWeights.c5, buffer.size());
+	FloatSmoothingContext c7Ctx = prepareSmoothingFloat(params->smoothedC7L, targetWeights.c7, buffer.size());
+	FloatSmoothingContext c9Ctx = prepareSmoothingFloat(params->smoothedC9L, targetWeights.c9, buffer.size());
+
+	shaperWeights = {c1Ctx.current, c3Ctx.current, c5Ctx.current, c7Ctx.current, c9Ctx.current};
 
 	// Local copy of state for efficient per-sample update
 	// If voiceState is null, use local zeros (no persistent state across buffers)
 	q31_t dcState = voiceState ? voiceState->dcBlockerL : 0;
 	q31_t fbState = voiceState ? voiceState->feedbackL : 0;
-	q31_t fbLpfState = voiceState ? voiceState->feedbackLpfL : 0;
-	q31_t fbHpfState = voiceState ? voiceState->feedbackHpfL : 0;
 	q31_t currentDrive = driveCtx.current;
 
 	// Scale feedback amount for moderate self-oscillation range
 	// At max (1.0), feedback is ~0.9 of output (just below self-oscillation)
-	// In Zone 0, feedback is inversely proportional to harmonic position (more cascade = less feedback)
+	// In Zone 7 (Poly), feedback is inversely proportional to harmonic position (more cascade = less feedback)
 	// Also reduce feedback by up to 10% as drive increases (tames high-drive feedback)
 	constexpr float kFeedbackScale = 0.25f;
 	float fbScale = kFeedbackScale;
-	constexpr q31_t kZone0End = ONE_Q31 / 8;
-	if (smoothedHarmonic < kZone0End) {
-		float zone0Pos = static_cast<float>(smoothedHarmonic) / static_cast<float>(kZone0End);
-		fbScale *= (1.0f - zone0Pos); // 100% at start, 0% at end of Zone 0
+	constexpr q31_t kZone7Start = ONE_Q31 - (ONE_Q31 / 8); // 7/8 without overflow
+	if (smoothedHarmonic >= kZone7Start) {
+		float zone7Pos = static_cast<float>(smoothedHarmonic - kZone7Start) / static_cast<float>(ONE_Q31 - kZone7Start);
+		fbScale *= (1.0f - zone7Pos); // 100% at start, 0% at end of Zone 7
+		fbScale *= 0.707f;            // -3dB for Zone 7 (poly is hotter)
 	}
-	// Drive-based reduction: -10% at max drive
+	// Drive-based reduction: up to 10% at max drive (tames high-drive feedback)
 	float driveNorm = static_cast<float>(drive) / static_cast<float>(ONE_Q31);
 	fbScale *= (1.0f - 0.1f * driveNorm);
-	q31_t fbAmount = static_cast<q31_t>(feedbackAmount * fbScale * static_cast<float>(ONE_Q31));
+	q31_t fbAmount = static_cast<q31_t>(twist.feedbackAmount * fbScale * static_cast<float>(ONE_Q31));
 
 	for (auto& sample : buffer) {
 		// Apply feedback to input (before shaping)
-		q31_t inputWithFb = sample;
+		// Pre-boost for subtractive mode to normalize operating point with FM
+		q31_t inputWithFb = boostSubtractive ? lshiftAndSaturate<kSubtractiveBoostBits>(sample) : sample;
 		if (fbAmount > 0) {
 			// Apply feedback directly (HPF on tap prevents fundamental buildup)
 			q31_t fb = signed_saturate<22>(multiply_32x32_rshift32(fbState, fbAmount) << 1);
-			inputWithFb = add_saturate(sample, fb);
+			inputWithFb = add_saturate(inputWithFb, fb);
 			// Clamp combined signal to q31 range
 			inputWithFb = std::clamp(inputWithFb, -ONE_Q31, ONE_Q31);
 		}
 
 		// Get shaped (wet) signal with all modifiers (drive + weights interpolated per-sample)
-		q31_t shaped = sineShapeCore(inputWithFb, currentDrive, smoothedHarmonic, symmetry,
-		                             (inZone1 || inZone2) ? &zone1Weights : nullptr, nullptr, evenAmount, rectAmount,
-		                             rect2Amount, currentPhaseHarmonic);
+		// All zones use shaperWeights (repurposed per zone, see comment above)
+		q31_t shaped = sineShapeCore(inputWithFb, currentDrive, smoothedHarmonic, twist.symmetry, &shaperWeights,
+		                             twist.evenAmount, twist.rectAmount, twist.rect2Amount, twist.phaseHarmonic);
 		currentDrive += driveCtx.increment;
 
-		// Update weights for next sample (per-sample interpolation)
-		if (inZone0) {
-			// Zone 0: smooth phaseHarmonic
-			currentPhaseHarmonic = (c1Ctx.current += c1Ctx.increment);
+		// Update weights for next sample (per-sample interpolation, unified path)
+		shaperWeights.c1 = (c1Ctx.current += c1Ctx.increment);
+		shaperWeights.c3 = (c3Ctx.current += c3Ctx.increment);
+		shaperWeights.c5 = (c5Ctx.current += c5Ctx.increment);
+		shaperWeights.c7 = (c7Ctx.current += c7Ctx.increment);
+		shaperWeights.c9 = (c9Ctx.current += c9Ctx.increment);
+
+		// 100Hz HPF on wet signal only - removes sub-bass rumble without affecting dry
+		dcState += multiply_32x32_rshift32(shaped - dcState, kOutputHpfAlpha) * 2;
+		q31_t hpfWet = shaped - dcState;
+
+		// Rect2 peak limiting on HPF'd wet for feedback: y = x - sign(x) * x² * k
+		// Taps HPF'd wet BEFORE subtractive attenuation so feedback operates at waveshaper level
+		// k=2: sign flips at |x| > 0.5, providing soft folding for stability
+		{
+			q31_t x2 = multiply_32x32_rshift32(hpfWet, hpfWet) << 1;
+			q31_t rect2Term = x2 << 1; // k=2.0
+			fbState = (hpfWet >= 0) ? (hpfWet - rect2Term) : (hpfWet + rect2Term);
 		}
-		else if (inZone1 || inZone2) {
-			zone1Weights.c1 = (c1Ctx.current += c1Ctx.increment);
-			zone1Weights.c3 = (c3Ctx.current += c3Ctx.increment);
-			zone1Weights.c5 = (c5Ctx.current += c5Ctx.increment);
-			zone1Weights.c7 = (c7Ctx.current += c7Ctx.increment);
-			zone1Weights.c9 = (c9Ctx.current += c9Ctx.increment);
+
+		// Post-attenuate wet signal for subtractive mode (inverse of pre-boost)
+		// This normalizes the waveshaper operating point without changing output level
+		// Applied AFTER feedback tap so feedback operates at internal waveshaper level
+		if (boostSubtractive) {
+			hpfWet >>= kSubtractiveBoostBits;
 		}
 
 		q31_t mixed;
@@ -1188,51 +749,31 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 			// At mix=0: pure dry, mix=1: pure wet
 			q31_t dryCoeff = ONE_Q31 - multiply_32x32_rshift32(mix, ONE_Q31) * 2; // 1 - mix
 			q31_t dryPart = multiply_32x32_rshift32(sample, dryCoeff) << 1;
-			q31_t wetPart = multiply_32x32_rshift32(shaped, mix) << 1;
+			q31_t wetPart = multiply_32x32_rshift32(hpfWet, mix) << 1;
 			mixed = add_saturate(dryPart, wetPart);
 		}
 		else {
-			// Zone 0: Traditional wet/dry crossfade
+			// Zone 7 (Poly): Traditional wet/dry crossfade
 			q31_t invMix = ONE_Q31 - mix;
 			q31_t dryPart = multiply_32x32_rshift32(sample, invMix) << 1;
-			q31_t wetPart = multiply_32x32_rshift32(shaped, mix) << 1;
+			q31_t wetPart = multiply_32x32_rshift32(hpfWet, mix) << 1;
 			mixed = add_saturate(dryPart, wetPart);
 		}
 
-		// 100Hz HPF (replaces 5Hz DC blocker) - removes sub-bass rumble
-		dcState += multiply_32x32_rshift32(mixed - dcState, kOutputHpfAlpha) * 2;
-		q31_t hpfOut = mixed - dcState;
-		sample = hpfOut;
-
-		// Rect2 peak limiting on HPF'd output for feedback: y = x - sign(x) * x² * k
-		// Taps post-HPF so feedback inherits high-pass filtering
-		// k=2: sign flips at |x| > 0.5, providing soft folding for stability
-		{
-			q31_t x2 = multiply_32x32_rshift32(hpfOut, hpfOut) << 1;
-			q31_t rect2Term = x2 << 1; // k=2.0
-			fbState = (hpfOut >= 0) ? (hpfOut - rect2Term) : (hpfOut + rect2Term);
-		}
+		sample = mixed;
 	}
 
 	// Write back state if voiceState is not null
 	if (voiceState) {
 		voiceState->dcBlockerL = dcState;
 		voiceState->feedbackL = fbState;
-		voiceState->feedbackLpfL = fbLpfState;
-		voiceState->feedbackHpfL = fbHpfState;
 	}
-	if (inZone0) {
-		// Zone 0: write back smoothed phaseHarmonic (stored in smoothedC1)
-		params->smoothedC1 = c1Ctx.target;
-	}
-	else if (inZone1 || inZone2) {
-		// Zone 1/2: write back smoothed Chebyshev coefficients
-		params->smoothedC1 = c1Ctx.target;
-		params->smoothedC3L = c3Ctx.target;
-		params->smoothedC5L = c5Ctx.target;
-		params->smoothedC7L = c7Ctx.target;
-		params->smoothedC9L = c9Ctx.target;
-	}
+	// Write back smoothed params (shared across zones, zone boundary glitches acceptable)
+	params->smoothedC1 = c1Ctx.target;
+	params->smoothedC3L = c3Ctx.target;
+	params->smoothedC5L = c5Ctx.target;
+	params->smoothedC7L = c7Ctx.target;
+	params->smoothedC9L = c9Ctx.target;
 }
 
 /**
@@ -1246,23 +787,17 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
  * @param smoothedDrive Pointer to smoothed drive state (updated in place)
  * @param voiceState Pointer to per-voice state (DC blocker, feedback, LFO, etc.)
  * @param harmonic Raw harmonic value (smoothed internally via params->smoothedHarmonic)
- * @param symmetry DC bias for asymmetry (Twist Zone 3)
  * @param mix Wet/dry blend - if 0, buffer is not modified (CPU optimization)
- * @param stereoWidth Stereo coefficient spread envelope (peaks at 25-75% of Width zone)
- * @param stereoFreqMult Stereo oscillation frequency multiplier (1× to 4×)
- * @param stereoPhaseOffset Stereo phase evolution (0-1 across Width zone)
- * @param evenAmount Self-mul for even harmonics (Twist Zone 2, 0.0 to 4.0)
- * @param rectAmount Rectifier blend (Twist Zone 4, 0.0 to 1.0)
- * @param feedbackAmount Feedback depth (Twist Zone 5, 0.0 to 0.25)
+ * @param twist Twist parameters (stereo, symmetry, even, rect, feedback, phaseHarmonic)
  * @param params Pointer to SineShaperParams for coefficient smoothing (required)
- * @param phaseHarmonic Twist zone 0 offset for Harmonic knob (default 0)
  * @param wasBypassed Pointer to bypass state flag (updated in place)
+ * @param boostSubtractive If true, pre-boost input and post-attenuate wet to normalize
+ *                         subtractive mode signal levels to match FM mode operating point
  */
 inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoothedDrive,
-                            SineShaperVoiceState* voiceState, q31_t harmonic, q31_t symmetry, q31_t mix,
-                            float stereoWidth, float stereoFreqMult, float stereoPhaseOffset, float evenAmount,
-                            float rectAmount, float rect2Amount, float feedbackAmount, SineShaperParams* params,
-                            float phaseHarmonic = 0.0f, bool* wasBypassed = nullptr) {
+                            SineShaperVoiceState* voiceState, q31_t harmonic, q31_t mix,
+                            const SineShaperTwistParams& twist, SineShaperParams* params, bool* wasBypassed = nullptr,
+                            bool boostSubtractive = false) {
 	// Early out - if mix is 0, do nothing (important CPU optimization)
 	if (mix <= 0 || buffer.empty()) {
 		if (wasBypassed) {
@@ -1275,7 +810,7 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	auto driveCtx = prepareSmoothing(*smoothedDrive, drive, buffer.size());
 	*smoothedDrive = driveCtx.target; // Write back smoothed state
 
-	// Smooth harmonic internally (fixes Zone 0 clicking from cascadeBlend/selfMulBlend jumps)
+	// Smooth harmonic internally (fixes Zone 7 clicking from cascadeBlend/selfMulBlend jumps)
 	// Note: 7th vs 9th harmonic selection is now computed internally by computeZone1*
 	// based on a bipolar triangle at the posInZone - no need for external flag
 	q31_t smoothedHarmonic = smoothParam(&params->smoothedHarmonic, harmonic);
@@ -1285,136 +820,93 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 		*wasBypassed = false;
 	}
 
-	// Determine crossfade mode based on smoothed harmonic
-	constexpr q31_t kZone1Threshold = ONE_Q31 / 8;       // Zone 1 starts at 1/8
-	constexpr q31_t kZone2Threshold = ONE_Q31 / 4;       // Zone 2 starts at 2/8
-	constexpr q31_t kZone3Threshold = (ONE_Q31 / 8) * 3; // Zone 3 starts at 3/8
-	constexpr q31_t kZone4Threshold = ONE_Q31 / 2;       // Zone 4 starts at 4/8
-	bool inZone0 = (smoothedHarmonic < kZone1Threshold);
-	bool useChebyshevCrossfade = !inZone0;
-	bool inZone1 = (smoothedHarmonic >= kZone1Threshold && smoothedHarmonic < kZone2Threshold);
-	bool inZone2 = (smoothedHarmonic >= kZone2Threshold && smoothedHarmonic < kZone3Threshold);
-	bool inZone3 = (smoothedHarmonic >= kZone3Threshold && smoothedHarmonic < kZone4Threshold);
+	// Determine zone from smoothed harmonic
+	auto zoneInfo = computeZoneQ31(smoothedHarmonic, kNumHarmonicZones);
+	int32_t zone = zoneInfo.index;
+	float posInZone = zoneInfo.position;
+	// Poly (zone 7) uses different crossfade, all others use Chebyshev-style
+	bool useChebyshevCrossfade = (zone != 7);
 
 	// Hoist zone weight calculation with per-sample coefficient interpolation
 	// Per-sample smoothing eliminates zipper noise from triangle weight changes
-	// Zone 0 reuses c1Ctx for phaseHarmonic smoothing (zones are orthogonal)
-	Zone1Weights zone1WeightsL;
-	Zone1Weights zone1WeightsR;
-	FloatSmoothingContext c1Ctx{0, 0, 0}, c3LCtx{0, 0, 0}, c5LCtx{0, 0, 0}, c7LCtx{0, 0, 0}, c9LCtx{0, 0, 0};
-	FloatSmoothingContext c3RCtx{0, 0, 0}, c5RCtx{0, 0, 0}, c7RCtx{0, 0, 0}, c9RCtx{0, 0, 0};
-	bool usePerSampleWeights = (inZone0 || inZone1 || inZone2);
-	float currentPhaseHarmonic = phaseHarmonic;
+	// Zone boundary glitches are acceptable - smoothing is per-zone, not cross-zone
+	// All zones use same smoothing path and repurpose ShaperWeights:
+	//   Zone 7 (Poly): c1=cascadeBlend, c3=selfMulBlend
+	//   Zone 0/1 (Chebyshev): c1-c9 = Chebyshev coefficients
+	//   Zones 2-6 (FM): c1=inputGainMult, c3=w0, c5=w1, c7=w2, c9=w3
+	ShaperWeights shaperWeightsL{0, 0, 0, 0, 0};
+	ShaperWeights shaperWeightsR{0, 0, 0, 0, 0};
+	ShaperWeights targetWeightsL{0, 0, 0, 0, 0};
+	ShaperWeights targetWeightsR{0, 0, 0, 0, 0};
 
-	if (inZone0) {
-		// Zone 0: smooth phaseHarmonic using c1Ctx (reused since Zone 0 doesn't use Chebyshev coeffs)
-		c1Ctx = prepareSmoothingFloat(params->smoothedC1, phaseHarmonic, buffer.size());
-		currentPhaseHarmonic = c1Ctx.current;
+	// Compute stereo position offset for zones that use it
+	float stereoMod = triangleFloat(twist.stereoPhaseOffset * twist.stereoFreqMult);
+
+	if (zone == 7) {
+		// Zone 7 (Poly): c1=cascadeBlend, c3=selfMulBlend (L/R identical)
+		targetWeightsL.c1 = posInZone;
+		targetWeightsL.c3 = std::clamp(twist.phaseHarmonic + 0.5f, 0.0f, 1.0f);
+		targetWeightsR = targetWeightsL;
 	}
-	else if (inZone1 || inZone2) {
-		int32_t zoneIndex = inZone1 ? 1 : 2;
-		float posInZone = computePosInZone(smoothedHarmonic, zoneIndex);
-		// Apply phaseHarmonic offset (from Twist zone) - wraps around [0,1]
-		posInZone = std::fmod(posInZone + phaseHarmonic + 1.0f, 1.0f);
+	else if (zone == 0 || zone == 1) {
+		float pos = std::fmod(posInZone + twist.phaseHarmonic + 1.0f, 1.0f);
 
-		// === Position-based stereo: L and R computed at different harmonic positions ===
-		// Instead of attenuating coefficients (which can break polynomial cancellation),
-		// we compute L and R as independent valid Chebyshev blends at offset positions.
-		// This guarantees both channels produce outputs within prescient gain bounds.
-
-		// Compute animated stereo offset using 100% duty triangle (no dead zone)
-		uint32_t phase = static_cast<uint32_t>(stereoPhaseOffset * stereoFreqMult * 4294967296.0f);
-		float mod = static_cast<float>(getTriangle(phase)) / static_cast<float>(ONE_Q31);
-
-		// Position offset: ±stereoWidth * 0.06 (6% of zone at max stereo)
-		// Small offset creates subtle L/R differences without shifting overall harmonic character
+		// Position-based stereo: L and R at different positions
 		constexpr float kMaxPosOffset = 0.06f;
-		float posOffset = stereoWidth * mod * kMaxPosOffset;
+		float posOffset = twist.stereoWidth * stereoMod * kMaxPosOffset;
+		float posL = std::clamp(pos - posOffset, 0.0f, 1.0f);
+		float posR = std::clamp(pos + posOffset, 0.0f, 1.0f);
 
-		// Compute L and R at different "virtual" positions (clamped to [0,1])
-		float posL = std::clamp(posInZone - posOffset, 0.0f, 1.0f);
-		float posR = std::clamp(posInZone + posOffset, 0.0f, 1.0f);
-
-		Zone1Weights targetL = computeZone1WeightsFromPos(posL);
-		Zone1Weights targetR = computeZone1WeightsFromPos(posR);
-
-		// Prepare per-sample interpolation for L coefficients (c1 shared)
-		c1Ctx = prepareSmoothingFloat(params->smoothedC1, targetL.c1, buffer.size());
-		c3LCtx = prepareSmoothingFloat(params->smoothedC3L, targetL.c3, buffer.size());
-		c5LCtx = prepareSmoothingFloat(params->smoothedC5L, targetL.c5, buffer.size());
-		c7LCtx = prepareSmoothingFloat(params->smoothedC7L, targetL.c7, buffer.size());
-		c9LCtx = prepareSmoothingFloat(params->smoothedC9L, targetL.c9, buffer.size());
-
-		// Prepare per-sample interpolation for R coefficients (c1R = c1)
-		c3RCtx = prepareSmoothingFloat(params->smoothedC3R, targetR.c3, buffer.size());
-		c5RCtx = prepareSmoothingFloat(params->smoothedC5R, targetR.c5, buffer.size());
-		c7RCtx = prepareSmoothingFloat(params->smoothedC7R, targetR.c7, buffer.size());
-		c9RCtx = prepareSmoothingFloat(params->smoothedC9R, targetR.c9, buffer.size());
-
-		// Initialize weights for first sample
-		zone1WeightsL = {c1Ctx.current, c3LCtx.current, c5LCtx.current, c7LCtx.current, c9LCtx.current};
-		zone1WeightsR = {c1Ctx.current, c3RCtx.current, c5RCtx.current, c7RCtx.current, c9RCtx.current};
+		targetWeightsL = computeShaperWeightsFromPos(posL);
+		targetWeightsR = computeShaperWeightsFromPos(posR);
 	}
+	else if (zone >= 2 && zone <= 6) {
+		// Zones 2-6 (FM): c1=inputGainMult, c3=w0, c5=w1, c7=w2, c9=w3
+		// All use same weight structure, differ only in DSP applied in sineShapeCore
+		float pos = std::fmod(posInZone + twist.phaseHarmonic + 1.0f, 1.0f);
 
-	// Hoist Zone 3 weight calculation with per-sample interpolation
-	// Reuses Zone 1/2 smoothing contexts: c3→w0, c5→w1, c7→w2, c9→w3, c1→inputGain
-	BlendWeights4 zone3WeightsL, zone3WeightsR;
-	bool useZone3Weights = inZone3;
-
-	if (useZone3Weights) {
-		float posInZone = computePosInZone(smoothedHarmonic, 3);
-		// Apply phaseHarmonic offset (from Twist zone) - wraps around [0,1]
-		posInZone = std::fmod(posInZone + phaseHarmonic + 1.0f, 1.0f);
-
-		// === Position-based stereo: L and R at different positions ===
-		uint32_t phase = static_cast<uint32_t>(stereoPhaseOffset * stereoFreqMult * 4294967296.0f);
-		float mod = static_cast<float>(getTriangle(phase)) / static_cast<float>(ONE_Q31);
-
-		// Position offset: ±stereoWidth * 0.08 (8% of zone for Zone 3)
+		// Position-based stereo
 		constexpr float kMaxPosOffset = 0.08f;
-		float posOffset = stereoWidth * mod * kMaxPosOffset;
+		float posOffset = twist.stereoWidth * stereoMod * kMaxPosOffset;
+		float posL = std::clamp(pos - posOffset, 0.0f, 1.0f);
+		float posR = std::clamp(pos + posOffset, 0.0f, 1.0f);
 
-		float posL = std::clamp(posInZone - posOffset, 0.0f, 1.0f);
-		float posR = std::clamp(posInZone + posOffset, 0.0f, 1.0f);
+		BlendWeights4 wL = computeBlendWeights4(posL);
+		BlendWeights4 wR = computeBlendWeights4(posR);
+		float inputGain = 1.0f + pos * 3.0f;
 
-		// Compute target weights at offset positions
-		BlendWeights4 targetWeightsL = computeBlendWeights4(posL);
-		BlendWeights4 targetWeightsR = computeBlendWeights4(posR);
-		float targetInputGain = 1.0f + posInZone * 3.0f; // Input gain ramps with position
-
-		// Reuse Zone 1/2 smoothing contexts: c3→w0, c5→w1, c7→w2, c9→w3, c1→inputGain
-		// Prepare per-sample interpolation for L weights
-		c3LCtx = prepareSmoothingFloat(params->smoothedC3L, targetWeightsL.w0, buffer.size());
-		c5LCtx = prepareSmoothingFloat(params->smoothedC5L, targetWeightsL.w1, buffer.size());
-		c7LCtx = prepareSmoothingFloat(params->smoothedC7L, targetWeightsL.w2, buffer.size());
-		c9LCtx = prepareSmoothingFloat(params->smoothedC9L, targetWeightsL.w3, buffer.size());
-
-		// Prepare per-sample interpolation for R weights
-		c3RCtx = prepareSmoothingFloat(params->smoothedC3R, targetWeightsR.w0, buffer.size());
-		c5RCtx = prepareSmoothingFloat(params->smoothedC5R, targetWeightsR.w1, buffer.size());
-		c7RCtx = prepareSmoothingFloat(params->smoothedC7R, targetWeightsR.w2, buffer.size());
-		c9RCtx = prepareSmoothingFloat(params->smoothedC9R, targetWeightsR.w3, buffer.size());
-
-		// Prepare per-sample interpolation for input gain (shared L/R, uses c1)
-		c1Ctx = prepareSmoothingFloat(params->smoothedC1, targetInputGain, buffer.size());
-
-		// Initialize weights for first sample
-		zone3WeightsL = {c3LCtx.current, c5LCtx.current, c7LCtx.current, c9LCtx.current, c1Ctx.current};
-		zone3WeightsR = {c3RCtx.current, c5RCtx.current, c7RCtx.current, c9RCtx.current, c1Ctx.current};
+		targetWeightsL = {inputGain, wL.w0, wL.w1, wL.w2, wL.w3};
+		targetWeightsR = {inputGain, wR.w0, wR.w1, wR.w2, wR.w3};
 	}
 
-	// Zone 0 stereo: modulate drive bipolar (L gets +, R gets -)
+	// Single smoothing path for all zones (L channel)
+	FloatSmoothingContext c1Ctx = prepareSmoothingFloat(params->smoothedC1, targetWeightsL.c1, buffer.size());
+	FloatSmoothingContext c3LCtx = prepareSmoothingFloat(params->smoothedC3L, targetWeightsL.c3, buffer.size());
+	FloatSmoothingContext c5LCtx = prepareSmoothingFloat(params->smoothedC5L, targetWeightsL.c5, buffer.size());
+	FloatSmoothingContext c7LCtx = prepareSmoothingFloat(params->smoothedC7L, targetWeightsL.c7, buffer.size());
+	FloatSmoothingContext c9LCtx = prepareSmoothingFloat(params->smoothedC9L, targetWeightsL.c9, buffer.size());
+
+	// R channel (c1 shared)
+	FloatSmoothingContext c3RCtx = prepareSmoothingFloat(params->smoothedC3R, targetWeightsR.c3, buffer.size());
+	FloatSmoothingContext c5RCtx = prepareSmoothingFloat(params->smoothedC5R, targetWeightsR.c5, buffer.size());
+	FloatSmoothingContext c7RCtx = prepareSmoothingFloat(params->smoothedC7R, targetWeightsR.c7, buffer.size());
+	FloatSmoothingContext c9RCtx = prepareSmoothingFloat(params->smoothedC9R, targetWeightsR.c9, buffer.size());
+
+	shaperWeightsL = {c1Ctx.current, c3LCtx.current, c5LCtx.current, c7LCtx.current, c9LCtx.current};
+	shaperWeightsR = {c1Ctx.current, c3RCtx.current, c5RCtx.current, c7RCtx.current, c9RCtx.current};
+
+	// Poly zone (7) stereo: modulate drive bipolar (L gets +, R gets -)
 	// Time-based LFO with frequency modulated by stereoFreqMult
-	constexpr q31_t kZone0StereoDriveScale = ONE_Q31 / 8; // ±12.5% drive modulation
+	constexpr q31_t kPolyStereoDriveScale = ONE_Q31 / 8; // ±12.5% drive modulation
 	q31_t stereoDriveOffset = 0;
 
-	if (!useChebyshevCrossfade && stereoWidth > 0.0f) {
+	if (!useChebyshevCrossfade && twist.stereoWidth > 0.0f) { // Poly zone only
 		// LFO frequency: 0.1Hz min to 2Hz max (linear ramp through Wide zone)
 		constexpr float kMinLfoHz = 0.1f;
 		constexpr float kMaxLfoHz = 2.0f;
 		constexpr float kSampleRate = 44100.0f;
 		// stereoFreqMult: 1.0 at zone start → 4.0 at zone end, map to 0.1-2Hz
-		float lfoHz = kMinLfoHz + (stereoFreqMult - 1.0f) * (kMaxLfoHz - kMinLfoHz) / 3.0f;
+		float lfoHz = kMinLfoHz + (twist.stereoFreqMult - 1.0f) * (kMaxLfoHz - kMinLfoHz) / 3.0f;
 		float phaseIncrement = (lfoHz * static_cast<float>(buffer.size())) / kSampleRate;
 
 		// Advance and wrap phase
@@ -1429,8 +921,9 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 
 		// LFO output modulates drive offset (bipolar: L+, R-)
 		// Triangle for efficient CPU and consistent with other parameter modulation
-		float stereoMod = triangleBipolarFloat(phase);
-		stereoDriveOffset = static_cast<q31_t>(stereoWidth * stereoMod * static_cast<float>(kZone0StereoDriveScale));
+		float stereoMod = triangleFloat(phase);
+		stereoDriveOffset =
+		    static_cast<q31_t>(twist.stereoWidth * stereoMod * static_cast<float>(kPolyStereoDriveScale));
 	}
 
 	// Local copy of state for efficient per-sample update
@@ -1439,29 +932,26 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	q31_t dcStateR = voiceState ? voiceState->dcBlockerR : 0;
 	q31_t fbStateL = voiceState ? voiceState->feedbackL : 0;
 	q31_t fbStateR = voiceState ? voiceState->feedbackR : 0;
-	q31_t fbLpfStateL = voiceState ? voiceState->feedbackLpfL : 0;
-	q31_t fbLpfStateR = voiceState ? voiceState->feedbackLpfR : 0;
-	q31_t fbHpfStateL = voiceState ? voiceState->feedbackHpfL : 0;
-	q31_t fbHpfStateR = voiceState ? voiceState->feedbackHpfR : 0;
 	q31_t currentDrive = driveCtx.current;
 	q31_t driveL = currentDrive;
 	q31_t driveR = currentDrive;
 
 	// Scale feedback amount for moderate self-oscillation range
 	// At max (1.0), feedback is ~0.9 of output (just below self-oscillation)
-	// In Zone 0, feedback is inversely proportional to harmonic position (more cascade = less feedback)
+	// In Zone 7 (Poly), feedback is inversely proportional to harmonic position (more cascade = less feedback)
 	// Also reduce feedback by up to 10% as drive increases (tames high-drive feedback)
 	constexpr float kFeedbackScale = 0.25f;
 	float fbScale = kFeedbackScale;
-	constexpr q31_t kZone0End = ONE_Q31 / 8;
-	if (smoothedHarmonic < kZone0End) {
-		float zone0Pos = static_cast<float>(smoothedHarmonic) / static_cast<float>(kZone0End);
-		fbScale *= (1.0f - zone0Pos); // 100% at start, 0% at end of Zone 0
+	constexpr q31_t kZone7Start = ONE_Q31 - (ONE_Q31 / 8); // 7/8 without overflow
+	if (smoothedHarmonic >= kZone7Start) {
+		float zone7Pos = static_cast<float>(smoothedHarmonic - kZone7Start) / static_cast<float>(ONE_Q31 - kZone7Start);
+		fbScale *= (1.0f - zone7Pos); // 100% at start, 0% at end of Zone 7
+		fbScale *= 0.707f;            // -3dB for Zone 7 (poly is hotter)
 	}
 	// Drive-based reduction: -10% at max drive
 	float driveNorm = static_cast<float>(drive) / static_cast<float>(ONE_Q31);
 	fbScale *= (1.0f - 0.1f * driveNorm);
-	q31_t fbAmount = static_cast<q31_t>(feedbackAmount * fbScale * static_cast<float>(ONE_Q31));
+	q31_t fbAmount = static_cast<q31_t>(twist.feedbackAmount * fbScale * static_cast<float>(ONE_Q31));
 
 	for (auto& sample : buffer) {
 		// Apply bipolar stereo drive offset (L gets +, R gets -)
@@ -1469,68 +959,67 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 		driveR = add_saturate(currentDrive, -stereoDriveOffset);
 
 		// Apply feedback to input (before shaping)
-		q31_t inputL = sample.l;
-		q31_t inputR = sample.r;
+		// Pre-boost for subtractive mode to normalize operating point with FM
+		q31_t inputL = boostSubtractive ? lshiftAndSaturate<kSubtractiveBoostBits>(sample.l) : sample.l;
+		q31_t inputR = boostSubtractive ? lshiftAndSaturate<kSubtractiveBoostBits>(sample.r) : sample.r;
 		if (fbAmount > 0) {
 			// Apply feedback directly (HPF on tap prevents fundamental buildup)
 			q31_t fbL = signed_saturate<22>(multiply_32x32_rshift32(fbStateL, fbAmount) << 1);
 			q31_t fbR = signed_saturate<22>(multiply_32x32_rshift32(fbStateR, fbAmount) << 1);
-			inputL = add_saturate(sample.l, fbL);
-			inputR = add_saturate(sample.r, fbR);
+			inputL = add_saturate(inputL, fbL);
+			inputR = add_saturate(inputR, fbR);
 			// Clamp combined signal to q31 range
 			inputL = std::clamp(inputL, -ONE_Q31, ONE_Q31);
 			inputR = std::clamp(inputR, -ONE_Q31, ONE_Q31);
 		}
 
 		// Process left channel with L drive
-		q31_t shapedL = sineShapeCore(
-		    inputL, driveL, smoothedHarmonic, symmetry, (inZone1 || inZone2) ? &zone1WeightsL : nullptr,
-		    useZone3Weights ? &zone3WeightsL : nullptr, evenAmount, rectAmount, rect2Amount, currentPhaseHarmonic);
-
-		// Process right channel with R drive
-		q31_t shapedR = sineShapeCore(
-		    inputR, driveR, smoothedHarmonic, symmetry, (inZone1 || inZone2) ? &zone1WeightsR : nullptr,
-		    useZone3Weights ? &zone3WeightsR : nullptr, evenAmount, rectAmount, rect2Amount, currentPhaseHarmonic);
+		// All zones use shaperWeights (repurposed per zone, see comment above)
+		q31_t shapedL = sineShapeCore(inputL, driveL, smoothedHarmonic, twist.symmetry, &shaperWeightsL,
+		                              twist.evenAmount, twist.rectAmount, twist.rect2Amount, twist.phaseHarmonic);
+		q31_t shapedR = sineShapeCore(inputR, driveR, smoothedHarmonic, twist.symmetry, &shaperWeightsR,
+		                              twist.evenAmount, twist.rectAmount, twist.rect2Amount, twist.phaseHarmonic);
 		currentDrive += driveCtx.increment;
 
-		// Update per-sample weights/values
-		if (inZone0) {
-			// Zone 0: smooth phaseHarmonic
-			currentPhaseHarmonic = (c1Ctx.current += c1Ctx.increment);
+		// Update weights for next sample (per-sample interpolation, unified path)
+		float c1 = (c1Ctx.current += c1Ctx.increment);
+		shaperWeightsL.c1 = c1;
+		shaperWeightsL.c3 = (c3LCtx.current += c3LCtx.increment);
+		shaperWeightsL.c5 = (c5LCtx.current += c5LCtx.increment);
+		shaperWeightsL.c7 = (c7LCtx.current += c7LCtx.increment);
+		shaperWeightsL.c9 = (c9LCtx.current += c9LCtx.increment);
+
+		shaperWeightsR.c1 = c1;
+		shaperWeightsR.c3 = (c3RCtx.current += c3RCtx.increment);
+		shaperWeightsR.c5 = (c5RCtx.current += c5RCtx.increment);
+		shaperWeightsR.c7 = (c7RCtx.current += c7RCtx.increment);
+		shaperWeightsR.c9 = (c9RCtx.current += c9RCtx.increment);
+
+		// 100Hz HPF on wet signal only - removes sub-bass rumble without affecting dry
+		dcStateL += multiply_32x32_rshift32(shapedL - dcStateL, kOutputHpfAlpha) * 2;
+		dcStateR += multiply_32x32_rshift32(shapedR - dcStateR, kOutputHpfAlpha) * 2;
+		q31_t hpfWetL = shapedL - dcStateL;
+		q31_t hpfWetR = shapedR - dcStateR;
+
+		// Rect2 peak limiting on HPF'd wet for feedback: y = x - sign(x) * x² * k
+		// Taps HPF'd wet BEFORE subtractive attenuation so feedback operates at waveshaper level
+		// k=2: sign flips at |x| > 0.5, providing soft folding for stability
+		{
+			q31_t x2L = multiply_32x32_rshift32(hpfWetL, hpfWetL) << 1;
+			q31_t rect2TermL = x2L << 1; // k=2.0
+			fbStateL = (hpfWetL >= 0) ? (hpfWetL - rect2TermL) : (hpfWetL + rect2TermL);
+
+			q31_t x2R = multiply_32x32_rshift32(hpfWetR, hpfWetR) << 1;
+			q31_t rect2TermR = x2R << 1; // k=2.0
+			fbStateR = (hpfWetR >= 0) ? (hpfWetR - rect2TermR) : (hpfWetR + rect2TermR);
 		}
-		else if (inZone1 || inZone2) {
-			// Increment L coefficients (c1 shared)
-			float c1 = (c1Ctx.current += c1Ctx.increment);
-			zone1WeightsL.c1 = c1;
-			zone1WeightsL.c3 = (c3LCtx.current += c3LCtx.increment);
-			zone1WeightsL.c5 = (c5LCtx.current += c5LCtx.increment);
-			zone1WeightsL.c7 = (c7LCtx.current += c7LCtx.increment);
-			zone1WeightsL.c9 = (c9LCtx.current += c9LCtx.increment);
 
-			// Increment R coefficients (c1R = c1)
-			zone1WeightsR.c1 = c1;
-			zone1WeightsR.c3 = (c3RCtx.current += c3RCtx.increment);
-			zone1WeightsR.c5 = (c5RCtx.current += c5RCtx.increment);
-			zone1WeightsR.c7 = (c7RCtx.current += c7RCtx.increment);
-			zone1WeightsR.c9 = (c9RCtx.current += c9RCtx.increment);
-		}
-
-		// Update Zone 3 weights for next sample (reuses Zone 1/2 contexts)
-		if (useZone3Weights) {
-			float gain = (c1Ctx.current += c1Ctx.increment);
-			// Increment L weights (c3→w0, c5→w1, c7→w2, c9→w3)
-			zone3WeightsL.w0 = (c3LCtx.current += c3LCtx.increment);
-			zone3WeightsL.w1 = (c5LCtx.current += c5LCtx.increment);
-			zone3WeightsL.w2 = (c7LCtx.current += c7LCtx.increment);
-			zone3WeightsL.w3 = (c9LCtx.current += c9LCtx.increment);
-			zone3WeightsL.inputGainMult = gain;
-
-			// Increment R weights
-			zone3WeightsR.w0 = (c3RCtx.current += c3RCtx.increment);
-			zone3WeightsR.w1 = (c5RCtx.current += c5RCtx.increment);
-			zone3WeightsR.w2 = (c7RCtx.current += c7RCtx.increment);
-			zone3WeightsR.w3 = (c9RCtx.current += c9RCtx.increment);
-			zone3WeightsR.inputGainMult = gain;
+		// Post-attenuate wet signal for subtractive mode (inverse of pre-boost)
+		// This normalizes the waveshaper operating point without changing output level
+		// Applied AFTER feedback tap so feedback operates at internal waveshaper level
+		if (boostSubtractive) {
+			hpfWetL >>= kSubtractiveBoostBits;
+			hpfWetR >>= kSubtractiveBoostBits;
 		}
 
 		q31_t mixedL, mixedR;
@@ -1539,39 +1028,21 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 			// At mix=0: pure dry, mix=1: pure wet
 			q31_t dryCoeff = ONE_Q31 - multiply_32x32_rshift32(mix, ONE_Q31) * 2; // 1 - mix
 			mixedL = add_saturate(multiply_32x32_rshift32(sample.l, dryCoeff) << 1,
-			                      multiply_32x32_rshift32(shapedL, mix) << 1);
+			                      multiply_32x32_rshift32(hpfWetL, mix) << 1);
 			mixedR = add_saturate(multiply_32x32_rshift32(sample.r, dryCoeff) << 1,
-			                      multiply_32x32_rshift32(shapedR, mix) << 1);
+			                      multiply_32x32_rshift32(hpfWetR, mix) << 1);
 		}
 		else {
-			// Zone 0: Traditional wet/dry crossfade
+			// Zone 7 (Poly): Traditional wet/dry crossfade
 			q31_t invMix = ONE_Q31 - mix;
-			mixedL = add_saturate(multiply_32x32_rshift32(sample.l, invMix) << 1, multiply_32x32_rshift32(shapedL, mix)
+			mixedL = add_saturate(multiply_32x32_rshift32(sample.l, invMix) << 1, multiply_32x32_rshift32(hpfWetL, mix)
 			                                                                          << 1);
-			mixedR = add_saturate(multiply_32x32_rshift32(sample.r, invMix) << 1, multiply_32x32_rshift32(shapedR, mix)
+			mixedR = add_saturate(multiply_32x32_rshift32(sample.r, invMix) << 1, multiply_32x32_rshift32(hpfWetR, mix)
 			                                                                          << 1);
 		}
 
-		// 100Hz HPF (replaces 5Hz DC blocker) - removes sub-bass rumble
-		dcStateL += multiply_32x32_rshift32(mixedL - dcStateL, kOutputHpfAlpha) * 2;
-		dcStateR += multiply_32x32_rshift32(mixedR - dcStateR, kOutputHpfAlpha) * 2;
-		q31_t hpfOutL = mixedL - dcStateL;
-		q31_t hpfOutR = mixedR - dcStateR;
-		sample.l = hpfOutL;
-		sample.r = hpfOutR;
-
-		// Rect2 peak limiting on HPF'd output for feedback: y = x - sign(x) * x² * k
-		// Taps post-HPF so feedback inherits high-pass filtering
-		// k=2: sign flips at |x| > 0.5, providing soft folding for stability
-		{
-			q31_t x2L = multiply_32x32_rshift32(hpfOutL, hpfOutL) << 1;
-			q31_t rect2TermL = x2L << 1; // k=2.0
-			fbStateL = (hpfOutL >= 0) ? (hpfOutL - rect2TermL) : (hpfOutL + rect2TermL);
-
-			q31_t x2R = multiply_32x32_rshift32(hpfOutR, hpfOutR) << 1;
-			q31_t rect2TermR = x2R << 1; // k=2.0
-			fbStateR = (hpfOutR >= 0) ? (hpfOutR - rect2TermR) : (hpfOutR + rect2TermR);
-		}
+		sample.l = mixedL;
+		sample.r = mixedR;
 	}
 
 	// Write back state if voiceState is not null
@@ -1580,82 +1051,17 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 		voiceState->dcBlockerR = dcStateR;
 		voiceState->feedbackL = fbStateL;
 		voiceState->feedbackR = fbStateR;
-		voiceState->feedbackLpfL = fbLpfStateL;
-		voiceState->feedbackLpfR = fbLpfStateR;
-		voiceState->feedbackHpfL = fbHpfStateL;
-		voiceState->feedbackHpfR = fbHpfStateR;
 	}
-	if (inZone0) {
-		// Zone 0: write back smoothed phaseHarmonic (stored in smoothedC1)
-		params->smoothedC1 = c1Ctx.target;
-	}
-	else if (inZone1 || inZone2 || useZone3Weights) {
-		// Zone 1/2/3: write back smoothed coefficients/weights
-		// Zone 1/2 uses c1-c9 for Chebyshev coefficients
-		// Zone 3 reuses same state: c3→w0, c5→w1, c7→w2, c9→w3, c1→inputGain
-		params->smoothedC1 = c1Ctx.target;
-		params->smoothedC3L = c3LCtx.target;
-		params->smoothedC5L = c5LCtx.target;
-		params->smoothedC7L = c7LCtx.target;
-		params->smoothedC9L = c9LCtx.target;
-		params->smoothedC3R = c3RCtx.target;
-		params->smoothedC5R = c5RCtx.target;
-		params->smoothedC7R = c7RCtx.target;
-		params->smoothedC9R = c9RCtx.target;
-	}
-}
-
-// ============================================================================
-// Tanh-based Sine Shaper (uses antialiased lookup table)
-// ============================================================================
-// Alternative implementation using getTanHAntialiased for smoother saturation
-// with built-in anti-aliasing. Requires state variables per channel.
-
-/**
- * Single sample tanh-based shaping with antialiasing
- * @param input Sample to process
- * @param drive Saturation amount (higher = more harmonics)
- * @param lastWorkingValue State variable for antialiasing (per-channel)
- * @param mix Wet/dry blend
- */
-inline q31_t sineShapeTanh(q31_t input, q31_t drive, uint32_t* lastWorkingValue, q31_t mix) {
-	if (mix <= 0) {
-		return input;
-	}
-
-	// Calculate saturation amount from drive (1-8 range for getTanHAntialiased)
-	// drive is 0 to ~ONE_Q31, map to saturation 1-6
-	uint32_t saturationAmount = 1 + static_cast<uint32_t>(multiply_32x32_rshift32(drive, 5));
-
-	// Apply tanh saturation with antialiasing
-	q31_t shaped = getTanHAntialiased(input, lastWorkingValue, saturationAmount);
-
-	// Wet/dry crossfade
-	q31_t invMix = ONE_Q31 - mix;
-	q31_t dryPart = multiply_32x32_rshift32(input, invMix) << 1;
-	q31_t wetPart = multiply_32x32_rshift32(shaped, mix) << 1;
-
-	return add_saturate(dryPart, wetPart);
-}
-
-/**
- * Process a stereo buffer through tanh-based shaper
- * @param buffer Stereo audio buffer
- * @param drive Saturation amount
- * @param stateL Left channel antialiasing state
- * @param stateR Right channel antialiasing state
- * @param mix Wet/dry blend
- */
-inline void sineShapeBufferTanh(StereoBuffer<q31_t> buffer, q31_t drive, uint32_t* stateL, uint32_t* stateR,
-                                q31_t mix) {
-	if (mix <= 0) {
-		return;
-	}
-
-	for (auto& sample : buffer) {
-		sample.l = sineShapeTanh(sample.l, drive, stateL, mix);
-		sample.r = sineShapeTanh(sample.r, drive, stateR, mix);
-	}
+	// Write back smoothed params (shared across zones, zone boundary glitches acceptable)
+	params->smoothedC1 = c1Ctx.target;
+	params->smoothedC3L = c3LCtx.target;
+	params->smoothedC5L = c5LCtx.target;
+	params->smoothedC7L = c7LCtx.target;
+	params->smoothedC9L = c9LCtx.target;
+	params->smoothedC3R = c3RCtx.target;
+	params->smoothedC5R = c5RCtx.target;
+	params->smoothedC7R = c7RCtx.target;
+	params->smoothedC9R = c9RCtx.target;
 }
 
 } // namespace deluge::dsp

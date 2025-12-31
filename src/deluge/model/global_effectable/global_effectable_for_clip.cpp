@@ -144,10 +144,7 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 		auto twistParams = deluge::dsp::computeSineShaperTwistParams(smoothedTwist);
 
 		deluge::dsp::sineShapeBuffer(global_effectable_audio, sineDrive, &sineShaper.smoothedDrive, &sineShaperState,
-		                             sineHarmonic, twistParams.symmetry, sineMix, twistParams.stereoWidth,
-		                             twistParams.stereoFreqMult, twistParams.stereoPhaseOffset, twistParams.evenAmount,
-		                             twistParams.rectAmount, twistParams.rect2Amount, twistParams.feedbackAmount,
-		                             &sineShaper, twistParams.phaseHarmonic);
+		                             sineHarmonic, sineMix, twistParams, &sineShaper);
 	}
 
 	// XY Saturator (for audio clips, uses uint8_t drive member)
@@ -174,19 +171,18 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	                           pan, true);
 
 	if (multibandCompressor.isEnabled()) {
-		// DOTT runs when enabled (ModeZone != Off)
+		// DOTT runs when enabled (ModeZone != Off) - acts as a distortion/saturation unit
 		applyMultibandCompressorParams(paramManagerForClip);
 		// Only enable metering calculations when analyzer is visible (saves CPU)
 		multibandCompressor.setMeteringEnabled(runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DOTTAnalyzer));
-		multibandCompressor.render(global_effectable_audio, volumePostFX);
+		multibandCompressor.render(global_effectable_audio);
 	}
 
 	if (compThreshold > 0) {
 		// Single-band compressor runs when threshold is set
 		compressor.renderVolNeutral(global_effectable_audio, volumePostFX);
 	}
-	else if (!multibandCompressor.isEnabled()) {
-		// Only reset if neither compressor is active
+	else {
 		compressor.reset();
 	}
 
