@@ -218,7 +218,7 @@ requires(shift < 32 && bits <= 32)
 ///@note VFP instruction - 1 cycle for issue, 4 cycles result latency
 ///@deprecated This function is deprecated. Use FixedPoint<31>::FixedPoint instead.
 static inline int32_t q31_from_float(float value) {
-	asm("vcvt.s32.f32 %0, %0, #31" : "=t"(value) : "t"(value));
+	asm("vcvt.s32.f32 %0, %0, #31" : "+t"(value));
 	return std::bit_cast<int32_t>(value);
 }
 
@@ -226,6 +226,6 @@ static inline int32_t q31_from_float(float value) {
 ///@note VFP instruction - 1 cycle for issue, 4 cycles result latency
 ///@deprecated This function is deprecated. Use FixedPoint<31>::to_float instead.
 static inline float int32_to_float(int32_t value) {
-	asm("vcvt.f32.s32 %0, %0, #31" : "=t"(value) : "t"(value));
+	asm("vcvt.f32.s32 %0, %0, #31" : "+t"(value));
 	return std::bit_cast<float>(value);
 }
