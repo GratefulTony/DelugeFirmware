@@ -153,15 +153,27 @@ public:
 			char buffer[12];
 			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
 			display->displayPopup(buffer);
+			suppressNotification_ = true; // Prevent horizontal menu from overwriting popup
 		}
 		else {
 			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
 		}
 	}
 
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
 	}
+
+private:
+	mutable bool suppressNotification_ = false;
 };
 
 /// Twist zone control - 5 zones with different modifiers
@@ -202,18 +214,31 @@ public:
 			char buffer[12];
 			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
 			display->displayPopup(buffer);
+			suppressNotification_ = true; // Prevent horizontal menu from overwriting popup
 		}
 		else {
 			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
 		}
 	}
 
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
 	}
+
+private:
+	mutable bool suppressNotification_ = false;
 };
 
 // Mix: wet/dry blend (0-127, 0 = bypass)
+// Secret menu: Push encoder to adjust gammaPhase (offsets metaPhase by 100*gamma)
 class SineShaperMix final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
@@ -236,6 +261,23 @@ public:
 			soundEditor.currentModControllable->sineShaper.mix = current_value;
 		}
 	}
+
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust gammaPhase (adds 100*gamma to metaPhase in DSP)
+			Buttons::selectButtonPressUsedUp = true;
+			float& gamma = soundEditor.currentModControllable->sineShaper.gammaPhase;
+			gamma += static_cast<float>(offset) * 0.1f;
+			// Show current value on display
+			char buffer[12];
+			intToString(static_cast<int32_t>(gamma * 10.0f), buffer);
+			display->displayPopup(buffer);
+		}
+		else {
+			IntegerWithOff::selectEncoderAction(offset);
+		}
+	}
+
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {

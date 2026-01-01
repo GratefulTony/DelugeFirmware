@@ -34,6 +34,15 @@ namespace deluge::dsp {
 // - Harmonic: Adds odd harmonics via polynomial shaping
 // - Symmetry: DC bias before shaping (adds even harmonics via asymmetry)
 // - Mix: Wet/dry blend (0 = bypass processing entirely)
+//
+// Future Patched Param Design:
+// ----------------------------
+// Twist and Harmonic could become patched params with mod-matrix routing.
+// Modulation should ADD to menu setting (not multiply), with full-scale spanning:
+// - Twist (5 zones): 1 sub-zone width = 1/5 of q31 range (~429M)
+// - Harmonic (8 zones, modulation targets 4-7): 4 zones = 1/2 of q31 range (~1.07B)
+// This allows LFO/envelope modulation to sweep through a musically useful subset
+// while the menu position establishes the base zone.
 
 // Forward declaration for cached weights
 struct ShaperWeights;
@@ -48,6 +57,7 @@ struct SineShaperParams {
 	// Meta zone phase offsets (per-patch, secret menus)
 	float metaPhase{0};         // Single offset for all Twist param triangles (push Twist encoder)
 	float metaPhaseHarmonic{0}; // Harmonic zone phase offset (push Harmonic encoder)
+	float gammaPhase{0};        // Additional offset = 100*gamma, accessed via Mix encoder push
 	// DSP smoothing state (per-sound, shared across voices)
 	q31_t smoothedDrive{0};    // Previous drive value for parameter smoothing
 	q31_t smoothedHarmonic{0}; // Previous harmonic value for parameter smoothing
@@ -261,22 +271,6 @@ struct SineShaperTwistParams {
 	float phaseHarmonic{0.0f};     // Twist zone: offset for Harmonic knob
 };
 
-/// 70% duty cycle triangle: active for 70% of cycle, zero for 30%
-[[gnu::always_inline]] inline float triangle70(float phase) {
-	phase = std::fmod(phase, 1.0f);
-	if (phase < 0.0f)
-		phase += 1.0f;
-	if (phase >= 0.7f)
-		return 0.0f;
-	float t = phase / 0.7f;
-	return 1.0f - std::abs(2.0f * t - 1.0f);
-}
-
-/// Staggered ramp: 0 before offset, ramps to 1 at pos=1
-[[gnu::always_inline]] inline float metaRamp(float pos, float offset) {
-	return (pos <= offset) ? 0.0f : (pos - offset) / (1.0f - offset);
-}
-
 /**
  * Derive all Twist-dependent parameters from smoothed Twist value
  * Zones 0-3: Individual effects, Zone 4+: Meta (all effects combined)
@@ -291,6 +285,11 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
 
 	SineShaperTwistParams result;
 
+	// Always apply metaPhaseHarmonic offset (Harmonic secret menu) - works in all zones
+	// This allows cycling through harmonic zones even when Twist is in zones 0-3
+	float phH = ssParams ? ssParams->metaPhaseHarmonic : 0.0f;
+	result.phaseHarmonic = phH;
+
 	if (smoothedTwist < kZone1) {
 		// Zone 0: Width - stereo spread with animated phase evolution
 		float pos = static_cast<float>(smoothedTwist) / static_cast<float>(kZone1);
@@ -299,16 +298,20 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
 		result.stereoPhaseOffset = pos;
 	}
 	else if (smoothedTwist < kZone2) {
-		// Zone 1: Evens - phased triangles
+		// Zone 1: Evens - bipolar rectified triangle (duty=1.0: dry→evens1→dry→evens2)
 		float pos = static_cast<float>(smoothedTwist - kZone1) / static_cast<float>(kZone2 - kZone1);
-		result.evenAmount = triangleSimpleUnipolar(pos, 0.5f);
-		result.evenDryBlend = triangleSimpleUnipolar(pos + 0.5f, 0.5f);
+		float tri = triangleFloat(pos, 1.0f);
+		float absTri = std::abs(tri);
+		result.evenAmount = (tri > 0.0f) ? absTri : 0.0f;
+		result.evenDryBlend = (tri < 0.0f) ? absTri : 0.0f;
 	}
 	else if (smoothedTwist < kZone3) {
-		// Zone 2: Rect - phased triangles
+		// Zone 2: Rect - bipolar rectified triangle (duty=1.0: dry→rect1→dry→rect2)
 		float pos = static_cast<float>(smoothedTwist - kZone2) / static_cast<float>(kZone3 - kZone2);
-		result.rectAmount = triangleSimpleUnipolar(pos, 0.5f);
-		result.rect2Amount = triangleSimpleUnipolar(pos + 0.5f, 0.5f);
+		float tri = triangleFloat(pos, 1.0f);
+		float absTri = std::abs(tri);
+		result.rectAmount = (tri > 0.0f) ? absTri : 0.0f;
+		result.rect2Amount = (tri < 0.0f) ? absTri : 0.0f;
 	}
 	else if (smoothedTwist < kZone4) {
 		// Zone 3: Feedback (capped at 25%)
@@ -316,41 +319,72 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
 		result.feedbackAmount = pos * 0.25f;
 	}
 	else {
-		// Zone 4+: Meta - all effects combined with staggered ramps + φ-ratio triangles
-		// φ-ratios ensure triangles never align, so single offset suffices
-		constexpr float kPhi = 1.6180339887f;
-		constexpr float kMinMod = 0.3f; // Triangle modulates 0.3-1.0
+		// Zone 4+: Meta - unified triangle evolution, all shift with (pos + ph)
+		// Fractional φ powers for tighter frequency spacing (all irrational, never align)
+		constexpr float kPhi025 = 1.1271566f;  // φ^0.25
+		constexpr float kPhi033 = 1.1746627f;  // φ^0.33
+		constexpr float kPhi050 = 1.2720196f;  // φ^0.5
+		constexpr float kPhi067 = 1.3871872f;  // φ^0.67
+		constexpr float kPhi075 = 1.4352958f;  // φ^0.75
+		constexpr float kPhi100 = 1.6180340f;  // φ^1.0
+		constexpr float kPhiN025 = 0.8872984f; // φ^-0.25
+		constexpr float kPhiN050 = 0.7861513f; // φ^-0.5
 
-		// Get per-patch phase offsets (default 0 if no ssParams)
-		float ph = ssParams ? ssParams->metaPhase : 0.0f;
-		float phH = ssParams ? ssParams->metaPhaseHarmonic : 0.0f;
-
+		// Use double for ph wrapping to maintain precision at large gamma values (gamma < 10^15 ok)
+		double phRaw = ssParams ? static_cast<double>(ssParams->metaPhase) + 100.0 * ssParams->gammaPhase : 0.0;
 		float pos = static_cast<float>(smoothedTwist - kZone4) / static_cast<float>(ONE_Q31 - kZone4);
-		float freqMult = 1.0f + pos * 0.5f; // Frequency boost CW: 1.0→1.5
 
-		// phaseHarmonic: ramps first 20%, then holds, plus per-patch offset
-		result.phaseHarmonic = std::min(pos / 0.2f, 1.0f) * 0.5f + phH;
+		// Scale and wrap ph per-frequency to preserve irrational divergence with large ph values
+		// pos * freq maintains full precision, ph * freq is wrapped to 0-1 after scaling
+		auto wrapPh = [](double ph, double freq) {
+			double scaled = ph * freq;
+			return static_cast<float>(scaled - std::floor(scaled));
+		};
+		float ph025 = wrapPh(phRaw, kPhi025);
+		float ph033 = wrapPh(phRaw, kPhi033);
+		float ph050 = wrapPh(phRaw, kPhi050);
+		float ph067 = wrapPh(phRaw, kPhi067);
+		float ph075 = wrapPh(phRaw, kPhi075);
+		float ph100 = wrapPh(phRaw, kPhi100);
+		float phN025 = wrapPh(phRaw, kPhiN025);
+		float phN050 = wrapPh(phRaw, kPhiN050);
 
-		// Width: offset 0.2, freq 1.0
-		float wr = metaRamp(pos, 0.2f);
-		result.stereoWidth = wr * (kMinMod + (1.0f - kMinMod) * triangle70(pos * freqMult + ph));
+		// Per-effect freqMult: ramps 1.0→(1.25-1.5), peaks at pos=1, phXXX varies the peak
+		float fmW = 1.0f + pos * (0.25f + 0.25f * ph025);
+		float fmE = 1.0f + pos * (0.25f + 0.25f * ph033);
+		float fmR = 1.0f + pos * (0.25f + 0.25f * ph067);
+		float fmF = 1.0f + pos * (0.25f + 0.25f * phN025);
 
-		// Evens: offset 0.35, freq φ
-		float er = metaRamp(pos, 0.35f);
-		float ev = er * (kMinMod + (1.0f - kMinMod) * triangle70(pos * kPhi * freqMult + ph));
-		result.evenAmount = ev;
-		result.evenDryBlend = ev;
+		result.phaseHarmonic += pos * 5.0f;
 
-		// Rect: offset 0.5, freq φ²
-		float rr = metaRamp(pos, 0.5f);
-		float rv = rr * (kMinMod + (1.0f - kMinMod) * triangle70(pos * kPhi * kPhi * freqMult + ph));
-		result.rectAmount = rv;
-		result.rect2Amount = rv;
+		// Phase offsets calculated so all triangles peak at pos=0.5 (end of effective zone 5), phi=0
+		// offset = duty - (freq * 0.5 * 1.125) mod 1, where 1.125 = fmX at pos=0.5, phXXX=0
 
-		// Feedback: offset 0.65, freq 1/φ, quadratic ramp, max 0.25
-		float fr = metaRamp(pos, 0.65f);
-		fr = fr * fr; // Quadratic for safety
-		result.feedbackAmount = fr * 0.25f * (kMinMod + (1.0f - kMinMod) * triangle70(pos / kPhi * freqMult + ph));
+		// Width: scale(φ^0.25)*2 clipped * param(φ^0.5), duty 0.8/0.7 for broad coverage
+		float wS = std::min(triangleSimpleUnipolar(pos * kPhi025 * fmW + ph025 + 0.166f, 0.8f) * 2.0f, 1.0f);
+		float wP = triangleSimpleUnipolar(pos * kPhi050 * fmW + ph050 + 0.984f, 0.7f);
+		result.stereoWidth = wS * wP;
+		result.stereoPhaseOffset = triangleSimpleUnipolar(pos * kPhi067 * fmW + ph067 + 0.720f, 0.5f);
+		result.stereoFreqMult = 1.0f + 0.5f * triangleSimpleUnipolar(pos * kPhi100 * fmW + ph100 + 0.590f);
+
+		// Evens: bipolar rectified, scale(φ^0.33*0.5) * param(φ^0.75*0.5), sign selects mode
+		float eS = triangleSimpleUnipolar(pos * kPhi033 * 0.5f * fmE + ph033 + 0.970f, 0.3f);
+		float eT = triangleFloat(pos * kPhi075 * 0.5f * fmE + ph075 + 0.896f, 0.3f);
+		float eAbs = std::abs(eT);
+		result.evenAmount = eS * ((eT > 0.0f) ? eAbs : 0.0f);
+		result.evenDryBlend = eS * ((eT < 0.0f) ? eAbs : 0.0f);
+
+		// Rect: bipolar rectified, scale(φ^0.67*0.5) * param(φ^1.0*0.5), sign selects mode
+		float rS = triangleSimpleUnipolar(pos * kPhi067 * 0.5f * fmR + ph067 + 0.910f, 0.3f);
+		float rT = triangleFloat(pos * kPhi100 * 0.5f * fmR + ph100 + 0.845f, 0.3f);
+		float rAbs = std::abs(rT);
+		result.rectAmount = rS * ((rT > 0.0f) ? rAbs : 0.0f);
+		result.rect2Amount = rS * ((rT < 0.0f) ? rAbs : 0.0f);
+
+		// Feedback: scale(φ^-0.25) * min(param(φ^-0.5)² * 1.5, 1) * 0.25
+		float fS = triangleSimpleUnipolar(pos * kPhiN025 * fmF + phN025 + 0.001f, 0.5f);
+		float fP = triangleSimpleUnipolar(pos * kPhiN050 * fmF + phN050 + 0.058f, 0.5f);
+		result.feedbackAmount = fS * std::min(fP * fP * 1.5f, 1.0f) * 0.25f;
 	}
 
 	return result;
@@ -725,7 +759,7 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 	if (zone == 7) {
 		// Zone 7 (Poly): c1=cascadeBlend, c3=selfMulBlend
 		targetWeights.c1 = posInZone;
-		targetWeights.c3 = std::clamp(twist.phaseHarmonic + 0.5f, 0.0f, 1.0f);
+		targetWeights.c3 = std::fmod(twist.phaseHarmonic + 0.5f + 1.0f, 1.0f);
 	}
 	else if (zone == 0 || zone == 1) {
 		float pos = std::fmod(posInZone + twist.phaseHarmonic + 1.0f, 1.0f);
@@ -925,7 +959,7 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	if (zone == 7) {
 		// Zone 7 (Poly): c1=cascadeBlend, c3=selfMulBlend (L/R identical)
 		targetWeightsL.c1 = posInZone;
-		targetWeightsL.c3 = std::clamp(twist.phaseHarmonic + 0.5f, 0.0f, 1.0f);
+		targetWeightsL.c3 = std::fmod(twist.phaseHarmonic + 0.5f + 1.0f, 1.0f);
 		targetWeightsR = targetWeightsL;
 	}
 	else if (zone == 0 || zone == 1) {

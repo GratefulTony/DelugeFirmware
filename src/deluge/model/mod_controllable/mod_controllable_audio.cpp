@@ -98,6 +98,7 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	sineShaper.mix = other->sineShaper.mix;
 	sineShaper.metaPhase = other->sineShaper.metaPhase;
 	sineShaper.metaPhaseHarmonic = other->sineShaper.metaPhaseHarmonic;
+	sineShaper.gammaPhase = other->sineShaper.gammaPhase;
 	modFXType_ = other->modFXType_;
 	bassFreq = other->bassFreq; // Eventually, these shouldn't be variables like this
 	trebleFreq = other->trebleFreq;
@@ -559,6 +560,9 @@ void ModControllableAudio::writeAttributesToFile(Serializer& writer) {
 	}
 	if (sineShaper.metaPhaseHarmonic != 0.0f) {
 		writer.writeAttribute("sineShaperMetaPhaseH", static_cast<int32_t>(sineShaper.metaPhaseHarmonic * 10.0f));
+	}
+	if (sineShaper.gammaPhase != 0.0f) {
+		writer.writeAttribute("sineShaperGamma", static_cast<int32_t>(sineShaper.gammaPhase * 10.0f));
 	}
 	// Saturator params (only write if non-default)
 	if (saturatorDrive) {
@@ -1079,6 +1083,10 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 	else if (!strcmp(tagName, "sineShaperMetaPhaseH")) {
 		sineShaper.metaPhaseHarmonic = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
 		reader.exitTag("sineShaperMetaPhaseH");
+	}
+	else if (!strcmp(tagName, "sineShaperGamma")) {
+		sineShaper.gammaPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
+		reader.exitTag("sineShaperGamma");
 	}
 	// Saturator params
 	else if (!strcmp(tagName, "saturatorDrive")) {
