@@ -64,12 +64,6 @@ class AllpassCrossover {
 public:
 	using Bands = CrossoverBands;
 
-	/// Per-channel filter state for the cascaded allpass filters
-	struct ChannelState {
-		std::array<BasicFilterComponent, ORDER> apLow;  // Low crossover stages
-		std::array<BasicFilterComponent, ORDER> apHigh; // High crossover stages
-	};
-
 	AllpassCrossover() = default;
 
 	/// Set the low-mid crossover frequency
@@ -92,44 +86,51 @@ public:
 	/// Get the current high crossover frequency in Hz
 	[[nodiscard]] float getHighCrossoverHz() const { return highCrossoverHz_; }
 
-	/// Process a single mono sample and return the three frequency bands.
-	///
-	/// @param input The input sample
-	/// @param state Reference to the filter state (use stateL_ or stateR_)
-	/// @return The three frequency bands
-	[[gnu::always_inline]] inline Bands process(q31_t input, ChannelState& state) const {
+	/// Process a stereo sample pair using NEON (parallel L/R processing)
+	[[gnu::always_inline]] inline void processStereo(q31_t inputL, q31_t inputR, Bands& outL, Bands& outR) {
+		// Pack L/R into NEON vector
+		int32x2_t input = {inputL, inputR};
+
 		// Step 1: Low crossover splits input into LOW and REST
-		q31_t apLow = input;
+		int32x2_t apLow = input;
 		for (int i = 0; i < ORDER; ++i) {
-			apLow = state.apLow[i].doAPF(apLow, lowCoeff_);
+			apLow = stereoState_.apLow[i].doAPF(apLow, lowCoeff_);
 		}
-		q31_t low = (input + apLow) >> 1;  // Lowpass
-		q31_t rest = (input - apLow) >> 1; // Highpass (everything above low crossover)
+		// low = (input + apLow) >> 1
+		int32x2_t low = vhadd_s32(input, apLow);
+		// rest = (input - apLow) >> 1
+		int32x2_t rest = vhsub_s32(input, apLow);
 
 		// Step 2: High crossover splits REST into MID and HIGH
-		q31_t apHigh = rest;
+		int32x2_t apHigh = rest;
 		for (int i = 0; i < ORDER; ++i) {
-			apHigh = state.apHigh[i].doAPF(apHigh, highCoeff_);
+			apHigh = stereoState_.apHigh[i].doAPF(apHigh, highCoeff_);
 		}
-		q31_t mid = (rest + apHigh) >> 1;  // Lowpass of REST = bandpass overall
-		q31_t high = (rest - apHigh) >> 1; // Highpass of REST = highpass overall
+		// mid = (rest + apHigh) >> 1
+		int32x2_t mid = vhadd_s32(rest, apHigh);
+		// high = (rest - apHigh) >> 1
+		int32x2_t high = vhsub_s32(rest, apHigh);
 
-		return {low, mid, high};
-	}
-
-	/// Process a stereo sample pair
-	[[gnu::always_inline]] inline void processStereo(q31_t inputL, q31_t inputR, Bands& outL, Bands& outR) {
-		outL = process(inputL, stateL_);
-		outR = process(inputR, stateR_);
+		// Unpack results
+		outL = {vget_lane_s32(low, 0), vget_lane_s32(mid, 0), vget_lane_s32(high, 0)};
+		outR = {vget_lane_s32(low, 1), vget_lane_s32(mid, 1), vget_lane_s32(high, 1)};
 	}
 
 	/// Reset all filter states
 	void reset() {
-		stateL_ = {};
-		stateR_ = {};
+		for (int i = 0; i < ORDER; ++i) {
+			stereoState_.apLow[i].reset();
+			stereoState_.apHigh[i].reset();
+		}
 	}
 
 private:
+	/// NEON stereo filter state (processes L/R in parallel)
+	struct StereoState {
+		std::array<StereoFilterComponent, ORDER> apLow;  // Low crossover stages
+		std::array<StereoFilterComponent, ORDER> apHigh; // High crossover stages
+	};
+
 	/// Calculate the allpass coefficient for a given frequency.
 	/// For BasicFilterComponent::doAPF(): coeff = tan(pi * fc / fs) / (1 + tan(pi * fc / fs))
 	[[nodiscard]] static q31_t calculateCoefficient(float freqHz) {
@@ -142,8 +143,7 @@ private:
 		return static_cast<q31_t>(coeff * ONE_Q31);
 	}
 
-	ChannelState stateL_{};
-	ChannelState stateR_{};
+	StereoState stereoState_{};
 
 	q31_t lowCoeff_ = calculateCoefficient(200.0f);   // Default 200Hz
 	q31_t highCoeff_ = calculateCoefficient(2000.0f); // Default 2kHz
