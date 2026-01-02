@@ -16,10 +16,13 @@
  */
 #pragma once
 
+#include "dsp/zone_param.hpp" // For ZoneBasedParam
 #include "gui/menu_item/decimal.h"
 #include "gui/menu_item/menu_item_with_cc_learning.h"
 #include "gui/menu_item/momentum_encoder.h" // VelocityEncoder and zone render helpers
+#include "gui/menu_item/source_selection/regular.h"
 #include "gui/ui/sound_editor.h"
+#include "hid/buttons.h"
 #include "model/model_stack.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_descriptor.h"
@@ -29,6 +32,9 @@
 namespace params = deluge::modulation::params;
 
 namespace deluge::gui::menu_item {
+
+// Re-export ZoneBasedParam from dsp namespace for convenience
+using dsp::ZoneBasedParam;
 
 // High resolution constants for zone-based menus (1024 steps)
 constexpr int32_t kZoneHighResSteps = 1024;
@@ -153,6 +159,99 @@ class ZoneBasedFieldItem : public ZoneBasedMenuItem<NUM_ZONES> {
 public:
 	using ZoneBasedMenuItem<NUM_ZONES>::ZoneBasedMenuItem;
 	// Derived class must implement readCurrentValue/writeCurrentValue
+};
+
+/**
+ * Zone-based menu item with patched param for mod matrix routing
+ *
+ * Design: Menu controls a FIELD on the sound (base value), patched param provides
+ * pure modulation (neutral = 0). DSP combines: field + scaledMod.
+ *
+ * Provides:
+ * - Zone-based high-resolution display (1024 steps, 8 zones)
+ * - Mod matrix routing via PatchedParam (press encoder to access sources)
+ * - CC learning for the patched param
+ *
+ * Derived class must implement:
+ * - getZoneName(int32_t) for zone labels
+ * - getFieldValue() / setFieldValue() for the sound's field
+ *
+ * @tparam PARAM_ID The Local param ID for mod routing (e.g., LOCAL_SINE_SHAPER_TWIST)
+ * @tparam NUM_ZONES Number of zones (typically 8)
+ */
+template <params::Local PARAM_ID, int32_t NUM_ZONES = 8>
+class ZoneBasedPatchedParam : public DecimalWithoutScrolling, public MenuItemWithCCLearning {
+public:
+	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	/// Override to provide zone name for each index (0 to NUM_ZONES-1)
+	[[nodiscard]] virtual const char* getZoneName(int32_t zoneIndex) const = 0;
+
+	/// Override to get the field value from the sound (q31_t, 0 to ONE_Q31)
+	[[nodiscard]] virtual q31_t getFieldValue() const = 0;
+
+	/// Override to set the field value on the sound
+	virtual void setFieldValue(q31_t value) = 0;
+
+	[[nodiscard]] int32_t getMaxValue() const override { return kZoneHighResSteps; }
+	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
+	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	// Scale 0-1024 to 0-50 for display (matches gold knob popup range)
+	[[nodiscard]] float getDisplayValue() override { return (this->getValue() * 50.0f) / kZoneHighResSteps; }
+
+	void selectEncoderAction(int32_t offset) override {
+		DecimalWithoutScrolling::selectEncoderAction(velocity_.getScaledOffset(offset));
+	}
+
+	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
+		renderZoneInHorizontalMenu(slot, this->getValue(), kZoneHighResSteps, NUM_ZONES,
+		                           [this](int32_t z) { return this->getZoneName(z); });
+	}
+
+	// === PatchedParam interface for mod matrix routing ===
+	[[nodiscard]] int32_t getP() const { return PARAM_ID; }
+
+	MenuItem* selectButtonPress() override {
+		// If shift held down, user wants to delete automation
+		if (Buttons::isShiftButtonPressed()) {
+			return DecimalWithoutScrolling::selectButtonPress();
+		}
+		// Press encoder (without twist) opens mod matrix source selection
+		soundEditor.patchingParamSelected = PARAM_ID;
+		return &source_selection::regularMenu;
+	}
+
+	ParamDescriptor getLearningThing() override {
+		ParamDescriptor paramDescriptor;
+		paramDescriptor.setToHaveParamOnly(PARAM_ID);
+		return paramDescriptor;
+	}
+
+	[[nodiscard]] deluge::modulation::params::Kind getParamKind() const {
+		return deluge::modulation::params::Kind::PATCHED;
+	}
+
+	// Read from sound field (not patched param)
+	void readCurrentValue() override { this->setValue(zoneParamToMenuValue(getFieldValue())); }
+
+	// Write to sound field (not patched param)
+	void writeCurrentValue() override { setFieldValue(zoneMenuValueToParam(this->getValue())); }
+
+	void unlearnAction() final { MenuItemWithCCLearning::unlearnAction(); }
+	bool allowsLearnMode() final { return MenuItemWithCCLearning::allowsLearnMode(); }
+	void learnKnob(MIDICable* cable, int32_t whichKnob, int32_t modKnobMode, int32_t midiChannel) final {
+		MenuItemWithCCLearning::learnKnob(cable, whichKnob, modKnobMode, midiChannel);
+	}
+
+protected:
+	void drawPixelsForOled() override {
+		drawZoneForOled(this->getValue(), kZoneHighResSteps, NUM_ZONES,
+		                [this](int32_t z) { return this->getZoneName(z); });
+	}
+
+	mutable VelocityEncoder velocity_;
 };
 
 } // namespace deluge::gui::menu_item

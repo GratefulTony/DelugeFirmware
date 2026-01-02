@@ -130,6 +130,7 @@ public:
 	q31_t saturatorFilterR{0};        // Post-saturation lowpass state R
 	float saturatorPrevXL{0.0f};      // ADAA state L (previous input sample)
 	float saturatorPrevXR{0.0f};      // ADAA state R (previous input sample)
+	float saturatorPhase{0.0f};       // Phase offset for triangle modulation (secret knob)
 
 	// Disperser (allpass cascade with feedback)
 	deluge::dsp::Disperser disperser; // DSP processor with 16 allpass stages

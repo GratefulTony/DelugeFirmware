@@ -37,6 +37,35 @@ bool isParamHybridDrive(Kind kind, int32_t paramID) {
 	return (kind == Kind::PATCHED && (paramID == LOCAL_SATURATOR_DRIVE || paramID == LOCAL_SINE_SHAPER_DRIVE));
 }
 
+int32_t getParamZoneCount(Kind kind, int32_t paramID) {
+	// Zone-based params: full bipolar modulation spans 1 zone (1/N of range where N = zone count)
+	// Returns 0 for non-zone params, zone count otherwise
+	if (kind == Kind::PATCHED) {
+		// Use range check - zone params are between FIRST_LOCAL_ZONE and FIRST_LOCAL_EXP
+		if (paramID >= FIRST_LOCAL_ZONE && paramID < FIRST_LOCAL_EXP) {
+			return 8;
+		}
+	}
+	else if (kind == Kind::UNPATCHED_SOUND) {
+		// Unpatched params don't have a contiguous range, check individually
+		if (paramID == UNPATCHED_SINE_SHAPER_TWIST || paramID == UNPATCHED_SINE_SHAPER_HARMONIC) {
+			return 8;
+		}
+	}
+	return 0;
+}
+
+bool shouldClipModToZoneBoundary(Kind kind, int32_t paramID) {
+	// Zone params that should clip modulation to zone boundaries instead of crossing zones
+	// Useful when different zones have fundamentally different algorithms
+	if (kind == Kind::PATCHED) {
+		if (paramID == LOCAL_SINE_SHAPER_HARMONIC) {
+			return true; // Different algorithm per zone - don't cross
+		}
+	}
+	return false;
+}
+
 bool isParamPan(Kind kind, int32_t paramID) {
 	return (kind == Kind::PATCHED && paramID == LOCAL_PAN)
 	       || (kind == Kind::UNPATCHED_GLOBAL && paramID == UNPATCHED_PAN);
@@ -168,6 +197,8 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [LOCAL_PAN]                      = "Pan",
 	    [LOCAL_SATURATOR_DRIVE]          = "Sat. drive",
 	    [LOCAL_SINE_SHAPER_DRIVE]        = "Sine drive",
+	    [LOCAL_SINE_SHAPER_TWIST]        = "Sine twist",
+	    [LOCAL_SINE_SHAPER_HARMONIC]     = "Sine harm",
 	    [LOCAL_LPF_FREQ]                 = "LPf freq",
 	    [LOCAL_PITCH_ADJUST]             = "Pitch",
 	    [LOCAL_OSC_A_PITCH_ADJUST]       = "Osc1 pitch",
@@ -241,6 +272,8 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [LOCAL_PAN] = STRING_FOR_PARAM_LOCAL_PAN,
 	    [LOCAL_SATURATOR_DRIVE] = STRING_FOR_PARAM_LOCAL_SATURATOR_DRIVE,
 	    [LOCAL_SINE_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_SINE_SHAPER_DRIVE,
+	    [LOCAL_SINE_SHAPER_TWIST] = STRING_FOR_SINE_SHAPER_SYMMETRY, // Reuse existing twist/symmetry string
+	    [LOCAL_SINE_SHAPER_HARMONIC] = STRING_FOR_SINE_SHAPER_HARMONIC,
 	    [LOCAL_LPF_FREQ] = STRING_FOR_PARAM_LOCAL_LPF_FREQ,
 	    [LOCAL_PITCH_ADJUST] = STRING_FOR_PARAM_LOCAL_PITCH_ADJUST,
 	    [LOCAL_OSC_A_PITCH_ADJUST] = STRING_FOR_PARAM_LOCAL_OSC_A_PITCH_ADJUST,
@@ -776,6 +809,12 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 
 		case LOCAL_SINE_SHAPER_DRIVE:
 			return "sineShaperDrive";
+
+		case LOCAL_SINE_SHAPER_TWIST:
+			return "localSineShaperTwist";
+
+		case LOCAL_SINE_SHAPER_HARMONIC:
+			return "localSineShaperHarmonic";
 
 		case LOCAL_LAST:
 		    // Intentionally not handled

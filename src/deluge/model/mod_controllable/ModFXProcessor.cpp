@@ -17,6 +17,7 @@
 
 #include "ModFXProcessor.h"
 #include "definitions_cxx.hpp"
+#include "io/debug/fx_benchmark.h"
 #include "io/debug/print.h"
 #include "mem_functions.h"
 #include "memory/general_memory_allocator.h"
@@ -29,12 +30,19 @@
 // Set to 1 and enable ENABLE_TEXT_OUTPUT in uart.h to profile
 #define MODFX_PROFILE 0
 
+// ModFX type names for benchmarking
+static const char* kModFXTypeNames[] = {"none", "flanger", "chorus", "phaser", "stereo_ch", "warble", "dimen", "grain"};
+
 /// NOT GRAIN! - this only does the comb filter based mod fx
 void ModFXProcessor::processModFX(deluge::dsp::StereoBuffer<q31_t> buffer, const ModFXType& modFXType,
                                   int32_t modFXRate, int32_t modFXDepth, int32_t* postFXVolume,
                                   UnpatchedParamSet* unpatchedParams, bool anySoundComingIn) {
 
 	if (modFXType != ModFXType::NONE) {
+		// Benchmark with mod FX type tag
+		FX_BENCH_DECLARE(benchModFX, "modfx");
+		FX_BENCH_SET_TAG(benchModFX, 0, kModFXTypeNames[static_cast<uint8_t>(modFXType)]);
+		FX_BENCH_START(benchModFX);
 
 		LFOType modFXLFOWaveType{};
 		int32_t modFXDelayOffset{};
@@ -84,6 +92,8 @@ void ModFXProcessor::processModFX(deluge::dsp::StereoBuffer<q31_t> buffer, const
 			                                         thisModFXDelayDepth, feedback, AudioEngine::renderInStereo);
 			break;
 		}
+
+		FX_BENCH_STOP(benchModFX);
 	}
 }
 void ModFXProcessor::setupChorus(const ModFXType& modFXType, int32_t modFXDepth, int32_t* postFXVolume,

@@ -21,6 +21,7 @@
 #include "dsp/dx/engine.h"
 #include "dsp/filter/filter_set.h"
 #include "dsp/oscillators/sine_osc.h"
+#include "dsp/saturator_buffer.h"
 #include "dsp/timestretch/time_stretcher.h"
 #include "dsp/util.hpp"
 #include "gui/waveform/waveform_renderer.h"
@@ -49,6 +50,8 @@
 
 #include "dsp/oscillators/basic_waves.h"
 #include "dsp/oscillators/oscillator.h"
+#include "gui/menu_item/zone_based.h"
+#include "io/debug/fx_benchmark.h"
 #include "util/misc.h"
 #include <cstring>
 #include <new>
@@ -70,6 +73,7 @@ const Patcher::Config kPatcherConfigForVoice = {
     .firstParam = 0,
     .firstNonVolumeParam = params::FIRST_LOCAL_NON_VOLUME,
     .firstHybridParam = params::FIRST_LOCAL__HYBRID,
+    .firstZoneParam = params::FIRST_LOCAL_ZONE,
     .firstExpParam = params::FIRST_LOCAL_EXP,
     .endParams = params::FIRST_GLOBAL,
     .globality = GLOBALITY_LOCAL,
@@ -1513,11 +1517,15 @@ skipUnisonPart: {}
 			dsp::foldBufferPolyApproximation(stereo_osc_buffer, paramFinalValues[params::LOCAL_FOLD]);
 		}
 
-		// Sine Shaper (per-voice, mod-matrix routable drive)
+		// Sine Shaper (per-voice, mod-matrix routable drive, harmonic, and twist)
 		if (sound.sineShaper.mix > 0) {
 			q31_t sineDrive = paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE];
-			q31_t sineHarmonic = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC);
-			q31_t sineTwist = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SINE_SHAPER_TWIST);
+			// Combine field (menu base) + modulation (combineWithMod handles scaling: full mod = 1 zone)
+			// Harmonic clips to zone boundaries (different algorithms per zone)
+			q31_t sineHarmonic =
+			    sound.sineShaper.harmonic.combineWithMod(paramFinalValues[params::LOCAL_SINE_SHAPER_HARMONIC]);
+			// Twist allows cross-zone modulation
+			q31_t sineTwist = sound.sineShaper.twist.combineWithMod(paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST]);
 			q31_t sineMix = static_cast<q31_t>(sound.sineShaper.mix) << 24;
 
 			// Smooth Twist at source - derived values inherit smoothness
@@ -1531,18 +1539,18 @@ skipUnisonPart: {}
 			// Only boost when filters are OFF (with filters, filterGain handles level)
 			bool boostSubtractive = (synthMode == SynthMode::SUBTRACTIVE) && !sound.hasFilters();
 
+			// Benchmarking happens inside sineShapeBuffer with zone tags and sub-aggregations
 			dsp::sineShapeBuffer(stereo_osc_buffer, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperState,
 			                     sineHarmonic, sineMix, twistParams, &sound.sineShaper, nullptr, boostSubtractive);
 		}
 
 		// XY Saturator (per-voice, mod-matrix routable drive)
+		// Benchmarking happens inside saturateBuffer with "table" tag
 		if (sound.saturatorMix > 0) {
 			q31_t satDrive = paramFinalValues[params::LOCAL_SATURATOR_DRIVE];
 			q31_t satMix = static_cast<q31_t>(sound.saturatorMix) << 24;
-			// ADAA disabled - direct table lookup provides sufficient quality
-			// Per-voice ADAA state preserved for future use (saturatorPrevXL, saturatorPrevXR)
-			dsp::saturateBuffer(stereo_osc_buffer, sound.saturator, satDrive, &sound.saturatorDriveLast, satMix,
-			                    nullptr, nullptr);
+			// Integer-only path for benchmarking (no floats, like builtin)
+			dsp::saturateBufferInt32(stereo_osc_buffer, sound.saturator, satDrive, &sound.saturatorDriveLast, satMix);
 		}
 
 		// Filters
@@ -1576,8 +1584,10 @@ skipUnisonPart: {}
 			}
 		}
 
-		// Yes clipping
+		// Yes clipping (builtin saturator using getTanHAntialiased)
 		else {
+			FX_BENCH_DECLARE(benchClip, "saturator_builtin");
+			FX_BENCH_SCOPE(benchClip);
 
 			int32_t const* __restrict__ oscBufferPos = oscBuffer; // For traversal
 			dsp::StereoSample<q31_t>* __restrict__ outputSample = (dsp::StereoSample<q31_t>*)soundBuffer;
@@ -1631,11 +1641,15 @@ skipUnisonPart: {}
 			dsp::foldBufferPolyApproximation(std::span{oscBuffer, n}, foldAmount);
 		}
 
-		// Sine Shaper (per-voice, mod-matrix routable drive) - mono path
+		// Sine Shaper (per-voice, mod-matrix routable drive, harmonic, and twist) - mono path
 		if (sound.sineShaper.mix > 0) {
 			q31_t sineDrive = paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE];
-			q31_t sineHarmonic = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC);
-			q31_t sineTwist = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SINE_SHAPER_TWIST);
+			// Combine field (menu base) + modulation (combineWithMod handles scaling: full mod = 1 zone)
+			// Harmonic clips to zone boundaries (different algorithms per zone)
+			q31_t sineHarmonic =
+			    sound.sineShaper.harmonic.combineWithMod(paramFinalValues[params::LOCAL_SINE_SHAPER_HARMONIC]);
+			// Twist allows cross-zone modulation
+			q31_t sineTwist = sound.sineShaper.twist.combineWithMod(paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST]);
 			q31_t sineMix = static_cast<q31_t>(sound.sineShaper.mix) << 24;
 
 			// Smooth Twist at source - derived values inherit smoothness
@@ -1650,17 +1664,19 @@ skipUnisonPart: {}
 			// Only boost when filters are OFF (with filters, filterGain handles level)
 			bool boostSubtractive = (synthMode == SynthMode::SUBTRACTIVE) && !sound.hasFilters();
 
+			// Benchmarking happens inside sineShapeBuffer with zone tags and sub-aggregations
 			dsp::sineShapeBuffer(std::span{oscBuffer, n}, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperState,
 			                     sineHarmonic, sineMix, twistParams, &sound.sineShaper, nullptr, boostSubtractive);
 		}
 
 		// XY Saturator (per-voice, mod-matrix routable drive) - mono path
+		// Benchmarking happens inside saturateBuffer with "table" tag
 		if (sound.saturatorMix > 0) {
 			q31_t satDrive = paramFinalValues[params::LOCAL_SATURATOR_DRIVE];
 			q31_t satMix = static_cast<q31_t>(sound.saturatorMix) << 24;
-			// ADAA disabled - direct table lookup provides sufficient quality
-			dsp::saturateBuffer(std::span{oscBuffer, n}, sound.saturator, satDrive, &sound.saturatorDriveLast, satMix,
-			                    nullptr);
+			// Integer-only path for benchmarking (no floats, like builtin)
+			dsp::saturateBufferInt32(std::span{oscBuffer, n}, sound.saturator, satDrive, &sound.saturatorDriveLast,
+			                         satMix);
 		}
 
 		filterSet.renderLong(std::span{oscBuffer, n});
@@ -1698,8 +1714,11 @@ skipUnisonPart: {}
 			} while (++oscBufferPos != oscBufferEnd);
 		}
 
-		// Yes clipping
+		// Yes clipping (builtin saturator using getTanHAntialiased)
 		else {
+			FX_BENCH_DECLARE(benchClip, "saturator_builtin");
+			FX_BENCH_SCOPE(benchClip);
+
 			int32_t const* __restrict__ oscBufferPos = oscBuffer; // For traversal
 			int32_t* __restrict__ outputSample = soundBuffer;
 			int32_t overallOscAmplitudeNow = overallOscAmplitudeLastTime;

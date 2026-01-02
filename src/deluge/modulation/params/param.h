@@ -100,6 +100,11 @@ enum Local : ParamType {
 	LOCAL_SATURATOR_DRIVE,   // XY distortion drive (additive mod: base + mod)
 	LOCAL_SINE_SHAPER_DRIVE, // Sine shaper drive (additive mod: base + mod)
 
+	// Local zone params begin (pure modulation pass-through, scaling handled by ZoneBasedParam)
+	FIRST_LOCAL_ZONE,
+	LOCAL_SINE_SHAPER_TWIST = FIRST_LOCAL_ZONE, // Sine shaper twist/modifier
+	LOCAL_SINE_SHAPER_HARMONIC,                 // Sine shaper harmonic zone
+
 	// Local exp params begin
 	FIRST_LOCAL_EXP,
 	LOCAL_LPF_FREQ = FIRST_LOCAL_EXP,
@@ -286,6 +291,12 @@ bool isParamPan(Kind kind, int32_t paramID);
 bool isParamPitch(Kind kind, int32_t paramID);
 bool isParamPitchBend(Kind kind, int32_t paramID);
 bool isParamHybridDrive(Kind kind, int32_t paramID);
+/// Returns zone count for zone-based params (e.g., 8 for sine shaper TWIST/HARMONIC)
+/// Returns 0 for non-zone-based params. Used by patcher for modulation scaling.
+int32_t getParamZoneCount(Kind kind, int32_t paramID);
+/// Returns true if modulation should be clipped to zone boundaries (no cross-zone modulation)
+/// Useful when different zones have fundamentally different algorithms (e.g., Harmonic)
+bool shouldClipModToZoneBoundary(Kind kind, int32_t paramID);
 bool isParamArpRhythm(Kind kind, int32_t paramID);
 bool isParamStutter(Kind kind, int32_t paramID);
 bool isParamQuantizedStutter(Kind kind, int32_t paramID, ModControllableAudio* modControllableAudio);

@@ -19,7 +19,6 @@
 #include "deluge/util/fixedpoint.h"
 #include "deluge/util/functions.h"
 #include "dsp/fast_math.h"
-#include "dsp/saturator.h"
 #include "dsp_ng/core/types.hpp"
 #include "util/waves.h"
 #include <cmath>
@@ -394,84 +393,6 @@ inline void wavefoldBufferEnhanced(std::span<q31_t> buffer, q31_t level, q31_t d
 inline void wavefoldBufferEnhanced(StereoBuffer<q31_t> buffer, q31_t level, q31_t drive, q31_t symmetry) {
 	wavefoldBufferEnhanced(std::span<q31_t>{reinterpret_cast<q31_t*>(buffer.data()), buffer.size() * 2}, level, drive,
 	                       symmetry);
-}
-
-/**
- * Process a mono buffer through the Saturator waveshaper
- *
- * @param buffer Audio buffer to process in-place
- * @param saturator The Saturator instance (with pre-generated table)
- * @param drive Patched drive parameter (q31)
- * @param smoothedDrive Previous drive value for smoothing (updated)
- * @param mix Wet/dry blend (q31, 0 = bypass)
- * @param prevX ADAA state (previous input sample), nullptr if AA disabled
- */
-inline void saturateBuffer(std::span<q31_t> buffer, Saturator& saturator, q31_t drive, q31_t* smoothedDrive, q31_t mix,
-                           float* prevX = nullptr) {
-	// Early out - if mix is 0, do nothing
-	if (mix <= 0 || buffer.empty()) {
-		return;
-	}
-
-	auto ctx = prepareSmoothing(*smoothedDrive, drive, buffer.size());
-
-	for (auto& sample : buffer) {
-		// Per-sample IIR update
-		ctx.current += multiply_32x32_rshift32(ctx.target - ctx.current, ctx.alpha) * 2;
-
-		// Get saturated (wet) signal - prevX enables ADAA when non-null
-		q31_t wet = saturator.process(sample, ctx.current, prevX);
-
-		// Wet/dry crossfade
-		q31_t dry = multiply_32x32_rshift32(sample, ONE_Q31 - mix) << 1;
-		wet = multiply_32x32_rshift32(wet, mix) << 1;
-		sample = add_saturate(dry, wet);
-	}
-
-	*smoothedDrive = ctx.current; // Write back final smoothed value
-}
-
-/**
- * Process a stereo buffer through the Saturator waveshaper
- *
- * @param buffer Stereo audio buffer to process in-place
- * @param saturator The Saturator instance (with pre-generated table)
- * @param drive Patched drive parameter (q31)
- * @param smoothedDrive Previous drive value for smoothing (updated)
- * @param mix Wet/dry blend (q31, 0 = bypass)
- * @param prevXL Left channel ADAA state (previous input sample), nullptr if AA disabled
- * @param prevXR Right channel ADAA state (previous input sample), nullptr if AA disabled
- */
-inline void saturateBuffer(StereoBuffer<q31_t> buffer, Saturator& saturator, q31_t drive, q31_t* smoothedDrive,
-                           q31_t mix, float* prevXL = nullptr, float* prevXR = nullptr) {
-	// Early out - if mix is 0, do nothing
-	if (mix <= 0 || buffer.empty()) {
-		return;
-	}
-
-	auto ctx = prepareSmoothing(*smoothedDrive, drive, buffer.size());
-
-	for (auto& sample : buffer) {
-		// Per-sample IIR update
-		ctx.current += multiply_32x32_rshift32(ctx.target - ctx.current, ctx.alpha) * 2;
-
-		// Process left channel - prevXL enables ADAA when non-null
-		q31_t wetL = saturator.process(sample.l, ctx.current, prevXL);
-
-		// Process right channel - prevXR enables ADAA when non-null
-		q31_t wetR = saturator.process(sample.r, ctx.current, prevXR);
-
-		// Wet/dry crossfade
-		q31_t dryL = multiply_32x32_rshift32(sample.l, ONE_Q31 - mix) << 1;
-		q31_t dryR = multiply_32x32_rshift32(sample.r, ONE_Q31 - mix) << 1;
-		wetL = multiply_32x32_rshift32(wetL, mix) << 1;
-		wetR = multiply_32x32_rshift32(wetR, mix) << 1;
-
-		sample.l = add_saturate(dryL, wetL);
-		sample.r = add_saturate(dryR, wetR);
-	}
-
-	*smoothedDrive = ctx.current; // Write back final smoothed value
 }
 
 } // namespace deluge::dsp

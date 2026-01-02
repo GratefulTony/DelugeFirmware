@@ -1,5 +1,5 @@
 /*
- * Copyright © 2024 Synthstrom Audible Limited
+ * Copyright © 2024-2025 Owlet Records
  *
  * This file is part of The Synthstrom Audible Deluge Firmware.
  *
@@ -13,12 +13,17 @@
  *
  * You should have received a copy of the GNU General Public License along with this program.
  * If not, see <https://www.gnu.org/licenses/>.
+ *
+ * --- Additional terms under GNU GPL version 3 section 7 ---
+ * This file requires preservation of the above copyright notice and author attribution
+ * in all copies or substantial portions of this file.
  */
 
 #pragma once
 
 #include "definitions_cxx.hpp"
 #include "dsp/filter/ladder_components.h"
+#include "io/debug/fx_benchmark.h"
 #include "util/fixedpoint.h"
 #include <array>
 #include <cmath>
@@ -195,6 +200,9 @@ public:
 		if (stages == 0 || buffer.empty()) {
 			return;
 		}
+
+		FX_BENCH_DECLARE(bench, "disperser");
+		FX_BENCH_SCOPE(bench);
 
 		// Calculate per-sample feedback increment for smooth modulation
 		constexpr q31_t smoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31);

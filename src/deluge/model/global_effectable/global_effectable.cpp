@@ -23,6 +23,7 @@
 #include "gui/views/view.h"
 #include "hid/buttons.h"
 #include "hid/led/indicator_leds.h"
+#include "io/debug/fx_benchmark.h"
 #include "memory/general_memory_allocator.h"
 #include "model/action/action_logger.h"
 #include "model/mod_controllable/ModFXProcessor.h"
@@ -786,6 +787,8 @@ void GlobalEffectable::setupFilterSetConfig(int32_t* postFXVolume, ParamManager*
 }
 
 [[gnu::hot]] void GlobalEffectable::processFilters(deluge::dsp::StereoBuffer<q31_t> buffer) {
+	FX_BENCH_DECLARE(bench, "filters");
+	FX_BENCH_SCOPE(bench);
 	filterSet.renderLongStereo(buffer);
 }
 

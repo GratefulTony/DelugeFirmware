@@ -19,6 +19,7 @@
 #include "definitions_cxx.hpp"
 #include "dsp/delay/delay_buffer.h"
 #include "dsp_ng/core/types.hpp"
+#include "io/debug/fx_benchmark.h"
 #include "io/debug/log.h"
 #include "memory/general_memory_allocator.h"
 #include "model/sync.h"
@@ -229,6 +230,9 @@ void Delay::process(StereoBuffer<q31_t> buffer, const State& delayWorkingState) 
 	if (!delayWorkingState.doDelay) {
 		return;
 	}
+
+	FX_BENCH_DECLARE(bench, "delay");
+	FX_BENCH_SCOPE(bench);
 
 	if (delayWorkingState.userDelayRate != userRateLastTime) {
 		userRateLastTime = delayWorkingState.userDelayRate;

@@ -18,10 +18,13 @@
 #include "model/global_effectable/global_effectable_for_clip.h"
 #include "definitions.h"
 #include "definitions_cxx.hpp"
+#include "dsp/saturator_buffer.h"
+#include "dsp/sine_shaper.hpp"
 #include "dsp/util.hpp"
 #include "dsp_ng/core/types.hpp"
 #include "gui/l10n/l10n.h"
 #include "gui/views/view.h"
+#include "io/debug/fx_benchmark.h"
 #include "model/action/action.h"
 #include "model/action/action_logger.h"
 #include "model/settings/runtime_feature_settings.h"
@@ -29,6 +32,7 @@
 #include <limits>
 #include <string.h>
 // #include <algorithm>
+#include "gui/menu_item/zone_based.h"
 #include "hid/buttons.h"
 #include "memory/general_memory_allocator.h"
 #include "model/clip/clip.h"
@@ -119,8 +123,11 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	    modelStack, global_effectable_audio, nullptr, reverbBuffer, reverbAmountAdjustForDrums, sideChainHitPending,
 	    shouldLimitDelayFeedback, isClipActive, pitchAdjust, 134217728, 134217728);
 
-	// Render saturation
+	// Render saturation (builtin saturator using getTanHAntialiased)
 	if (clippingAmount != 0u) {
+		FX_BENCH_DECLARE(benchClip, "saturator_builtin");
+		FX_BENCH_SCOPE(benchClip);
+
 		for (deluge::dsp::StereoSample<q31_t>& sample : global_effectable_audio) {
 			sample.l = saturate(sample.l, &lastSaturationTanHWorkingValue[0]);
 			sample.r = saturate(sample.r, &lastSaturationTanHWorkingValue[1]);
@@ -133,8 +140,11 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	// Sine Shaper (for audio clips, uses sineShaper struct)
 	if (sineShaper.mix > 0) {
 		q31_t sineDrive = static_cast<q31_t>(sineShaper.drive) << 24;
-		q31_t sineHarmonic = unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC);
-		q31_t sineTwist = unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_TWIST);
+		// Combine field + modulation (combineWithMod handles scaling: full mod = 1 zone)
+		q31_t sineHarmonic =
+		    sineShaper.harmonic.combineWithMod(unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC));
+		q31_t sineTwist =
+		    sineShaper.twist.combineWithMod(unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_TWIST));
 		q31_t sineMix = static_cast<q31_t>(sineShaper.mix) << 24;
 
 		// Smooth Twist at source - derived values inherit smoothness
@@ -143,16 +153,19 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 
 		auto twistParams = deluge::dsp::computeSineShaperTwistParams(smoothedTwist, &sineShaper);
 
+		// Benchmarking happens inside sineShapeBuffer with zone tags and sub-aggregations
 		deluge::dsp::sineShapeBuffer(global_effectable_audio, sineDrive, &sineShaper.smoothedDrive, &sineShaperState,
 		                             sineHarmonic, sineMix, twistParams, &sineShaper);
 	}
 
 	// XY Saturator (for audio clips, uses uint8_t drive member)
+	// Benchmarking happens inside saturateBuffer
 	if (saturatorMix > 0) {
 		q31_t satDrive = static_cast<q31_t>(saturatorDrive) << 24;
 		q31_t satMix = static_cast<q31_t>(saturatorMix) << 24;
-		// Audio clips don't support ADAA toggle - pass nullptr for prevX pointers
-		deluge::dsp::saturateBuffer(global_effectable_audio, saturator, satDrive, &saturatorDriveLast, satMix);
+		// ADAA enabled - uses per-clip state for anti-aliasing
+		deluge::dsp::saturateBuffer(global_effectable_audio, saturator, satDrive, &saturatorDriveLast, satMix,
+		                            &saturatorPrevXL, &saturatorPrevXR);
 	}
 
 	// Render FX

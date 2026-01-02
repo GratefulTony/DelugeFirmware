@@ -113,12 +113,25 @@ protected:
 };
 
 /// Harmonic zone control - 8 zones with triangle-modulated Chebyshev harmonics
-/// Zone 0: Poly - Cascaded polynomial waveshaping
-/// Zones 1-7: Chebyshev harmonics with triangle modulation
-/// Secret menu: Push encoder to adjust metaPhaseHarmonic (per-patch phase offset)
-class SineShaperHarmonic final : public ZoneBasedUnpatchedParam<params::UNPATCHED_SINE_SHAPER_HARMONIC> {
+/// Zone 0: 3579 - T3, T5, T7/T9 blend (edgy)
+/// Zone 1: 3579wm - Same with sine input waveshaping (warm)
+/// Zone 2: FM - Add, Ring, FM, Fold at 2x
+/// Zone 3: Fold - Wavefolder k=1,2,3,4
+/// Zone 4: Ring - Ring mod n=2,3,4,5
+/// Zone 5: Add - Additive n=2,3,4,5
+/// Zone 6: Mod - FM depths d=0.25,0.5,0.75,1.0
+/// Zone 7: Poly - Cascaded polynomial waveshaping
+/// Secret menu: Push+twist encoder to adjust metaPhaseHarmonic (per-patch phase offset)
+/// Press encoder (no twist): Opens mod matrix source selection
+class SineShaperHarmonic final : public ZoneBasedPatchedParam<params::LOCAL_SINE_SHAPER_HARMONIC> {
 public:
-	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
+	using ZoneBasedPatchedParam::ZoneBasedPatchedParam;
+
+	[[nodiscard]] q31_t getFieldValue() const override {
+		return soundEditor.currentModControllable->sineShaper.harmonic;
+	}
+
+	void setFieldValue(q31_t value) override { soundEditor.currentModControllable->sineShaper.harmonic = value; }
 
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
@@ -156,7 +169,7 @@ public:
 			suppressNotification_ = true; // Prevent horizontal menu from overwriting popup
 		}
 		else {
-			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
+			ZoneBasedPatchedParam::selectEncoderAction(offset);
 		}
 	}
 
@@ -176,16 +189,21 @@ private:
 	mutable bool suppressNotification_ = false;
 };
 
-/// Twist zone control - 5 zones with different modifiers
+/// Twist zone control - 8 zones with different modifiers
 /// Zone 0: Width - Stereo spread with animated phase evolution
 /// Zone 1: Evens - Asymmetric compression for even harmonics
 /// Zone 2: Rect - Blended rectifier (rect + rect2 with overlap)
 /// Zone 3: Fdbk - Output→input feedback (thickening to chaos)
-/// Zone 4: Twist - Phase modulator for Harmonic zones (meta-control)
-/// Secret menu: Push encoder to adjust metaPhase (per-patch phase offset for meta zone)
-class SineShaperTwist final : public ZoneBasedUnpatchedParam<params::UNPATCHED_SINE_SHAPER_TWIST> {
+/// Zones 4-7: Meta - Combined modifiers with φ-ratio triangle modulation
+/// Secret menu: Push+twist encoder to adjust metaPhase (per-patch phase offset for meta zone)
+/// Press encoder (no twist): Opens mod matrix source selection
+class SineShaperTwist final : public ZoneBasedPatchedParam<params::LOCAL_SINE_SHAPER_TWIST> {
 public:
-	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
+	using ZoneBasedPatchedParam::ZoneBasedPatchedParam;
+
+	[[nodiscard]] q31_t getFieldValue() const override { return soundEditor.currentModControllable->sineShaper.twist; }
+
+	void setFieldValue(q31_t value) override { soundEditor.currentModControllable->sineShaper.twist = value; }
 
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
@@ -198,7 +216,10 @@ public:
 		case 3:
 			return "Fdbk";
 		case 4:
-			return "Twist";
+		case 5:
+		case 6:
+		case 7:
+			return "Meta"; // Zones 4-7 are the meta region with combined effects
 		default:
 			return "---";
 		}
@@ -217,7 +238,7 @@ public:
 			suppressNotification_ = true; // Prevent horizontal menu from overwriting popup
 		}
 		else {
-			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
+			ZoneBasedPatchedParam::selectEncoderAction(offset);
 		}
 	}
 
@@ -272,10 +293,19 @@ public:
 			char buffer[12];
 			intToString(static_cast<int32_t>(gamma * 10.0f), buffer);
 			display->displayPopup(buffer);
+			suppressNotification_ = true; // Prevent horizontal menu from overwriting popup
 		}
 		else {
 			IntegerWithOff::selectEncoderAction(offset);
 		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
 	}
 
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
@@ -283,6 +313,9 @@ public:
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
 	}
+
+private:
+	mutable bool suppressNotification_ = false;
 };
 
 } // namespace deluge::gui::menu_item::fx

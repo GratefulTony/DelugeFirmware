@@ -32,6 +32,7 @@
 #include "hid/display/display.h"
 #include "hid/encoders.h"
 #include "hid/led/indicator_leds.h"
+#include "io/debug/fx_benchmark.h"
 #include "io/debug/log.h"
 #include "io/midi/midi_engine.h"
 #include "memory/general_memory_allocator.h"
@@ -586,6 +587,8 @@ bool calledFromScheduler = false;
 	bypassCulling = false;
 }
 void renderAudio(size_t numSamples) {
+	FX_BENCH_TICK(); // Advance global sampling counter
+
 	std::span renderingBuffer{renderingMemory.data(), numSamples};
 	std::span reverbBuffer{reverbMemory.data(), numSamples};
 
@@ -618,6 +621,8 @@ void renderAudio(size_t numSamples) {
 
 	renderingBufferOutputPos = renderingMemory.begin();
 	renderingBufferOutputEnd = renderingMemory.begin() + numSamples;
+
+	FX_BENCH_END_BUFFER(); // Reset sampling flag for next buffer
 }
 
 void renderAudioForStemExport(size_t numSamples) {
@@ -813,7 +818,11 @@ void renderReverb(size_t numSamples) {
 
 		// Mix reverb into main render
 		reverb.setPanLevels(reverbAmplitudeL, reverbAmplitudeR);
-		reverb.process(reverbBuffer, renderingBuffer);
+		{
+			FX_BENCH_DECLARE(bench, "reverb");
+			FX_BENCH_SCOPE(bench);
+			reverb.process(reverbBuffer, renderingBuffer);
+		}
 		logAction("Reverb complete");
 	}
 }

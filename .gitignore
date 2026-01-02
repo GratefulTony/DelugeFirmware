@@ -49,3 +49,6 @@ CLAUDE.md
 
 # PR documentation (not for commit)
 DYNAMICS_SOUND_DESIGN_PR.md
+
+# FX benchmark output
+fx_benchmark.csv

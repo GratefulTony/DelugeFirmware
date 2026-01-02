@@ -28,6 +28,7 @@
 #include "gui/views/performance_view.h"
 #include "gui/views/session_view.h"
 #include "gui/views/view.h"
+#include "io/debug/fx_benchmark.h"
 #include "io/debug/log.h"
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_engine.h"
@@ -96,6 +97,8 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	sineShaper.drive = other->sineShaper.drive;
 	sineShaper.symmetry = other->sineShaper.symmetry;
 	sineShaper.mix = other->sineShaper.mix;
+	sineShaper.harmonic = other->sineShaper.harmonic;
+	sineShaper.twist = other->sineShaper.twist;
 	sineShaper.metaPhase = other->sineShaper.metaPhase;
 	sineShaper.metaPhaseHarmonic = other->sineShaper.metaPhaseHarmonic;
 	sineShaper.gammaPhase = other->sineShaper.gammaPhase;
@@ -112,8 +115,9 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	saturatorShapeX = other->saturatorShapeX;
 	saturatorShapeY = other->saturatorShapeY;
 	saturatorMix = other->saturatorMix;
+	saturatorPhase = other->saturatorPhase;
 	if (saturatorDrive || saturatorMix) {
-		saturator.regenerateTable(saturatorShapeX, saturatorShapeY);
+		saturator.regenerateTable(saturatorShapeX, saturatorShapeY, saturatorPhase);
 	}
 	// Disperser
 	disperserFreq = other->disperserFreq;
@@ -266,6 +270,8 @@ void ModControllableAudio::processFX(deluge::dsp::StereoBuffer<q31_t> buffer, Mo
                                      int32_t modFXDepth, const deluge::dsp::Delay::State& delayWorkingState,
                                      int32_t* postFXVolume, ParamManager* paramManager, bool anySoundComingIn,
                                      q31_t reverbSendAmount) {
+	// Note: ModFX benchmarking happens inside modfx.processModFX with type tags
+	// This function also handles EQ/bass/treble which aren't benchmarked separately
 
 	UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
 
@@ -392,6 +398,9 @@ bool ModControllableAudio::isSRREnabled(ParamManager* paramManager) {
 
 void ModControllableAudio::processSRRAndBitcrushing(deluge::dsp::StereoBuffer<q31_t> buffer, int32_t* postFXVolume,
                                                     ParamManager* paramManager) {
+	FX_BENCH_DECLARE(bench, "srr_bitcrush");
+	FX_BENCH_SCOPE(bench);
+
 	uint32_t bitCrushMaskForSRR = 0xFFFFFFFF;
 
 	bool srrEnabled = isSRREnabled(paramManager);
@@ -544,12 +553,15 @@ void ModControllableAudio::writeAttributesToFile(Serializer& writer) {
 		writer.writeAttribute("clippingAmount", clippingAmount);
 	}
 	// Sine shaper params (only write if non-default)
-	// Note: sineShaperHarmonic is now saved via UNPATCHED_SINE_SHAPER_HARMONIC param system
+	// Harmonic and Twist fields are base values; patched params add modulation
 	if (sineShaper.drive) {
 		writer.writeAttribute("sineShaperDrive", sineShaper.drive);
 	}
-	if (sineShaper.symmetry != 64) {
-		writer.writeAttribute("sineShaperSymmetry", sineShaper.symmetry);
+	if (sineShaper.harmonic != 0) {
+		writer.writeAttribute("sineShaperHarmonicBase", sineShaper.harmonic);
+	}
+	if (sineShaper.twist != 0) {
+		writer.writeAttribute("sineShaperTwistBase", sineShaper.twist);
 	}
 	if (sineShaper.mix) {
 		writer.writeAttribute("sineShaperMix", sineShaper.mix);
@@ -576,6 +588,9 @@ void ModControllableAudio::writeAttributesToFile(Serializer& writer) {
 	}
 	if (saturatorMix) {
 		writer.writeAttribute("saturatorMix", saturatorMix);
+	}
+	if (saturatorPhase != 0.0f) {
+		writer.writeAttribute("saturatorPhase", static_cast<int32_t>(saturatorPhase * 10.0f));
 	}
 	// Disperser params (only write if non-default)
 	if (disperserFreq != 64) {
@@ -1054,23 +1069,13 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 		sineShaper.drive = reader.readTagOrAttributeValueInt();
 		reader.exitTag("sineShaperDrive");
 	}
-	else if (!strcmp(tagName, "sineShaperHarmonic")) {
-		// Legacy format: migrate to unpatched param system
-		int32_t legacyValue = reader.readTagOrAttributeValueInt();
-		reader.exitTag("sineShaperHarmonic");
-		// Migrate: old 0-127 range to full q31 high-res (0-1024 menu maps to full q31)
-		// legacyValue << 24 gives us the old scaling, but new system uses full q31
-		// Scale: 127 (old max) -> INT32_MAX (new max)
-		if (paramManager && legacyValue > 0) {
-			q31_t newValue = static_cast<q31_t>(static_cast<int64_t>(legacyValue) * 2147483647 / 127);
-			paramManager->getUnpatchedParamSet()
-			    ->params[params::UNPATCHED_SINE_SHAPER_HARMONIC]
-			    .setCurrentValueBasicForSetup(newValue);
-		}
+	else if (!strcmp(tagName, "sineShaperHarmonicBase")) {
+		sineShaper.harmonic = reader.readTagOrAttributeValueInt();
+		reader.exitTag("sineShaperHarmonicBase");
 	}
-	else if (!strcmp(tagName, "sineShaperSymmetry")) {
-		sineShaper.symmetry = reader.readTagOrAttributeValueInt();
-		reader.exitTag("sineShaperSymmetry");
+	else if (!strcmp(tagName, "sineShaperTwistBase")) {
+		sineShaper.twist = reader.readTagOrAttributeValueInt();
+		reader.exitTag("sineShaperTwistBase");
 	}
 	else if (!strcmp(tagName, "sineShaperMix")) {
 		sineShaper.mix = reader.readTagOrAttributeValueInt();
@@ -1091,22 +1096,27 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 	// Saturator params
 	else if (!strcmp(tagName, "saturatorDrive")) {
 		saturatorDrive = reader.readTagOrAttributeValueInt();
-		saturator.regenerateTable(saturatorShapeX, saturatorShapeY); // Rebuild table
+		saturator.regenerateTable(saturatorShapeX, saturatorShapeY, saturatorPhase);
 		reader.exitTag("saturatorDrive");
 	}
 	else if (!strcmp(tagName, "saturatorShapeX")) {
 		saturatorShapeX = reader.readTagOrAttributeValueInt();
-		saturator.regenerateTable(saturatorShapeX, saturatorShapeY); // Rebuild table
+		saturator.regenerateTable(saturatorShapeX, saturatorShapeY, saturatorPhase);
 		reader.exitTag("saturatorShapeX");
 	}
 	else if (!strcmp(tagName, "saturatorShapeY")) {
 		saturatorShapeY = reader.readTagOrAttributeValueInt();
-		saturator.regenerateTable(saturatorShapeX, saturatorShapeY); // Rebuild table
+		saturator.regenerateTable(saturatorShapeX, saturatorShapeY, saturatorPhase);
 		reader.exitTag("saturatorShapeY");
 	}
 	else if (!strcmp(tagName, "saturatorMix")) {
 		saturatorMix = reader.readTagOrAttributeValueInt();
 		reader.exitTag("saturatorMix");
+	}
+	else if (!strcmp(tagName, "saturatorPhase")) {
+		saturatorPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
+		saturator.regenerateTable(saturatorShapeX, saturatorShapeY, saturatorPhase);
+		reader.exitTag("saturatorPhase");
 	}
 	// Disperser params
 	else if (!strcmp(tagName, "disperserFreq")) {
@@ -1748,6 +1758,8 @@ void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
 
 void ModControllableAudio::processStutter(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager) {
 	if (stutterer.isStuttering(this)) {
+		FX_BENCH_DECLARE(bench, "stutter");
+		FX_BENCH_SCOPE(bench);
 		stutterer.processStutter(buffer, paramManager, currentSong->getInputTickMagnitude(),
 		                         playbackHandler.getTimePerInternalTickInverse());
 	}

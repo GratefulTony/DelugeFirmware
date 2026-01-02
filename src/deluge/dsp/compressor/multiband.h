@@ -1,5 +1,5 @@
 /*
- * Copyright © 2024 Synthstrom Audible Limited
+ * Copyright © 2024-2025 Owlet Records
  *
  * This file is part of The Synthstrom Audible Deluge Firmware.
  *
@@ -13,6 +13,10 @@
  *
  * You should have received a copy of the GNU General Public License along with this program.
  * If not, see <https://www.gnu.org/licenses/>.
+ *
+ * --- Additional terms under GNU GPL version 3 section 7 ---
+ * This file requires preservation of the above copyright notice and author attribution
+ * in all copies or substantial portions of this file.
  */
 
 #pragma once
@@ -24,6 +28,7 @@
 #include "dsp/filter/lr_crossover.h"
 #include "dsp/util.hpp"
 #include "dsp_ng/core/types.hpp"
+#include "io/debug/fx_benchmark.h"
 #include "io/debug/print.h"
 #include "util/fixedpoint.h"
 #include "util/functions.h"
@@ -31,11 +36,8 @@
 #include <cmath>
 #include <span>
 
-// TODO:PROFILING-DELETE - Enable to profile multiband compressor render stages
-// Outputs cycle counts for crossover, envelope, gain apply, and recombine stages
-// Uses Debug::OneOfN to sample every Nth buffer (default 1000)
-// Set to 1 and enable ENABLE_TEXT_OUTPUT in uart.h to profile
-#define MULTIBAND_PROFILE 0
+// FX Benchmarking: Use -DENABLE_FX_BENCHMARK=ON in cmake to profile multiband compressor
+// Outputs JSON cycle counts for crossover, envelope, and recombine stages via sysex
 
 namespace deluge::dsp {
 
@@ -958,16 +960,20 @@ public:
 			return;
 		}
 
-// TODO:PROFILING-DELETE begin
-#if MULTIBAND_PROFILE
-		static Debug::OneOfN profTotal("MB_total", 1000);
-		static Debug::OneOfN profXover("MB_xover", 1000);
-		static Debug::OneOfN profEnv("MB_env", 1000);
-		static Debug::OneOfN profRecomb("MB_recomb", 1000); // Gain apply is now fused into recombine
-		profTotal.start();
-		profXover.start();
-#endif
-		// TODO:PROFILING-DELETE end
+		// Crossover type names for benchmarking
+		static const char* kXoverNames[] = {"ap1_6dB", "ap2_12dB", "ap3_18dB", "lr2_12dB"};
+		const char* xoverTag = kXoverNames[crossoverType_ < 4 ? crossoverType_ : 0];
+
+		FX_BENCH_DECLARE(benchTotal, "multiband", "total");
+		FX_BENCH_DECLARE(benchXover, "multiband", "crossover");
+		FX_BENCH_DECLARE(benchEnv, "multiband", "envelope");
+		FX_BENCH_DECLARE(benchRecomb, "multiband", "recombine");
+		FX_BENCH_SET_TAG(benchTotal, 1, xoverTag);
+		FX_BENCH_SET_TAG(benchXover, 1, xoverTag);
+		FX_BENCH_SET_TAG(benchEnv, 1, xoverTag);
+		FX_BENCH_SET_TAG(benchRecomb, 1, xoverTag);
+		FX_BENCH_START(benchTotal);
+		FX_BENCH_START(benchXover);
 
 		// Increment frame counter for gap detection in band compressors
 		++frameCount_;
@@ -1052,12 +1058,8 @@ public:
 			break;
 		}
 
-// TODO:PROFILING-DELETE begin
-#if MULTIBAND_PROFILE
-		profXover.stop();
-		profEnv.start();
-#endif
-		// TODO:PROFILING-DELETE end
+		FX_BENCH_STOP(benchXover);
+		FX_BENCH_START(benchEnv);
 
 		// Fixed threshold reference - thresholds are absolute, independent of track volume
 		// Using full scale (ONE_Q31) as reference: log(2^31) ≈ 21.49
@@ -1079,12 +1081,8 @@ public:
 			                                       frameCount_);
 		}
 
-// TODO:PROFILING-DELETE begin
-#if MULTIBAND_PROFILE
-		profEnv.stop();
-		profRecomb.start();
-#endif
-		// TODO:PROFILING-DELETE end
+		FX_BENCH_STOP(benchEnv);
+		FX_BENCH_START(benchRecomb);
 
 		// Fused gain apply + recombine loop
 		// This combines compression gain, per-band output level, stereo width, and output gain
@@ -1229,12 +1227,8 @@ public:
 			}
 		}
 
-// TODO:PROFILING-DELETE begin
-#if MULTIBAND_PROFILE
-		profRecomb.stop();
-		profTotal.stop();
-#endif
-		// TODO:PROFILING-DELETE end
+		FX_BENCH_STOP(benchRecomb);
+		FX_BENCH_STOP(benchTotal);
 	}
 
 	/// Get combined gain reduction for display (average of all bands)

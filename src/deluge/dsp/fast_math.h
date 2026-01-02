@@ -20,6 +20,10 @@
 #include <cmath>
 #include <cstdint>
 
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+
 namespace deluge::dsp {
 
 /// Fast math approximations for DSP use.
@@ -141,6 +145,25 @@ namespace deluge::dsp {
 	float x3 = x2 * x;
 	float x5 = x3 * x2;
 	return x - 0.16666667f * x3 + 0.00833333f * x5;
+}
+
+/// Fast reciprocal (1/x) using NEON vrecpe + Newton-Raphson refinement.
+/// Accurate to ~12 bits after one refinement iteration.
+/// ~3x faster than full division on Cortex-A9.
+/// @param x Input value (must be non-zero)
+/// @return Approximate 1/x
+[[gnu::always_inline]] inline float fastReciprocal(float x) {
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+	// Use NEON fast reciprocal estimate + one Newton-Raphson iteration
+	// vrecpe gives ~8-bit accuracy, one iteration improves to ~12 bits
+	float32x2_t v = vdup_n_f32(x);
+	float32x2_t est = vrecpe_f32(v);
+	// Newton-Raphson: est' = est * (2 - x * est)
+	est = vmul_f32(est, vrecps_f32(v, est));
+	return vget_lane_f32(est, 0);
+#else
+	return 1.0f / x;
+#endif
 }
 
 /// Fast sin(x) for full range using range reduction + fastSinHalfPi.

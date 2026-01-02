@@ -1,5 +1,5 @@
 /*
- * Copyright © 2024 Synthstrom Audible Limited
+ * Copyright © 2024-2025 Owlet Records
  *
  * This file is part of The Synthstrom Audible Deluge Firmware.
  *
@@ -13,16 +13,21 @@
  *
  * You should have received a copy of the GNU General Public License along with this program.
  * If not, see <https://www.gnu.org/licenses/>.
+ *
+ * --- Additional terms under GNU GPL version 3 section 7 ---
+ * This file requires preservation of the above copyright notice and author attribution
+ * in all copies or substantial portions of this file.
  */
 
 #pragma once
 
 #include "dsp/fast_math.h"
+#include "dsp/util.hpp"
 #include "util/fixedpoint.h"
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace deluge::dsp {
 
@@ -87,27 +92,38 @@ public:
 	// =============================================================================
 	// A/B TEST CONFIGURATION - Change these for testing different modes
 	// =============================================================================
-	// Table size: 512 (fast regen, less precise) vs 2048 (slow regen, more precise)
-	static constexpr size_t kTableSize = 512;
+	// Table size: 128 (smallest, ~1KB), 256 (~2KB), 512 (~4KB), 2048 (~16KB)
+	static constexpr size_t kTableSize = 2048;
 
-	// Interpolation mode for antiderivative lookup:
+	// Interpolation mode for function f(x) lookup:
+	// false = linear (fast, ~10 ops)
+	// true = cubic Catmull-Rom (slow, ~25 ops, smoother waveshaping)
+	static constexpr bool kUseCubicFunction = false;
+
+	// Interpolation mode for antiderivative F(x) lookup:
 	// false = linear (fast, ~10 ops)
 	// true = cubic Catmull-Rom (slow, ~25 ops, smoother ADAA)
-	static constexpr bool kUseCubicInterpolation = false;
+	static constexpr bool kUseCubicAntiderivative = true;
+
+	// Generate ADAA tables (float F(x) antiderivative):
+	// false = int32 path only, saves ~16KB and speeds up regeneration
+	// true = enables float ADAA path (process() with prevX state)
+	static constexpr bool kGenerateADAA = false;
 	// =============================================================================
 
 	static constexpr size_t kTableMask = kTableSize - 1;
 	static constexpr float kTableScale = static_cast<float>(kTableSize) / 2.0f;
 
-	TableSaturator() { regenerateTables(); }
+	TableSaturator() = default; // Tables start empty, allocated on first non-linear use
 
 	/// Set all parameters at once using struct
+	/// Regenerates tables immediately (not deferred to audio thread)
 	void setParameters(const SaturatorParams& p) {
 		SaturatorParams clamped = p;
 		clamped.clamp();
 		if (clamped != params_) {
 			params_ = clamped;
-			tablesDirty_ = true;
+			regenerateTables(); // Immediate regeneration in UI thread
 		}
 	}
 
@@ -115,12 +131,19 @@ public:
 	[[nodiscard]] const SaturatorParams& getParameters() const { return params_; }
 
 	/// Check if effect is effectively bypassed (transparent)
-	[[nodiscard]] bool isLinear() const { return params_.drive < 0.001f || params_.threshold > 0.999f; }
+	/// Only checks drive (X axis) - threshold shouldn't cause bypass since user explicitly set X > 0
+	[[nodiscard]] bool isLinear() const { return params_.drive < 0.001f; }
 
 	/// Process a single sample with ADAA (uses internal state)
 	/// @param x Input sample in range [-1, 1]
 	/// @return Processed sample (peak-normalized)
 	[[gnu::always_inline]] float process(float x) { return process(x, &prevX_); }
+
+	/// ADAA state: stores both previous X and cached F(prevX) to avoid redundant lookup
+	struct AdaaState {
+		float prevX{0.0f};
+		float prevF{0.0f}; // Cached F(prevX) - saves one table lookup per sample
+	};
 
 	/// Process a single sample with ADAA using external state
 	/// This allows one TableSaturator (one set of tables) to serve multiple channels
@@ -130,11 +153,6 @@ public:
 	[[gnu::always_inline]] float process(float x, float* prevXState) {
 		// Headroom: normalizationGain_ already handles peak limiting, minimal extra needed
 		constexpr float kHeadroom = 0.8f;
-
-		// Ensure tables are current
-		if (tablesDirty_) {
-			regenerateTables();
-		}
 
 		// Fast path: bypass when linear
 		if (isLinear_) {
@@ -152,50 +170,100 @@ public:
 		float output;
 
 		// Threshold for numerical stability - below this, blend with direct lookup
-		// Wider blend zone reduces artifacts from the ADAA/direct transition
 		// At 44.1kHz, a 1kHz full-scale sine changes by ~0.14 per sample
 		constexpr float kMinDx = 0.01f;
+		constexpr float kInvMinDx = 1.0f / kMinDx; // Precomputed reciprocal
 		// Maximum dx for ADAA - above this, the antiderivative lookup becomes unreliable
-		// (handles voice start, table regen, and large input jumps)
 		constexpr float kMaxDx = 0.5f;
 
 		if (absDx < 1e-7f || absDx > kMaxDx) {
 			// Essentially static OR large jump - use direct lookup
 			output = lookupFunction(x);
 		}
-		else if (absDx >= kMinDx) {
-			// Normal ADAA range
-			output = (F_curr - F_prev) / dx;
-		}
 		else {
-			// Transition zone - smoothstep blend between ADAA and direct
-			float adaaOutput = (F_curr - F_prev) / dx;
-			float directOutput = lookupFunction(x);
+			// Fast reciprocal using NEON vrecpe + Newton-Raphson (~5 cycles vs ~15 for division)
+			float invDx = fastReciprocal(dx);
+			float adaaOutput = (F_curr - F_prev) * invDx;
 
-			// Smoothstep: t² * (3 - 2t) gives smooth S-curve from 0 to 1
-			float t = absDx / kMinDx;
-			float blend = t * t * (3.0f - 2.0f * t);
+			if (absDx >= kMinDx) {
+				// Normal ADAA range - use ADAA output directly
+				output = adaaOutput;
+			}
+			else {
+				// Transition zone - smoothstep blend between ADAA and direct
+				float directOutput = lookupFunction(x);
 
-			output = adaaOutput * blend + directOutput * (1.0f - blend);
+				// Smoothstep: t² * (3 - 2t) gives smooth S-curve from 0 to 1
+				float t = absDx * kInvMinDx; // Multiply by precomputed reciprocal
+				float blend = t * t * (3.0f - 2.0f * t);
+
+				output = adaaOutput * blend + directOutput * (1.0f - blend);
+			}
 		}
 
 		*prevXState = x;
 
-		// Apply peak normalization and headroom
-		float result = output * normalizationGain_ * kHeadroom;
+		// Apply combined normalization and headroom
+		float result = output * (normalizationGain_ * kHeadroom);
 
 		// Safety clamp - prevent any extreme values that could cause clicks
-		// This should never trigger if ADAA is working correctly, but provides protection
+		return std::clamp(result, -1.0f, 1.0f);
+	}
+
+	/// Process a single sample with ADAA using cached state (optimized - one lookup per sample)
+	/// @param x Input sample in range [-1, 1]
+	/// @param state Pointer to ADAA state (prevX and cached F(prevX))
+	/// @return Processed sample (peak-normalized)
+	[[gnu::always_inline]] float processWithCache(float x, AdaaState* state) {
+		constexpr float kHeadroom = 0.8f;
+
+		if (isLinear_) {
+			state->prevX = x;
+			state->prevF = x * x * 0.5f; // F(x) = x²/2 for linear
+			return x * kHeadroom;
+		}
+
+		// Only one lookup - use cached F(prevX)
+		float F_curr = lookupAntiderivative(x);
+		float F_prev = state->prevF;
+
+		float dx = x - state->prevX;
+		float absDx = std::fabs(dx);
+		float output;
+
+		constexpr float kMinDx = 0.01f;
+		constexpr float kInvMinDx = 1.0f / kMinDx;
+		constexpr float kMaxDx = 0.5f;
+
+		if (absDx < 1e-7f || absDx > kMaxDx) {
+			output = lookupFunction(x);
+		}
+		else {
+			float invDx = fastReciprocal(dx);
+			float adaaOutput = (F_curr - F_prev) * invDx;
+
+			if (absDx >= kMinDx) {
+				output = adaaOutput;
+			}
+			else {
+				float directOutput = lookupFunction(x);
+				float t = absDx * kInvMinDx;
+				float blend = t * t * (3.0f - 2.0f * t);
+				output = adaaOutput * blend + directOutput * (1.0f - blend);
+			}
+		}
+
+		// Update state with cached F for next sample
+		state->prevX = x;
+		state->prevF = F_curr;
+
+		float result = output * (normalizationGain_ * kHeadroom);
 		return std::clamp(result, -1.0f, 1.0f);
 	}
 
 	/// Process with ADAA using cubic interpolation (smoother, more expensive)
 	[[gnu::always_inline]] float processCubic(float x, float* prevXState) {
 		constexpr float kHeadroom = 0.8f;
-
-		if (tablesDirty_) {
-			regenerateTables();
-		}
 
 		if (isLinear_) {
 			*prevXState = x;
@@ -210,24 +278,30 @@ public:
 		float output;
 
 		constexpr float kMinDx = 0.01f;
+		constexpr float kInvMinDx = 1.0f / kMinDx; // Precomputed reciprocal
 		constexpr float kMaxDx = 0.5f;
 
 		if (absDx < 1e-7f || absDx > kMaxDx) {
 			output = lookupFunction(x);
 		}
-		else if (absDx >= kMinDx) {
-			output = (F_curr - F_prev) / dx;
-		}
 		else {
-			float adaaOutput = (F_curr - F_prev) / dx;
-			float directOutput = lookupFunction(x);
-			float t = absDx / kMinDx;
-			float blend = t * t * (3.0f - 2.0f * t);
-			output = adaaOutput * blend + directOutput * (1.0f - blend);
+			// Fast reciprocal using NEON vrecpe + Newton-Raphson
+			float invDx = fastReciprocal(dx);
+			float adaaOutput = (F_curr - F_prev) * invDx;
+
+			if (absDx >= kMinDx) {
+				output = adaaOutput;
+			}
+			else {
+				float directOutput = lookupFunction(x);
+				float t = absDx * kInvMinDx; // Multiply by precomputed reciprocal
+				float blend = t * t * (3.0f - 2.0f * t);
+				output = adaaOutput * blend + directOutput * (1.0f - blend);
+			}
 		}
 
 		*prevXState = x;
-		float result = output * normalizationGain_ * kHeadroom;
+		float result = output * (normalizationGain_ * kHeadroom);
 		return std::clamp(result, -1.0f, 1.0f);
 	}
 
@@ -237,10 +311,6 @@ public:
 		// Headroom: must match process() for level consistency
 		constexpr float kHeadroom = 0.8f;
 
-		if (tablesDirty_) {
-			regenerateTables();
-		}
-
 		if (isLinear_) {
 			return x * kHeadroom;
 		}
@@ -249,30 +319,78 @@ public:
 		return lookupFunction(x) * normalizationGain_ * kHeadroom;
 	}
 
+	/// Process a single sample using integer-only path (no floats, like builtin)
+	/// @param input Input sample in uint32 format (0 = -1.0, 2^31 = 0, 2^32-1 = +1.0)
+	/// @return Output sample in int32 format (scaled for Q31 output after wrapper post-gain)
+	[[gnu::always_inline]] int32_t processNoAAInt32(uint32_t input) {
+		// Fast path: bypass when linear (tables may be deallocated)
+		if (isLinear_) {
+			// Linear identity: convert uint32 to signed (unity gain)
+			// Input: 0 = -1.0, 2^31 = 0, 2^32-1 = +1.0
+			// Output: same range as table output [-2.15B, 2.15B]
+			return static_cast<int32_t>(input - 2147483648u);
+		}
+		// Table already has normalization + headroom baked in
+		// lookupFunctionInt returns int16 * 65536 = Q16.15 format
+		// Just return the lookup result - wrapper applies post-gain
+		return lookupFunctionInt(input);
+	}
+
 	/// Reset ADAA state (call when starting a new audio stream)
 	void reset() {
 		prevX_ = 0.0f;
-		tablesDirty_ = true;
+		// Tables don't need regeneration - params haven't changed
 	}
 
 	[[nodiscard]] float getNormalizationGain() const { return normalizationGain_; }
 
+	/// Deallocate tables to free memory
+	/// ~4KB when kGenerateADAA=false (int16 only), ~20KB when true (+ float tables)
+	/// Called automatically when X=0 (linear bypass)
+	void deallocateTables() {
+		fTableInt_.clear();
+		fTableInt_.shrink_to_fit();
+		if constexpr (kGenerateADAA) {
+			fTable_.clear();
+			fTable_.shrink_to_fit();
+			FTable_.clear();
+			FTable_.shrink_to_fit();
+		}
+	}
+
+	/// Check if tables are currently allocated
+	[[nodiscard]] bool hasAllocatedTables() const { return !fTableInt_.empty(); }
+
 private:
 	/// Regenerate both f(x) and F(x) tables based on current parameters
 	/// Uses fast math approximations for speed during parameter automation.
+	/// When linear (X=0), deallocates tables to save memory (~20KB per instance).
+	/// IMPORTANT: isLinear_ is set AFTER tables are fully populated to prevent
+	/// audio thread from reading partially-initialized data.
 	void regenerateTables() {
 		tablesDirty_ = false;
-		isLinear_ = isLinear();
+		bool willBeLinear = isLinear(); // Check params, but don't set isLinear_ yet
 
-		if (isLinear_) {
-			// Linear: f(x) = x, F(x) = x²/2, normalization = 1
+		if (willBeLinear) {
+			// Linear bypass: deallocate tables to save memory
+			// Process functions have isLinear_ fast-path that doesn't use tables
+			deallocateTables();
 			normalizationGain_ = 1.0f;
-			for (size_t i = 0; i <= kTableSize; ++i) {
-				float x = (static_cast<float>(i) / kTableScale) - 1.0f; // -1 to +1
-				fTable_[i] = x;
-				FTable_[i] = x * x * 0.5f;
-			}
+			normalizationGainInt_ = 32767;
+			isLinear_ = true; // Safe to set - no tables to read
 			return;
+		}
+
+		// Keep isLinear_ = true until tables are FULLY populated
+		// This prevents audio thread from reading partial data
+
+		// Allocate tables if needed (first non-linear use or after deallocation)
+		if (fTableInt_.size() != kTableSize + 1) {
+			fTableInt_.resize(kTableSize + 1);
+			if constexpr (kGenerateADAA) {
+				fTable_.resize(kTableSize + 1);
+				FTable_.resize(kTableSize + 1);
+			}
 		}
 
 		// Compute effective parameters
@@ -412,41 +530,95 @@ private:
 				f_val = sign * (T + (1.0f - T) * std::fabs(basis_out));
 			}
 
-			fTable_[i] = f_val;
-
 			// Track peak for normalization
 			float absVal = std::fabs(f_val);
 			if (absVal > peakValue) {
 				peakValue = absVal;
 			}
 
-			// Compute antiderivative using trapezoidal integration
-			// F(x) = ∫f(x)dx, approximated incrementally
-			if (i == 0) {
-				FTable_[i] = 0.0f;
+			// Store to appropriate tables based on configuration
+			if constexpr (kGenerateADAA) {
+				fTable_[i] = f_val;
+
+				// Compute antiderivative using trapezoidal integration
+				// F(x) = ∫f(x)dx, approximated incrementally
+				if (i == 0) {
+					FTable_[i] = 0.0f;
+				}
+				else {
+					// Trapezoidal rule: F(x) = F(x-dx) + (f(x) + f(x-dx)) * dx / 2
+					FTable_[i] = FTable_[i - 1] + (fTable_[i] + fTable_[i - 1]) * dx * 0.5f;
+				}
 			}
-			else {
-				// Trapezoidal rule: F(x) = F(x-dx) + (f(x) + f(x-dx)) * dx / 2
-				FTable_[i] = FTable_[i - 1] + (fTable_[i] + fTable_[i - 1]) * dx * 0.5f;
-			}
+
+			// Always populate int table (used by processNoAAInt32)
+			// Bake in normalization incrementally to avoid second pass
+			// Note: we'll rescale after finding true peak
+			fTableInt_[i] = static_cast<int16_t>(std::clamp(f_val * 32767.0f, -32767.0f, 32767.0f));
 		}
 
 		// Compute peak normalization gain
 		// This ensures output peak matches input peak regardless of basis/parameter settings
 		normalizationGain_ = (peakValue > 0.01f) ? (1.0f / peakValue) : 1.0f;
+
+		// Integer normalization: Q15 format (32767 = 1.0)
+		normalizationGainInt_ = static_cast<int32_t>(normalizationGain_ * 32767.0f);
+
+		// Apply normalization to integer table
+		// The table was populated with unnormalized values; now rescale by peak
+		if (peakValue > 0.01f) {
+			// Rescale existing int16 values by normalization factor
+			// Since we stored f_val * 32767, we need to multiply by (1/peakValue)
+			// which is equivalent to dividing each entry by peakValue
+			for (size_t i = 0; i <= kTableSize; ++i) {
+				float normalized = static_cast<float>(fTableInt_[i]) * normalizationGain_;
+				fTableInt_[i] = static_cast<int16_t>(std::clamp(normalized, -32767.0f, 32767.0f));
+			}
+		}
+
+		// NOW safe to tell audio thread tables are ready
+		// Must be AFTER all table data is written
+		isLinear_ = false;
 	}
 
-	/// Lookup f(x) from cached table with linear interpolation
+	/// Lookup f(x) from cached table with linear or cubic interpolation
 	[[gnu::always_inline]] float lookupFunction(float x) const {
 		// Map x from [-1, 1] to [0, kTableSize]
 		float idx = (x + 1.0f) * kTableScale;
 		idx = std::clamp(idx, 0.0f, static_cast<float>(kTableSize));
 
 		size_t i0 = static_cast<size_t>(idx);
-		size_t i1 = std::min(i0 + 1, kTableSize);
 		float frac = idx - static_cast<float>(i0);
 
-		return fTable_[i0] + (fTable_[i1] - fTable_[i0]) * frac;
+		if constexpr (kUseCubicFunction) {
+			// Cubic Catmull-Rom: smoother, better for small tables
+			if (i0 == 0 || i0 >= kTableSize - 1) {
+				// Fall back to linear at boundaries
+				size_t i1 = std::min(i0 + 1, kTableSize);
+				return fTable_[i0] + (fTable_[i1] - fTable_[i0]) * frac;
+			}
+
+			size_t im1 = i0 - 1;
+			size_t i1 = i0 + 1;
+			size_t i2 = std::min(i0 + 2, kTableSize);
+
+			float y0 = fTable_[im1];
+			float y1 = fTable_[i0];
+			float y2 = fTable_[i1];
+			float y3 = fTable_[i2];
+
+			float a0 = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
+			float a1 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+			float a2 = -0.5f * y0 + 0.5f * y2;
+			float a3 = y1;
+
+			return ((a0 * frac + a1) * frac + a2) * frac + a3;
+		}
+		else {
+			// Linear interpolation: faster, may have artifacts with small tables
+			size_t i1 = std::min(i0 + 1, kTableSize);
+			return fTable_[i0] + (fTable_[i1] - fTable_[i0]) * frac;
+		}
 	}
 
 	/// Lookup F(x) with linear interpolation (fast)
@@ -491,8 +663,36 @@ private:
 		return ((a0 * frac + a1) * frac + a2) * frac + a3;
 	}
 
+	/// Integer table lookup - matches builtin interpolateTableSigned style
+	/// Input: uint32_t in [0, 2^32) where 0 = -1.0, 2^32-1 = +1.0
+	/// Output: int32_t scaled by 65536 (Q16.15 format, like builtin)
+	/// Uses linear interpolation for speed
+	[[gnu::always_inline]] int32_t lookupFunctionInt(uint32_t input) const {
+		// Compute log2(kTableSize) at compile time
+		constexpr int32_t kTableBits = (kTableSize == 128)    ? 7
+		                               : (kTableSize == 256)  ? 8
+		                               : (kTableSize == 512)  ? 9
+		                               : (kTableSize == 1024) ? 10
+		                               : (kTableSize == 2048) ? 11
+		                                                      : 8; // default
+
+		// Extract table index (upper kTableBits bits of input)
+		int32_t whichValue = input >> (32 - kTableBits);
+
+		// Extract fractional part (next 16 bits after index)
+		constexpr int32_t rshiftAmount = 32 - 16 - kTableBits;
+		uint32_t rshifted = input >> rshiftAmount;
+		int32_t strength2 = rshifted & 65535;
+		int32_t strength1 = 65536 - strength2;
+
+		// Linear interpolation with int16 table entries
+		// Result is scaled by 65536 (Q16.15)
+		return static_cast<int32_t>(fTableInt_[whichValue]) * strength1
+		       + static_cast<int32_t>(fTableInt_[whichValue + 1]) * strength2;
+	}
+
 	/// Lookup F(x) (antiderivative) from cached table
-	/// Uses linear or cubic interpolation based on kUseCubicInterpolation flag
+	/// Uses linear or cubic interpolation based on kUseCubicAntiderivative flag
 	[[gnu::always_inline]] float lookupAntiderivative(float x) const {
 		// Map x from [-1, 1] to [0, kTableSize]
 		float idx = (x + 1.0f) * kTableScale;
@@ -501,7 +701,7 @@ private:
 		size_t i0 = static_cast<size_t>(idx);
 		float frac = idx - static_cast<float>(i0);
 
-		if constexpr (kUseCubicInterpolation) {
+		if constexpr (kUseCubicAntiderivative) {
 			// Use linear at boundaries where we don't have enough neighbors
 			if (i0 == 0 || i0 >= kTableSize - 1) {
 				size_t i1 = std::min(i0 + 1, kTableSize);
@@ -533,8 +733,13 @@ private:
 	}
 
 	// Cached tables (regenerated when parameters change)
-	std::array<float, kTableSize + 1> fTable_{}; // f(x) values
-	std::array<float, kTableSize + 1> FTable_{}; // F(x) antiderivative values
+	// Uses vectors for dynamic allocation - deallocated when X=0 to save ~20KB per instance
+	std::vector<float> fTable_; // f(x) values (float)
+	std::vector<float> FTable_; // F(x) antiderivative values (float)
+
+	// Integer tables for fast integer-only processing (like builtin)
+	// Scale: float [-1,1] → int16_t [-32767,32767]
+	std::vector<int16_t> fTableInt_; // f(x) values (int16)
 
 	// Parameters (consolidated struct)
 	SaturatorParams params_;
@@ -543,7 +748,8 @@ private:
 	bool tablesDirty_{true};
 	bool isLinear_{true};
 	float prevX_{0.0f};
-	float normalizationGain_{1.0f}; // Peak normalization (computed during table regen)
+	float normalizationGain_{1.0f};       // Peak normalization (float)
+	int32_t normalizationGainInt_{32767}; // Peak normalization (fixed-point, Q15 format)
 };
 
 /**
@@ -572,22 +778,6 @@ struct TableSaturatorXYMapper {
 	// =================================================================
 	static constexpr float kPhaseWidth = 0.5f;
 
-	/// Pure float triangle wave with dead zones (2-segment unipolar: 0→1→0)
-	/// @param phase Float phase (0-N cycles, wraps via floor)
-	/// @param width Active portion (0-1), rest is dead zone at 0
-	/// @return Float value 0-1
-	static float triangle(float phase, float width = kPhaseWidth) {
-		phase = phase - std::floor(phase); // Wrap to [0,1)
-		float halfWidth = width * 0.5f;
-		if (phase < halfWidth) {
-			return phase / halfWidth; // Rising: 0→1
-		}
-		else if (phase < width) {
-			return (width - phase) / halfWidth; // Falling: 1→0
-		}
-		return 0.0f; // Dead zone
-	}
-
 	/// Derive parameters from X (0-127) and Y (0-1023) with combinatoric sweep
 	/// @param x X position (0-127), maps to drive (0 = linear bypass)
 	/// @param y Y position (0-1023), creates high-res combinatoric parameter sweep
@@ -603,27 +793,49 @@ struct TableSaturatorXYMapper {
 		float freqMult = 1.0f + yNorm * yNorm * kAccelFactor;
 
 		// 6 Basis weights with irrational period ratios for dense coverage
-		p.tanhWeight = 0.2f + triangle(yNorm * 3.0f * freqMult) * 0.8f;
-		p.polyWeight = triangle(yNorm * 2.718f * freqMult + 0.167f);
-		p.hardKneeWeight = triangle(yNorm * 2.236f * freqMult + 0.333f);
-		p.chebyWeight = triangle(yNorm * 3.14159f * freqMult + 0.5f);
-		p.sineFoldWeight = triangle(yNorm * 2.618f * freqMult + 0.667f);
-		p.rectifierWeight = triangle(yNorm * 1.732f * freqMult + 0.833f);
+		p.tanhWeight = 0.2f + triangleSimpleUnipolar(yNorm * 3.0f * freqMult, kPhaseWidth) * 0.8f;
+		p.polyWeight = triangleSimpleUnipolar(yNorm * 2.718f * freqMult + 0.167f, kPhaseWidth);
+		p.hardKneeWeight = triangleSimpleUnipolar(yNorm * 2.236f * freqMult + 0.333f, kPhaseWidth);
+		p.chebyWeight = triangleSimpleUnipolar(yNorm * 3.14159f * freqMult + 0.5f, kPhaseWidth);
+		p.sineFoldWeight = triangleSimpleUnipolar(yNorm * 2.618f * freqMult + 0.667f, kPhaseWidth);
+		p.rectifierWeight = triangleSimpleUnipolar(yNorm * 1.732f * freqMult + 0.833f, kPhaseWidth);
 
-		p.threshold = triangle(yNorm * 2.5f * freqMult + 0.25f);
+		p.threshold = triangleSimpleUnipolar(yNorm * 2.5f * freqMult + 0.25f, kPhaseWidth);
 
 		float asymFreqMult = 1.0f + yNorm * yNorm * (kAccelFactor * 0.5f);
-		p.asymmetry = 0.3f + triangle(yNorm * 1.618f * asymFreqMult) * 0.4f;
+		p.asymmetry = 0.3f + triangleSimpleUnipolar(yNorm * 1.618f * asymFreqMult, kPhaseWidth) * 0.4f;
 
 		return p;
 	}
 
-	/// Derive parameters with phase offsets for DOTT vibe/feel integration
+	/// Derive parameters with phase offsets for secret knob integration
 	/// @param x X position (0-127)
 	/// @param y Y position (0-1023)
-	/// @param phaseOffset Phase offset for parameter interference (from vibe knob)
-	/// @param periodScale Period scaling for parameter sweep rate (from feel knob)
+	/// @param phaseOffset Phase offset for parameter interference (from secret knob)
+	/// @param periodScale Period scaling for parameter sweep rate
 	/// @return SaturatorParams with all derived values
+	///
+	/// DESIGN NOTE: Phase Offset Scope
+	/// ===============================
+	/// Currently, phaseOffset rotates TWO levels of parameters:
+	///   1. Algorithm superposition weights (which basis functions are active)
+	///      - polyWeight, hardKneeWeight, chebyWeight, sineFoldWeight, rectifierWeight
+	///      - phMult values: 0.167, 0.333, 0.5, 0.667, 0.833
+	///   2. Internal algorithm parameters (how each basis behaves)
+	///      - threshold (phMult: 0.25), asymmetry (phMult: 0.618)
+	///
+	/// Note: tanhWeight has phMult=0 so it serves as an anchor (always present)
+	///
+	/// ALTERNATIVE: Only rotate internal parameters
+	/// If zone names should remain semantically stable (Y=0 always "Warm", Y=512 always "Fold"),
+	/// we could set phMult=0 for all 6 basis weights. This would make:
+	///   - Y axis: determines WHICH algorithms are blended (zone identity)
+	///   - Secret knob: tunes HOW those algorithms behave (character within zone)
+	///
+	/// Current behavior: Secret knob morphs both identity AND character, creating
+	/// continuous exploration where zone names are approximate guides rather than
+	/// fixed definitions. This is more "sound design-y" but less predictable.
+	///
 	static SaturatorParams deriveParametersWithPhase(uint8_t x, uint16_t y, float phaseOffset, float periodScale) {
 		SaturatorParams p;
 		p.drive = static_cast<float>(x) / 127.0f;
@@ -633,18 +845,30 @@ struct TableSaturatorXYMapper {
 		constexpr float kAccelFactor = 3.0f;
 		float freqMult = 1.0f + yNorm * yNorm * kAccelFactor;
 
-		// Apply phase offsets and period scaling for interference patterns
-		p.tanhWeight = 0.2f + triangle(yNorm * 3.0f * freqMult * periodScale + phaseOffset * 0.0f) * 0.8f;
-		p.polyWeight = triangle(yNorm * 2.718f * freqMult * periodScale + phaseOffset * 0.167f);
-		p.hardKneeWeight = triangle(yNorm * 2.236f * freqMult * periodScale + phaseOffset * 0.333f);
-		p.chebyWeight = triangle(yNorm * 3.14159f * freqMult * periodScale + phaseOffset * 0.5f);
-		p.sineFoldWeight = triangle(yNorm * 2.618f * freqMult * periodScale + phaseOffset * 0.667f);
-		p.rectifierWeight = triangle(yNorm * 1.732f * freqMult * periodScale + phaseOffset * 0.833f);
+		// Use double precision to preserve phase accuracy at large phaseOffset values (< 10^15 ok)
+		// Wrap each frequency*phase product individually before converting to float
+		double ph = static_cast<double>(phaseOffset);
+		auto wrapPhase = [yNorm, freqMult, periodScale](double phOff, float freq, float phMult) {
+			double base = static_cast<double>(yNorm) * freq * freqMult * periodScale;
+			double offset = phOff * phMult;
+			return static_cast<float>(std::fmod(base + offset, 1.0));
+		};
 
-		p.threshold = triangle(yNorm * 2.5f * freqMult * periodScale + phaseOffset * 0.25f);
+		// Apply phase offsets and period scaling for interference patterns
+		p.tanhWeight = 0.2f + triangleSimpleUnipolar(wrapPhase(ph, 3.0f, 0.0f), kPhaseWidth) * 0.8f;
+		p.polyWeight = triangleSimpleUnipolar(wrapPhase(ph, 2.718f, 0.167f), kPhaseWidth);
+		p.hardKneeWeight = triangleSimpleUnipolar(wrapPhase(ph, 2.236f, 0.333f), kPhaseWidth);
+		p.chebyWeight = triangleSimpleUnipolar(wrapPhase(ph, 3.14159f, 0.5f), kPhaseWidth);
+		p.sineFoldWeight = triangleSimpleUnipolar(wrapPhase(ph, 2.618f, 0.667f), kPhaseWidth);
+		p.rectifierWeight = triangleSimpleUnipolar(wrapPhase(ph, 1.732f, 0.833f), kPhaseWidth);
+
+		p.threshold = triangleSimpleUnipolar(wrapPhase(ph, 2.5f, 0.25f), kPhaseWidth);
 
 		float asymFreqMult = 1.0f + yNorm * yNorm * (kAccelFactor * 0.5f);
-		p.asymmetry = 0.3f + triangle(yNorm * 1.618f * asymFreqMult * periodScale + phaseOffset * 0.618f) * 0.4f;
+		double asymBase = static_cast<double>(yNorm) * 1.618 * asymFreqMult * periodScale;
+		p.asymmetry =
+		    0.3f
+		    + triangleSimpleUnipolar(static_cast<float>(std::fmod(asymBase + ph * 0.618, 1.0)), kPhaseWidth) * 0.4f;
 
 		return p;
 	}
