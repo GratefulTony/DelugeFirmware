@@ -153,9 +153,105 @@ private:
 };
 
 // Type aliases for convenience
-using AllpassCrossoverLR1 = AllpassCrossover<1>; // 6dB/oct - cheapest, recommended
-using AllpassCrossoverLR2 = AllpassCrossover<2>; // 12dB/oct - experimental
-using AllpassCrossoverLR3 = AllpassCrossover<3>; // 18dB/oct - experimental
+// ORDER=1 is correct 6dB/oct crossover; higher orders are "broken" but creatively useful
+using AllpassCrossoverLR1 = AllpassCrossover<1>; // 6dB/oct - cheapest, correct
+using AllpassCrossoverLR2 = AllpassCrossover<2>; // "Quirky" - creative/experimental
+using AllpassCrossoverLR3 = AllpassCrossover<3>; // "Weird" - creative/experimental
 using AllpassCrossoverLR5 = AllpassCrossover<5>; // 30dB/oct - experimental
+
+/// "Twisted" crossover - 2 stages with mixed coefficients.
+/// Same cost as ORDER=2 (4 ops) but blends coefficients between stages.
+/// twist=0: behaves like Quirky (same coeff both stages)
+/// twist=1: fully twisted (stage2 uses opposite crossover's coeff)
+/// Creates asymmetric phase smearing between bands - interesting for creative use.
+class AllpassCrossoverTwisted {
+public:
+	using Bands = CrossoverBands;
+
+	AllpassCrossoverTwisted() = default;
+
+	void setLowCrossover(float freqHz) {
+		lowCrossoverHz_ = freqHz;
+		lowCoeff_ = calculateCoefficient(freqHz);
+		updateBlendedCoeffs();
+	}
+
+	void setHighCrossover(float freqHz) {
+		highCrossoverHz_ = freqHz;
+		highCoeff_ = calculateCoefficient(freqHz);
+		updateBlendedCoeffs();
+	}
+
+	/// Set twist amount (0.0 = like Quirky, 1.0 = fully twisted)
+	void setTwist(float twist) {
+		twist_ = std::clamp(twist, 0.0f, 1.0f);
+		updateBlendedCoeffs();
+	}
+
+	[[nodiscard]] float getTwist() const { return twist_; }
+	[[nodiscard]] float getLowCrossoverHz() const { return lowCrossoverHz_; }
+	[[nodiscard]] float getHighCrossoverHz() const { return highCrossoverHz_; }
+
+	/// Process with blended coefficients based on twist amount
+	[[gnu::always_inline]] inline void processStereo(q31_t inputL, q31_t inputR, Bands& outL, Bands& outR) {
+		int32x2_t input = {inputL, inputR};
+
+		// Low crossover: stage1=lowCoeff, stage2=blended toward highCoeff
+		int32x2_t apLow1 = stereoState_.apLow1.doAPF(input, lowCoeff_);
+		int32x2_t apLow2 = stereoState_.apLow2.doAPF(apLow1, lowStage2Coeff_);
+		int32x2_t low = vhadd_s32(input, apLow2);
+		int32x2_t rest = vhsub_s32(input, apLow2);
+
+		// High crossover: stage1=highCoeff, stage2=blended toward lowCoeff
+		int32x2_t apHigh1 = stereoState_.apHigh1.doAPF(rest, highCoeff_);
+		int32x2_t apHigh2 = stereoState_.apHigh2.doAPF(apHigh1, highStage2Coeff_);
+		int32x2_t mid = vhadd_s32(rest, apHigh2);
+		int32x2_t high = vhsub_s32(rest, apHigh2);
+
+		outL = {vget_lane_s32(low, 0), vget_lane_s32(mid, 0), vget_lane_s32(high, 0)};
+		outR = {vget_lane_s32(low, 1), vget_lane_s32(mid, 1), vget_lane_s32(high, 1)};
+	}
+
+	void reset() {
+		stereoState_.apLow1.reset();
+		stereoState_.apLow2.reset();
+		stereoState_.apHigh1.reset();
+		stereoState_.apHigh2.reset();
+	}
+
+private:
+	struct StereoState {
+		StereoFilterComponent apLow1, apLow2;
+		StereoFilterComponent apHigh1, apHigh2;
+	};
+
+	[[nodiscard]] static q31_t calculateCoefficient(float freqHz) {
+		float fc = freqHz / static_cast<float>(kSampleRate);
+		fc = std::clamp(fc, 0.001f, 0.49f);
+		float wc = fastTan(3.14159265358979f * fc);
+		float coeff = wc / (1.0f + wc);
+		return static_cast<q31_t>(coeff * ONE_Q31);
+	}
+
+	/// Update blended coefficients based on twist amount
+	void updateBlendedCoeffs() {
+		// twist=0: stage2 uses same coeff as stage1 (like Quirky)
+		// twist=1: stage2 uses opposite crossover's coeff (fully twisted)
+		float t = twist_;
+		float lowF = static_cast<float>(lowCoeff_);
+		float highF = static_cast<float>(highCoeff_);
+		lowStage2Coeff_ = static_cast<q31_t>(lowF + (highF - lowF) * t);
+		highStage2Coeff_ = static_cast<q31_t>(highF + (lowF - highF) * t);
+	}
+
+	StereoState stereoState_{};
+	q31_t lowCoeff_ = calculateCoefficient(200.0f);
+	q31_t highCoeff_ = calculateCoefficient(2000.0f);
+	q31_t lowStage2Coeff_ = lowCoeff_;   // Blended coeff for low crossover stage 2
+	q31_t highStage2Coeff_ = highCoeff_; // Blended coeff for high crossover stage 2
+	float twist_ = 1.0f;                 // Default fully twisted
+	float lowCrossoverHz_ = 200.0f;
+	float highCrossoverHz_ = 2000.0f;
+};
 
 } // namespace deluge::dsp::filter

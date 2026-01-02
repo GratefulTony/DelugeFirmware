@@ -482,6 +482,12 @@ public:
 		crossoverLR2_.setHighCrossover(2000.0f);
 		crossoverLR2Fast_.setLowCrossover(200.0f);
 		crossoverLR2Fast_.setHighCrossover(2000.0f);
+		crossoverLR4_.setLowCrossover(200.0f);
+		crossoverLR4_.setHighCrossover(2000.0f);
+		crossoverLR4Fast_.setLowCrossover(200.0f);
+		crossoverLR4Fast_.setHighCrossover(2000.0f);
+		crossoverTwisted_.setLowCrossover(200.0f);
+		crossoverTwisted_.setHighCrossover(2000.0f);
 
 		// Set default parameters for each band
 		// Use setter functions to keep knob values in sync with actual values
@@ -509,6 +515,9 @@ public:
 		crossoverAllpass3_.setLowCrossover(freqHz);
 		crossoverLR2_.setLowCrossover(freqHz);
 		crossoverLR2Fast_.setLowCrossover(freqHz);
+		crossoverLR4_.setLowCrossover(freqHz);
+		crossoverLR4Fast_.setLowCrossover(freqHz);
+		crossoverTwisted_.setLowCrossover(freqHz);
 		// Update max stride for low band (Nyquist = sampleRate/2/stride >= lowCrossover)
 		// stride <= sampleRate / (2 * lowCrossover)
 		maxStridePerBand_[0] = std::clamp(static_cast<size_t>(kSampleRate / (2.0f * freqHz)), size_t{2}, size_t{32});
@@ -521,6 +530,9 @@ public:
 		crossoverAllpass3_.setHighCrossover(freqHz);
 		crossoverLR2_.setHighCrossover(freqHz);
 		crossoverLR2Fast_.setHighCrossover(freqHz);
+		crossoverLR4_.setHighCrossover(freqHz);
+		crossoverLR4Fast_.setHighCrossover(freqHz);
+		crossoverTwisted_.setHighCrossover(freqHz);
 		// Update max stride for mid band (Nyquist = sampleRate/2/stride >= highCrossover)
 		// stride <= sampleRate / (2 * highCrossover)
 		maxStridePerBand_[1] = std::clamp(static_cast<size_t>(kSampleRate / (2.0f * freqHz)), size_t{2}, size_t{32});
@@ -533,11 +545,10 @@ public:
 	[[nodiscard]] float getHighCrossoverHz() const { return crossoverAllpass1_.getHighCrossoverHz(); }
 
 	/// Set crossover type (ordered by CPU cost, cheapest first):
-	/// 0=allpass 6dB/oct (1st order), 1=allpass 12dB/oct (2nd order),
-	/// 2=allpass 18dB/oct (3rd order), 3=LR2 Fast (no phase comp), 4=LR2 12dB/oct (full)
-	void setCrossoverType(uint8_t type) { crossoverType_ = std::min(type, static_cast<uint8_t>(4)); }
+	/// 0=AP 6dB, 1=Quirky, 2=Twisted, 3=Weird, 4=LR2 Fast, 5=LR2, 6=LR4 Fast, 7=LR4
+	void setCrossoverType(uint8_t type) { crossoverType_ = std::min(type, static_cast<uint8_t>(7)); }
 
-	/// Get crossover type (0-4, ordered by CPU cost)
+	/// Get crossover type (0-7, ordered by CPU cost)
 	[[nodiscard]] uint8_t getCrossoverType() const { return crossoverType_; }
 
 	/// Access a specific band's compressor
@@ -1029,6 +1040,9 @@ public:
 		crossoverAllpass3_.reset();
 		crossoverLR2_.reset();
 		crossoverLR2Fast_.reset();
+		crossoverLR4_.reset();
+		crossoverLR4Fast_.reset();
+		crossoverTwisted_.reset();
 		for (auto& band : bands_) {
 			band.reset();
 		}
@@ -1048,9 +1062,10 @@ public:
 			return;
 		}
 
-		// Crossover type names for benchmarking (must match crossoverType_ 0-4)
-		static const char* kXoverNames[] = {"ap1_6dB", "ap2_12dB", "ap3_18dB", "lr2_fast", "lr2_full"};
-		const char* xoverTag = kXoverNames[crossoverType_ < 5 ? crossoverType_ : 0];
+		// Crossover type names for benchmarking (must match crossoverType_ 0-7)
+		static const char* kXoverNames[] = {"ap1_6dB",  "quirky",   "twisted",  "weird",
+		                                    "lr2_fast", "lr2_full", "lr4_fast", "lr4_full"};
+		const char* xoverTag = kXoverNames[crossoverType_ < 8 ? crossoverType_ : 0];
 
 		FX_BENCH_DECLARE(benchTotal, "multiband", "total");
 		FX_BENCH_DECLARE(benchXover, "multiband", "crossover");
@@ -1077,13 +1092,10 @@ public:
 		static std::array<q31_t, SSI_TX_BUFFER_NUM_SAMPLES> bandBufferR[kNumBands];
 
 		// Split into bands using selected crossover type (ordered by CPU cost):
-		// - 0: Allpass 1st order (6dB/oct) - cheapest, default
-		// - 1: Allpass 2nd order (12dB/oct) - experimental
-		// - 2: Allpass 3rd order (18dB/oct) - experimental
-		// - 3: LR2 12dB/oct - most expensive
+		// Crossover types: 0=AP 6dB, 1=Quirky, 2=Twisted, 3=Weird, 4=LR2 Fast, 5=LR2, 6=LR4 Fast, 7=LR4
 		// Separate loops per crossover type for better branch prediction and potential vectorization
 		switch (crossoverType_) {
-		case 1:
+		case 1: // Quirky - ORDER=2 allpass (creative)
 			for (size_t i = 0; i < buffer.size(); ++i) {
 				filter::CrossoverBands bandsL, bandsR;
 				crossoverAllpass2_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
@@ -1095,7 +1107,19 @@ public:
 				bandBufferR[2][i] = bandsR.high;
 			}
 			break;
-		case 2:
+		case 2: // Twisted - mixed coefficients (creative)
+			for (size_t i = 0; i < buffer.size(); ++i) {
+				filter::CrossoverBands bandsL, bandsR;
+				crossoverTwisted_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
+				bandBufferL[0][i] = bandsL.low;
+				bandBufferL[1][i] = bandsL.mid;
+				bandBufferL[2][i] = bandsL.high;
+				bandBufferR[0][i] = bandsR.low;
+				bandBufferR[1][i] = bandsR.mid;
+				bandBufferR[2][i] = bandsR.high;
+			}
+			break;
+		case 3: // Weird - ORDER=3 allpass (creative)
 			for (size_t i = 0; i < buffer.size(); ++i) {
 				filter::CrossoverBands bandsL, bandsR;
 				crossoverAllpass3_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
@@ -1107,7 +1131,7 @@ public:
 				bandBufferR[2][i] = bandsR.high;
 			}
 			break;
-		case 3: // LR2 Fast - no phase compensation (4 filter ops/channel)
+		case 4: // LR2 Fast - no phase compensation (4 filter ops/channel)
 			for (size_t i = 0; i < buffer.size(); ++i) {
 				filter::CrossoverBands bandsL, bandsR;
 				crossoverLR2Fast_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
@@ -1119,10 +1143,34 @@ public:
 				bandBufferR[2][i] = bandsR.high;
 			}
 			break;
-		case 4: // LR2 Full - with phase compensation (6 filter ops/channel)
+		case 5: // LR2 Full - with phase compensation (6 filter ops/channel)
 			for (size_t i = 0; i < buffer.size(); ++i) {
 				filter::CrossoverBands bandsL, bandsR;
 				crossoverLR2_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
+				bandBufferL[0][i] = bandsL.low;
+				bandBufferL[1][i] = bandsL.mid;
+				bandBufferL[2][i] = bandsL.high;
+				bandBufferR[0][i] = bandsR.low;
+				bandBufferR[1][i] = bandsR.mid;
+				bandBufferR[2][i] = bandsR.high;
+			}
+			break;
+		case 6: // LR4 Fast - no phase compensation (8 filter ops/channel)
+			for (size_t i = 0; i < buffer.size(); ++i) {
+				filter::CrossoverBands bandsL, bandsR;
+				crossoverLR4Fast_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
+				bandBufferL[0][i] = bandsL.low;
+				bandBufferL[1][i] = bandsL.mid;
+				bandBufferL[2][i] = bandsL.high;
+				bandBufferR[0][i] = bandsR.low;
+				bandBufferR[1][i] = bandsR.mid;
+				bandBufferR[2][i] = bandsR.high;
+			}
+			break;
+		case 7: // LR4 Full - with phase compensation (12 filter ops/channel)
+			for (size_t i = 0; i < buffer.size(); ++i) {
+				filter::CrossoverBands bandsL, bandsR;
+				crossoverLR4_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
 				bandBufferL[0][i] = bandsL.low;
 				bandBufferL[1][i] = bandsL.mid;
 				bandBufferL[2][i] = bandsL.high;
@@ -1538,16 +1586,22 @@ private:
 
 	// Crossover filters - ordered by CPU cost (cheapest to most expensive)
 	// Type 0: AllpassCrossoverLR1 - 6dB/oct (2 ops/ch), cheapest, default
-	// Type 1: AllpassCrossoverLR2 - 12dB/oct (4 ops/ch)
-	// Type 2: AllpassCrossoverLR3 - 18dB/oct (6 ops/ch)
-	// Type 3: LR2CrossoverFast - 12dB/oct (4 ops/ch), no phase comp
-	// Type 4: LR2CrossoverFull - 12dB/oct (6 ops/ch), with phase comp
-	filter::AllpassCrossoverLR1 crossoverAllpass1_; // Type 0 - 6dB/oct (cheapest)
-	filter::AllpassCrossoverLR2 crossoverAllpass2_; // Type 1 - 12dB/oct
-	filter::AllpassCrossoverLR3 crossoverAllpass3_; // Type 2 - 18dB/oct
-	filter::LR2CrossoverFast crossoverLR2Fast_;     // Type 3 - 12dB/oct no phase comp
-	filter::LR2CrossoverFull crossoverLR2_;         // Type 4 - 12dB/oct with phase comp
-	uint8_t crossoverType_ = 0;                     // Default to cheapest (1st order allpass)
+	// Type 1: AllpassCrossoverLR2 - "Quirky" (4 ops/ch)
+	// Type 2: AllpassCrossoverTwisted - "Twisted" (4 ops/ch), mixed coefficients
+	// Type 3: AllpassCrossoverLR3 - "Weird" (6 ops/ch)
+	// Type 4: LR2CrossoverFast - 12dB/oct (4 ops/ch), no phase comp
+	// Type 5: LR2CrossoverFull - 12dB/oct (6 ops/ch), with phase comp
+	// Type 6: LR4CrossoverFast - 24dB/oct (8 ops/ch), no phase comp
+	// Type 7: LR4CrossoverFull - 24dB/oct (12 ops/ch), with phase comp
+	filter::AllpassCrossoverLR1 crossoverAllpass1_;    // Type 0 - 6dB/oct (cheapest)
+	filter::AllpassCrossoverLR2 crossoverAllpass2_;    // Type 1 - "Quirky"
+	filter::AllpassCrossoverTwisted crossoverTwisted_; // Type 2 - "Twisted"
+	filter::AllpassCrossoverLR3 crossoverAllpass3_;    // Type 3 - "Weird"
+	filter::LR2CrossoverFast crossoverLR2Fast_;        // Type 4 - 12dB/oct no phase comp
+	filter::LR2CrossoverFull crossoverLR2_;            // Type 5 - 12dB/oct with phase comp
+	filter::LR4CrossoverFast crossoverLR4Fast_;        // Type 6 - 24dB/oct no phase comp
+	filter::LR4CrossoverFull crossoverLR4_;            // Type 7 - 24dB/oct with phase comp
+	uint8_t crossoverType_ = 0;                        // Default to cheapest (1st order allpass)
 	std::array<BandCompressor, kNumBands> bands_;
 	FixedPoint<31> wet_{ONE_Q31};
 	float dry_ = 0.0f;

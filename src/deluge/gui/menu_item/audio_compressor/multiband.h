@@ -800,13 +800,13 @@ public:
 };
 
 /// Mode zone control - first item in DOTT menu
-/// 6 zones: Off, AP 6dB (1st), AP 12dB (2nd), AP 18dB (3rd), LR2 12dB, LR2 Fast
+/// 9 zones: Off, AP 6dB, Quirky, Twisted, Weird, LR2 Fast, LR2, LR4 Fast, LR4
 /// One encoder click per zone, ordered by CPU cost (cheapest to most expensive CW)
 class ModeZone final : public DecimalWithoutScrolling {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
 
-	static constexpr int32_t kNumModes = 6;
+	static constexpr int32_t kNumModes = 9;
 
 	void readCurrentValue() override {
 		auto& comp = soundEditor.currentModControllable->multibandCompressor;
@@ -861,13 +861,19 @@ private:
 		case 1:
 			return "AP 6dB"; // Allpass 1st order - cheapest (2 ops/ch)
 		case 2:
-			return "AP 12dB"; // Allpass 2nd order (4 ops/ch)
+			return "Quirky"; // Allpass 2nd order - creative/experimental (4 ops/ch)
 		case 3:
-			return "AP 18dB"; // Allpass 3rd order (6 ops/ch)
+			return "Twisted"; // Mixed coefficients - creative/experimental (4 ops/ch)
 		case 4:
-			return "LR2 Fast"; // LR2 without phase comp (4 ops/ch)
+			return "Weird"; // Allpass 3rd order - creative/experimental (6 ops/ch)
 		case 5:
+			return "LR2 Fast"; // LR2 without phase comp (4 ops/ch)
+		case 6:
 			return "LR2"; // LR2 with phase compensation (6 ops/ch)
+		case 7:
+			return "LR4 Fast"; // LR4 without phase comp (8 ops/ch)
+		case 8:
+			return "LR4"; // LR4 with phase compensation (12 ops/ch)
 		default:
 			return "?";
 		}
