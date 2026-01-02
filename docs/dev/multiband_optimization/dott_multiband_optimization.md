@@ -301,31 +301,49 @@ struct StereoFilterComponent {
 
 ## Final Benchmark Results
 
-**Reference:** ModFX (dimen) = 1,414 cycles
+**Reference:** ModFX (dimen) = 1,547 cycles (no GUI), 1,318 cycles (with GUI)
 
-### Multiband by Crossover Type
+### Multiband by Crossover Type (No GUI Overhead)
 
 | Crossover | Total Cycles | vs ap1_6dB | Notes |
 |-----------|--------------|------------|-------|
-| ap1_6dB | 4,079 | baseline | Correct 6dB/oct, cheapest |
-| lr2_fast | 4,408 | +8% | Correct 12dB/oct, no phase comp |
-| ap2_12dB (Quirky) | 4,553 | +12% | Creative/experimental |
-| ap3_18dB (Weird) | 5,088 | +25% | Creative/experimental |
-| lr2_full | 5,072 | +24% | Correct 12dB/oct, phase compensated |
-| lr4_fast | 5,374 | +32% | Correct 24dB/oct, no phase comp |
-| lr4_full | 6,403 | +57% | Correct 24dB/oct, phase compensated |
+| ap1_6dB | 4,247 | baseline | Correct 6dB/oct, cheapest |
+| lr2_fast | 4,382 | +3% | Correct 12dB/oct, no phase comp |
+| inverted | 4,408 | +4% | AP1 with swapped L/H bands |
+| quirky | 4,902 | +15% | 2-stage allpass, creative |
+| twisted | 4,904 | +15% | 2-stage with blended coefficients |
+| lr2_full | 5,442 | +28% | Correct 12dB/oct, phase compensated |
+| weird | 5,621 | +32% | 3-stage allpass, creative |
+| twist3 | 5,657 | +33% | 3-stage with progressive blending |
+| lr4_fast | 6,054 | +43% | Correct 24dB/oct, no phase comp |
+| lr4_full | 6,272 | +48% | Correct 24dB/oct, phase compensated |
 
-### Stage Breakdown (lr2_full)
+### Multiband by Crossover Type (With GUI/Analyzer)
+
+| Crossover | Total Cycles | vs ap1_6dB | Notes |
+|-----------|--------------|------------|-------|
+| ap1_6dB | 4,048 | baseline | Slightly faster due to cache effects |
+| lr2_fast | 4,370 | +8% | |
+| twisted | 4,398 | +9% | |
+| lr2_full | 4,902 | +21% | |
+| quirky | 4,986 | +23% | |
+| weird | 5,016 | +24% | |
+| lr4_fast | 5,324 | +32% | |
+| lr4_full | 6,234 | +54% | |
+
+**Note:** GUI overhead causes minor measurement variance (~5-10%). No-GUI numbers are most accurate for absolute comparisons.
+
+### Stage Breakdown (lr2_full, No GUI)
 
 | Stage | Median Cycles | % of Total |
 |-------|---------------|------------|
-| crossover | 1,865 | 37% |
-| envelope | 1,390 | 27% |
-| recombine | 1,423 | 28% |
-| overhead | ~394 | 8% |
-| **total** | **5,072** | 100% |
+| crossover | 2,308 | 42% |
+| envelope | 1,332 | 24% |
+| recombine | 1,460 | 27% |
+| overhead | ~342 | 6% |
+| **total** | **5,442** | 100% |
 
-Recombine went from 74% → 28% of total cost. Stages are now balanced.
+Recombine went from 74% → 27% of total cost. Stages are now balanced.
 
 ---
 
@@ -348,11 +366,13 @@ Recombine went from 74% → 28% of total cost. Stages are now balanced.
 
 ## Conclusion
 
-The cheapest DOTT mode (ap1_6dB at 4,079 cycles) is now ~2.9x the cost of a ModFX effect. This is a **huge win** compared to the pre-optimization 14,222 cycles (10x ModFX).
+The cheapest DOTT mode (ap1_6dB at 4,247 cycles) is now ~2.7x the cost of a ModFX effect. This is a **huge win** compared to the pre-optimization 14,222 cycles (10x ModFX).
 
 **Recommended crossover choices:**
 - **ap1_6dB** - Best CPU efficiency, correct 6dB/oct slopes
 - **lr2_fast** - Best balance of quality vs cost, correct 12dB/oct
+- **inverted** - Cheap creative mode (swapped bands)
 - **lr4_fast** - Sharpest slopes at reasonable cost, 24dB/oct
-- **Quirky/Weird** - Creative modes with interesting phase artifacts
+- **Quirky/Twisted** - 2-stage creative modes with phase artifacts
+- **Weird/Twist3** - 3-stage creative modes with deeper phase smearing
 
