@@ -133,6 +133,7 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 		multibandCompressor.setRatioOffset(i, other->multibandCompressor.getRatioOffset(i));
 		multibandCompressor.setBandwidthOffset(i, other->multibandCompressor.getBandwidthOffset(i));
 	}
+	multibandCompressor.setVibeTwistPhase(other->multibandCompressor.getVibeTwistPhase());
 }
 
 void ModControllableAudio::initParams(ParamManager* paramManager) {
@@ -700,6 +701,11 @@ void ModControllableAudio::writeTagsToFile(Serializer& writer) {
 			writer.writeAttributeHex(attrName, bandwidthOffset, 8);
 		}
 	}
+	// Vibe twist phase (secret menu param, scaled by 10 like sine shaper)
+	float vibeTwistPhase = multibandCompressor.getVibeTwistPhase();
+	if (vibeTwistPhase != 0.0f) {
+		writer.writeAttribute("mbVibeTwistPhase", static_cast<int32_t>(vibeTwistPhase * 10.0f));
+	}
 
 	// Stutter
 	writer.writeOpeningTagBeginning("stutter");
@@ -1182,6 +1188,10 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 	else if (!strcmp(tagName, "mbBandwidthOffset2")) {
 		multibandCompressor.setBandwidthOffset(2, reader.readTagOrAttributeValueHex(0));
 		reader.exitTag("mbBandwidthOffset2");
+	}
+	else if (!strcmp(tagName, "mbVibeTwistPhase")) {
+		multibandCompressor.setVibeTwistPhase(static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f);
+		reader.exitTag("mbVibeTwistPhase");
 	}
 
 	// Arpeggiator
