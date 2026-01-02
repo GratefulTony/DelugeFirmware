@@ -488,6 +488,8 @@ public:
 		crossoverLR4Fast_.setHighCrossover(2000.0f);
 		crossoverTwisted_.setLowCrossover(200.0f);
 		crossoverTwisted_.setHighCrossover(2000.0f);
+		crossoverTwist3_.setLowCrossover(200.0f);
+		crossoverTwist3_.setHighCrossover(2000.0f);
 
 		// Set default parameters for each band
 		// Use setter functions to keep knob values in sync with actual values
@@ -518,6 +520,7 @@ public:
 		crossoverLR4_.setLowCrossover(freqHz);
 		crossoverLR4Fast_.setLowCrossover(freqHz);
 		crossoverTwisted_.setLowCrossover(freqHz);
+		crossoverTwist3_.setLowCrossover(freqHz);
 		// Update max stride for low band (Nyquist = sampleRate/2/stride >= lowCrossover)
 		// stride <= sampleRate / (2 * lowCrossover)
 		maxStridePerBand_[0] = std::clamp(static_cast<size_t>(kSampleRate / (2.0f * freqHz)), size_t{2}, size_t{32});
@@ -533,6 +536,7 @@ public:
 		crossoverLR4_.setHighCrossover(freqHz);
 		crossoverLR4Fast_.setHighCrossover(freqHz);
 		crossoverTwisted_.setHighCrossover(freqHz);
+		crossoverTwist3_.setHighCrossover(freqHz);
 		// Update max stride for mid band (Nyquist = sampleRate/2/stride >= highCrossover)
 		// stride <= sampleRate / (2 * highCrossover)
 		maxStridePerBand_[1] = std::clamp(static_cast<size_t>(kSampleRate / (2.0f * freqHz)), size_t{2}, size_t{32});
@@ -545,8 +549,8 @@ public:
 	[[nodiscard]] float getHighCrossoverHz() const { return crossoverAllpass1_.getHighCrossoverHz(); }
 
 	/// Set crossover type (ordered by CPU cost, cheapest first):
-	/// 0=AP 6dB, 1=Quirky, 2=Twisted, 3=Weird, 4=LR2 Fast, 5=LR2, 6=LR4 Fast, 7=LR4
-	void setCrossoverType(uint8_t type) { crossoverType_ = std::min(type, static_cast<uint8_t>(7)); }
+	/// 0=AP 6dB, 1=Quirky, 2=Twisted, 3=Weird, 4=LR2 Fast, 5=LR2, 6=LR4 Fast, 7=LR4, 8=Inverted, 9=Twist3
+	void setCrossoverType(uint8_t type) { crossoverType_ = std::min(type, static_cast<uint8_t>(9)); }
 
 	/// Get crossover type (0-7, ordered by CPU cost)
 	[[nodiscard]] uint8_t getCrossoverType() const { return crossoverType_; }
@@ -641,10 +645,6 @@ public:
 		// Determine zone (0-7) and position within zone (0.0-1.0)
 		auto [zone, zonePos] = computeZoneQ31(c, kNumCharacterZones);
 
-		// 4-segment triangle for OWLTT zone oscillations: -1→0→+1→0→-1 (peak at 0.5)
-		// Original: 1.0f - 4.0f * std::abs(p - 0.5f) = triangleFloat shifted by -0.25
-		auto triangle = [](float phase) { return triangleFloat(phase - 0.25f); };
-
 		// === Compute derived parameters based on zone ===
 		// Each zone has characteristic curves for width, knee, timing, skew
 
@@ -659,9 +659,12 @@ public:
 		case 5:                                  // Rich: slow for warm sustain
 			response_ = 0.15f - zonePos * 0.15f; // 0.15→0.0
 			break;
-		case 7: // OWLTT: oscillates full range for dynamic breathing
-			response_ = 0.5f + 0.5f * triangle(zonePos * 2.0f + vibePhaseWidth_);
+		case 7: { // OWLTT: oscillates full range for dynamic breathing
+			// Phi-power frequencies for non-repeating patterns (same constants as Chaos zone)
+			constexpr float kFreq2 = 2.0581f; // φ^1.5 ≈ 2
+			response_ = 0.5f + 0.5f * triangleFloat(zonePos * kFreq2 + vibePhaseWidth_ - 0.25f);
 			break;
+		}
 		default:
 			response_ = 0.5f; // Balanced (~9ms)
 		}
@@ -679,9 +682,11 @@ public:
 		case 3: // Punch: narrower for impact
 			width_ = 0.3f + zonePos * 0.2f;
 			break;
-		case 7: // OWLTT: oscillates wildly (with vibe phase offset)
-			width_ = 0.5f + 0.5f * triangle(zonePos * 2.0f + vibePhaseWidth_);
+		case 7: {                             // OWLTT: oscillates wildly (with vibe phase offset)
+			constexpr float kFreq2 = 2.0581f; // φ^1.5 ≈ 2
+			width_ = 0.5f + 0.5f * triangleFloat(zonePos * kFreq2 + vibePhaseWidth_ - 0.25f);
 			break;
+		}
 		default:
 			width_ = 0.5f; // Moderate stereo
 		}
@@ -699,9 +704,11 @@ public:
 		case 6: // OTT: medium-hard for aggression
 			knee_ = 0.1f + zonePos * 0.2f;
 			break;
-		case 7: // OWLTT: varies dramatically (with vibe phase offset)
-			knee_ = 0.5f + 0.4f * triangle(zonePos * 3.0f + vibePhaseKnee_);
+		case 7: {                             // OWLTT: varies dramatically (with vibe phase offset)
+			constexpr float kFreq3 = 2.9603f; // φ^2.25 ≈ 3
+			knee_ = 0.5f + 0.4f * triangleFloat(zonePos * kFreq3 + vibePhaseKnee_ - 0.25f);
 			break;
+		}
 		default:
 			knee_ = 0.4f; // Medium
 		}
@@ -729,11 +736,15 @@ public:
 			timingOffset_[1] = -0.3f;
 			timingOffset_[2] = -0.4f;
 			break;
-		case 7: // OWLTT: chaos (with vibe phase offsets)
-			timingOffset_[0] = 0.5f * triangle(zonePos * 4.0f + vibePhaseTiming_[0]);
-			timingOffset_[1] = 0.5f * triangle(zonePos * 5.0f + 0.333f + vibePhaseTiming_[1]);
-			timingOffset_[2] = 0.5f * triangle(zonePos * 6.0f + 0.667f + vibePhaseTiming_[2]);
+		case 7: {                             // OWLTT: chaos (with vibe phase offsets)
+			constexpr float kFreq4 = 4.2360f; // φ^3.0 ≈ 4
+			constexpr float kFreq5 = 5.3884f; // φ^3.5 ≈ 5
+			constexpr float kFreq6 = 6.0409f; // φ^3.75 ≈ 6
+			timingOffset_[0] = 0.5f * triangleFloat(zonePos * kFreq4 + vibePhaseTiming_[0] - 0.25f);
+			timingOffset_[1] = 0.5f * triangleFloat(zonePos * kFreq5 + 0.333f + vibePhaseTiming_[1] - 0.25f);
+			timingOffset_[2] = 0.5f * triangleFloat(zonePos * kFreq6 + 0.667f + vibePhaseTiming_[2] - 0.25f);
 			break;
+		}
 		default:
 			timingOffset_[0] = timingOffset_[1] = timingOffset_[2] = 0.0f;
 		}
@@ -760,11 +771,15 @@ public:
 			skewOffset_[1] = 0.0f;
 			skewOffset_[2] = -0.1f;
 			break;
-		case 7: // OWLTT: extreme variation (with vibe phase offsets)
-			skewOffset_[0] = 0.8f * triangle(zonePos * 5.0f + vibePhaseSkew_[0]);
-			skewOffset_[1] = 0.8f * triangle(zonePos * 4.0f + 0.167f + vibePhaseSkew_[1]);
-			skewOffset_[2] = 0.8f * triangle(zonePos * 6.0f + 0.333f + vibePhaseSkew_[2]);
+		case 7: {                             // OWLTT: extreme variation (with vibe phase offsets)
+			constexpr float kFreq4 = 4.2360f; // φ^3.0 ≈ 4
+			constexpr float kFreq5 = 5.3884f; // φ^3.5 ≈ 5
+			constexpr float kFreq6 = 6.0409f; // φ^3.75 ≈ 6
+			skewOffset_[0] = 0.8f * triangleFloat(zonePos * kFreq5 + vibePhaseSkew_[0] - 0.25f);
+			skewOffset_[1] = 0.8f * triangleFloat(zonePos * kFreq4 + 0.167f + vibePhaseSkew_[1] - 0.25f);
+			skewOffset_[2] = 0.8f * triangleFloat(zonePos * kFreq6 + 0.333f + vibePhaseSkew_[2] - 0.25f);
 			break;
+		}
 		default:
 			skewOffset_[0] = skewOffset_[1] = skewOffset_[2] = 0.0f;
 		}
@@ -820,9 +835,24 @@ public:
 		// Determine zone (0-7) and position within zone (0.0-1.0)
 		auto [zone, zonePos] = computeZoneQ31(v, kNumVibeZones);
 
-		// 4-segment triangle for vibe zone oscillations: -1→0→+1→0→-1 (peak at 0.5)
-		// Original: 1.0f - 4.0f * std::abs(p - 0.5f) = triangleFloat shifted by -0.25
-		auto triangle = [](float phase) { return triangleFloat(phase - 0.25f); };
+		// Twist modulation: 10 triangle periods, 75% duty cycle (zero until halfway up vibe)
+		// Global vibe position (0.0 to 1.0 across entire knob range)
+		float globalVibePos = static_cast<float>(v) / static_cast<float>(ONE_Q31);
+		if (globalVibePos < 0.5f) {
+			// First 75% of duty cycle: twist stays at maximum (1.0)
+			vibeTwist_ = 1.0f;
+		}
+		else {
+			// Last 25% of duty cycle: triangle modulation with blend ramping up
+			float rampPos = (globalVibePos - 0.5f) * 2.0f; // 0 to 1 in second half
+			// Wrap phase with fmod for precision at high values
+			float twistPhase = std::fmod(rampPos * 10.0f + vibeTwistPhase_, 1.0f);
+			float triangleVal = triangleFloat(twistPhase); // -1 to +1
+			// Blend: 0 at vibe=50%, 1 at vibe=100%
+			float blend = rampPos;
+			// At zero blend: full twist (1.0). At full blend: modulated by triangle (0.5 to 1.0)
+			vibeTwist_ = 1.0f - blend * 0.5f * (1.0f - triangleVal);
+		}
 
 		// Compute phase offsets based on zone
 		switch (zone) {
@@ -875,16 +905,45 @@ public:
 			vibePhaseSkew_ = {0.15f * zonePos, 0.35f * zonePos, 0.25f * zonePos};
 			break;
 
-		case 7: // Chaos: rapidly oscillating phase offsets
-			vibePhaseWidth_ = 0.5f * triangle(zonePos * 3.0f);
-			vibePhaseKnee_ = 0.5f * triangle(zonePos * 4.0f + 0.25f);
-			vibePhaseTiming_[0] = 0.5f * triangle(zonePos * 5.0f);
-			vibePhaseTiming_[1] = 0.5f * triangle(zonePos * 6.0f + 0.333f);
-			vibePhaseTiming_[2] = 0.5f * triangle(zonePos * 7.0f + 0.667f);
-			vibePhaseSkew_[0] = 0.5f * triangle(zonePos * 4.0f + 0.5f);
-			vibePhaseSkew_[1] = 0.5f * triangle(zonePos * 5.0f + 0.167f);
-			vibePhaseSkew_[2] = 0.5f * triangle(zonePos * 6.0f + 0.833f);
+		case 7: { // Chaos: phi-power frequencies with secret phase offset (like sine shaper)
+			// φ^n values chosen to approximate original integer frequencies
+			constexpr float kFreq3 = 2.9603f;  // φ^2.25 ≈ 3
+			constexpr float kFreq4 = 4.2360f;  // φ^3.0 ≈ 4
+			constexpr float kFreq5 = 5.3884f;  // φ^3.5 ≈ 5
+			constexpr float kFreq6 = 6.0409f;  // φ^3.75 ≈ 6
+			constexpr float kFreq7 = 6.8541f;  // φ^4.0 ≈ 7
+			constexpr float kFreq4b = 4.7742f; // φ^3.25 ≈ 4.8 (variant)
+			constexpr float kFreq5b = 5.7067f; // φ^3.6 ≈ 5.7 (variant)
+			constexpr float kFreq6b = 6.4408f; // φ^3.85 ≈ 6.4 (variant)
+
+			// Use double for phase wrapping to maintain precision at large values
+			// Same pattern as sine shaper's metaPhase/gammaPhase handling
+			double phRaw = static_cast<double>(vibeTwistPhase_);
+			auto wrapPh = [](double ph, double freq) {
+				double scaled = ph * freq;
+				return static_cast<float>(scaled - std::floor(scaled));
+			};
+
+			// Per-frequency phase offsets - irrational frequencies create non-repeating divergence
+			float ph3 = wrapPh(phRaw, kFreq3);
+			float ph4 = wrapPh(phRaw, kFreq4);
+			float ph5 = wrapPh(phRaw, kFreq5);
+			float ph6 = wrapPh(phRaw, kFreq6);
+			float ph7 = wrapPh(phRaw, kFreq7);
+			float ph4b = wrapPh(phRaw, kFreq4b);
+			float ph5b = wrapPh(phRaw, kFreq5b);
+			float ph6b = wrapPh(phRaw, kFreq6b);
+
+			vibePhaseWidth_ = 0.5f * triangleFloat(zonePos * kFreq3 - 0.25f + ph3);
+			vibePhaseKnee_ = 0.5f * triangleFloat(zonePos * kFreq4 + ph4);
+			vibePhaseTiming_[0] = 0.5f * triangleFloat(zonePos * kFreq5 - 0.25f + ph5);
+			vibePhaseTiming_[1] = 0.5f * triangleFloat(zonePos * kFreq6 + 0.083f + ph6);
+			vibePhaseTiming_[2] = 0.5f * triangleFloat(zonePos * kFreq7 + 0.417f + ph7);
+			vibePhaseSkew_[0] = 0.5f * triangleFloat(zonePos * kFreq4b + 0.25f + ph4b);
+			vibePhaseSkew_[1] = 0.5f * triangleFloat(zonePos * kFreq5b - 0.083f + ph5b);
+			vibePhaseSkew_[2] = 0.5f * triangleFloat(zonePos * kFreq6b + 0.583f + ph6b);
 			break;
+		}
 
 		default:
 			vibePhaseWidth_ = 0.0f;
@@ -896,6 +955,12 @@ public:
 
 	/// Get vibe knob value
 	[[nodiscard]] q31_t getVibe() const { return vibeKnob_; }
+
+	/// Set twist phase offset (secret menu parameter, unbounded - wraps in DSP)
+	void setVibeTwistPhase(float phase) { vibeTwistPhase_ = phase; }
+
+	/// Get twist phase offset
+	[[nodiscard]] float getVibeTwistPhase() const { return vibeTwistPhase_; }
 
 	/// Get current vibe zone for display
 	[[nodiscard]] VibeZone getVibeZone() const {
@@ -1043,6 +1108,7 @@ public:
 		crossoverLR4_.reset();
 		crossoverLR4Fast_.reset();
 		crossoverTwisted_.reset();
+		crossoverTwist3_.reset();
 		for (auto& band : bands_) {
 			band.reset();
 		}
@@ -1062,10 +1128,10 @@ public:
 			return;
 		}
 
-		// Crossover type names for benchmarking (must match crossoverType_ 0-7)
-		static const char* kXoverNames[] = {"ap1_6dB",  "quirky",   "twisted",  "weird",
-		                                    "lr2_fast", "lr2_full", "lr4_fast", "lr4_full"};
-		const char* xoverTag = kXoverNames[crossoverType_ < 8 ? crossoverType_ : 0];
+		// Crossover type names for benchmarking (must match crossoverType_ 0-9)
+		static const char* kXoverNames[] = {"ap1_6dB",  "quirky",   "twisted",  "weird",    "lr2_fast",
+		                                    "lr2_full", "lr4_fast", "lr4_full", "inverted", "twist3"};
+		const char* xoverTag = kXoverNames[crossoverType_ < 10 ? crossoverType_ : 0];
 
 		FX_BENCH_DECLARE(benchTotal, "multiband", "total");
 		FX_BENCH_DECLARE(benchXover, "multiband", "crossover");
@@ -1090,6 +1156,14 @@ public:
 		// Temporary buffers for each band
 		static std::array<q31_t, SSI_TX_BUFFER_NUM_SAMPLES> bandBufferL[kNumBands];
 		static std::array<q31_t, SSI_TX_BUFFER_NUM_SAMPLES> bandBufferR[kNumBands];
+
+		// Apply twist modulation to Twisted/Twist3 crossovers (only affects types 2 and 9)
+		if (crossoverType_ == 2) {
+			crossoverTwisted_.setTwist(vibeTwist_);
+		}
+		else if (crossoverType_ == 9) {
+			crossoverTwist3_.setTwist(vibeTwist_);
+		}
 
 		// Split into bands using selected crossover type (ordered by CPU cost):
 		// Crossover types: 0=AP 6dB, 1=Quirky, 2=Twisted, 3=Weird, 4=LR2 Fast, 5=LR2, 6=LR4 Fast, 7=LR4
@@ -1171,6 +1245,31 @@ public:
 			for (size_t i = 0; i < buffer.size(); ++i) {
 				filter::CrossoverBands bandsL, bandsR;
 				crossoverLR4_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
+				bandBufferL[0][i] = bandsL.low;
+				bandBufferL[1][i] = bandsL.mid;
+				bandBufferL[2][i] = bandsL.high;
+				bandBufferR[0][i] = bandsR.low;
+				bandBufferR[1][i] = bandsR.mid;
+				bandBufferR[2][i] = bandsR.high;
+			}
+			break;
+		case 8: // Inverted - AP1 with swapped low/high bands (creative, same cost as AP1)
+			for (size_t i = 0; i < buffer.size(); ++i) {
+				filter::CrossoverBands bandsL, bandsR;
+				crossoverAllpass1_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
+				// Swap low and high bands for inverted frequency response
+				bandBufferL[0][i] = bandsL.high; // Was low
+				bandBufferL[1][i] = bandsL.mid;
+				bandBufferL[2][i] = bandsL.low; // Was high
+				bandBufferR[0][i] = bandsR.high;
+				bandBufferR[1][i] = bandsR.mid;
+				bandBufferR[2][i] = bandsR.low;
+			}
+			break;
+		case 9: // Twist3 - 3 stages with progressive coefficient blending (6 ops/ch)
+			for (size_t i = 0; i < buffer.size(); ++i) {
+				filter::CrossoverBands bandsL, bandsR;
+				crossoverTwist3_.processStereo(buffer[i].l, buffer[i].r, bandsL, bandsR);
 				bandBufferL[0][i] = bandsL.low;
 				bandBufferL[1][i] = bandsL.mid;
 				bandBufferL[2][i] = bandsL.high;
@@ -1601,6 +1700,7 @@ private:
 	filter::LR2CrossoverFull crossoverLR2_;            // Type 5 - 12dB/oct with phase comp
 	filter::LR4CrossoverFast crossoverLR4Fast_;        // Type 6 - 24dB/oct no phase comp
 	filter::LR4CrossoverFull crossoverLR4_;            // Type 7 - 24dB/oct with phase comp
+	filter::AllpassCrossoverTwist3 crossoverTwist3_;   // Type 9 - "Twist3" (Twisted+Weird)
 	uint8_t crossoverType_ = 0;                        // Default to cheapest (1st order allpass)
 	std::array<BandCompressor, kNumBands> bands_;
 	FixedPoint<31> wet_{ONE_Q31};
@@ -1632,6 +1732,8 @@ private:
 	float vibePhaseKnee_ = 0.0f;                                     // Phase offset for knee oscillation
 	std::array<float, kNumBands> vibePhaseTiming_{0.0f, 0.0f, 0.0f}; // Phase offsets for timing
 	std::array<float, kNumBands> vibePhaseSkew_{0.0f, 0.0f, 0.0f};   // Phase offsets for skew
+	float vibeTwist_ = 1.0f;                                         // Twist amount for Twisted/Twist3 (0-1)
+	float vibeTwistPhase_ = 0.0f;                                    // Secret phase offset for twist modulation
 
 	// Enable/disable zone (0 = off, >ONE_Q31/2 = on)
 	q31_t enabledZone_{0};

@@ -254,4 +254,108 @@ private:
 	float highCrossoverHz_ = 2000.0f;
 };
 
+/// "Twist3" crossover - 3 stages with progressive coefficient blending.
+/// Same cost as ORDER=3 (6 ops) but blends coefficients across stages.
+/// Combines Twisted's coefficient mixing with Weird's 3-stage depth.
+/// Creates more extreme phase smearing than either alone.
+class AllpassCrossoverTwist3 {
+public:
+	using Bands = CrossoverBands;
+
+	AllpassCrossoverTwist3() = default;
+
+	void setLowCrossover(float freqHz) {
+		lowCrossoverHz_ = freqHz;
+		lowCoeff_ = calculateCoefficient(freqHz);
+		updateBlendedCoeffs();
+	}
+
+	void setHighCrossover(float freqHz) {
+		highCrossoverHz_ = freqHz;
+		highCoeff_ = calculateCoefficient(freqHz);
+		updateBlendedCoeffs();
+	}
+
+	/// Set twist amount (0.0 = like Weird, 1.0 = fully twisted)
+	void setTwist(float twist) {
+		twist_ = std::clamp(twist, 0.0f, 1.0f);
+		updateBlendedCoeffs();
+	}
+
+	[[nodiscard]] float getTwist() const { return twist_; }
+	[[nodiscard]] float getLowCrossoverHz() const { return lowCrossoverHz_; }
+	[[nodiscard]] float getHighCrossoverHz() const { return highCrossoverHz_; }
+
+	/// Process with progressively blended coefficients
+	[[gnu::always_inline]] inline void processStereo(q31_t inputL, q31_t inputR, Bands& outL, Bands& outR) {
+		int32x2_t input = {inputL, inputR};
+
+		// Low crossover: stage1=low, stage2=mid-blend, stage3=high-blend
+		int32x2_t apLow1 = stereoState_.apLow1.doAPF(input, lowCoeff_);
+		int32x2_t apLow2 = stereoState_.apLow2.doAPF(apLow1, lowStage2Coeff_);
+		int32x2_t apLow3 = stereoState_.apLow3.doAPF(apLow2, lowStage3Coeff_);
+		int32x2_t low = vhadd_s32(input, apLow3);
+		int32x2_t rest = vhsub_s32(input, apLow3);
+
+		// High crossover: stage1=high, stage2=mid-blend, stage3=low-blend
+		int32x2_t apHigh1 = stereoState_.apHigh1.doAPF(rest, highCoeff_);
+		int32x2_t apHigh2 = stereoState_.apHigh2.doAPF(apHigh1, highStage2Coeff_);
+		int32x2_t apHigh3 = stereoState_.apHigh3.doAPF(apHigh2, highStage3Coeff_);
+		int32x2_t mid = vhadd_s32(rest, apHigh3);
+		int32x2_t high = vhsub_s32(rest, apHigh3);
+
+		outL = {vget_lane_s32(low, 0), vget_lane_s32(mid, 0), vget_lane_s32(high, 0)};
+		outR = {vget_lane_s32(low, 1), vget_lane_s32(mid, 1), vget_lane_s32(high, 1)};
+	}
+
+	void reset() {
+		stereoState_.apLow1.reset();
+		stereoState_.apLow2.reset();
+		stereoState_.apLow3.reset();
+		stereoState_.apHigh1.reset();
+		stereoState_.apHigh2.reset();
+		stereoState_.apHigh3.reset();
+	}
+
+private:
+	struct StereoState {
+		StereoFilterComponent apLow1, apLow2, apLow3;
+		StereoFilterComponent apHigh1, apHigh2, apHigh3;
+	};
+
+	[[nodiscard]] static q31_t calculateCoefficient(float freqHz) {
+		float fc = freqHz / static_cast<float>(kSampleRate);
+		fc = std::clamp(fc, 0.001f, 0.49f);
+		float wc = fastTan(3.14159265358979f * fc);
+		float coeff = wc / (1.0f + wc);
+		return static_cast<q31_t>(coeff * ONE_Q31);
+	}
+
+	/// Update blended coefficients - progressive blend across 3 stages
+	void updateBlendedCoeffs() {
+		// twist=0: all stages use own coeff (like Weird)
+		// twist=1: stage2=50% blend, stage3=100% opposite
+		float t = twist_;
+		float lowF = static_cast<float>(lowCoeff_);
+		float highF = static_cast<float>(highCoeff_);
+		// Stage 2: 50% of twist amount
+		lowStage2Coeff_ = static_cast<q31_t>(lowF + (highF - lowF) * t * 0.5f);
+		highStage2Coeff_ = static_cast<q31_t>(highF + (lowF - highF) * t * 0.5f);
+		// Stage 3: full twist amount
+		lowStage3Coeff_ = static_cast<q31_t>(lowF + (highF - lowF) * t);
+		highStage3Coeff_ = static_cast<q31_t>(highF + (lowF - highF) * t);
+	}
+
+	StereoState stereoState_{};
+	q31_t lowCoeff_ = calculateCoefficient(200.0f);
+	q31_t highCoeff_ = calculateCoefficient(2000.0f);
+	q31_t lowStage2Coeff_ = lowCoeff_;
+	q31_t lowStage3Coeff_ = lowCoeff_;
+	q31_t highStage2Coeff_ = highCoeff_;
+	q31_t highStage3Coeff_ = highCoeff_;
+	float twist_ = 1.0f; // Default fully twisted
+	float lowCrossoverHz_ = 200.0f;
+	float highCrossoverHz_ = 2000.0f;
+};
+
 } // namespace deluge::dsp::filter

@@ -25,6 +25,7 @@
 #include "gui/menu_item/menu_item_with_cc_learning.h"
 #include "gui/menu_item/momentum_encoder.h"
 #include "gui/menu_item/value_scaling.h"
+#include "gui/menu_item/zone_based.h"
 #include "gui/ui/sound_editor.h"
 #include "hid/display/oled.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
@@ -369,87 +370,19 @@ public:
 
 /// Character control (replaces knee) - controls width, knee, timing, skew via zones
 /// Zones: Width, Timing, Skew, Punch, Air, Rich, OTT, OWLTT
-class Character final : public DecimalWithoutScrolling, public MenuItemWithCCLearning {
+class Character final : public ZoneBasedUnpatchedParam<params::UNPATCHED_MB_COMPRESSOR_CHARACTER, 8> {
 public:
-	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
 
-	void readCurrentValue() override {
-		q31_t value = soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(
-		    params::UNPATCHED_MB_COMPRESSOR_CHARACTER);
-		this->setValue(paramToMenuValueHighRes(value));
+	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
+		static constexpr const char* kNames[] = {"Width", "Timing", "Skew", "Punch", "Air", "Rich", "OTT", "OWLTT"};
+		return (zoneIndex >= 0 && zoneIndex < 8) ? kNames[zoneIndex] : "?";
 	}
-
-	void writeCurrentValue() override {
-		q31_t value = menuValueToParamHighRes(this->getValue());
-		char modelStackMemory[MODEL_STACK_MAX_SIZE];
-		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(modelStackMemory);
-		ModelStackWithAutoParam* modelStackWithParam =
-		    modelStack->getUnpatchedAutoParamFromId(params::UNPATCHED_MB_COMPRESSOR_CHARACTER);
-		modelStackWithParam->autoParam->setCurrentValueInResponseToUserInput(value, modelStackWithParam);
-	}
-
-	ParamDescriptor getLearningThing() override {
-		ParamDescriptor paramDescriptor;
-		paramDescriptor.setToHaveParamOnly(params::UNPATCHED_MB_COMPRESSOR_CHARACTER + params::UNPATCHED_START);
-		return paramDescriptor;
-	}
-
-	void unlearnAction() final { MenuItemWithCCLearning::unlearnAction(); }
-	bool allowsLearnMode() final { return MenuItemWithCCLearning::allowsLearnMode(); }
-	void learnKnob(MIDICable* cable, int32_t whichKnob, int32_t modKnobMode, int32_t midiChannel) final {
-		MenuItemWithCCLearning::learnKnob(cable, whichKnob, modKnobMode, midiChannel);
-	}
-
-	[[nodiscard]] int32_t getMaxValue() const override { return kHighResSteps; }
-	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
-	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
-
-	// Scale 0-1024 to 0-50 for display (matches gold knob popup range)
-	// 1 decimal place since we have finer internal resolution
-	[[nodiscard]] float getDisplayValue() override { return (this->getValue() * 50.0f) / kHighResSteps; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
 		       && modControllable->multibandCompressor.isEnabled();
 	}
-
-	void selectEncoderAction(int32_t offset) override {
-		DecimalWithoutScrolling::selectEncoderAction(velocity_.getScaledOffset(offset));
-	}
-
-	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
-		renderZoneInHorizontalMenu(slot, this->getValue(), kHighResSteps, 8, getZoneName);
-	}
-
-protected:
-	void drawPixelsForOled() override { drawZoneForOled(this->getValue(), kHighResSteps, 8, getZoneName); }
-
-private:
-	static const char* getZoneName(int32_t zoneIndex) {
-		switch (zoneIndex) {
-		case 0:
-			return "Width";
-		case 1:
-			return "Timing";
-		case 2:
-			return "Skew";
-		case 3:
-			return "Punch";
-		case 4:
-			return "Air";
-		case 5:
-			return "Rich";
-		case 6:
-			return "OTT";
-		case 7:
-			return "OWLTT";
-		default:
-			return "?";
-		}
-	}
-
-	mutable VelocityEncoder velocity_;
 };
 
 /// Up/Down ratio skew control (balance between upward and downward compression)
@@ -497,87 +430,52 @@ public:
 
 /// Vibe control - controls phase relationships between oscillations in Feel
 /// Zones: Sync, Spread, Pairs, Cascade, Invert, Pulse, Drift, Chaos
-class Vibe final : public DecimalWithoutScrolling, public MenuItemWithCCLearning {
+/// Secret menu: push+turn encoder to adjust twist phase offset
+class Vibe final : public ZoneBasedUnpatchedParam<params::UNPATCHED_MB_COMPRESSOR_VIBE, 8> {
 public:
-	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
 
-	void readCurrentValue() override {
-		q31_t value =
-		    soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_MB_COMPRESSOR_VIBE);
-		this->setValue(paramToMenuValueHighRes(value));
+	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
+		static constexpr const char* kNames[] = {"Sync",   "Spread", "Pairs", "Cascade",
+		                                         "Invert", "Pulse",  "Drift", "Chaos"};
+		return (zoneIndex >= 0 && zoneIndex < 8) ? kNames[zoneIndex] : "?";
 	}
-
-	void writeCurrentValue() override {
-		q31_t value = menuValueToParamHighRes(this->getValue());
-		char modelStackMemory[MODEL_STACK_MAX_SIZE];
-		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(modelStackMemory);
-		ModelStackWithAutoParam* modelStackWithParam =
-		    modelStack->getUnpatchedAutoParamFromId(params::UNPATCHED_MB_COMPRESSOR_VIBE);
-		modelStackWithParam->autoParam->setCurrentValueInResponseToUserInput(value, modelStackWithParam);
-	}
-
-	ParamDescriptor getLearningThing() override {
-		ParamDescriptor paramDescriptor;
-		paramDescriptor.setToHaveParamOnly(params::UNPATCHED_MB_COMPRESSOR_VIBE + params::UNPATCHED_START);
-		return paramDescriptor;
-	}
-
-	void unlearnAction() final { MenuItemWithCCLearning::unlearnAction(); }
-	bool allowsLearnMode() final { return MenuItemWithCCLearning::allowsLearnMode(); }
-	void learnKnob(MIDICable* cable, int32_t whichKnob, int32_t modKnobMode, int32_t midiChannel) final {
-		MenuItemWithCCLearning::learnKnob(cable, whichKnob, modKnobMode, midiChannel);
-	}
-
-	[[nodiscard]] int32_t getMaxValue() const override { return kHighResSteps; }
-	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
-	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
-
-	// Scale 0-1024 to 0-50 for display (matches gold knob popup range)
-	// 1 decimal place since we have finer internal resolution
-	[[nodiscard]] float getDisplayValue() override { return (this->getValue() * 50.0f) / kHighResSteps; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
 		       && modControllable->multibandCompressor.isEnabled();
 	}
 
+	// Override to add secret menu for twist phase adjustment
 	void selectEncoderAction(int32_t offset) override {
-		DecimalWithoutScrolling::selectEncoderAction(velocity_.getScaledOffset(offset));
-	}
-
-	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
-		renderZoneInHorizontalMenu(slot, this->getValue(), kHighResSteps, 8, getZoneName);
-	}
-
-protected:
-	void drawPixelsForOled() override { drawZoneForOled(this->getValue(), kHighResSteps, 8, getZoneName); }
-
-private:
-	static const char* getZoneName(int32_t zoneIndex) {
-		switch (zoneIndex) {
-		case 0:
-			return "Sync";
-		case 1:
-			return "Spread";
-		case 2:
-			return "Pairs";
-		case 3:
-			return "Cascade";
-		case 4:
-			return "Invert";
-		case 5:
-			return "Pulse";
-		case 6:
-			return "Drift";
-		case 7:
-			return "Chaos";
-		default:
-			return "?";
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust vibeTwistPhase (unbounded, wraps via fmod in DSP)
+			Buttons::selectButtonPressUsedUp = true;
+			auto& comp = soundEditor.currentModControllable->multibandCompressor;
+			float phase = comp.getVibeTwistPhase();
+			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			comp.setVibeTwistPhase(phase);
+			// Show current value on display
+			char buffer[12];
+			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
+			display->displayPopup(buffer);
+			suppressNotification_ = true;
+		}
+		else {
+			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
 		}
 	}
 
-	mutable VelocityEncoder velocity_;
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
+private:
+	mutable bool suppressNotification_ = false;
 };
 
 /// Global output gain control
@@ -799,14 +697,14 @@ public:
 	}
 };
 
-/// Mode zone control - first item in DOTT menu
-/// 9 zones: Off, AP 6dB, Quirky, Twisted, Weird, LR2 Fast, LR2, LR4 Fast, LR4
-/// One encoder click per zone, ordered by CPU cost (cheapest to most expensive CW)
+/// Mode selector - first item in DOTT menu
+/// 11 modes: Off, AP 6dB, Quirky, Twisted, Weird, LR2 Fast, LR2, LR4 Fast, LR4, Inverted, Twist3
+/// One encoder click per mode, ordered by CPU cost (cheapest to most expensive CW)
 class ModeZone final : public DecimalWithoutScrolling {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
 
-	static constexpr int32_t kNumModes = 9;
+	static constexpr int32_t kNumModes = 11;
 
 	void readCurrentValue() override {
 		auto& comp = soundEditor.currentModControllable->multibandCompressor;
@@ -814,66 +712,69 @@ public:
 			this->setValue(0); // Off
 		}
 		else {
-			// Crossover types are already ordered by cost: 0=AP1, 1=AP2, 2=AP3, 3=LR2
-			// Zone = crossover type + 1 (zone 0 is Off)
 			this->setValue(comp.getCrossoverType() + 1);
 		}
 	}
 
 	void writeCurrentValue() override {
 		auto& comp = soundEditor.currentModControllable->multibandCompressor;
-		int32_t zone = this->getValue();
+		int32_t mode = this->getValue();
 
-		if (zone == 0) {
-			// Off
+		if (mode == 0) {
 			comp.setEnabledZone(0);
 		}
 		else {
-			// Enable and set crossover type (zone - 1)
 			comp.setEnabledZone(ONE_Q31);
-			comp.setCrossoverType(zone - 1);
+			comp.setCrossoverType(mode - 1);
 		}
 	}
 
-	[[nodiscard]] int32_t getMaxValue() const override { return kNumModes - 1; } // 0-4
+	[[nodiscard]] int32_t getMaxValue() const override { return kNumModes - 1; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
-	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
 	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
 	}
 
+	// Display mode name as text (not zone knob visualization)
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
-		// For discrete zones, value IS the zone index. Pass numZones as maxValue so stepsPerZone=1
-		renderZoneInHorizontalMenu(slot, this->getValue(), kNumModes, kNumModes, getZoneName);
+		deluge::hid::display::OLED::main.drawStringCentered(getModeName(this->getValue()), slot.start_x, slot.start_y,
+		                                                    kTextSmallSpacingX, kTextSmallSizeY, slot.width);
 	}
 
 protected:
-	void drawPixelsForOled() override { drawZoneForOled(this->getValue(), kNumModes, kNumModes, getZoneName); }
+	void drawPixelsForOled() override {
+		deluge::hid::display::OLED::main.drawStringCentered(getModeName(this->getValue()), 0,
+		                                                    OLED_MAIN_TOPMOST_PIXEL + 20, kTextSpacingX, kTextSpacingY,
+		                                                    OLED_MAIN_WIDTH_PIXELS);
+	}
 
 private:
-	static const char* getZoneName(int32_t zoneIndex) {
-		// Ordered by CPU cost (cheapest first)
-		switch (zoneIndex) {
+	static const char* getModeName(int32_t modeIndex) {
+		switch (modeIndex) {
 		case 0:
 			return "Off";
 		case 1:
-			return "AP 6dB"; // Allpass 1st order - cheapest (2 ops/ch)
+			return "AP 6dB";
 		case 2:
-			return "Quirky"; // Allpass 2nd order - creative/experimental (4 ops/ch)
+			return "Quirky";
 		case 3:
-			return "Twisted"; // Mixed coefficients - creative/experimental (4 ops/ch)
+			return "Twisted";
 		case 4:
-			return "Weird"; // Allpass 3rd order - creative/experimental (6 ops/ch)
+			return "Weird";
 		case 5:
-			return "LR2 Fast"; // LR2 without phase comp (4 ops/ch)
+			return "LR2 Fast";
 		case 6:
-			return "LR2"; // LR2 with phase compensation (6 ops/ch)
+			return "LR2";
 		case 7:
-			return "LR4 Fast"; // LR4 without phase comp (8 ops/ch)
+			return "LR4 Fast";
 		case 8:
-			return "LR4"; // LR4 with phase compensation (12 ops/ch)
+			return "LR4";
+		case 9:
+			return "Inverted";
+		case 10:
+			return "Twist3";
 		default:
 			return "?";
 		}
