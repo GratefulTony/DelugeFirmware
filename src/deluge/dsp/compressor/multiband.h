@@ -41,6 +41,97 @@
 
 namespace deluge::dsp {
 
+// ============================================================================
+// Pre-shifted Gain for Efficient Fixed-Point Multiplication
+// ============================================================================
+// Represents gains 0.03x to 32x without float conversion in the audio loop.
+// gain = mantissa * 2^shift where mantissa is q31 (0.5 to 1.0 range)
+
+/// Pre-shifted gain representation for efficient fixed-point multiplication
+struct ShiftedGain {
+	q31_t mantissa; ///< Q31 mantissa, always in range [ONE_Q31/2, ONE_Q31) for normalized values
+	int8_t shift;   ///< Power of 2 multiplier: final_gain = mantissa * 2^shift
+};
+
+/// Convert float gain to pre-shifted fixed-point representation
+/// @param gain Float gain (0.03 to 32.0 typical range)
+/// @return ShiftedGain with mantissa in [0.5, 1.0) and appropriate shift
+[[gnu::always_inline]] inline ShiftedGain floatToShiftedGain(float gain) {
+	if (gain <= 0.0f) {
+		return {0, 0};
+	}
+
+	// Find shift such that gain / 2^shift is in [0.5, 1.0)
+	// shift = floor(log2(gain)) + 1
+	// For gain=4.0: shift=3, mantissa=0.5
+	// For gain=0.25: shift=-1, mantissa=0.5
+	// For gain=1.0: shift=1, mantissa=0.5
+
+	int8_t shift = 0;
+	float normalized = gain;
+
+	// Scale down if >= 1.0
+	while (normalized >= 1.0f && shift < 6) {
+		normalized *= 0.5f;
+		shift++;
+	}
+	// Scale up if < 0.5
+	while (normalized < 0.5f && shift > -5) {
+		normalized *= 2.0f;
+		shift--;
+	}
+
+	// Convert normalized (0.5 to 1.0) to q31
+	q31_t mantissa = static_cast<q31_t>(normalized * static_cast<float>(ONE_Q31));
+	return {mantissa, shift};
+}
+
+/// Apply pre-shifted gain to a q31 sample with saturation
+/// @param sample Input sample in q31
+/// @param gain Pre-shifted gain from floatToShiftedGain
+/// @return Gained sample, saturated to q31 range
+[[gnu::always_inline]] inline q31_t applyShiftedGain(q31_t sample, ShiftedGain gain) {
+	// Multiply by mantissa (result fits in q31 since mantissa < 1.0)
+	q31_t scaled = multiply_32x32_rshift32(sample, gain.mantissa) << 1;
+
+	// Apply shift with saturation
+	if (gain.shift > 0) {
+		return lshiftAndSaturateUnknown(scaled, static_cast<uint8_t>(gain.shift));
+	}
+	else if (gain.shift < 0) {
+		return scaled >> (-gain.shift);
+	}
+	return scaled;
+}
+
+// ============================================================================
+// NEON-Vectorized Gain Application (4 samples in parallel)
+// ============================================================================
+
+/// Apply pre-shifted gain to 4 q31 samples using NEON SIMD
+/// @param samples 4 input samples as NEON vector
+/// @param mantissa Mantissa broadcast to all lanes
+/// @param shift Shift amount (same for all samples)
+/// @return 4 gained samples, saturated to q31 range
+[[gnu::always_inline]] inline int32x4_t applyShiftedGainNeon(int32x4_t samples, int32x4_t mantissa, int8_t shift) {
+	// vqdmulhq_s32: saturating doubling multiply high - perfect for q31 × q31
+	// Result is already doubled (the 'q' in vqdmulh), equivalent to multiply_32x32_rshift32 << 1
+	int32x4_t scaled = vqdmulhq_s32(samples, mantissa);
+
+	// Apply shift with saturation
+	if (shift > 0) {
+		// Left shift with saturation using vqshlq_s32
+		int32x4_t shiftVec = vdupq_n_s32(shift);
+		return vqshlq_s32(scaled, shiftVec);
+	}
+	else if (shift < 0) {
+		// Right shift (no saturation needed)
+		int32x4_t shiftVec = vdupq_n_s32(shift); // Negative value = right shift
+		return vshlq_s32(scaled, shiftVec);
+	}
+	return scaled;
+}
+
 /// A single-band compressor with both upward and downward compression (OTT-style).
 /// Designed to be used as part of a multiband compressor.
 class BandCompressor {
@@ -276,18 +367,15 @@ public:
 	/// @param bufferL Left channel samples
 	/// @param bufferR Right channel samples
 	/// @param numSamples Number of samples in each buffer
-	/// @param response 0.0 = tight (~2ms, catches transients), 1.0 = punchy (~145ms, lets transients through)
-	/// @param maxStride Maximum stride for this band (computed from crossover frequency Nyquist)
-	/// Optimized: response-based stride and alpha are matched for consistent behavior
-	void updateLevel(const q31_t* bufferL, const q31_t* bufferR, size_t numSamples, float response,
-	                 size_t maxStride = 32) {
+	/// @param stride Pre-computed stride for peak detection
+	/// @param alpha Pre-computed IIR alpha (hoisted from response calculation)
+	/// @param oneMinusAlpha Pre-computed (1-alpha)
+	/// Optimized: alpha hoisted out of audio loop, computed only when response changes
+	void updateLevel(const q31_t* bufferL, const q31_t* bufferR, size_t numSamples, size_t stride, float alpha,
+	                 float oneMinusAlpha) {
 		q31_t peak = 0;
 
-		// Response-based downsampling: tight needs fine resolution, punchy doesn't
-		// stride = 2 (tight) to 32 (punchy) - matched to alpha for consistent behavior
-		// At 44.1kHz: stride 2 = 0.045ms resolution, stride 32 = 0.73ms resolution
-		// maxStride is pre-computed based on band's max frequency (Nyquist limit)
-		const size_t stride = std::min(2 + static_cast<size_t>(response * 30.0f), maxStride);
+		// Peak detection with pre-computed stride
 		for (size_t i = 0; i < numSamples; i += stride) {
 			q31_t L = bufferL[i];
 			q31_t R = bufferR[i];
@@ -297,12 +385,9 @@ public:
 			peak = (s > peak) ? s : peak;
 		}
 
-		// IIR smoothing with extended range for musical variety
-		// alpha = 0.60 (tight, ~2ms τ) to 0.02 (punchy, ~145ms τ)
-		// At 128 samples/buffer (~2.9ms): τ = -2.9ms / ln(1-α)
+		// Float IIR smoothing with pre-computed alpha: level = level * (1-alpha) + peak * alpha
 		float peakF = static_cast<float>(peak);
-		float alpha = 0.60f - response * 0.58f;
-		level_ = level_ * (1.0f - alpha) + peakF * alpha;
+		level_ = level_ * oneMinusAlpha + peakF * alpha;
 
 		// Convert to log domain for threshold comparison (used by calculateGain)
 		rms_ = fastLog(std::max(level_, 1.0f));
@@ -672,6 +757,9 @@ public:
 		default:
 			skewOffset_[0] = skewOffset_[1] = skewOffset_[2] = 0.0f;
 		}
+
+		// Update pre-computed envelope alpha values
+		updateEnvelopeAlpha();
 	}
 
 	/// Get character knob value
@@ -960,9 +1048,9 @@ public:
 			return;
 		}
 
-		// Crossover type names for benchmarking
-		static const char* kXoverNames[] = {"ap1_6dB", "ap2_12dB", "ap3_18dB", "lr2_12dB"};
-		const char* xoverTag = kXoverNames[crossoverType_ < 4 ? crossoverType_ : 0];
+		// Crossover type names for benchmarking (must match crossoverType_ 0-4)
+		static const char* kXoverNames[] = {"ap1_6dB", "ap2_12dB", "ap3_18dB", "lr2_fast", "lr2_full"};
+		const char* xoverTag = kXoverNames[crossoverType_ < 5 ? crossoverType_ : 0];
 
 		FX_BENCH_DECLARE(benchTotal, "multiband", "total");
 		FX_BENCH_DECLARE(benchXover, "multiband", "crossover");
@@ -1066,13 +1154,16 @@ public:
 		constexpr float kThresholdRefdB = 21.49f;
 
 		// Process each band - envelope detection
-		// updateLevel now combines L+R inline, stride varies by band to prevent undersampling
+		// updateLevel uses pre-computed alpha (fixed-point) and stride varies by band
 		// maxStridePerBand_ is computed from crossover frequencies (updated in setLow/HighCrossover)
 		std::array<float, kNumBands> bandGains;
 		for (size_t b = 0; b < kNumBands; ++b) {
-			// Calculate level for the band (L+R combined inline, stride varies by band)
-			bands_[b].updateLevel(bandBufferL[b].data(), bandBufferR[b].data(), buffer.size(), response_,
-			                      maxStridePerBand_[b]);
+			// Compute stride: 2 (tight) to 32 (punchy), clamped by band's Nyquist limit
+			size_t stride = std::min(2 + static_cast<size_t>(response_ * 30.0f), maxStridePerBand_[b]);
+
+			// Calculate level using float IIR with pre-computed alpha (hoisted from response calc)
+			bands_[b].updateLevel(bandBufferL[b].data(), bandBufferR[b].data(), buffer.size(), stride, alpha_,
+			                      oneMinusAlpha_);
 
 			// Calculate compression gain
 			// Use character-derived knee and add per-band skew offset to global skew
@@ -1088,92 +1179,176 @@ public:
 		// This combines compression gain, per-band output level, stereo width, and output gain
 		// into a single pass over the data, reducing memory bandwidth
 
-		// Pre-compute combined gain = compression gain * output level (as float)
-		// Using float avoids fixed-point overflow issues at high gains
-		std::array<float, kNumBands> bandCombinedGain;
+		// Pre-compute combined gain as ShiftedGain for efficient fixed-point math
+		// This eliminates all float conversions from the inner loop
+		std::array<ShiftedGain, kNumBands> bandCombinedGain;
 		for (size_t b = 0; b < kNumBands; ++b) {
-			bandCombinedGain[b] = bandGains[b] * bands_[b].getOutputLevelLinear();
+			float combinedFloat = bandGains[b] * bands_[b].getOutputLevelLinear();
+			bandCombinedGain[b] = floatToShiftedGain(combinedFloat);
 		}
+		ShiftedGain outputGainShifted = floatToShiftedGain(outputGain_);
 
 		// Pre-compute stereo width as fixed-point for mid/high bands (bass is always mono)
 		// Width is 0-1 range, no overflow risk
 		q31_t widthFixed = static_cast<q31_t>(width_ * ONE_Q31f);
 
-		int64_t truePeak = 0;                              // Track true peak before clamping for accurate metering
+		q31_t peakThisBuffer = 0;                          // Track peak for metering
 		std::array<q31_t, kNumBands> bandPeakThisBuffer{}; // Per-band peak tracking (post-level)
 		const bool doMetering = meteringEnabled_;
 
-		for (size_t i = 0; i < buffer.size(); ++i) {
-			// Use 64-bit accumulator to prevent overflow when summing high-gain bands
-			int64_t sumL = 0, sumR = 0;
+		// Pre-broadcast mantissa values for NEON (4-sample parallel processing)
+		int32x4_t mantissa0 = vdupq_n_s32(bandCombinedGain[0].mantissa);
+		int32x4_t mantissa1 = vdupq_n_s32(bandCombinedGain[1].mantissa);
+		int32x4_t mantissa2 = vdupq_n_s32(bandCombinedGain[2].mantissa);
+		int32x4_t mantissaOut = vdupq_n_s32(outputGainShifted.mantissa);
+		int32x4_t widthVec = vdupq_n_s32(widthFixed);
 
-			// Band 0 (bass): Always mono - skip M/S processing entirely
-			{
-				q31_t L = bandBufferL[0][i];
-				q31_t R = bandBufferR[0][i];
-				q31_t mono = (L >> 1) + (R >> 1); // Sum to mono
-				int64_t scaled = static_cast<int64_t>(static_cast<float>(mono) * bandCombinedGain[0]);
-				sumL += scaled;
-				sumR += scaled;
+		// NEON peak tracking vectors (reduced to scalar at end)
+		int32x4_t peakVec = vdupq_n_s32(0);
+		int32x4_t bandPeakVec0 = vdupq_n_s32(0);
+		int32x4_t bandPeakVec1 = vdupq_n_s32(0);
+		int32x4_t bandPeakVec2 = vdupq_n_s32(0);
 
-				if (doMetering) {
-					q31_t peak = static_cast<q31_t>(std::abs(scaled));
-					bandPeakThisBuffer[0] = std::max(bandPeakThisBuffer[0], peak);
-				}
-			}
+		const size_t numSamples = buffer.size();
+		const size_t vectorLen = numSamples & ~3; // Round down to multiple of 4
 
-			// Bands 1-2 (mid/high): Apply stereo width via M/S processing
-			for (size_t b = 1; b < kNumBands; ++b) {
-				q31_t L = bandBufferL[b][i];
-				q31_t R = bandBufferR[b][i];
+		// Main NEON loop - process 4 samples at a time
+		for (size_t i = 0; i < vectorLen; i += 4) {
+			// === Band 0 (bass): mono ===
+			int32x4_t L0 = vld1q_s32(&bandBufferL[0][i]);
+			int32x4_t R0 = vld1q_s32(&bandBufferR[0][i]);
+			int32x4_t mono0 = vhaddq_s32(L0, R0); // Halving add = (L+R)/2
+			int32x4_t scaled0 = applyShiftedGainNeon(mono0, mantissa0, bandCombinedGain[0].shift);
 
-				// M/S encoding: M = (L+R)/2, S = (L-R)/2
-				// Width scaling: S_out = S * width
-				// Decoding: L_out = M + S_out, R_out = M - S_out
-				q31_t mid = (L >> 1) + (R >> 1);
-				q31_t side = (L >> 1) - (R >> 1);
-				q31_t sideScaled = multiply_32x32_rshift32(side, widthFixed);
-				L = mid + sideScaled;
-				R = mid - sideScaled;
+			int32x4_t sumL = scaled0;
+			int32x4_t sumR = scaled0;
 
-				// Apply combined gain using float
-				int64_t scaledL = static_cast<int64_t>(static_cast<float>(L) * bandCombinedGain[b]);
-				int64_t scaledR = static_cast<int64_t>(static_cast<float>(R) * bandCombinedGain[b]);
-				sumL += scaledL;
-				sumR += scaledR;
-
-				// Track per-band peak only if metering is enabled
-				if (doMetering) {
-					q31_t absL = static_cast<q31_t>(std::abs(scaledL));
-					q31_t absR = static_cast<q31_t>(std::abs(scaledR));
-					bandPeakThisBuffer[b] = std::max(bandPeakThisBuffer[b], std::max(absL, absR));
-				}
-			}
-
-			// Saturate band sum to q31_t range
-			q31_t sumL_sat =
-			    static_cast<q31_t>(std::clamp(sumL, static_cast<int64_t>(INT32_MIN), static_cast<int64_t>(INT32_MAX)));
-			q31_t sumR_sat =
-			    static_cast<q31_t>(std::clamp(sumR, static_cast<int64_t>(INT32_MIN), static_cast<int64_t>(INT32_MAX)));
-
-			// Apply output gain using float, clamp to prevent overflow
-			int64_t outL64 = static_cast<int64_t>(static_cast<float>(sumL_sat) * outputGain_);
-			int64_t outR64 = static_cast<int64_t>(static_cast<float>(sumR_sat) * outputGain_);
-			q31_t outL = static_cast<q31_t>(
-			    std::clamp(outL64, static_cast<int64_t>(INT32_MIN), static_cast<int64_t>(INT32_MAX)));
-			q31_t outR = static_cast<q31_t>(
-			    std::clamp(outR64, static_cast<int64_t>(INT32_MIN), static_cast<int64_t>(INT32_MAX)));
-
-			// Track true peak (only if metering enabled)
 			if (doMetering) {
-				q31_t absL = (outL < 0) ? -outL : outL;
-				q31_t absR = (outR < 0) ? -outR : outR;
-				truePeak = std::max(truePeak, static_cast<int64_t>(std::max(absL, absR)));
+				bandPeakVec0 = vmaxq_s32(bandPeakVec0, vabsq_s32(scaled0));
 			}
 
-			// Apply DC-blocking high-pass filter (removes DC offset from saturation)
+			// === Band 1 (mid): M/S with width ===
+			int32x4_t L1 = vld1q_s32(&bandBufferL[1][i]);
+			int32x4_t R1 = vld1q_s32(&bandBufferR[1][i]);
+			int32x4_t mid1 = vhaddq_s32(L1, R1);
+			int32x4_t side1 = vhsubq_s32(L1, R1);
+			int32x4_t sideScaled1 = vqdmulhq_s32(side1, widthVec);
+			int32x4_t msL1 = vaddq_s32(mid1, sideScaled1);
+			int32x4_t msR1 = vsubq_s32(mid1, sideScaled1);
+			int32x4_t scaledL1 = applyShiftedGainNeon(msL1, mantissa1, bandCombinedGain[1].shift);
+			int32x4_t scaledR1 = applyShiftedGainNeon(msR1, mantissa1, bandCombinedGain[1].shift);
+			sumL = vqaddq_s32(sumL, scaledL1);
+			sumR = vqaddq_s32(sumR, scaledR1);
+
+			if (doMetering) {
+				bandPeakVec1 = vmaxq_s32(bandPeakVec1, vmaxq_s32(vabsq_s32(scaledL1), vabsq_s32(scaledR1)));
+			}
+
+			// === Band 2 (high): M/S with width ===
+			int32x4_t L2 = vld1q_s32(&bandBufferL[2][i]);
+			int32x4_t R2 = vld1q_s32(&bandBufferR[2][i]);
+			int32x4_t mid2 = vhaddq_s32(L2, R2);
+			int32x4_t side2 = vhsubq_s32(L2, R2);
+			int32x4_t sideScaled2 = vqdmulhq_s32(side2, widthVec);
+			int32x4_t msL2 = vaddq_s32(mid2, sideScaled2);
+			int32x4_t msR2 = vsubq_s32(mid2, sideScaled2);
+			int32x4_t scaledL2 = applyShiftedGainNeon(msL2, mantissa2, bandCombinedGain[2].shift);
+			int32x4_t scaledR2 = applyShiftedGainNeon(msR2, mantissa2, bandCombinedGain[2].shift);
+			sumL = vqaddq_s32(sumL, scaledL2);
+			sumR = vqaddq_s32(sumR, scaledR2);
+
+			if (doMetering) {
+				bandPeakVec2 = vmaxq_s32(bandPeakVec2, vmaxq_s32(vabsq_s32(scaledL2), vabsq_s32(scaledR2)));
+			}
+
+			// === Output gain ===
+			int32x4_t outLVec = applyShiftedGainNeon(sumL, mantissaOut, outputGainShifted.shift);
+			int32x4_t outRVec = applyShiftedGainNeon(sumR, mantissaOut, outputGainShifted.shift);
+
+			if (doMetering) {
+				peakVec = vmaxq_s32(peakVec, vmaxq_s32(vabsq_s32(outLVec), vabsq_s32(outRVec)));
+			}
+
+			// Extract lanes and apply DC block (scalar - has state dependency)
+			q31_t out0L = vgetq_lane_s32(outLVec, 0);
+			q31_t out0R = vgetq_lane_s32(outRVec, 0);
+			buffer[i + 0].l = out0L - dcBlockL_.doFilter(out0L, kDCBlockCoeff);
+			buffer[i + 0].r = out0R - dcBlockR_.doFilter(out0R, kDCBlockCoeff);
+
+			q31_t out1L = vgetq_lane_s32(outLVec, 1);
+			q31_t out1R = vgetq_lane_s32(outRVec, 1);
+			buffer[i + 1].l = out1L - dcBlockL_.doFilter(out1L, kDCBlockCoeff);
+			buffer[i + 1].r = out1R - dcBlockR_.doFilter(out1R, kDCBlockCoeff);
+
+			q31_t out2L = vgetq_lane_s32(outLVec, 2);
+			q31_t out2R = vgetq_lane_s32(outRVec, 2);
+			buffer[i + 2].l = out2L - dcBlockL_.doFilter(out2L, kDCBlockCoeff);
+			buffer[i + 2].r = out2R - dcBlockR_.doFilter(out2R, kDCBlockCoeff);
+
+			q31_t out3L = vgetq_lane_s32(outLVec, 3);
+			q31_t out3R = vgetq_lane_s32(outRVec, 3);
+			buffer[i + 3].l = out3L - dcBlockL_.doFilter(out3L, kDCBlockCoeff);
+			buffer[i + 3].r = out3R - dcBlockR_.doFilter(out3R, kDCBlockCoeff);
+		}
+
+		// Handle remainder samples with scalar fallback (0-3 samples)
+		for (size_t i = vectorLen; i < numSamples; ++i) {
+			q31_t sumL = 0, sumR = 0;
+
+			// Band 0 (bass): mono
+			q31_t mono0 = (bandBufferL[0][i] >> 1) + (bandBufferR[0][i] >> 1);
+			q31_t scaled0 = applyShiftedGain(mono0, bandCombinedGain[0]);
+			sumL = add_saturate(sumL, scaled0);
+			sumR = add_saturate(sumR, scaled0);
+
+			// Band 1 (mid): M/S with width
+			q31_t mid1 = (bandBufferL[1][i] >> 1) + (bandBufferR[1][i] >> 1);
+			q31_t side1 = (bandBufferL[1][i] >> 1) - (bandBufferR[1][i] >> 1);
+			q31_t sideScaled1 = multiply_32x32_rshift32(side1, widthFixed);
+			q31_t scaledL1 = applyShiftedGain(mid1 + sideScaled1, bandCombinedGain[1]);
+			q31_t scaledR1 = applyShiftedGain(mid1 - sideScaled1, bandCombinedGain[1]);
+			sumL = add_saturate(sumL, scaledL1);
+			sumR = add_saturate(sumR, scaledR1);
+
+			// Band 2 (high): M/S with width
+			q31_t mid2 = (bandBufferL[2][i] >> 1) + (bandBufferR[2][i] >> 1);
+			q31_t side2 = (bandBufferL[2][i] >> 1) - (bandBufferR[2][i] >> 1);
+			q31_t sideScaled2 = multiply_32x32_rshift32(side2, widthFixed);
+			q31_t scaledL2 = applyShiftedGain(mid2 + sideScaled2, bandCombinedGain[2]);
+			q31_t scaledR2 = applyShiftedGain(mid2 - sideScaled2, bandCombinedGain[2]);
+			sumL = add_saturate(sumL, scaledL2);
+			sumR = add_saturate(sumR, scaledR2);
+
+			// Output gain
+			q31_t outL = applyShiftedGain(sumL, outputGainShifted);
+			q31_t outR = applyShiftedGain(sumR, outputGainShifted);
+
+			// DC block
 			buffer[i].l = outL - dcBlockL_.doFilter(outL, kDCBlockCoeff);
 			buffer[i].r = outR - dcBlockR_.doFilter(outR, kDCBlockCoeff);
+		}
+
+		// Reduce NEON peak vectors to scalars (ARMv7 horizontal max)
+		if (doMetering) {
+			// peakThisBuffer = horizontal max of peakVec
+			int32x2_t peak2 = vmax_s32(vget_low_s32(peakVec), vget_high_s32(peakVec));
+			peak2 = vpmax_s32(peak2, peak2);
+			peakThisBuffer = vget_lane_s32(peak2, 0);
+
+			// bandPeakThisBuffer[0]
+			int32x2_t bp0 = vmax_s32(vget_low_s32(bandPeakVec0), vget_high_s32(bandPeakVec0));
+			bp0 = vpmax_s32(bp0, bp0);
+			bandPeakThisBuffer[0] = vget_lane_s32(bp0, 0);
+
+			// bandPeakThisBuffer[1]
+			int32x2_t bp1 = vmax_s32(vget_low_s32(bandPeakVec1), vget_high_s32(bandPeakVec1));
+			bp1 = vpmax_s32(bp1, bp1);
+			bandPeakThisBuffer[1] = vget_lane_s32(bp1, 0);
+
+			// bandPeakThisBuffer[2]
+			int32x2_t bp2 = vmax_s32(vget_low_s32(bandPeakVec2), vget_high_s32(bandPeakVec2));
+			bp2 = vpmax_s32(bp2, bp2);
+			bandPeakThisBuffer[2] = vget_lane_s32(bp2, 0);
 		}
 
 		// Metering calculations - only run when analyzer is enabled
@@ -1184,9 +1359,8 @@ public:
 				bandOutputPeak_[b] = std::max(bandPeakThisBuffer[b], static_cast<q31_t>(bandOutputPeak_[b] * 0.95f));
 			}
 
-			// Track output level using true peak (before clamping) for accurate metering
-			q31_t bufferPeak = (truePeak > INT32_MAX) ? INT32_MAX : static_cast<q31_t>(truePeak);
-			outputPeak_ = std::max(bufferPeak, static_cast<q31_t>(outputPeak_ * 0.95f));
+			// Track output level using peak from this buffer
+			outputPeak_ = std::max(peakThisBuffer, static_cast<q31_t>(outputPeak_ * 0.95f));
 
 			// Increment refresh counter - only do expensive calculations on refresh frames
 			if (++meterRefreshCounter_ >= kMeterRefreshBuffers) {
@@ -1354,6 +1528,14 @@ public:
 	}
 
 private:
+	/// Update pre-computed envelope alpha values from response_
+	/// Called when response_ changes (in setCharacter)
+	void updateEnvelopeAlpha() {
+		// alpha = 0.60 - response * 0.58, range [0.02, 0.60]
+		alpha_ = 0.60f - response_ * 0.58f;
+		oneMinusAlpha_ = 1.0f - alpha_;
+	}
+
 	// Crossover filters - ordered by CPU cost (cheapest to most expensive)
 	// Type 0: AllpassCrossoverLR1 - 6dB/oct (2 ops/ch), cheapest, default
 	// Type 1: AllpassCrossoverLR2 - 12dB/oct (4 ops/ch)
@@ -1385,6 +1567,10 @@ private:
 
 	// Response - controlled by Feel zone, not a separate knob
 	float response_ = 0.5f; // 0=smooth/MAV, 1=punchy/peak
+
+	// Pre-computed envelope alpha values (updated when response_ changes)
+	float alpha_ = 0.31f; // 0.60 - response * 0.58
+	float oneMinusAlpha_ = 0.69f;
 
 	// Vibe knob - controls phase relationships between oscillations in Feel
 	q31_t vibeKnob_ = 0;                                             // Default 0 (Sync zone start)

@@ -67,29 +67,63 @@ public:
 	[[nodiscard]] float getLowCrossoverHz() const { return lowCrossoverHz_; }
 	[[nodiscard]] float getHighCrossoverHz() const { return highCrossoverHz_; }
 
-	/// Process a stereo sample pair
+	/// Process a stereo sample pair using NEON (parallel L/R processing)
 	[[gnu::always_inline]] inline void processStereo(q31_t inputL, q31_t inputR, Bands& outL, Bands& outR) {
-		outL = process(inputL, stateL_);
-		outR = process(inputR, stateR_);
+		// Pack L/R into NEON vector
+		int32x2_t input = {inputL, inputR};
+
+		// === Low crossover: split into LOW and REST ===
+		// LR2 lowpass = cascade of two first-order lowpasses
+		int32x2_t lp1 = stereoState_.lpLow1.doFilter(input, lowCoeff_);
+		int32x2_t lowRaw = stereoState_.lpLow2.doFilter(lp1, lowCoeff_);
+
+		// LR2 highpass = input - LR2_lowpass
+		int32x2_t rest = vsub_s32(input, lowRaw);
+
+		// === High crossover: split REST into MID and HIGH ===
+		int32x2_t lp3 = stereoState_.lpHigh1.doFilter(rest, highCoeff_);
+		int32x2_t mid = stereoState_.lpHigh2.doFilter(lp3, highCoeff_);
+
+		// Highpass of REST
+		int32x2_t high = vsub_s32(rest, mid);
+
+		// === Phase compensation for LOW band (conditional) ===
+		int32x2_t low;
+		if constexpr (PHASE_COMPENSATED) {
+			int32x2_t lowComp1 = stereoState_.apComp1.doAPF(lowRaw, highCoeff_);
+			low = stereoState_.apComp2.doAPF(lowComp1, highCoeff_);
+		}
+		else {
+			low = lowRaw;
+		}
+
+		// Unpack results
+		outL = {vget_lane_s32(low, 0), vget_lane_s32(mid, 0), vget_lane_s32(high, 0)};
+		outR = {vget_lane_s32(low, 1), vget_lane_s32(mid, 1), vget_lane_s32(high, 1)};
 	}
 
 	/// Reset all filter states
 	void reset() {
-		stateL_ = {};
-		stateR_ = {};
+		stereoState_.lpLow1.reset();
+		stereoState_.lpLow2.reset();
+		stereoState_.lpHigh1.reset();
+		stereoState_.lpHigh2.reset();
+		if constexpr (PHASE_COMPENSATED) {
+			stereoState_.apComp1.reset();
+			stereoState_.apComp2.reset();
+		}
 	}
 
 private:
-	/// Per-channel filter state
-	struct ChannelState {
+	/// NEON stereo filter state (processes L/R in parallel)
+	struct StereoState {
 		// Low crossover: two cascaded first-order for LR2
-		BasicFilterComponent lpLow1, lpLow2;
+		StereoFilterComponent lpLow1, lpLow2;
 		// High crossover: two cascaded first-order for LR2
-		BasicFilterComponent lpHigh1, lpHigh2;
+		StereoFilterComponent lpHigh1, lpHigh2;
 		// Phase compensation allpass for LOW band (only if PHASE_COMPENSATED)
-		// Conditionally included to save memory when not used
-		std::conditional_t<PHASE_COMPENSATED, BasicFilterComponent, char[0]> apComp1;
-		std::conditional_t<PHASE_COMPENSATED, BasicFilterComponent, char[0]> apComp2;
+		std::conditional_t<PHASE_COMPENSATED, StereoFilterComponent, char[0]> apComp1;
+		std::conditional_t<PHASE_COMPENSATED, StereoFilterComponent, char[0]> apComp2;
 	};
 
 	/// Calculate coefficient for first-order Butterworth
@@ -102,42 +136,7 @@ private:
 		return static_cast<q31_t>(coeff * ONE_Q31);
 	}
 
-	[[gnu::always_inline]] inline Bands process(q31_t input, ChannelState& state) const {
-		// === Low crossover: split into LOW and REST ===
-		// LR2 lowpass = cascade of two first-order lowpasses
-		q31_t lp1 = state.lpLow1.doFilter(input, lowCoeff_);
-		q31_t lowRaw = state.lpLow2.doFilter(lp1, lowCoeff_);
-
-		// LR2 highpass = input - LR2_lowpass
-		// Note: This gives exact reconstruction: LOW + REST = input
-		q31_t rest = input - lowRaw;
-
-		// === High crossover: split REST into MID and HIGH ===
-		q31_t lp3 = state.lpHigh1.doFilter(rest, highCoeff_);
-		q31_t mid = state.lpHigh2.doFilter(lp3, highCoeff_);
-
-		// Highpass of REST
-		q31_t high = rest - mid;
-
-		// === Phase compensation for LOW band (conditional) ===
-		q31_t low;
-		if constexpr (PHASE_COMPENSATED) {
-			// The MID+HIGH path has phase shift from the high crossover filters.
-			// Apply matching allpass to LOW so all bands stay aligned.
-			q31_t lowComp1 = state.apComp1.doAPF(lowRaw, highCoeff_);
-			low = state.apComp2.doAPF(lowComp1, highCoeff_);
-		}
-		else {
-			// Skip phase compensation for CPU efficiency.
-			// LOW has ~90° phase lead vs MID/HIGH at high crossover frequency.
-			low = lowRaw;
-		}
-
-		return {low, mid, high};
-	}
-
-	ChannelState stateL_{};
-	ChannelState stateR_{};
+	StereoState stereoState_{};
 
 	q31_t lowCoeff_ = calculateCoefficient(200.0f);
 	q31_t highCoeff_ = calculateCoefficient(2000.0f);
