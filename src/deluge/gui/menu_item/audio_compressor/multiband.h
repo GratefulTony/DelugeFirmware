@@ -27,6 +27,7 @@
 #include "gui/menu_item/value_scaling.h"
 #include "gui/menu_item/zone_based.h"
 #include "gui/ui/sound_editor.h"
+#include "hid/display/display.h"
 #include "hid/display/oled.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
 #include "model/model_stack.h"
@@ -748,6 +749,11 @@ protected:
 		deluge::hid::display::OLED::main.drawStringCentered(getModeName(this->getValue()), 0,
 		                                                    OLED_MAIN_TOPMOST_PIXEL + 20, kTextSpacingX, kTextSpacingY,
 		                                                    OLED_MAIN_WIDTH_PIXELS);
+	}
+
+	// 7-segment display: show mode name (scrolls if longer than 4 chars)
+	void drawActualValue(bool justDidHorizontalScroll = false) override {
+		display->setScrollingText(getModeName(this->getValue()));
 	}
 
 private:

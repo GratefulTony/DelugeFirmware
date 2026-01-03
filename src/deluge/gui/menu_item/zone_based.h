@@ -17,12 +17,14 @@
 #pragma once
 
 #include "dsp/zone_param.hpp" // For ZoneBasedParam
+#include "gui/menu_item/automation/automation.h"
 #include "gui/menu_item/decimal.h"
 #include "gui/menu_item/menu_item_with_cc_learning.h"
 #include "gui/menu_item/momentum_encoder.h" // VelocityEncoder and zone render helpers
 #include "gui/menu_item/source_selection/regular.h"
 #include "gui/ui/sound_editor.h"
 #include "hid/buttons.h"
+#include "hid/display/display.h"
 #include "model/model_stack.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_descriptor.h"
@@ -80,6 +82,9 @@ public:
 	/// Override to provide zone name for each index (0 to NUM_ZONES-1)
 	[[nodiscard]] virtual const char* getZoneName(int32_t zoneIndex) const = 0;
 
+	/// Override to provide 2-char abbreviation for 7-segment display (default: first 2 chars of zone name)
+	[[nodiscard]] virtual const char* getShortZoneName(int32_t zoneIndex) const { return getZoneName(zoneIndex); }
+
 	[[nodiscard]] int32_t getMaxValue() const override { return kZoneHighResSteps; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
@@ -104,6 +109,25 @@ protected:
 		                [this](int32_t z) { return this->getZoneName(z); });
 	}
 
+	// 7-segment: show zone abbreviation + position (e.g., "SY50" for Sync at 50%)
+	void drawActualValue(bool justDidHorizontalScroll = false) override {
+		int32_t zoneWidth = kZoneHighResSteps / NUM_ZONES;
+		int32_t zoneIndex = std::min(this->getValue() / zoneWidth, NUM_ZONES - 1);
+		int32_t posInZone = this->getValue() - (zoneIndex * zoneWidth);
+		int32_t posPercent = (posInZone * 99) / zoneWidth; // 0-99
+
+		const char* abbrev = getShortZoneName(zoneIndex);
+		char buffer[5];
+		// Take first 2 chars of abbreviation
+		buffer[0] = abbrev[0];
+		buffer[1] = (abbrev[1] != '\0') ? abbrev[1] : ' ';
+		// Add 2-digit position
+		buffer[2] = '0' + (posPercent / 10);
+		buffer[3] = '0' + (posPercent % 10);
+		buffer[4] = '\0';
+		display->setText(buffer);
+	}
+
 	mutable VelocityEncoder velocity_;
 };
 
@@ -116,7 +140,7 @@ protected:
  * @tparam NUM_ZONES Number of zones (typically 8)
  */
 template <params::UnpatchedShared PARAM_ID, int32_t NUM_ZONES = 8>
-class ZoneBasedUnpatchedParam : public ZoneBasedMenuItem<NUM_ZONES>, public MenuItemWithCCLearning {
+class ZoneBasedUnpatchedParam : public ZoneBasedMenuItem<NUM_ZONES>, public MenuItemWithCCLearning, public Automation {
 public:
 	using ZoneBasedMenuItem<NUM_ZONES>::ZoneBasedMenuItem;
 
@@ -137,6 +161,12 @@ public:
 		ParamDescriptor paramDescriptor;
 		paramDescriptor.setToHaveParamOnly(PARAM_ID + params::UNPATCHED_START);
 		return paramDescriptor;
+	}
+
+	// Automation interface for gold knob
+	ModelStackWithAutoParam* getModelStackWithParam(void* memory) override {
+		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(memory);
+		return modelStack->getUnpatchedAutoParamFromId(PARAM_ID);
 	}
 
 	void unlearnAction() final { MenuItemWithCCLearning::unlearnAction(); }
@@ -180,12 +210,15 @@ public:
  * @tparam NUM_ZONES Number of zones (typically 8)
  */
 template <params::Local PARAM_ID, int32_t NUM_ZONES = 8>
-class ZoneBasedPatchedParam : public DecimalWithoutScrolling, public MenuItemWithCCLearning {
+class ZoneBasedPatchedParam : public DecimalWithoutScrolling, public MenuItemWithCCLearning, public Automation {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
 
 	/// Override to provide zone name for each index (0 to NUM_ZONES-1)
 	[[nodiscard]] virtual const char* getZoneName(int32_t zoneIndex) const = 0;
+
+	/// Override to provide 2-char abbreviation for 7-segment display (default: first 2 chars of zone name)
+	[[nodiscard]] virtual const char* getShortZoneName(int32_t zoneIndex) const { return getZoneName(zoneIndex); }
 
 	/// Override to get the field value from the sound (q31_t, 0 to ONE_Q31)
 	[[nodiscard]] virtual q31_t getFieldValue() const = 0;
@@ -233,6 +266,12 @@ public:
 		return deluge::modulation::params::Kind::PATCHED;
 	}
 
+	// Automation interface for gold knob (returns patched param for modulation automation)
+	ModelStackWithAutoParam* getModelStackWithParam(void* memory) override {
+		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(memory);
+		return modelStack->getPatchedAutoParamFromId(PARAM_ID);
+	}
+
 	// Read from sound field (not patched param)
 	void readCurrentValue() override { this->setValue(zoneParamToMenuValue(getFieldValue())); }
 
@@ -249,6 +288,25 @@ protected:
 	void drawPixelsForOled() override {
 		drawZoneForOled(this->getValue(), kZoneHighResSteps, NUM_ZONES,
 		                [this](int32_t z) { return this->getZoneName(z); });
+	}
+
+	// 7-segment: show zone abbreviation + position (e.g., "SY50" for Sync at 50%)
+	void drawActualValue(bool justDidHorizontalScroll = false) override {
+		int32_t zoneWidth = kZoneHighResSteps / NUM_ZONES;
+		int32_t zoneIndex = std::min(this->getValue() / zoneWidth, NUM_ZONES - 1);
+		int32_t posInZone = this->getValue() - (zoneIndex * zoneWidth);
+		int32_t posPercent = (posInZone * 99) / zoneWidth; // 0-99
+
+		const char* abbrev = getShortZoneName(zoneIndex);
+		char buffer[5];
+		// Take first 2 chars of abbreviation
+		buffer[0] = abbrev[0];
+		buffer[1] = (abbrev[1] != '\0') ? abbrev[1] : ' ';
+		// Add 2-digit position
+		buffer[2] = '0' + (posPercent / 10);
+		buffer[3] = '0' + (posPercent % 10);
+		buffer[4] = '\0';
+		display->setText(buffer);
 	}
 
 	mutable VelocityEncoder velocity_;
