@@ -80,8 +80,8 @@ print(df.groupby(['fx', 'tags'])['cycles'].mean())
 | Effect | Benchmark Name | Dynamic Tags | Location |
 |--------|----------------|--------------|----------|
 | Sine Shaper | `sine_shaper` | stage (`total`, `setup`, `loop`) + harmonic zone (`z0_cheby`, `z1_cheby`, `z2_fm`-`z6_fm`, `z7_poly`) | Voice + Clip |
-| Table Saturator | `saturator_table` | - | Voice + Clip |
-| Builtin Saturator | `saturator_builtin` | - | Voice + Clip |
+| Table Shaper | `shaper_table` | - | Voice + Clip |
+| Builtin Shaper | `shaper_builtin` | - | Voice + Clip |
 | Disperser | `disperser` | - | Clip |
 | ModFX | `modfx` | type (`flanger`, `chorus`, `phaser`, `stereo_ch`, `warble`, `dimen`, `grain`) | Clip |
 | Filters | `filters` | LPF mode + HPF mode (`lp12`, `lp24`, `lp24drv`, `svf_band`, `svf_notch`, `hpladder`, `off`) | Voice + Clip |

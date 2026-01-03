@@ -32,7 +32,7 @@
 namespace deluge::dsp {
 
 /**
- * Parameters for table-based saturator - consolidated for efficient passing
+ * Parameters for table-based shaper - consolidated for efficient passing
  *
  * All parameters are normalized 0-1 range:
  * - drive: Overall intensity (0 = bypass)
@@ -45,7 +45,7 @@ namespace deluge::dsp {
  * - threshold: Linear zone size (1 = all linear, 0 = always saturate)
  * - asymmetry: Even harmonics (0.5 = symmetric)
  */
-struct SaturatorParams {
+struct TableShaperParams {
 	float drive{0.0f};
 	float tanhWeight{1.0f};
 	float polyWeight{0.0f};
@@ -69,7 +69,7 @@ struct SaturatorParams {
 		asymmetry = std::clamp(asymmetry, 0.0f, 1.0f);
 	}
 
-	bool operator!=(const SaturatorParams& o) const {
+	bool operator!=(const TableShaperParams& o) const {
 		return drive != o.drive || tanhWeight != o.tanhWeight || polyWeight != o.polyWeight
 		       || hardKneeWeight != o.hardKneeWeight || chebyWeight != o.chebyWeight
 		       || sineFoldWeight != o.sineFoldWeight || rectifierWeight != o.rectifierWeight || threshold != o.threshold
@@ -78,7 +78,7 @@ struct SaturatorParams {
 };
 
 /**
- * Table-based Parametric Saturator with ADAA (Antiderivative Antialiasing)
+ * Table-based Parametric Shaper with ADAA (Antiderivative Antialiasing)
  *
  * Features:
  * - 6 basis functions for rich harmonic exploration
@@ -87,7 +87,7 @@ struct SaturatorParams {
  * - Cached f(x) and F(x) tables for fast lookup
  * - First-order ADAA using cached antiderivative table
  */
-class TableSaturator {
+class TableShaperCore {
 public:
 	// =============================================================================
 	// A/B TEST CONFIGURATION - Change these for testing different modes
@@ -114,12 +114,12 @@ public:
 	static constexpr size_t kTableMask = kTableSize - 1;
 	static constexpr float kTableScale = static_cast<float>(kTableSize) / 2.0f;
 
-	TableSaturator() = default; // Tables start empty, allocated on first non-linear use
+	TableShaperCore() = default; // Tables start empty, allocated on first non-linear use
 
 	/// Set all parameters at once using struct
 	/// Regenerates tables immediately (not deferred to audio thread)
-	void setParameters(const SaturatorParams& p) {
-		SaturatorParams clamped = p;
+	void setParameters(const TableShaperParams& p) {
+		TableShaperParams clamped = p;
 		clamped.clamp();
 		if (clamped != params_) {
 			params_ = clamped;
@@ -128,7 +128,7 @@ public:
 	}
 
 	/// Get current parameters
-	[[nodiscard]] const SaturatorParams& getParameters() const { return params_; }
+	[[nodiscard]] const TableShaperParams& getParameters() const { return params_; }
 
 	/// Check if effect is effectively bypassed (transparent)
 	/// Only checks drive (X axis) - threshold shouldn't cause bypass since user explicitly set X > 0
@@ -146,7 +146,7 @@ public:
 	};
 
 	/// Process a single sample with ADAA using external state
-	/// This allows one TableSaturator (one set of tables) to serve multiple channels
+	/// This allows one TableShaper (one set of tables) to serve multiple channels
 	/// @param x Input sample in range [-1, 1]
 	/// @param prevXState Pointer to previous sample state (updated in place)
 	/// @return Processed sample (peak-normalized)
@@ -742,7 +742,7 @@ private:
 	std::vector<int16_t> fTableInt_; // f(x) values (int16)
 
 	// Parameters (consolidated struct)
-	SaturatorParams params_;
+	TableShaperParams params_;
 
 	// State
 	bool tablesDirty_{true};
@@ -753,7 +753,7 @@ private:
 };
 
 /**
- * Helper to derive saturator parameters from XY position with combinatoric sweep
+ * Helper to derive shaper parameters from XY position with combinatoric sweep
  *
  * X axis maps to drive (0 = linear bypass, 127 = full saturation)
  * Y axis creates a combinatoric sweep through basis weights, threshold, asymmetry
@@ -768,7 +768,7 @@ private:
  *
  * Result: distinct character zones at low Y, fragmented/chaotic at high Y
  */
-struct TableSaturatorXYMapper {
+struct TableShaperXYMapper {
 	// =================================================================
 	// Duty cycle controls the active/gap ratio of basis oscillators
 	// 0.25 = 25% active, 75% gap (very sparse, distinct characters)
@@ -781,9 +781,9 @@ struct TableSaturatorXYMapper {
 	/// Derive parameters from X (0-127) and Y (0-1023) with combinatoric sweep
 	/// @param x X position (0-127), maps to drive (0 = linear bypass)
 	/// @param y Y position (0-1023), creates high-res combinatoric parameter sweep
-	/// @return SaturatorParams with all derived values
-	static SaturatorParams deriveParameters(uint8_t x, uint16_t y) {
-		SaturatorParams p;
+	/// @return TableShaperParams with all derived values
+	static TableShaperParams deriveParameters(uint8_t x, uint16_t y) {
+		TableShaperParams p;
 		p.drive = static_cast<float>(x) / 127.0f;
 
 		float yNorm = static_cast<float>(y) / 1023.0f;
@@ -813,7 +813,7 @@ struct TableSaturatorXYMapper {
 	/// @param y Y position (0-1023)
 	/// @param phaseOffset Phase offset for parameter interference (from secret knob)
 	/// @param periodScale Period scaling for parameter sweep rate
-	/// @return SaturatorParams with all derived values
+	/// @return TableShaperParams with all derived values
 	///
 	/// DESIGN NOTE: Phase Offset Scope
 	/// ===============================
@@ -836,8 +836,8 @@ struct TableSaturatorXYMapper {
 	/// continuous exploration where zone names are approximate guides rather than
 	/// fixed definitions. This is more "sound design-y" but less predictable.
 	///
-	static SaturatorParams deriveParametersWithPhase(uint8_t x, uint16_t y, float phaseOffset, float periodScale) {
-		SaturatorParams p;
+	static TableShaperParams deriveParametersWithPhase(uint8_t x, uint16_t y, float phaseOffset, float periodScale) {
+		TableShaperParams p;
 		p.drive = static_cast<float>(x) / 127.0f;
 
 		float yNorm = static_cast<float>(y) / 1023.0f;

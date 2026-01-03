@@ -75,9 +75,9 @@ public:
 
 	std::array<uint32_t, 2> lastSaturationTanHWorkingValue;
 
-	// Per-voice ADAA state for XY saturator (previous input samples)
-	float saturatorPrevXL{0.0f};
-	float saturatorPrevXR{0.0f};
+	// Per-voice ADAA state for Table Shaper (previous input samples)
+	float shaperPrevXL{0.0f};
+	float shaperPrevXR{0.0f};
 
 	// Per-voice sine shaper state (DC blocker, feedback, feedback LPF, stereo LFO)
 	deluge::dsp::SineShaperVoiceState sineShaperState;

@@ -50,7 +50,7 @@ void Patcher::recalculateFinalValueForParamWithNoCables(int32_t p, Sound& sound,
 			final_value = getFinalParameterValueHybrid(param_neutral_value, cable_combination);
 		}
 		else if (p < config.firstExpParam) {
-			// Zone params: pure modulation pass-through, ZoneBasedParam::combineWithMod() handles scaling
+			// Zone params: output cables only, DSP combines with preset via ZoneBasedParam
 			final_value = cable_combination;
 		}
 		else {
@@ -137,7 +137,7 @@ void Patcher::performPatching(uint32_t sourcesChanged, Sound& sound, ParamManage
 		    getFinalParameterValueHybrid(paramNeutralValues[param], cable_combo);
 	}
 
-	// Zone params: pure modulation pass-through
+	// Zone params: output cables only, DSP combines with preset via ZoneBasedParam
 	for (; iterator < cable_combos.end() && iterator->first < config.firstExpParam; iterator++) {
 		auto [param, cable_combo] = *iterator;
 		param_final_values_[param - config.firstParam] = cable_combo;
@@ -275,7 +275,7 @@ int32_t Patcher::cableToExpParam(int32_t running_total, const PatchCable& patch_
 	}
 
 	// Do the "preset value" (which we treat like a "cable" here)
-	// Zone params skip this - they use field value + modulation combined in ZoneBasedParam::combineWithMod()
+	// Zone params: return cables only, handled separately in final value calculation
 	bool isZoneParam = (param >= config.firstZoneParam && param < config.firstExpParam);
 	if (!isZoneParam) {
 		running_total = cableToExpParamWithoutRangeAdjustment(
@@ -346,7 +346,8 @@ void Patcher::performInitialPatching(Sound& sound, ParamManager& param_manager) 
 		    getFinalParameterValueHybrid(paramNeutralValues[param], param_final_values_[param - config.firstParam]);
 	}
 
-	// Zone params: no transformation needed, value is already pure modulation pass-through
+	// Zone params: cables only, DSP combines with preset via ZoneBasedParam
+	// (no transformation needed - cables already in param_final_values_)
 
 	// Exp params
 	for (int32_t param = config.firstExpParam; param < config.endParams; param++) {

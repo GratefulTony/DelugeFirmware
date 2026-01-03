@@ -78,7 +78,7 @@
 #include "gui/menu_item/flash/status.h"
 #include "gui/menu_item/fx/clipping.h"
 #include "gui/menu_item/fx/disperser.h"
-#include "gui/menu_item/fx/saturator.h"
+#include "gui/menu_item/fx/shaper.h"
 #include "gui/menu_item/fx/sine_shaper.h"
 #include "gui/menu_item/gate/mode.h"
 #include "gui/menu_item/gate/off_time.h"
@@ -213,6 +213,7 @@
 #include "gui/menu_item/submenu/compressor.h"
 #include "gui/menu_item/submenu/mod_fx.h"
 #include "gui/menu_item/submenu/modulator.h"
+#include "gui/menu_item/submenu/shaping.h"
 #include "gui/menu_item/swing/interval.h"
 #include "gui/menu_item/synth_mode.h"
 #include "gui/menu_item/trigger/in/ppqn.h"
@@ -620,19 +621,41 @@ fx::SineShaperHarmonic sineShaperHarmonicMenu{STRING_FOR_SINE_SHAPER_HARMONIC};
 fx::SineShaperTwist sineShaperTwistMenu{STRING_FOR_SINE_SHAPER_SYMMETRY};
 fx::SineShaperMix sineShaperMixMenu{STRING_FOR_SINE_SHAPER_MIX};
 
-// Saturator - XY waveshaper with lookup table
-// Uses SaturatorDrive to toggle AA on gold knob press
-fx::SaturatorDrive saturatorDriveMenu{STRING_FOR_SATURATOR_DRIVE, STRING_FOR_SATURATOR_DRIVE,
-                                      params::LOCAL_SATURATOR_DRIVE, RenderingStyle::BAR};
-fx::SaturatorShapeX saturatorShapeXMenu{STRING_FOR_SATURATOR_SHAPE_X};
-fx::SaturatorShapeY saturatorShapeYMenu{STRING_FOR_SATURATOR_SHAPE_Y};
-fx::SaturatorMix saturatorMixMenu{STRING_FOR_SATURATOR_MIX};
+HorizontalMenu sineShaperSubMenu{
+    STRING_FOR_SINE_SHAPER_MENU,
+    {&sineShaperDriveMenu, &sineShaperHarmonicMenu, &sineShaperTwistMenu, &sineShaperMixMenu},
+};
+
+// Shaper - Table Shaper with XY control and lookup table
+// Uses TableShaperDrive to toggle AA on gold knob press
+fx::TableShaperDrive shaperDriveMenu{STRING_FOR_SHAPER_DRIVE, STRING_FOR_SHAPER_DRIVE, params::LOCAL_SHAPER_DRIVE,
+                                     RenderingStyle::BAR};
+fx::TableShaperShapeX shaperShapeXMenu{STRING_FOR_SHAPER_SHAPE_X};
+fx::TableShaperShapeY shaperShapeYMenu{STRING_FOR_SHAPER_SHAPE_Y};
+fx::TableShaperMix shaperMixMenu{STRING_FOR_SHAPER_MIX};
+
+HorizontalMenu tableShaperSubMenu{
+    STRING_FOR_TABLE_SHAPER_MENU,
+    {&shaperDriveMenu, &shaperShapeXMenu, &shaperShapeYMenu, &shaperMixMenu},
+};
 
 // Disperser - allpass cascade with feedback
 fx::DisperserFreq disperserFreqMenu{STRING_FOR_DISPERSER_FREQ};
 fx::DisperserSpread disperserSpreadMenu{STRING_FOR_DISPERSER_SPREAD};
 fx::DisperserFeedback disperserFeedbackMenu{STRING_FOR_DISPERSER_FEEDBACK};
 fx::DisperserStages disperserStagesMenu{STRING_FOR_DISPERSER_STAGES};
+
+HorizontalMenu disperserSubMenu{
+    STRING_FOR_DISPERSER_MENU,
+    {&disperserFreqMenu, &disperserSpreadMenu, &disperserFeedbackMenu, &disperserStagesMenu},
+};
+
+// Shaping submenu - contains Sine Shaper, Table Shaper, and Disperser
+// Gated by DynamicsSoundDesign community feature
+submenu::Shaping shapingMenu{
+    STRING_FOR_SHAPING,
+    {&sineShaperSubMenu, &tableShaperSubMenu, &disperserSubMenu},
+};
 
 HorizontalMenu soundDistortionMenu{
     STRING_FOR_DISTORTION,
@@ -641,21 +664,6 @@ HorizontalMenu soundDistortionMenu{
         &bitcrushMenu,
         &srrMenu,
         &foldMenu,
-        // Sine Shaper
-        &sineShaperDriveMenu,
-        &sineShaperHarmonicMenu,
-        &sineShaperTwistMenu,
-        &sineShaperMixMenu,
-        // Saturator
-        &saturatorDriveMenu,
-        &saturatorShapeXMenu,
-        &saturatorShapeYMenu,
-        &saturatorMixMenu,
-        // Disperser
-        &disperserFreqMenu,
-        &disperserSpreadMenu,
-        &disperserFeedbackMenu,
-        &disperserStagesMenu,
     },
 };
 
@@ -837,21 +845,6 @@ HorizontalMenu globalDistortionMenu{
     {
         &srrMenu,
         &bitcrushMenu,
-        // Sine Shaper
-        &sineShaperDriveMenu,
-        &sineShaperHarmonicMenu,
-        &sineShaperTwistMenu,
-        &sineShaperMixMenu,
-        // Saturator
-        &saturatorDriveMenu,
-        &saturatorShapeXMenu,
-        &saturatorShapeYMenu,
-        &saturatorMixMenu,
-        // Disperser
-        &disperserFreqMenu,
-        &disperserSpreadMenu,
-        &disperserFeedbackMenu,
-        &disperserStagesMenu,
     },
 };
 
@@ -863,6 +856,7 @@ Submenu globalFXMenu{
         &globalReverbMenu,
         &stutterMenu,
         &globalModFXMenu,
+        &shapingMenu,
         &globalDistortionMenu,
         &dottMenu,
     },
@@ -908,21 +902,6 @@ HorizontalMenu audioClipDistortionMenu{
         &clippingMenu,
         &bitcrushMenu,
         &srrMenu,
-        // Sine Shaper
-        &sineShaperDriveMenu,
-        &sineShaperHarmonicMenu,
-        &sineShaperTwistMenu,
-        &sineShaperMixMenu,
-        // Saturator
-        &saturatorDriveMenu,
-        &saturatorShapeXMenu,
-        &saturatorShapeYMenu,
-        &saturatorMixMenu,
-        // Disperser
-        &disperserFreqMenu,
-        &disperserSpreadMenu,
-        &disperserFeedbackMenu,
-        &disperserStagesMenu,
     },
 };
 
@@ -934,6 +913,7 @@ Submenu audioClipFXMenu{
         &globalReverbMenu,
         &stutterMenu,
         &globalModFXMenu,
+        &shapingMenu,
         &audioClipDistortionMenu,
     },
 };
@@ -1445,6 +1425,7 @@ Submenu soundFXMenu{
         &reverbMenu,
         &stutterMenu,
         &modFXMenu,
+        &shapingMenu,
         &soundDistortionMenu,
         &noiseMenu,
         &dottMenu,

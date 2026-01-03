@@ -118,7 +118,7 @@ struct ShaperWeights;
 /// Sine shaper parameters and DSP state for one sound instance
 /// Note: For sounds, harmonic uses LOCAL_SINE_SHAPER_HARMONIC, twist uses LOCAL_SINE_SHAPER_TWIST
 /// (patched params with mod matrix routing). Clips use UNPATCHED variants.
-struct SineShaperParams {
+struct SineTableShaperParams {
 	// User-facing parameters (0-127, converted to q31_t for DSP)
 	uint8_t drive{0};     // Input gain / saturation amount
 	uint8_t symmetry{64}; // DEPRECATED: kept for XML backwards compat, use Twist param instead
@@ -361,7 +361,7 @@ struct SineShaperTwistParams {
  * @param params Optional - provides per-patch phase offsets for meta zone
  */
 inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
-                                                          const SineShaperParams* ssParams = nullptr) {
+                                                          const SineTableShaperParams* ssParams = nullptr) {
 	constexpr q31_t kZone1 = ONE_Q31 / 8;       // 1/8
 	constexpr q31_t kZone2 = ONE_Q31 / 4;       // 2/8
 	constexpr q31_t kZone3 = (ONE_Q31 / 8) * 3; // 3/8
@@ -477,7 +477,7 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
 /**
  * Compute drive gain from q31 drive parameter
  *
- * Drive follows saturator pattern with hybrid param (bipolar, additive modulation):
+ * Drive follows shaper pattern with hybrid param (bipolar, additive modulation):
  * - Drive INT32_MIN = silence (gain = 0)
  * - Drive 0 (12 o'clock) = unity gain (gain = 1)
  * - Drive INT32_MAX = 4x overdrive (gain = 4)
@@ -1117,15 +1117,15 @@ sineShapeCoreStereo(q31_t inputL, q31_t inputR, float driveGainL, float driveGai
  * @param harmonic Raw harmonic value (smoothed internally)
  * @param mix Wet/dry blend - if 0, buffer is not modified (CPU optimization)
  * @param twist Twist parameters (evens, rect, feedback, phaseHarmonic)
- * @param params Pointer to SineShaperParams for coefficient smoothing
+ * @param params Pointer to SineTableShaperParams for coefficient smoothing
  * @param wasBypassed Pointer to bypass state flag (updated in place)
  * @param boostSubtractive If true, pre-boost input and post-attenuate wet to normalize
  *                         subtractive mode signal levels to match FM mode operating point
  */
 inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothedDrive,
                             SineShaperVoiceState* voiceState, q31_t harmonic, q31_t mix,
-                            const SineShaperTwistParams& twist, SineShaperParams* params, bool* wasBypassed = nullptr,
-                            bool boostSubtractive = false) {
+                            const SineShaperTwistParams& twist, SineTableShaperParams* params,
+                            bool* wasBypassed = nullptr, bool boostSubtractive = false) {
 	// Early out - if mix is 0, do nothing (important CPU optimization)
 	if (mix <= 0 || buffer.empty()) {
 		if (wasBypassed) {
@@ -1223,7 +1223,8 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 	// Also reduce feedback by up to 10% as drive increases (tames high-drive feedback)
 	constexpr float kFeedbackScale = 0.25f;
 	float fbScale = kFeedbackScale;
-	constexpr q31_t kZone7Start = ONE_Q31 - (ONE_Q31 / 8); // 7/8 without overflow
+	// Zone 7 starts at 7 * zoneWidth (consistent with computeZoneQ31)
+	constexpr q31_t kZone7Start = (kNumHarmonicZones - 1) * (ONE_Q31 / kNumHarmonicZones);
 	if (smoothedHarmonic >= kZone7Start) {
 		float zone7Pos = static_cast<float>(smoothedHarmonic - kZone7Start) / static_cast<float>(ONE_Q31 - kZone7Start);
 		fbScale *= (1.0f - zone7Pos); // 100% at start, 0% at end of Zone 7
@@ -1348,15 +1349,15 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
  * @param harmonic Raw harmonic value (smoothed internally via params->smoothedHarmonic)
  * @param mix Wet/dry blend - if 0, buffer is not modified (CPU optimization)
  * @param twist Twist parameters (stereo, evens, rect, feedback, phaseHarmonic)
- * @param params Pointer to SineShaperParams for coefficient smoothing (required)
+ * @param params Pointer to SineTableShaperParams for coefficient smoothing (required)
  * @param wasBypassed Pointer to bypass state flag (updated in place)
  * @param boostSubtractive If true, pre-boost input and post-attenuate wet to normalize
  *                         subtractive mode signal levels to match FM mode operating point
  */
 inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoothedDrive,
                             SineShaperVoiceState* voiceState, q31_t harmonic, q31_t mix,
-                            const SineShaperTwistParams& twist, SineShaperParams* params, bool* wasBypassed = nullptr,
-                            bool boostSubtractive = false) {
+                            const SineShaperTwistParams& twist, SineTableShaperParams* params,
+                            bool* wasBypassed = nullptr, bool boostSubtractive = false) {
 	// Early out - if mix is 0, do nothing (important CPU optimization)
 	if (mix <= 0 || buffer.empty()) {
 		if (wasBypassed) {
@@ -1558,7 +1559,8 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	// Also reduce feedback by up to 10% as drive increases (tames high-drive feedback)
 	constexpr float kFeedbackScale = 0.25f;
 	float fbScale = kFeedbackScale;
-	constexpr q31_t kZone7Start = ONE_Q31 - (ONE_Q31 / 8); // 7/8 without overflow
+	// Zone 7 starts at 7 * zoneWidth (consistent with computeZoneQ31)
+	constexpr q31_t kZone7Start = (kNumHarmonicZones - 1) * (ONE_Q31 / kNumHarmonicZones);
 	if (smoothedHarmonic >= kZone7Start) {
 		float zone7Pos = static_cast<float>(smoothedHarmonic - kZone7Start) / static_cast<float>(ONE_Q31 - kZone7Start);
 		fbScale *= (1.0f - zone7Pos); // 100% at start, 0% at end of Zone 7

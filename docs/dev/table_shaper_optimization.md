@@ -1,12 +1,12 @@
-# TableSaturator Performance Optimization
+# TableShaper Performance Optimization
 
-This document summarizes the benchmarking and optimization work performed on the TableSaturator effect.
+This document summarizes the benchmarking and optimization work performed on the TableShaper effect.
 
 ## Summary
 
 **Current best**: Integer-only processing path achieves **0.69x** the builtin's cycle count (970 vs 1413 cycles) — **31% faster than builtin**. This was achieved through baked normalization, two-stage gain scaling, and 1024-entry tables.
 
-The TableSaturator provides parametric X/Y shape control with 6 blendable basis functions. Performance optimization focused on matching the builtin's integer-only architecture while preserving tonal flexibility.
+The TableShaper provides parametric X/Y shape control with 6 blendable basis functions. Performance optimization focused on matching the builtin's integer-only architecture while preserving tonal flexibility.
 
 ### Key Features
 - **Drive range**: 0.25x (-12dB) at min, 1.0x (unity) at center, 2.0x (+6dB) at max
@@ -15,7 +15,7 @@ The TableSaturator provides parametric X/Y shape control with 6 blendable basis 
 ## Final Configuration
 
 ```cpp
-// table_saturator.h
+// table_shaper.h
 static constexpr size_t kTableSize = 1024;
 static constexpr bool kUseCubicFunction = false;  // Linear for int path
 static constexpr bool kUseCubicAntiderivative = true;
@@ -28,7 +28,7 @@ Using integer-only path in voice.cpp via `saturateBufferInt32()`.
 
 ## Background
 
-The TableSaturator is a parametric waveshaper with:
+The TableShaper is a parametric waveshaper with:
 - 6 blendable basis functions (tanh, polynomial, hard knee, Chebyshev, sine fold, rectifier)
 - X/Y shape control for creative distortion curves
 - Optional ADAA (Antiderivative Antialiasing) to reduce aliasing artifacts
@@ -68,7 +68,7 @@ This means: **optimize for cache footprint, not compute complexity**.
 
 ### Builtin Comparison
 
-The builtin saturator uses `tanH2d[65][129]` - a 2D int16_t table:
+The builtin shaper uses `tanH2d[65][129]` - a 2D int16_t table:
 - Size: 65 × 129 × 2 bytes = **~16KB**
 - Our 256-entry implementation uses only **~4KB** (4x smaller)
 
@@ -76,7 +76,7 @@ The builtin saturator uses `tanH2d[65][129]` - a 2D int16_t table:
 
 ### ⚠️ DATA VALIDITY WARNING
 
-**Much of the benchmark data below may be invalid.** Tests were run with X=0 (Shape X parameter), which triggers the linear bypass path in the table saturator:
+**Much of the benchmark data below may be invalid.** Tests were run with X=0 (Shape X parameter), which triggers the linear bypass path in the table shaper:
 
 ```cpp
 // X=0 → drive=0 → isLinear() returns true
@@ -86,7 +86,7 @@ if (isLinear_) {
 }
 ```
 
-This means the "table saturator" measurements were actually measuring **linear passthrough** vs builtin saturator, not actual table processing. Valid comparisons require **X ≥ 1** to exercise the table lookup + ADAA path.
+This means the "table shaper" measurements were actually measuring **linear passthrough** vs builtin shaper, not actual table processing. Valid comparisons require **X ≥ 1** to exercise the table lookup + ADAA path.
 
 ### Methodology
 - Sampling: Every ~3450 audio buffers (~10 seconds)
@@ -117,7 +117,7 @@ This is expected behavior on cached architectures.
 ### 1. Table Size Reduction (512 → 256)
 Reduced cache footprint from 8KB to 4KB, improving L1 residency.
 
-### 2. Precomputed Reciprocals (saturator.h)
+### 2. Precomputed Reciprocals (shaper.h)
 Eliminated per-sample divisions:
 ```cpp
 static constexpr float kInv0dBFS = 1.0f / kEffective0dBFS;
@@ -145,14 +145,14 @@ NEON-accelerated reciprocal for ADAA division:
 Enabled ADAA by passing state pointers:
 ```cpp
 // Stereo path
-dsp::saturateBuffer(stereo_osc_buffer, sound.saturator, satDrive,
-                    &sound.saturatorDriveLast, satMix,
-                    &sound.saturatorPrevXL, &sound.saturatorPrevXR);
+dsp::saturateBuffer(stereo_osc_buffer, sound.shaper, satDrive,
+                    &sound.shaperDriveLast, satMix,
+                    &sound.shaperPrevXL, &sound.shaperPrevXR);
 ```
 
 ### 5. Integer-Only Processing Path (NEW)
 
-The builtin saturator uses all-integer arithmetic with a 2D int16_t table. To close the performance gap, we implemented an equivalent integer path:
+The builtin shaper uses all-integer arithmetic with a 2D int16_t table. To close the performance gap, we implemented an equivalent integer path:
 
 #### Builtin Architecture Analysis
 ```cpp
@@ -161,7 +161,7 @@ The builtin saturator uses all-integer arithmetic with a 2D int16_t table. To cl
 int32_t getTanHAntialiased(int32_t x, uint32_t* lastX);
 ```
 
-#### Integer Table Addition (table_saturator.h)
+#### Integer Table Addition (table_shaper.h)
 ```cpp
 // Integer tables for fast integer-only processing (like builtin)
 std::array<int16_t, kTableSize + 1> fTableInt_{};
@@ -179,7 +179,7 @@ std::array<int16_t, kTableSize + 1> fTableInt_{};
 }
 ```
 
-#### Integer Wrapper (saturator.h)
+#### Integer Wrapper (shaper.h)
 ```cpp
 [[gnu::always_inline]] inline q31_t processInt32(q31_t input, q31_t drive) {
     // Asymmetric drive gain: unity at center, -12dB at min, +6dB at max
@@ -255,7 +255,7 @@ if (mix <= kMixHalf) {
 }
 ```
 
-This works because the saturator cannot induce phase shift — subtracting the input from the output leaves only the harmonics added by the waveshaper.
+This works because the shaper cannot induce phase shift — subtracting the input from the output leaves only the harmonics added by the waveshaper.
 
 ## Test Images
 
@@ -298,14 +298,14 @@ Current test configuration: **1024 entries, integer-only processing, baked norma
 
 For realistic cache pressure testing, would need:
 - Rapidly changing XY parameters (force table regeneration)
-- Multiple patches with different saturator settings (competing tables)
+- Multiple patches with different shaper settings (competing tables)
 
 This actually reflects real-world usage: users typically set XY and leave it, so static table performance is the relevant metric.
 
 ## Files Modified
 
-- `src/deluge/dsp/table_saturator.h` - Table size, interpolation flags, integer tables, baked normalization
-- `src/deluge/dsp/saturator.h` - Precomputed reciprocals, `processInt32()` integer wrapper
+- `src/deluge/dsp/table_shaper.h` - Table size, interpolation flags, integer tables, baked normalization
+- `src/deluge/dsp/shaper.h` - Precomputed reciprocals, `processInt32()` integer wrapper
 - `src/deluge/dsp/util.hpp` - `saturateBufferInt32()` integer buffer processing functions
 - `src/deluge/dsp/fast_math.h` - NEON fastReciprocal
 - `src/deluge/model/voice/voice.cpp` - Using `saturateBufferInt32()` for integer path

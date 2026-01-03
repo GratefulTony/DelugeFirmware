@@ -33,11 +33,17 @@ namespace deluge::gui::menu_item::submenu {
 /// - 1 bar for output level
 /// - 1 dot for clip indicator
 /// The meter updates automatically when audio passes through the compressor.
+/// Visibility is gated by the DynamicsSoundDesign community feature.
 class CompressorHorizontalMenu final : public HorizontalMenu {
 public:
 	using HorizontalMenu::HorizontalMenu;
 
 	static constexpr int32_t kMeterRefreshMs = 100; // 10 fps for meter animation
+
+	/// Gate the entire DOTT menu based on DynamicsSoundDesign feature toggle.
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
+	}
 
 	void beginSession(MenuItem* navigatedBackwardFrom = nullptr) override {
 		HorizontalMenu::beginSession(navigatedBackwardFrom);

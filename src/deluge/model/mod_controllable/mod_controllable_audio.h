@@ -23,8 +23,8 @@
 #include "dsp/compressor/rms_feedback.h"
 #include "dsp/delay/delay.h"
 #include "dsp/disperser.h"
-#include "dsp/saturator.h"
-#include "dsp/sine_shaper.hpp" // For SineShaperParams
+#include "dsp/shaper.h"
+#include "dsp/sine_shaper.hpp" // For SineTableShaperParams
 #include "dsp_ng/core/types.hpp"
 #include "hid/button.h"
 #include "model/fx/stutterer.h"
@@ -116,21 +116,21 @@ public:
 	q31_t wavefoldLast{0}; // Previous wavefold value for parameter smoothing
 
 	// Sine shaper parameters and DSP state (struct defined in dsp/util.hpp)
-	deluge::dsp::SineShaperParams sineShaper;
+	deluge::dsp::SineTableShaperParams sineShaper;
 
-	// Saturator with X/Y shape control
-	deluge::dsp::Saturator saturator; // DSP processor with lookup table
-	uint8_t saturatorDrive{0};        // Input gain / saturation amount (0-127)
-	uint8_t saturatorShapeX{0};       // Soft→Hard axis (0-127)
-	uint16_t saturatorShapeY{0};      // Clean→Weird axis (0-1023, high-res multi-zone)
-	uint8_t saturatorMix{0};          // Wet/dry blend (0 = bypass)
-	bool saturatorAA{false};          // Anti-aliasing enabled (default off, reserved for future use)
-	q31_t saturatorDriveLast{0};      // Previous drive value for smoothing
-	q31_t saturatorFilterL{0};        // Post-saturation lowpass state L
-	q31_t saturatorFilterR{0};        // Post-saturation lowpass state R
-	float saturatorPrevXL{0.0f};      // ADAA state L (previous input sample)
-	float saturatorPrevXR{0.0f};      // ADAA state R (previous input sample)
-	float saturatorPhase{0.0f};       // Phase offset for triangle modulation (secret knob)
+	// Table Shaper with X/Y shape control
+	deluge::dsp::TableShaper shaper; // DSP processor with lookup table
+	uint8_t shaperDrive{0};          // Input gain / saturation amount (0-127)
+	uint8_t shaperShapeX{0};         // Soft→Hard axis (0-127)
+	uint16_t shaperShapeY{0};        // Clean→Weird axis (0-1023, high-res multi-zone)
+	uint8_t shaperMix{0};            // Wet/dry blend (0 = bypass)
+	bool shaperAA{false};            // Anti-aliasing enabled (default off, reserved for future use)
+	q31_t shaperDriveLast{0};        // Previous drive value for smoothing
+	q31_t shaperFilterL{0};          // Post-saturation lowpass state L
+	q31_t shaperFilterR{0};          // Post-saturation lowpass state R
+	float shaperPrevXL{0.0f};        // ADAA state L (previous input sample)
+	float shaperPrevXR{0.0f};        // ADAA state R (previous input sample)
+	float shaperPhase{0.0f};         // Phase offset for triangle modulation (secret knob)
 
 	// Disperser (allpass cascade with feedback)
 	deluge::dsp::Disperser disperser; // DSP processor with 16 allpass stages

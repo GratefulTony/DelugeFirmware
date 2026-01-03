@@ -65,6 +65,7 @@
 #include "model/instrument/kit.h"
 #include "model/instrument/melodic_instrument.h"
 #include "model/instrument/midi_instrument.h"
+#include "model/mod_controllable/mod_controllable_audio.h"
 #include "model/model_stack.h"
 #include "model/note/note_row.h"
 #include "model/settings/runtime_feature_settings.h"
@@ -980,7 +981,7 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 		modelStackWithParam->setTimelineCounter(nullptr);
 	}
 
-	// Perform the actual change
+	// Perform the actual change - modify the autoParam (patched param preset)
 	modelStackWithParam->autoParam->setValuePossiblyForRegion(newValue, modelStackWithParam, modPos, modLength);
 
 	if (activeModControllableModelStack.timelineCounterIsSet()) {

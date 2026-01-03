@@ -272,11 +272,20 @@ public:
 		return modelStack->getPatchedAutoParamFromId(PARAM_ID);
 	}
 
-	// Read from sound field (not patched param)
-	void readCurrentValue() override { this->setValue(zoneParamToMenuValue(getFieldValue())); }
+	// Read from patched param preset (automation/gold knob modify this)
+	void readCurrentValue() override {
+		q31_t value = soundEditor.currentParamManager->getPatchedParamSet()->getValue(PARAM_ID);
+		this->setValue(zoneParamToMenuValue(value));
+	}
 
-	// Write to sound field (not patched param)
-	void writeCurrentValue() override { setFieldValue(zoneMenuValueToParam(this->getValue())); }
+	// Write to patched param preset
+	void writeCurrentValue() override {
+		q31_t value = zoneMenuValueToParam(this->getValue());
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(modelStackMemory);
+		ModelStackWithAutoParam* modelStackWithParam = modelStack->getPatchedAutoParamFromId(PARAM_ID);
+		modelStackWithParam->autoParam->setCurrentValueInResponseToUserInput(value, modelStackWithParam);
+	}
 
 	void unlearnAction() final { MenuItemWithCCLearning::unlearnAction(); }
 	bool allowsLearnMode() final { return MenuItemWithCCLearning::allowsLearnMode(); }

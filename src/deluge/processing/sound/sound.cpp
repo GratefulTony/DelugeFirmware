@@ -146,7 +146,7 @@ void Sound::initParams(ParamManager* paramManager) {
 	    getParamFromUserValue(params::GLOBAL_VOLUME_POST_FX, 40));
 	patchedParams->params[params::GLOBAL_VOLUME_POST_REVERB_SEND].setCurrentValueBasicForSetup(0);
 	patchedParams->params[params::LOCAL_FOLD].setCurrentValueBasicForSetup(-2147483648);
-	patchedParams->params[params::LOCAL_SATURATOR_DRIVE].setCurrentValueBasicForSetup(0);   // Unity gain at 12 o'clock
+	patchedParams->params[params::LOCAL_SHAPER_DRIVE].setCurrentValueBasicForSetup(0);      // Unity gain at 12 o'clock
 	patchedParams->params[params::LOCAL_SINE_SHAPER_DRIVE].setCurrentValueBasicForSetup(0); // Unity gain at 12 o'clock
 	patchedParams->params[params::LOCAL_HPF_RESONANCE].setCurrentValueBasicForSetup(-2147483648);
 	patchedParams->params[params::LOCAL_HPF_FREQ].setCurrentValueBasicForSetup(-2147483648);

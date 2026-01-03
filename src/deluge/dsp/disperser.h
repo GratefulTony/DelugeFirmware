@@ -25,6 +25,7 @@
 #include "dsp/filter/ladder_components.h"
 #include "io/debug/fx_benchmark.h"
 #include "util/fixedpoint.h"
+#include <arm_neon.h>
 #include <array>
 #include <cmath>
 
@@ -56,23 +57,13 @@ public:
 	 * @param smoothedSpread Previous smoothed spread value (updated)
 	 */
 	void updateCoefficientsSmoothed(q31_t freq, q31_t spread, q31_t* smoothedFreq, q31_t* smoothedSpread) {
-		// Exponential smoothing (~100ms at 44.1kHz with 128-sample buffers)
-		constexpr q31_t smoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31);
-
-		// Smooth freq
+		constexpr q31_t smoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31); // ~100ms at 44.1kHz
 		*smoothedFreq = *smoothedFreq + (multiply_32x32_rshift32(freq - *smoothedFreq, smoothingAlpha) << 1);
-
-		// Smooth spread
 		*smoothedSpread = *smoothedSpread + (multiply_32x32_rshift32(spread - *smoothedSpread, smoothingAlpha) << 1);
 
-		// Convert q31 to 0-127 range for coefficient calculation
-		// q31 range is -2^31 to 2^31-1, we map to 0-127
 		uint32_t freqU = static_cast<uint32_t>(*smoothedFreq) + 0x80000000u;
 		uint32_t spreadU = static_cast<uint32_t>(*smoothedSpread) + 0x80000000u;
-		uint8_t freq8 = freqU >> 25; // Top 7 bits -> 0-127
-		uint8_t spread8 = spreadU >> 25;
-
-		updateCoefficients(freq8, spread8);
+		updateCoefficients(freqU >> 25, spreadU >> 25);
 	}
 
 	/**
@@ -87,53 +78,23 @@ public:
 		lastFreq_ = freq;
 		lastSpread_ = spread;
 
-		// Map freq 0-127 to 50Hz-8kHz (logarithmic)
-		// log2(8000/50) ≈ 7.3 octaves
-		float freqNorm = freq / 127.0f;
-		float centerHz = 50.0f * std::pow(2.0f, freqNorm * 7.3f);
-
-		// Map spread 0-127 to 0-4 octaves spread per direction
-		// At max spread, stages span 8 octaves total (centerHz/16 to centerHz*16)
+		// freq: 0-127 -> 50Hz-8kHz (7.3 octaves), spread: 0-127 -> ±4 octaves
+		float centerHz = 50.0f * std::pow(2.0f, (freq / 127.0f) * 7.3f);
 		float spreadOctaves = (spread / 127.0f) * 4.0f;
 
-		// Calculate per-stage frequency
-		// At spread=0, all stages at centerHz
-		// At spread=max, stages spread from centerHz/16 to centerHz*16
-		constexpr float halfStages = (kMaxStages - 1) / 2.0f; // 7.5 for 16 stages
+		constexpr float halfStages = (kMaxStages - 1) / 2.0f;
 		for (size_t i = 0; i < kMaxStages; ++i) {
-			float stagePosition = (static_cast<float>(i) - halfStages) / halfStages; // -1 to +1
-			float stageHz = centerHz * std::pow(2.0f, stagePosition * spreadOctaves);
-
-			// Clamp to valid range
-			stageHz = std::clamp(stageHz, 20.0f, 20000.0f);
-
-			// Calculate allpass coefficient: coeff = tan(pi * f / fs) / (1 + tan(pi * f / fs))
-			float fc = stageHz / static_cast<float>(kSampleRate);
-			fc = std::clamp(fc, 0.001f, 0.49f);
+			float stagePosition = (static_cast<float>(i) - halfStages) / halfStages;
+			float stageHz = std::clamp(centerHz * std::pow(2.0f, stagePosition * spreadOctaves), 20.0f, 20000.0f);
+			float fc = std::clamp(stageHz / static_cast<float>(kSampleRate), 0.001f, 0.49f);
 			float wc = std::tan(3.14159265358979f * fc);
-			float coeff = wc / (1.0f + wc);
-			coeffs_[i] = static_cast<q31_t>(coeff * ONE_Q31);
+			coeffs_[i] = static_cast<q31_t>((wc / (1.0f + wc)) * ONE_Q31);
 		}
 	}
 
 	/**
-	 * Saturating allpass filter - prevents overflow that causes bitcrushing artifacts
-	 * Uses the formula: output = 2*lowpass - input, with saturation on the final add
-	 * @param input Input sample
-	 * @param memory Filter state (updated in place)
-	 * @param coeff Allpass coefficient (moveability = tan(f)/(1+tan(f)))
-	 */
-	[[gnu::always_inline]] static inline q31_t doAPFSaturating(q31_t input, q31_t& memory, q31_t coeff) {
-		q31_t a = q31_mult_rounded(input - memory, coeff);
-		q31_t b = a + memory;
-		memory = a + b;
-		// Original: return b * 2 - input; // This overflows!
-		// Rewrite as: b + (b - input) with saturation
-		return add_saturate(b, b - input);
-	}
-
-	/**
-	 * Process a stereo sample pair through the disperser
+	 * Process a stereo sample pair through the disperser (NEON vectorized)
+	 * Uses int32x2_t to process L/R channels in parallel for ~2x speedup.
 	 * @param inL Left input sample
 	 * @param inR Right input sample
 	 * @param outL Left output sample (written)
@@ -149,44 +110,29 @@ public:
 			return;
 		}
 
-		// Clamp stages
 		size_t numStages = std::min(static_cast<size_t>(stages), kMaxStages);
+		int32x2_t input = {inL, inR};
 
-		// Bipolar feedback: center (0) = no feedback, CW = positive, CCW = negative
-		// Scale to ±90% max for strong resonance (DC blocker prevents runaway)
-		// feedback is q31: -2^31 to +2^31-1, we want ±0.9 gain
-		// 0.9 in q31 ≈ 0x73333333
-		q31_t fbGain = (multiply_32x32_rshift32(feedback, 0x73333333) << 1); // ~90% of input
+		// Bipolar feedback scaled to ±90% (DC blocker prevents runaway)
+		q31_t fbGain = (multiply_32x32_rshift32(feedback, 0x73333333) << 1);
 
-		// Apply DC blocker to feedback to prevent low-frequency runaway
-		// Formula: y[n] = x[n] - x[n-1] + alpha * y[n-1], alpha ≈ 0.995 (~10Hz cutoff)
-		// This removes DC and sub-bass buildup while preserving musical content
-		constexpr q31_t dcAlpha = 0x7F5C28F5; // 0.995 in q31
-		q31_t dcInL = feedbackL_;
-		q31_t dcInR = feedbackR_;
-		q31_t dcOutL = dcInL - dcPrevInL_ + (multiply_32x32_rshift32(dcPrevOutL_, dcAlpha) << 1);
-		q31_t dcOutR = dcInR - dcPrevInR_ + (multiply_32x32_rshift32(dcPrevOutR_, dcAlpha) << 1);
-		dcPrevInL_ = dcInL;
-		dcPrevInR_ = dcInR;
-		dcPrevOutL_ = dcOutL;
-		dcPrevOutR_ = dcOutR;
+		// DC Blocker: y[n] = x[n] - x[n-1] + 0.995 * y[n-1]
+		constexpr q31_t dcAlpha = 0x7F5C28F5;
+		int32x2_t dcIn = vld1_s32(feedback_);
+		int32x2_t dcOut =
+		    vadd_s32(vsub_s32(dcIn, vld1_s32(dcPrevIn_)), vqrdmulh_s32(vld1_s32(dcPrevOut_), vdup_n_s32(dcAlpha)));
+		vst1_s32(dcPrevIn_, dcIn);
+		vst1_s32(dcPrevOut_, dcOut);
 
-		// Mix DC-blocked feedback into input
-		q31_t procL = add_saturate(inL, multiply_32x32_rshift32(dcOutL, fbGain) << 1);
-		q31_t procR = add_saturate(inR, multiply_32x32_rshift32(dcOutR, fbGain) << 1);
-
-		// Process through allpass cascade using saturating allpass
+		// Feedback + allpass cascade
+		int32x2_t proc = vqadd_s32(input, vqrdmulh_s32(dcOut, vdup_n_s32(fbGain)));
 		for (size_t i = 0; i < numStages; ++i) {
-			procL = doAPFSaturating(procL, stagesL_[i].memory, coeffs_[i]);
-			procR = doAPFSaturating(procR, stagesR_[i].memory, coeffs_[i]);
+			proc = stages_[i].doAPFSaturating(proc, coeffs_[i]);
 		}
 
-		// Store for feedback
-		feedbackL_ = procL;
-		feedbackR_ = procR;
-
-		outL = procL;
-		outR = procR;
+		vst1_s32(feedback_, proc);
+		outL = vget_lane_s32(proc, 0);
+		outR = vget_lane_s32(proc, 1);
 	}
 
 	/**
@@ -204,7 +150,6 @@ public:
 		FX_BENCH_DECLARE(bench, "disperser");
 		FX_BENCH_SCOPE(bench);
 
-		// Calculate per-sample feedback increment for smooth modulation
 		constexpr q31_t smoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31);
 		q31_t targetSmoothed =
 		    *smoothedFeedback + (multiply_32x32_rshift32(feedback - *smoothedFeedback, smoothingAlpha) << 1);
@@ -224,40 +169,24 @@ public:
 
 	/// Reset all filter states
 	void reset() {
-		for (auto& stage : stagesL_) {
+		for (auto& stage : stages_) {
 			stage.reset();
 		}
-		for (auto& stage : stagesR_) {
-			stage.reset();
-		}
-		feedbackL_ = 0;
-		feedbackR_ = 0;
-		dcPrevInL_ = 0;
-		dcPrevInR_ = 0;
-		dcPrevOutL_ = 0;
-		dcPrevOutR_ = 0;
+		feedback_[0] = 0;
+		feedback_[1] = 0;
+		dcPrevIn_[0] = 0;
+		dcPrevIn_[1] = 0;
+		dcPrevOut_[0] = 0;
+		dcPrevOut_[1] = 0;
 	}
 
 private:
-	// Per-channel allpass filter states
-	std::array<filter::BasicFilterComponent, kMaxStages> stagesL_{};
-	std::array<filter::BasicFilterComponent, kMaxStages> stagesR_{};
-
-	// Cached coefficients for each stage
+	std::array<filter::StereoFilterComponent, kMaxStages> stages_{};
 	std::array<q31_t, kMaxStages> coeffs_{};
-
-	// Feedback state
-	q31_t feedbackL_{0};
-	q31_t feedbackR_{0};
-
-	// DC blocker state for feedback path
-	q31_t dcPrevInL_{0};
-	q31_t dcPrevInR_{0};
-	q31_t dcPrevOutL_{0};
-	q31_t dcPrevOutR_{0};
-
-	// Cached parameters for change detection
-	uint8_t lastFreq_{255}; // Invalid value to force initial calc
+	q31_t feedback_[2]{};
+	q31_t dcPrevIn_[2]{};
+	q31_t dcPrevOut_[2]{};
+	uint8_t lastFreq_{255};
 	uint8_t lastSpread_{255};
 };
 

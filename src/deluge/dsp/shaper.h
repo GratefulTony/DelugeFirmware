@@ -21,7 +21,7 @@
 
 #pragma once
 
-#include "deluge/dsp/table_saturator.h"
+#include "deluge/dsp/table_shaper.h"
 #include "deluge/util/fixedpoint.h"
 #include "dsp_ng/core/types.hpp"
 #include <algorithm>
@@ -31,17 +31,17 @@
 namespace deluge::dsp {
 
 /**
- * XY Saturator using table-based waveshaping with lookup
+ * Table Shaper using table-based waveshaping with XY control
  *
  * Features:
  * - X/Y shape control for creative distortion curves
- * - Table-based parametric saturator with optional ADAA
+ * - Table-based parametric shaper with optional ADAA
  * - Gain-compensated drive for predictable unity at 12 o'clock
  *
- * Shape X (0-127): Controls waveshaping intensity/drive
- * Shape Y (0-1023): Sweeps through combinatoric blend of basis functions (high-res multi-zone)
+ * Shape X (0-127): Soft→hard clipping curve (UI: "Knee")
+ * Shape Y (0-1023): Saturation character/color (UI: "Color")
  */
-class Saturator {
+class TableShaper {
 public:
 	// Precomputed constants - eliminates per-sample divisions
 	// EFFECTIVE_0DBFS_Q31 is ~23.7 million - the expected signal level
@@ -64,7 +64,7 @@ public:
 	static constexpr float kInputScale = kInv0dBFS * kPreGain;         // Input: q31 → normalized with pre-gain
 	static constexpr float kOutputScale = kPostGain * kEffective0dBFS; // Output: normalized → q31
 
-	Saturator() { regenerateTable(0, 0); }
+	TableShaper() { regenerateTable(0, 0); }
 
 	/**
 	 * Regenerate the waveshaping tables based on shape parameters
@@ -77,36 +77,24 @@ public:
 		shapeX_ = shapeX;
 		shapeY_ = shapeY;
 		if (phaseOffset != 0.0f) {
-			tableSat_.setParameters(
-			    TableSaturatorXYMapper::deriveParametersWithPhase(shapeX, shapeY, phaseOffset, 1.0f));
+			tableSat_.setParameters(TableShaperXYMapper::deriveParametersWithPhase(shapeX, shapeY, phaseOffset, 1.0f));
 		}
 		else {
-			tableSat_.setParameters(TableSaturatorXYMapper::deriveParameters(shapeX, shapeY));
+			tableSat_.setParameters(TableShaperXYMapper::deriveParameters(shapeX, shapeY));
 		}
 	}
 
 	/**
-	 * Process a single sample through the saturator (optimized, no divisions)
+	 * Process a single sample through the shaper (optimized, no divisions)
 	 * @param input Sample to process (q31)
 	 * @param drive Input gain (q31 from hybrid-type patched param, bipolar additive modulation)
 	 * @param prevX Pointer to ADAA state (previous input sample), nullptr if AA disabled
 	 * @return Shaped sample (q31)
 	 */
 	[[gnu::always_inline]] inline q31_t process(q31_t input, q31_t drive, float* prevX = nullptr) {
-		// Compute drive gain using reciprocal (no division)
-		// driveGain = drive * kInvHybridParamMax + 1.0  (range: 0 to 2)
 		float driveGain = static_cast<float>(drive) * kInvHybridParamMax + 1.0f;
-
-		// Convert q31 to float with combined scale (no division)
-		float inputF = static_cast<float>(input) * kInputScale * driveGain;
-
-		// Clamp input to [-1, 1] for the saturator
-		inputF = std::clamp(inputF, -1.0f, 1.0f);
-
-		// Process with optional ADAA (anti-derivative anti-aliasing)
+		float inputF = std::clamp(static_cast<float>(input) * kInputScale * driveGain, -1.0f, 1.0f);
 		float outputF = prevX ? tableSat_.process(inputF, prevX) : tableSat_.processNoAA(inputF);
-
-		// Apply combined output scale (no division)
 		return static_cast<q31_t>(outputF * kOutputScale);
 	}
 
@@ -117,55 +105,24 @@ public:
 	 * @return Shaped sample (q31)
 	 */
 	[[gnu::always_inline]] inline q31_t processInt32(q31_t input, q31_t drive) {
-		// Two-stage gain to match float path while avoiding int64 overflow:
-		// Float: inputF = input * kInputScale * driveGain
-		//        where kInputScale = (1/23.7M) * 2.83 = 1.19e-7
-		// This maps 0dBFS (23.7M) to 2.83 at unity drive, which saturates to 1.0
-		//
-		// For int32: need input * 256 * driveGain to map 0dBFS to ~2^31 (full table range)
-		// Split into: (input * driveGain) * 256
-
-		// Step 1: Continuous drive gain with asymmetric range (unity at center)
-		// Range: 0.0625x (-24dB) at min, 1.0x (unity) at center, 2.0x (+6dB) at max
-		// Piecewise linear: different slopes below/above center for exact unity at 12 o'clock
+		// Asymmetric drive: 0.0625x at min, 1.0x at center, 2.0x at max
 		constexpr int32_t kOne_Q30 = 1 << 30;
-		int32_t driveGain_Q30;
-		if (drive < 0) {
-			// Below center: 0.0625x at min to 1.0x at center (slope = 0.9375)
-			driveGain_Q30 = kOne_Q30 + drive - (drive >> 4);
-		}
-		else {
-			// Above center: 1.0x at center to 2.0x at max (slope = 1.0)
-			driveGain_Q30 = kOne_Q30 + drive;
-		}
+		int32_t driveGain_Q30 = (drive < 0) ? kOne_Q30 + drive - (drive >> 4) : kOne_Q30 + drive;
 
-		// Apply drive: multiply_32x32_rshift32 keeps result in int32 range
-		// Result = input * driveGain (continuous, not stepped)
 		int32_t afterDrive = multiply_32x32_rshift32(input, driveGain_Q30) << 2;
-
-		// Step 2: Apply 256x normalization+pregain via shift with saturation
-		// This maps 0dBFS signal to full table range
 		int32_t scaledInput = lshiftAndSaturate<8>(afterDrive);
-
-		// Convert to uint32 for table lookup (0 = -1.0, 2^31 = 0, 2^32-1 = +1.0)
 		uint32_t tableInput = static_cast<uint32_t>(scaledInput) + 2147483648u;
-
-		// Integer table lookup - table has normalization baked in
-		// Returns: int16 * 65536, range ~[-2.15B, +2.15B]
-		int32_t tableOutput = tableSat_.processNoAAInt32(tableInput);
-
-		// Output scaling: divide by 256 to undo pregain for unity gain
-		return tableOutput >> 8;
+		return tableSat_.processNoAAInt32(tableInput) >> 8;
 	}
 
 	/// Check if effect is transparent (zero drive in waveshaper)
 	[[nodiscard]] bool isTransparent() const { return tableSat_.isLinear(); }
 
-	/// Get the table saturator for direct parameter access
-	[[nodiscard]] TableSaturator& getTableSaturator() { return tableSat_; }
-	[[nodiscard]] const TableSaturator& getTableSaturator() const { return tableSat_; }
+	/// Get the table shaper core for direct parameter access
+	[[nodiscard]] TableShaperCore& getTableShaperCore() { return tableSat_; }
+	[[nodiscard]] const TableShaperCore& getTableShaperCore() const { return tableSat_; }
 
-	/// Reset table saturator state (call when shape parameters change)
+	/// Reset table shaper state (call when shape parameters change)
 	void resetTableState() { tableSat_.reset(); }
 
 	[[nodiscard]] uint8_t getShapeX() const { return shapeX_; }
@@ -175,8 +132,8 @@ private:
 	uint8_t shapeX_{0};
 	uint16_t shapeY_{0};
 
-	// Table-based saturator with cached waveshaping (shared for L/R)
-	TableSaturator tableSat_;
+	// Table-based shaper with cached waveshaping (shared for L/R)
+	TableShaperCore tableSat_;
 };
 
 } // namespace deluge::dsp

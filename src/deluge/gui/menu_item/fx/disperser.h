@@ -18,9 +18,9 @@
 
 #include "gui/menu_item/integer.h"
 #include "gui/ui/sound_editor.h"
+#include "hid/display/oled.h"
 #include "model/instrument/kit.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
-#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "processing/sound/sound.h"
 #include "processing/sound/sound_drum.h"
@@ -54,9 +54,6 @@ public:
 	[[nodiscard]] int32_t getMinValue() const override { return 0; }
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
-	}
 };
 
 // Disperser Spread: Frequency spread across stages (0-127, 0=all same, 127=±4 octaves)
@@ -84,9 +81,6 @@ public:
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
-	}
 };
 
 // Disperser Feedback: Output fed back to input (0-127, 64=none, 0=negative, 127=positive)
@@ -115,9 +109,6 @@ public:
 	[[nodiscard]] int32_t getMinValue() const override { return 0; }
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
-	}
 };
 
 // Disperser Stages: Number of active allpass stages (0-16, acts as on/off and intensity)
@@ -145,8 +136,16 @@ public:
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return 16; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
+
+	// Show "OFF" when stages=0 (effect bypassed)
+	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
+		if (this->getValue() == 0) {
+			deluge::hid::display::OLED::main.drawStringCentered("OFF", slot.start_x,
+			                                                    slot.start_y + kHorizontalMenuSlotYOffset,
+			                                                    kTextSpacingX, kTextSpacingY, slot.width);
+			return;
+		}
+		IntegerWithOff::renderInHorizontalMenu(slot);
 	}
 };
 

@@ -173,7 +173,7 @@ inline float triangleFloat(float phase, float duty = 1.0f) {
 // ============================================================================
 // Utilities for parameters that divide their range into discrete zones,
 // each with distinct behavior. Used by sine shaper, multiband compressor,
-// analytic saturator, etc.
+// table shaper, etc.
 
 /// Result of zone calculation - index and position within zone
 struct ZoneInfo {
@@ -198,11 +198,20 @@ struct ZoneInfo {
 }
 
 /// Compute zone index and position directly from q31 parameter
+/// Uses integer division for zone index to match clipping boundaries exactly
+/// (float-based calculation has precision issues near zone boundaries)
 /// @param param Parameter value in q31 format (0 to ONE_Q31)
 /// @param numZones Number of zones (typically 8)
 /// @return ZoneInfo with index (0 to numZones-1) and position (0.0-1.0)
 [[gnu::always_inline]] inline ZoneInfo computeZoneQ31(q31_t param, int32_t numZones) {
-	return computeZone(normalizeQ31(param), numZones);
+	// Use integer division for zone index to match clipping boundaries
+	q31_t zoneWidth = ONE_Q31 / numZones;
+	int32_t rawIndex = static_cast<int32_t>(param / zoneWidth);
+	int32_t index = (rawIndex < 0) ? 0 : (rawIndex >= numZones) ? (numZones - 1) : rawIndex;
+	// Use float for position within zone (smooth interpolation)
+	q31_t zoneStart = static_cast<q31_t>(index) * zoneWidth;
+	float position = static_cast<float>(param - zoneStart) / static_cast<float>(zoneWidth);
+	return {index, position};
 }
 
 /// Convert zone position (0.0-1.0) to display value (0-127)

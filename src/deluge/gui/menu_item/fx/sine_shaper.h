@@ -22,7 +22,6 @@
 #include "gui/ui/sound_editor.h"
 #include "model/instrument/kit.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
-#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "modulation/params/param.h"
 #include "processing/sound/sound.h"
@@ -31,33 +30,30 @@
 #include <cstdint>
 #include <hid/buttons.h>
 #include <hid/display/display.h>
+#include <hid/display/oled.h>
 #include <limits>
 
 namespace params = deluge::modulation::params;
 
 namespace deluge::gui::menu_item::fx {
 
-/// UnpatchedParam with DynamicsSoundDesign gating for learnable drive parameters.
-/// Used in menus.cpp for sineShaperDriveMenu and saturatorDriveMenu.
+/// UnpatchedParam for learnable drive parameters in the shaping submenu.
+/// Used in menus.cpp for sineShaperDriveMenu and shaperDriveMenu.
+/// Visibility is gated at the submenu level by submenu::Shaping.
 class DynamicsUnpatchedParam : public UnpatchedParam {
 public:
 	using UnpatchedParam::UnpatchedParam;
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
-	}
 };
 
-/// PatchedParam with DynamicsSoundDesign gating for mod-matrix-routable drive parameters.
-/// Used in menus.cpp for sineShaperDriveMenu and saturatorDriveMenu.
+/// PatchedParam for mod-matrix-routable drive parameters in the shaping submenu.
+/// Used in menus.cpp for sineShaperDriveMenu and shaperDriveMenu.
 /// Uses bipolar range (-128 to +128) where 0 = unity, negative = below unity, -128 = -inf.
+/// Visibility is gated at the submenu level by submenu::Shaping.
 class DynamicsPatchedParam : public patched_param::Integer {
 public:
 	static constexpr int32_t kDriveMenuHalfRange = 128;
 
 	using patched_param::Integer::Integer;
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
-	}
 
 	/// Override selectEncoderAction to enforce our bipolar range (-128 to +128)
 	/// We bypass Integer::selectEncoderAction to avoid its getMaxValue/getMinValue clamping
@@ -181,10 +177,6 @@ public:
 		return true;
 	}
 
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
-	}
-
 private:
 	mutable bool suppressNotification_ = false;
 };
@@ -250,10 +242,6 @@ public:
 		return true;
 	}
 
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
-	}
-
 private:
 	mutable bool suppressNotification_ = false;
 };
@@ -310,8 +298,16 @@ public:
 
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
+
+	// Show "OFF" when mix=0 (effect bypassed)
+	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
+		if (this->getValue() == 0) {
+			deluge::hid::display::OLED::main.drawStringCentered("OFF", slot.start_x,
+			                                                    slot.start_y + kHorizontalMenuSlotYOffset,
+			                                                    kTextSpacingX, kTextSpacingY, slot.width);
+			return;
+		}
+		IntegerWithOff::renderInHorizontalMenu(slot);
 	}
 
 private:

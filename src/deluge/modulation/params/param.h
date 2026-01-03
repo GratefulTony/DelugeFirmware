@@ -97,7 +97,7 @@ enum Local : ParamType {
 	LOCAL_OSC_A_WAVE_INDEX,
 	LOCAL_OSC_B_WAVE_INDEX,
 	LOCAL_PAN,
-	LOCAL_SATURATOR_DRIVE,   // XY distortion drive (additive mod: base + mod)
+	LOCAL_SHAPER_DRIVE,      // XY distortion drive (additive mod: base + mod)
 	LOCAL_SINE_SHAPER_DRIVE, // Sine shaper drive (additive mod: base + mod)
 
 	// Local zone params begin (pure modulation pass-through, scaling handled by ZoneBasedParam)

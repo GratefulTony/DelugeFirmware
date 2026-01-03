@@ -110,14 +110,14 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	midi_knobs = other->midi_knobs; // Could fail if no RAM... not too big a concern
 	delay = other->delay;
 	stutterConfig = other->stutterConfig;
-	// Saturator
-	saturatorDrive = other->saturatorDrive;
-	saturatorShapeX = other->saturatorShapeX;
-	saturatorShapeY = other->saturatorShapeY;
-	saturatorMix = other->saturatorMix;
-	saturatorPhase = other->saturatorPhase;
-	if (saturatorDrive || saturatorMix) {
-		saturator.regenerateTable(saturatorShapeX, saturatorShapeY, saturatorPhase);
+	// Shaper
+	shaperDrive = other->shaperDrive;
+	shaperShapeX = other->shaperShapeX;
+	shaperShapeY = other->shaperShapeY;
+	shaperMix = other->shaperMix;
+	shaperPhase = other->shaperPhase;
+	if (shaperDrive || shaperMix) {
+		shaper.regenerateTable(shaperShapeX, shaperShapeY, shaperPhase);
 	}
 	// Disperser
 	disperserFreq = other->disperserFreq;
@@ -577,21 +577,21 @@ void ModControllableAudio::writeAttributesToFile(Serializer& writer) {
 	if (sineShaper.gammaPhase != 0.0f) {
 		writer.writeAttribute("sineShaperGamma", static_cast<int32_t>(sineShaper.gammaPhase * 10.0f));
 	}
-	// Saturator params (only write if non-default)
-	if (saturatorDrive) {
-		writer.writeAttribute("saturatorDrive", saturatorDrive);
+	// Shaper params (only write if non-default)
+	if (shaperDrive) {
+		writer.writeAttribute("shaperDrive", shaperDrive);
 	}
-	if (saturatorShapeX) {
-		writer.writeAttribute("saturatorShapeX", saturatorShapeX);
+	if (shaperShapeX) {
+		writer.writeAttribute("shaperShapeX", shaperShapeX);
 	}
-	if (saturatorShapeY) {
-		writer.writeAttribute("saturatorShapeY", saturatorShapeY);
+	if (shaperShapeY) {
+		writer.writeAttribute("shaperShapeY", shaperShapeY);
 	}
-	if (saturatorMix) {
-		writer.writeAttribute("saturatorMix", saturatorMix);
+	if (shaperMix) {
+		writer.writeAttribute("shaperMix", shaperMix);
 	}
-	if (saturatorPhase != 0.0f) {
-		writer.writeAttribute("saturatorPhase", static_cast<int32_t>(saturatorPhase * 10.0f));
+	if (shaperPhase != 0.0f) {
+		writer.writeAttribute("shaperPhase", static_cast<int32_t>(shaperPhase * 10.0f));
 	}
 	// Disperser params (only write if non-default)
 	if (disperserFreq != 64) {
@@ -1099,30 +1099,30 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 		sineShaper.gammaPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
 		reader.exitTag("sineShaperGamma");
 	}
-	// Saturator params
-	else if (!strcmp(tagName, "saturatorDrive")) {
-		saturatorDrive = reader.readTagOrAttributeValueInt();
-		saturator.regenerateTable(saturatorShapeX, saturatorShapeY, saturatorPhase);
-		reader.exitTag("saturatorDrive");
+	// Shaper params
+	else if (!strcmp(tagName, "shaperDrive")) {
+		shaperDrive = reader.readTagOrAttributeValueInt();
+		shaper.regenerateTable(shaperShapeX, shaperShapeY, shaperPhase);
+		reader.exitTag("shaperDrive");
 	}
-	else if (!strcmp(tagName, "saturatorShapeX")) {
-		saturatorShapeX = reader.readTagOrAttributeValueInt();
-		saturator.regenerateTable(saturatorShapeX, saturatorShapeY, saturatorPhase);
-		reader.exitTag("saturatorShapeX");
+	else if (!strcmp(tagName, "shaperShapeX")) {
+		shaperShapeX = reader.readTagOrAttributeValueInt();
+		shaper.regenerateTable(shaperShapeX, shaperShapeY, shaperPhase);
+		reader.exitTag("shaperShapeX");
 	}
-	else if (!strcmp(tagName, "saturatorShapeY")) {
-		saturatorShapeY = reader.readTagOrAttributeValueInt();
-		saturator.regenerateTable(saturatorShapeX, saturatorShapeY, saturatorPhase);
-		reader.exitTag("saturatorShapeY");
+	else if (!strcmp(tagName, "shaperShapeY")) {
+		shaperShapeY = reader.readTagOrAttributeValueInt();
+		shaper.regenerateTable(shaperShapeX, shaperShapeY, shaperPhase);
+		reader.exitTag("shaperShapeY");
 	}
-	else if (!strcmp(tagName, "saturatorMix")) {
-		saturatorMix = reader.readTagOrAttributeValueInt();
-		reader.exitTag("saturatorMix");
+	else if (!strcmp(tagName, "shaperMix")) {
+		shaperMix = reader.readTagOrAttributeValueInt();
+		reader.exitTag("shaperMix");
 	}
-	else if (!strcmp(tagName, "saturatorPhase")) {
-		saturatorPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
-		saturator.regenerateTable(saturatorShapeX, saturatorShapeY, saturatorPhase);
-		reader.exitTag("saturatorPhase");
+	else if (!strcmp(tagName, "shaperPhase")) {
+		shaperPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
+		shaper.regenerateTable(shaperShapeX, shaperShapeY, shaperPhase);
+		reader.exitTag("shaperPhase");
 	}
 	// Disperser params
 	else if (!strcmp(tagName, "disperserFreq")) {

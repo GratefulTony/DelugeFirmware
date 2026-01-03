@@ -26,28 +26,26 @@
 #include "hid/display/oled.h"
 #include "model/instrument/kit.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
-#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "processing/sound/sound.h"
 #include "processing/sound/sound_drum.h"
 
 namespace deluge::gui::menu_item::fx {
 
-// Drive: Bipolar patched param for saturator input gain
+// Drive: Bipolar patched param for shaper input gain
 // Gold knob press toggles AA via Sound::modEncoderButtonAction
-using SaturatorDrive = DynamicsPatchedParam;
+using TableShaperDrive = DynamicsPatchedParam;
 
-// High resolution: 1024 steps for Y axis zone exploration
-constexpr int32_t kSaturatorHighResSteps = 1024;
-constexpr int32_t kSaturatorNumZones = 8; // Placeholder zone count
+constexpr int32_t kShaperHighResSteps = 1024;
+constexpr int32_t kShaperNumZones = 8;
 
 // Shape X: Soft→Hard axis (0-127)
 // Controls knee/clipping aggressiveness
-class SaturatorShapeX final : public IntegerWithOff {
+class TableShaperShapeX final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->saturatorShapeX); }
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->shaperShapeX); }
 	bool usesAffectEntire() override { return true; }
 	void writeCurrentValue() override {
 		int32_t current_value = this->getValue();
@@ -58,40 +56,34 @@ public:
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->saturatorShapeX = current_value;
-					soundDrum->saturator.regenerateTable(current_value, soundDrum->saturatorShapeY,
-					                                     soundDrum->saturatorPhase);
+					soundDrum->shaperShapeX = current_value;
+					soundDrum->shaper.regenerateTable(current_value, soundDrum->shaperShapeY, soundDrum->shaperPhase);
 				}
 			}
 		}
 		else {
-			mca->saturatorShapeX = current_value;
-			mca->saturator.regenerateTable(current_value, mca->saturatorShapeY, mca->saturatorPhase);
+			mca->shaperShapeX = current_value;
+			mca->shaper.regenerateTable(current_value, mca->shaperShapeY, mca->shaperPhase);
 		}
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
-	}
 
-	// Auto-enable mix when user enables X from OFF state
 	void selectEncoderAction(int32_t offset) override {
 		auto* mca = soundEditor.currentModControllable;
 		bool wasOff = (this->getValue() == 0);
 		IntegerWithOff::selectEncoderAction(offset);
-		// If X was 0 and user turned it up, auto-set mix to 50% so effect is audible
-		if (wasOff && this->getValue() > 0 && mca->saturatorMix == 0) {
-			mca->saturatorMix = 64; // 50% wet
+		if (wasOff && this->getValue() > 0 && mca->shaperMix == 0) {
+			mca->shaperMix = 64; // Auto-enable mix
 		}
-		if (this->getValue() == 0 || mca->saturatorMix == 0) {
+		if (this->getValue() == 0 || mca->shaperMix == 0) {
 			display->displayPopup("OFF");
 		}
 	}
 
 	// Show "OFF" in horizontal menu when effect is bypassed (X=0 or mix=0)
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
-		if (this->getValue() == 0 || soundEditor.currentModControllable->saturatorMix == 0) {
+		if (this->getValue() == 0 || soundEditor.currentModControllable->shaperMix == 0) {
 			deluge::hid::display::OLED::main.drawStringCentered("OFF", slot.start_x,
 			                                                    slot.start_y + kHorizontalMenuSlotYOffset,
 			                                                    kTextSpacingX, kTextSpacingY, slot.width);
@@ -101,16 +93,13 @@ public:
 	}
 };
 
-// Shape Y: High-res multi-zone sweep through analytic saturator parameter space (0-1023)
-// Controls harmonic character via combinatoric blend of 6 basis functions:
-// Tanh (warm), Polynomial (bright), Hard Knee (clip), Chebyshev T5 (fold), Sine Folder (gold), Rectifier (diode)
-// Uses velocity-based encoder acceleration for smooth navigation through 1024 steps
-// Secret menu: Push+twist encoder to adjust saturatorPhase (per-patch phase offset for triangle modulation)
-class SaturatorShapeY final : public IntegerWithOff {
+// Shape Y (UI: "Color"): Sweeps through saturation characters
+// Secret menu: Push+twist to adjust shaperPhase
+class TableShaperShapeY final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->saturatorShapeY); }
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->shaperShapeY); }
 	bool usesAffectEntire() override { return true; }
 	void writeCurrentValue() override {
 		int32_t current_value = this->getValue();
@@ -121,34 +110,28 @@ public:
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->saturatorShapeY = current_value;
-					soundDrum->saturator.regenerateTable(soundDrum->saturatorShapeX, current_value,
-					                                     soundDrum->saturatorPhase);
+					soundDrum->shaperShapeY = current_value;
+					soundDrum->shaper.regenerateTable(soundDrum->shaperShapeX, current_value, soundDrum->shaperPhase);
 				}
 			}
 		}
 		else {
-			mca->saturatorShapeY = current_value;
-			mca->saturator.regenerateTable(mca->saturatorShapeX, current_value, mca->saturatorPhase);
+			mca->shaperShapeY = current_value;
+			mca->shaper.regenerateTable(mca->shaperShapeX, current_value, mca->shaperPhase);
 		}
 	}
-	[[nodiscard]] int32_t getMaxValue() const override { return kSaturatorHighResSteps - 1; } // 0-1023
+	[[nodiscard]] int32_t getMaxValue() const override { return kShaperHighResSteps - 1; } // 0-1023
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
-	}
 
-	// Velocity-based encoder acceleration for navigating 1024 steps
-	// Secret menu: Push+twist to adjust saturatorPhase
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret menu: adjust saturatorPhase (unbounded, wraps via fmod in DSP)
+			// Secret: push+twist adjusts shaperPhase
 			Buttons::selectButtonPressUsedUp = true;
-			float& phase = soundEditor.currentModControllable->saturatorPhase;
+			float& phase = soundEditor.currentModControllable->shaperPhase;
 			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
 			// Regenerate table with new phase
 			auto* mca = soundEditor.currentModControllable;
-			mca->saturator.regenerateTable(mca->saturatorShapeX, mca->saturatorShapeY, phase);
+			mca->shaper.regenerateTable(mca->shaperShapeX, mca->shaperShapeY, phase);
 			// Show current value on display
 			char buffer[12];
 			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
@@ -169,20 +152,18 @@ public:
 	}
 
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
-		renderZoneInHorizontalMenu(slot, this->getValue(), kSaturatorHighResSteps, kSaturatorNumZones, getZoneName);
+		renderZoneInHorizontalMenu(slot, this->getValue(), kShaperHighResSteps, kShaperNumZones, getZoneName);
 	}
 
 protected:
 	void drawPixelsForOled() override {
-		drawZoneForOled(this->getValue(), kSaturatorHighResSteps, kSaturatorNumZones, getZoneName);
+		drawZoneForOled(this->getValue(), kShaperHighResSteps, kShaperNumZones, getZoneName);
 	}
 
 private:
 	mutable VelocityEncoder velocity_;
 	mutable bool suppressNotification_ = false;
 
-	// Zone names reflecting the 6 basis functions explored across Y axis
-	// Basis functions: Tanh(warm), Poly(bright), HardKnee(clip), Cheby(fold), SineFold(gold), Rect(diode)
 	static const char* getZoneName(int32_t zoneIndex) {
 		switch (zoneIndex) {
 		case 0:
@@ -208,11 +189,11 @@ private:
 };
 
 // Mix: Wet/dry blend (0 = bypass, 127 = full wet)
-class SaturatorMix final : public IntegerWithOff {
+class TableShaperMix final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->saturatorMix); }
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->shaperMix); }
 	bool usesAffectEntire() override { return true; }
 	void writeCurrentValue() override {
 		int32_t current_value = this->getValue();
@@ -222,23 +203,20 @@ public:
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->saturatorMix = current_value;
+					soundDrum->shaperMix = current_value;
 				}
 			}
 		}
 		else {
-			soundEditor.currentModControllable->saturatorMix = current_value;
+			soundEditor.currentModControllable->shaperMix = current_value;
 		}
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
-		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);
-	}
 
 	// Show "OFF" when X=0, "DRY" when mix=0
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
-		if (soundEditor.currentModControllable->saturatorShapeX == 0) {
+		if (soundEditor.currentModControllable->shaperShapeX == 0) {
 			deluge::hid::display::OLED::main.drawStringCentered("OFF", slot.start_x,
 			                                                    slot.start_y + kHorizontalMenuSlotYOffset,
 			                                                    kTextSpacingX, kTextSpacingY, slot.width);
@@ -253,18 +231,16 @@ public:
 		IntegerWithOff::renderInHorizontalMenu(slot);
 	}
 
-	// Auto-enable X when user tries to increase mix from OFF state
 	void selectEncoderAction(int32_t offset) override {
 		auto* mca = soundEditor.currentModControllable;
-		if (mca->saturatorShapeX == 0) {
+		if (mca->shaperShapeX == 0) {
 			if (offset > 0) {
-				// User wants to enable the effect - auto-set X=1
-				mca->saturatorShapeX = 1;
-				mca->saturator.regenerateTable(1, mca->saturatorShapeY, mca->saturatorPhase);
+				mca->shaperShapeX = 1; // Auto-enable Knee
+				mca->shaper.regenerateTable(1, mca->shaperShapeY, mca->shaperPhase);
 			}
 			else {
 				display->displayPopup("OFF");
-				return; // Can't go lower than OFF
+				return;
 			}
 		}
 		IntegerWithOff::selectEncoderAction(offset);

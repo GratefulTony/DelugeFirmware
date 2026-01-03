@@ -74,6 +74,20 @@ struct StereoFilterComponent {
 		return vsub_s32(b2, input);
 	}
 
+	/// NEON-vectorized saturating allpass filter for stereo (L/R in parallel)
+	/// Uses saturating add to prevent overflow artifacts (bitcrushing)
+	[[gnu::always_inline]] int32x2_t doAPFSaturating(int32x2_t input, int32_t moveability) {
+		int32x2_t memory = vld1_s32(memory_);
+		int32x2_t coeff = vdup_n_s32(moveability);
+		int32x2_t diff = vsub_s32(input, memory);
+		int32x2_t a = vqrdmulh_s32(diff, coeff);
+		int32x2_t b = vadd_s32(a, memory);
+		memory = vadd_s32(a, b);
+		vst1_s32(memory_, memory);
+		// Saturating: b + (b - input) instead of b * 2 - input
+		return vqadd_s32(b, vsub_s32(b, input));
+	}
+
 	/// NEON-vectorized lowpass filter for stereo (L/R in parallel)
 	[[gnu::always_inline]] int32x2_t doFilter(int32x2_t input, int32_t moveability) {
 		int32x2_t memory = vld1_s32(memory_);

@@ -70,20 +70,16 @@ struct ShiftedGain {
 	int8_t shift = 0;
 	float normalized = gain;
 
-	// Scale down if >= 1.0
 	while (normalized >= 1.0f && shift < 6) {
 		normalized *= 0.5f;
 		shift++;
 	}
-	// Scale up if < 0.5
 	while (normalized < 0.5f && shift > -5) {
 		normalized *= 2.0f;
 		shift--;
 	}
 
-	// Convert normalized (0.5 to 1.0) to q31
-	q31_t mantissa = static_cast<q31_t>(normalized * static_cast<float>(ONE_Q31));
-	return {mantissa, shift};
+	return {static_cast<q31_t>(normalized * static_cast<float>(ONE_Q31)), shift};
 }
 
 /// Apply pre-shifted gain to a q31 sample with saturation
@@ -91,17 +87,11 @@ struct ShiftedGain {
 /// @param gain Pre-shifted gain from floatToShiftedGain
 /// @return Gained sample, saturated to q31 range
 [[gnu::always_inline]] inline q31_t applyShiftedGain(q31_t sample, ShiftedGain gain) {
-	// Multiply by mantissa (result fits in q31 since mantissa < 1.0)
 	q31_t scaled = multiply_32x32_rshift32(sample, gain.mantissa) << 1;
-
-	// Apply shift with saturation
 	if (gain.shift > 0) {
 		return lshiftAndSaturateUnknown(scaled, static_cast<uint8_t>(gain.shift));
 	}
-	else if (gain.shift < 0) {
-		return scaled >> (-gain.shift);
-	}
-	return scaled;
+	return (gain.shift < 0) ? (scaled >> (-gain.shift)) : scaled;
 }
 
 // ============================================================================
@@ -114,22 +104,12 @@ struct ShiftedGain {
 /// @param shift Shift amount (same for all samples)
 /// @return 4 gained samples, saturated to q31 range
 [[gnu::always_inline]] inline int32x4_t applyShiftedGainNeon(int32x4_t samples, int32x4_t mantissa, int8_t shift) {
-	// vqdmulhq_s32: saturating doubling multiply high - perfect for q31 × q31
-	// Result is already doubled (the 'q' in vqdmulh), equivalent to multiply_32x32_rshift32 << 1
+	// vqdmulhq_s32: saturating doubling multiply high (equivalent to multiply_32x32_rshift32 << 1)
 	int32x4_t scaled = vqdmulhq_s32(samples, mantissa);
-
-	// Apply shift with saturation
 	if (shift > 0) {
-		// Left shift with saturation using vqshlq_s32
-		int32x4_t shiftVec = vdupq_n_s32(shift);
-		return vqshlq_s32(scaled, shiftVec);
+		return vqshlq_s32(scaled, vdupq_n_s32(shift));
 	}
-	else if (shift < 0) {
-		// Right shift (no saturation needed)
-		int32x4_t shiftVec = vdupq_n_s32(shift); // Negative value = right shift
-		return vshlq_s32(scaled, shiftVec);
-	}
-	return scaled;
+	return (shift < 0) ? vshlq_s32(scaled, vdupq_n_s32(shift)) : scaled;
 }
 
 /// A single-band compressor with both upward and downward compression (OTT-style).

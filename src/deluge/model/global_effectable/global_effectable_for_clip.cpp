@@ -18,7 +18,7 @@
 #include "model/global_effectable/global_effectable_for_clip.h"
 #include "definitions.h"
 #include "definitions_cxx.hpp"
-#include "dsp/saturator_buffer.h"
+#include "dsp/shaper_buffer.h"
 #include "dsp/sine_shaper.hpp"
 #include "dsp/util.hpp"
 #include "dsp_ng/core/types.hpp"
@@ -123,20 +123,7 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	    modelStack, global_effectable_audio, nullptr, reverbBuffer, reverbAmountAdjustForDrums, sideChainHitPending,
 	    shouldLimitDelayFeedback, isClipActive, pitchAdjust, 134217728, 134217728);
 
-	// Render saturation (builtin saturator using getTanHAntialiased)
-	if (clippingAmount != 0u) {
-		FX_BENCH_DECLARE(benchClip, "saturator_builtin");
-		FX_BENCH_SCOPE(benchClip);
-
-		for (deluge::dsp::StereoSample<q31_t>& sample : global_effectable_audio) {
-			sample.l = saturate(sample.l, &lastSaturationTanHWorkingValue[0]);
-			sample.r = saturate(sample.r, &lastSaturationTanHWorkingValue[1]);
-		}
-	}
-
-	// Render filters
-	processFilters(global_effectable_audio);
-
+	// Shapers run before filters (matching voice processing order)
 	// Sine Shaper (for audio clips, uses sineShaper struct)
 	if (sineShaper.mix > 0) {
 		q31_t sineDrive = static_cast<q31_t>(sineShaper.drive) << 24;
@@ -158,15 +145,29 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 		                             sineHarmonic, sineMix, twistParams, &sineShaper);
 	}
 
-	// XY Saturator (for audio clips, uses uint8_t drive member)
-	// Benchmarking happens inside saturateBuffer
-	if (saturatorMix > 0) {
-		q31_t satDrive = static_cast<q31_t>(saturatorDrive) << 24;
-		q31_t satMix = static_cast<q31_t>(saturatorMix) << 24;
+	// Table Shaper (for audio clips)
+	// Benchmarking happens inside shapeBuffer
+	if (shaperMix > 0) {
+		q31_t satDrive = static_cast<q31_t>(shaperDrive) << 24;
+		q31_t satMix = static_cast<q31_t>(shaperMix) << 24;
 		// ADAA enabled - uses per-clip state for anti-aliasing
-		deluge::dsp::saturateBuffer(global_effectable_audio, saturator, satDrive, &saturatorDriveLast, satMix,
-		                            &saturatorPrevXL, &saturatorPrevXR);
+		deluge::dsp::shapeBuffer(global_effectable_audio, shaper, satDrive, &shaperDriveLast, satMix, &shaperPrevXL,
+		                         &shaperPrevXR);
 	}
+
+	// Render saturation (builtin shaper using getTanHAntialiased)
+	if (clippingAmount != 0u) {
+		FX_BENCH_DECLARE(benchClip, "shaper_builtin");
+		FX_BENCH_SCOPE(benchClip);
+
+		for (deluge::dsp::StereoSample<q31_t>& sample : global_effectable_audio) {
+			sample.l = saturate(sample.l, &lastSaturationTanHWorkingValue[0]);
+			sample.r = saturate(sample.r, &lastSaturationTanHWorkingValue[1]);
+		}
+	}
+
+	// Render filters
+	processFilters(global_effectable_audio);
 
 	// Render FX
 	processSRRAndBitcrushing(global_effectable_audio, &volumePostFX, paramManagerForClip);

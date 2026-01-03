@@ -1,8 +1,8 @@
-# Table Saturator - Design Document
+# Table Shaper - Design Document
 
 ## Overview
 
-The Table Saturator is an experimental Zone 4 addition to the XY Saturator, featuring:
+The Table Shaper is an experimental Zone 4 addition to the XY Shaper, featuring:
 - **3 Basis Functions**: Tanh (warm), Polynomial (bright), Chebyshev T5 (fold/synthy)
 - **ADAA (Antiderivative Antialiasing)**: Reduces aliasing artifacts
 - **Parametric XY Control**: X maps to drive, Y sweeps combinatorically through parameter space
@@ -12,23 +12,23 @@ The Table Saturator is an experimental Zone 4 addition to the XY Saturator, feat
 
 ### Files
 
-- `src/deluge/dsp/table_saturator.h` - Core parametric saturator with ADAA
-- `src/deluge/dsp/saturator.h` - Wrapper class, integrates Zone 4 with existing zones
+- `src/deluge/dsp/table_shaper.h` - Core parametric shaper with ADAA
+- `src/deluge/dsp/shaper.h` - Wrapper class, integrates Zone 4 with existing zones
 - `src/deluge/dsp/fast_math.h` - Fast math approximations (fastTanh, fastExp, etc.)
-- `src/deluge/gui/menu_item/fx/saturator.h` - Menu item with MomentumEncoder
+- `src/deluge/gui/menu_item/fx/shaper.h` - Menu item with MomentumEncoder
 - `src/deluge/gui/menu_item/momentum_encoder.h` - High-resolution encoder helper
 
 ### Key Classes
 
-#### TableSaturator
-Core saturator with cached lookup tables:
+#### TableShaper
+Core shaper with cached lookup tables:
 - `fTable_[513]` - f(x) waveshaping function values
 - `FTable_[513]` - F(x) antiderivative values for ADAA
 - Tables regenerate only when parameters change (dirty flag)
 - External state pointer pattern for multi-channel efficiency
 
-#### TableSaturatorXYMapper
-Derives saturator parameters from XY position using triangle wave phasing:
+#### TableShaperXYMapper
+Derives shaper parameters from XY position using triangle wave phasing:
 - X (0-127): Maps to drive (0 = bypass, 127 = full saturation)
 - Y (0-127): Combinatoric sweep through basis weights, threshold, asymmetry
 - Triangle waves with irrational period ratios (3, e, pi) for dense parameter coverage
@@ -56,10 +56,10 @@ The antiderivative is computed via trapezoidal integration during table generati
 
 ### Stereo Handling
 
-One TableSaturator instance (shared tables) with separate ADAA state per channel:
+One TableShaper instance (shared tables) with separate ADAA state per channel:
 ```cpp
-// In Saturator class:
-TableSaturator tableSat_;      // Shared tables
+// In Shaper class:
+TableShaper tableSat_;      // Shared tables
 float tablePrevXL_{0.0f};      // L channel ADAA state
 float tablePrevXR_{0.0f};      // R channel ADAA state
 
@@ -74,7 +74,7 @@ float output = tableSat_.process(input, prevXState);
 - **Zone 1 (Y 32-63)**: Asymmetric tube (even harmonics)
 - **Zone 2 (Y 64-95)**: Hard clip with linear zone
 - **Zone 3 (Y 96-127)**: Crossover distortion
-- **Zone 4 (Y 128-255)**: Table-based ADAA saturator
+- **Zone 4 (Y 128-255)**: Table-based ADAA shaper
 
 ## Known Issues (WIP)
 
@@ -83,7 +83,7 @@ float output = tableSat_.process(input, prevXState);
 2. **Limited Parameter Response**: X and Y changes have minimal audible effect (except X=0 being transparent)
 
 ### Suspected Causes
-1. **External Drive Pre-boost**: The Saturator::process() applies 3x boost at menu center position before clamping, causing hard clipping before saturation
+1. **External Drive Pre-boost**: The Shaper::process() applies 3x boost at menu center position before clamping, causing hard clipping before saturation
 2. **Basis Functions Not Scaled**: Polynomial and Chebyshev bases don't respond to drive/k parameter - only tanh is scaled by steepness
 3. **Threshold Interaction**: High threshold values from Y sweep may mask saturation effect
 4. **Peak Normalization**: May be amplifying artifacts
@@ -97,6 +97,6 @@ float output = tableSat_.process(input, prevXState);
 
 ## Future Considerations
 
-- Integration with DOTT multiband compressor (one saturator per band)
+- Integration with DOTT multiband compressor (one shaper per band)
 - Phase offset parameters from vibe/feel knobs for evolving textures
 - Optimize table size vs quality tradeoff

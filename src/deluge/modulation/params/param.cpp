@@ -34,7 +34,7 @@ bool isParamBipolar(Kind kind, int32_t paramID) {
 
 bool isParamHybridDrive(Kind kind, int32_t paramID) {
 	// Hybrid drive params: bipolar where 0 = unity, negative = attenuation, positive = boost
-	return (kind == Kind::PATCHED && (paramID == LOCAL_SATURATOR_DRIVE || paramID == LOCAL_SINE_SHAPER_DRIVE));
+	return (kind == Kind::PATCHED && (paramID == LOCAL_SHAPER_DRIVE || paramID == LOCAL_SINE_SHAPER_DRIVE));
 }
 
 int32_t getParamZoneCount(Kind kind, int32_t paramID) {
@@ -127,6 +127,16 @@ int32_t getGoldKnobZoneCount(Kind kind, int32_t paramID) {
 			break;
 		}
 	}
+	else if (kind == Kind::PATCHED) {
+		switch (static_cast<Local>(paramID)) {
+		case LOCAL_SINE_SHAPER_HARMONIC:
+		case LOCAL_SINE_SHAPER_TWIST:
+			// Always 8 zones for sine shaper params
+			return 8;
+		default:
+			break;
+		}
+	}
 	return 1;
 }
 
@@ -195,7 +205,7 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [LOCAL_OSC_A_WAVE_INDEX]         = "Osc1 wave",
 	    [LOCAL_OSC_B_WAVE_INDEX]         = "Osc2 wave",
 	    [LOCAL_PAN]                      = "Pan",
-	    [LOCAL_SATURATOR_DRIVE]          = "Sat. drive",
+	    [LOCAL_SHAPER_DRIVE]          = "Sat. drive",
 	    [LOCAL_SINE_SHAPER_DRIVE]        = "Sine drive",
 	    [LOCAL_SINE_SHAPER_TWIST]        = "Sine twist",
 	    [LOCAL_SINE_SHAPER_HARMONIC]     = "Sine harm",
@@ -270,7 +280,7 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [LOCAL_OSC_A_WAVE_INDEX] = STRING_FOR_PARAM_LOCAL_OSC_A_WAVE_INDEX,
 	    [LOCAL_OSC_B_WAVE_INDEX] = STRING_FOR_PARAM_LOCAL_OSC_B_WAVE_INDEX,
 	    [LOCAL_PAN] = STRING_FOR_PARAM_LOCAL_PAN,
-	    [LOCAL_SATURATOR_DRIVE] = STRING_FOR_PARAM_LOCAL_SATURATOR_DRIVE,
+	    [LOCAL_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_SHAPER_DRIVE,
 	    [LOCAL_SINE_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_SINE_SHAPER_DRIVE,
 	    [LOCAL_SINE_SHAPER_TWIST] = STRING_FOR_SINE_SHAPER_SYMMETRY, // Reuse existing twist/symmetry string
 	    [LOCAL_SINE_SHAPER_HARMONIC] = STRING_FOR_SINE_SHAPER_HARMONIC,
@@ -804,8 +814,8 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 		case LOCAL_FOLD:
 			return "waveFold";
 
-		case LOCAL_SATURATOR_DRIVE:
-			return "saturatorDrive";
+		case LOCAL_SHAPER_DRIVE:
+			return "shaperDrive";
 
 		case LOCAL_SINE_SHAPER_DRIVE:
 			return "sineShaperDrive";

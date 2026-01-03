@@ -1,18 +1,18 @@
-# Table Saturator - Continuation Prompt
+# Table Shaper - Continuation Prompt
 
 ## Context
 
-Working on Zone 4 of the XY Saturator - a table-based parametric saturator with ADAA.
+Working on Zone 4 of the XY Shaper - a table-based parametric shaper with ADAA.
 
 ## Current State
 
 **Commit**: `612414b0` on `feat/multiband_compressor` branch
 
 **Key Files**:
-- `src/deluge/dsp/table_saturator.h` - Core implementation
-- `src/deluge/dsp/saturator.h` - Integration wrapper
+- `src/deluge/dsp/table_shaper.h` - Core implementation
+- `src/deluge/dsp/shaper.h` - Integration wrapper
 - `src/deluge/dsp/fast_math.h` - Fast math (fastTanh)
-- `docs/dev/table_saturator.md` - Design document
+- `docs/dev/table_shaper.md` - Design document
 
 ## Bugs to Debug
 
@@ -22,7 +22,7 @@ At X > 0, the output sounds harsh and broken instead of smoothly saturated.
 
 **Suspected causes**:
 
-a) **External drive pre-boost is too aggressive** - In `Saturator::process()`:
+a) **External drive pre-boost is too aggressive** - In `Shaper::process()`:
 ```cpp
 float driveScale = 1.0f + (static_cast<float>(drive) / 2147483648.0f + 1.0f) * 2.0f;
 inputF *= driveScale;
@@ -67,7 +67,7 @@ X=0 correctly bypasses (transparent) because `drive_ = 0` triggers `isLinear()` 
 
 ## Relevant Code Sections
 
-### External drive in Saturator::process() (saturator.h ~line 100-116)
+### External drive in Shaper::process() (shaper.h ~line 100-116)
 ```cpp
 if (useTable_) {
     float inputF = static_cast<float>(input) / 2147483648.0f;
@@ -80,7 +80,7 @@ if (useTable_) {
 }
 ```
 
-### Basis function computation (table_saturator.h ~line 268-291)
+### Basis function computation (table_shaper.h ~line 268-291)
 ```cpp
 // Basis 1: Tanh - SCALED by kEff
 float tanh_out = fastTanh(kEff * norm) * invTanhNorm;
@@ -94,7 +94,7 @@ float n2 = norm * norm;
 float cheby_out = norm * (5.0f + n2 * (-20.0f + n2 * 16.0f));
 ```
 
-### Parameter derivation (table_saturator.h ~line 395-418)
+### Parameter derivation (table_shaper.h ~line 395-418)
 ```cpp
 outDrive = static_cast<float>(x) / 127.0f;  // X -> drive
 outTanhWeight = triangle(yNorm * 3.0f);
