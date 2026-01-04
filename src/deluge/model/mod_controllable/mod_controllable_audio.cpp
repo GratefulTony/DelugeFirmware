@@ -49,6 +49,22 @@ namespace params = deluge::modulation::params;
 
 extern int32_t spareRenderingBuffer[][SSI_TX_BUFFER_NUM_SAMPLES];
 
+/// Convert MIDI-like note code to frequency in Hz
+/// Note code 60 = middle C (C3) = ~130.81 Hz
+/// A4 (note 69) = 440 Hz
+[[gnu::always_inline]] inline float noteCodeToHz(int32_t noteCode) {
+	// Standard formula: Hz = 440 * 2^((noteCode - 69) / 12)
+	return 440.0f * std::pow(2.0f, (static_cast<float>(noteCode) - 69.0f) / 12.0f);
+}
+
+/// Convert Hz to 0-127 range for disperser (matching 1Hz-8kHz = 13 octaves)
+[[gnu::always_inline]] inline uint8_t hzToDisperserFreq(float hz) {
+	// Inverse of: centerHz = 1.0f * std::pow(2.0f, (freq / 127.0f) * 13.0f)
+	// freq = 127 * log2(hz) / 13
+	float octaves = std::log2(std::max(hz, 1.0f));
+	return static_cast<uint8_t>(std::clamp(octaves * 127.0f / 13.0f, 0.0f, 127.0f));
+}
+
 ModControllableAudio::ModControllableAudio() {
 
 	// Grain
@@ -121,9 +137,8 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	}
 	// Disperser
 	disperserFreq = other->disperserFreq;
-	disperserSpread = other->disperserSpread;
-	disperserFeedback = other->disperserFeedback;
 	disperserStages = other->disperserStages;
+	disperser = other->disperser;
 	// Multiband compressor state
 	multibandCompressor.setEnabledZone(other->multibandCompressor.getEnabledZone());
 	multibandCompressor.setCrossoverType(other->multibandCompressor.getCrossoverType());
@@ -498,16 +513,178 @@ void ModControllableAudio::processDisperser(deluge::dsp::StereoBuffer<q31_t> buf
 	using namespace deluge::dsp;
 
 	if (disperserStages > 0) {
-		// Convert uint8_t params to q31_t for the DSP
-		q31_t dispFreq = static_cast<q31_t>(disperserFreq) << 24;
-		q31_t dispSpread = static_cast<q31_t>(disperserSpread) << 24;
-		q31_t dispFeedback = (static_cast<q31_t>(disperserFeedback) - 64) << 24; // Center at 0 for bipolar
+		using namespace deluge::modulation::params;
 
-		// Update coefficients with smoothing
-		disperser.updateCoefficientsSmoothed(dispFreq, dispSpread, &disperserFreqLast, &disperserSpreadLast);
+		// Read zone values from unpatched params (like multiband compressor)
+		q31_t topoValue = 0;
+		q31_t twistValue = 0;
+		if (paramManager != nullptr && paramManager->containsAnyParamCollectionsIncludingExpression()) {
+			UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
+			if (unpatchedParams != nullptr) {
+				topoValue = unpatchedParams->getValue(UNPATCHED_DISPERSER_TOPO);
+				twistValue = unpatchedParams->getValue(UNPATCHED_DISPERSER_TWIST);
+			}
+		}
 
-		// Process buffer with feedback smoothing
-		disperser.processBuffer(buffer, disperserStages, dispFeedback, &disperserFeedbackLast);
+		// Smooth zone params for DSP
+		constexpr q31_t smoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31);
+		disperser.smoothedTopo += (multiply_32x32_rshift32(topoValue - disperser.smoothedTopo, smoothingAlpha) << 1);
+		disperser.smoothedTwist += (multiply_32x32_rshift32(twistValue - disperser.smoothedTwist, smoothingAlpha) << 1);
+
+		// Compute twist phase offset for detuning/harmonicBlend (meta zones only)
+		// In twist zones 5-7, position rotates through topo's phi triangle patterns
+		constexpr q31_t kZoneWidth = ONE_Q31 / kDisperserNumZones;
+		constexpr q31_t kZone5 = kZoneWidth * 5;
+		float twistPhaseOffset = 0.0f;
+		if (disperser.smoothedTwist >= kZone5) {
+			float twistMetaPos =
+			    static_cast<float>(disperser.smoothedTwist - kZone5) / static_cast<float>(ONE_Q31 - kZone5);
+			twistPhaseOffset = twistMetaPos * 5.0f; // 5 cycles per full meta sweep (like sine shaper)
+		}
+
+		// Compute derived parameters from zones
+		DisperserTopoParams topoParams =
+		    computeDisperserTopoParams(disperser.smoothedTopo, &disperser, twistPhaseOffset);
+		DisperserTwistParams twistParams = computeDisperserTwistParams(disperser.smoothedTwist, &disperser);
+
+		// Reset filter state when crossing zone boundaries to avoid artifacts
+		if (disperser.lastTopoZone != topoParams.zone && disperser.lastTopoZone >= 0) {
+			disperserDsp.reset();
+		}
+		disperser.lastTopoZone = topoParams.zone;
+
+		// Twist zone position controls write gains (0-1), so we use max read feedback
+		// The per-stage write gains from twistParams determine actual feedback level
+		constexpr float baseFeedback = 1.0f;
+
+		// Topology-specific spread and feedback modulation
+		float spreadMod = 1.0f;
+		float feedbackMod = 1.0f;
+		float lrSpreadOffset = twistParams.width; // Full range stereo spread
+
+		switch (topoParams.zone) {
+		case 0: // Cascade: classic disperser, param0 = spread, param1 = feedback boost
+			spreadMod = topoParams.param0;
+			feedbackMod = 1.0f + topoParams.param1 * 1.0f; // Up to 100% boost (TEST)
+			break;
+
+		case 1: // PingPong: tighter spread for rhythmic effect, alternation via lrOffset
+			spreadMod = topoParams.param0 * 0.7f; // Reduced spread
+			lrSpreadOffset += topoParams.lrOffset * 0.3f;
+			feedbackMod = 1.0f + topoParams.param1 * 0.2f;
+			break;
+
+		case 2: // Stereo: L/R frequency offset for width, param0 = spread, lrOffset = stereo amount
+			spreadMod = topoParams.param0;
+			lrSpreadOffset += topoParams.lrOffset; // Direct stereo spread
+			feedbackMod = 1.0f + topoParams.param1 * 0.25f;
+			break;
+
+		case 3: // Cross: cross-coupled feedback, param0 = cross amount, tighter for comb
+			spreadMod = topoParams.param0 * 0.5f;          // Tighter spread for comb effect
+			feedbackMod = 1.0f + topoParams.param1 * 0.4f; // Higher feedback ceiling
+			// Cross-coupling handled in process loop if we add it
+			break;
+
+		case 4: // Pitch: placeholder - would track pitch, for now acts like tight comb
+			spreadMod = topoParams.param0 * 0.3f; // Very tight for harmonic effect
+			feedbackMod = 1.0f + topoParams.param1 * 0.35f;
+			break;
+
+		case 5:                                          // Nested: wider spread, moderate feedback for diffusion
+			spreadMod = 0.3f + topoParams.param0 * 0.7f; // Always some spread
+			feedbackMod = 0.8f + topoParams.param1 * 0.3f;
+			break;
+
+		case 6: // Diffuse: randomized feel via param variations
+			spreadMod = topoParams.param0;
+			feedbackMod = 1.0f + topoParams.param1 * 0.25f;
+			// Diffusion comes from coefficient variations (future)
+			break;
+
+		case 7:                                            // Spring: chirp character, high feedback for resonance
+			spreadMod = 0.2f + topoParams.param0 * 0.5f;   // Moderate spread
+			feedbackMod = 1.0f + topoParams.param1 * 0.5f; // Highest feedback boost
+			break;
+		}
+
+		// Apply modulations
+		float finalSpread = std::clamp(spreadMod, 0.0f, 1.0f);
+		// Twist zone write gains control feedback intensity; process() has its own 85% cap
+		float finalFeedback = std::clamp(baseFeedback * feedbackMod, 0.0f, 1.0f);
+
+		q31_t dispSpread = static_cast<q31_t>(finalSpread * ONE_Q31);
+		q31_t dispFeedback = static_cast<q31_t>(finalFeedback * ONE_Q31);
+
+		// Pitch tracking: try to get note frequency from Sound, use freq knob as offset
+		// Note: drums use kNoteForDrum=60, so they track to ~261Hz with offset from there
+		uint8_t effectiveFreq = disperserFreq;
+		int32_t noteCode = getLastNoteCode();
+		if (noteCode >= 0 && noteCode < 128) {
+			// Got a valid note - use it as base frequency
+			float noteHz = noteCodeToHz(noteCode);
+
+			// Freq knob becomes bipolar offset: 64=center (no offset), 0=-6.5 octaves, 127=+6.5 octaves
+			float offsetOctaves = (static_cast<float>(disperserFreq) - 64.0f) / 64.0f * 6.5f;
+			float offsetHz = noteHz * std::pow(2.0f, offsetOctaves);
+			effectiveFreq = hzToDisperserFreq(offsetHz);
+		}
+		// else: no pitch info (clips/samples), use freq knob as absolute frequency
+
+		// Convert freq to q31
+		q31_t dispFreq = static_cast<q31_t>(effectiveFreq) << 24;
+
+		// Bimodal separation: topoParams.param0 in Bimodal zone (2), else 0
+		float bimodalSeparation = (topoParams.zone == 2) ? topoParams.param0 : 0.0f;
+
+		// Update coefficients with smoothing (lrOffset creates stereo width, Q from topo zone)
+		// Pass active stage count, spread curve, Q tilt, bimodal separation, detuning, and emphasis
+		// Detuning/emphasis now come from topo (with twist meta position rotating through patterns)
+		disperserDsp.updateCoefficientsSmoothed(dispFreq, dispSpread, &disperserFreqLast, &disperserSpreadLast,
+		                                        lrSpreadOffset, topoParams.q, disperserStages, twistParams.spreadCurve,
+		                                        twistParams.qTilt, bimodalSeparation, topoParams.detuning,
+		                                        topoParams.emphasis);
+
+		// Cross mix amount for Cross topology (zone 3)
+		float crossMix = (topoParams.zone == 3) ? (0.3f + topoParams.param0 * 0.5f) : 0.0f;
+
+		// Frequency-dispersed feedback:
+		// - dispersion=0: instant (all stages write at offset 1)
+		// - dispersion=1: natural (frequency-derived offsets from allpass tuning)
+		// - dispersion>1: more comb character (scaled offsets)
+		// delayTime from twist zones maps to dispersion (0-2 range)
+		float dispersion = twistParams.delayTime * 2.0f;
+
+		// Feedforward (flangy) from delayMix
+		float delayMix = twistParams.delayMix;
+
+		// Per-stage write gain curve (shapes which stages contribute to feedback)
+		// Different twist zones set different curves for spectral emphasis
+		float lowGain = twistParams.lowFreqGain;
+		float highGain = twistParams.highFreqGain;
+
+		// Read gain at 1.0 - twist zone position controls feedback via write gains
+		constexpr float readGain = 1.0f;
+
+		// Check if we should use punch/chirp processing (zones 1, 3, or meta zones with punch/chirp)
+		bool usePunchChirp = (twistParams.punch > 0.01f || twistParams.chirpAmount > 0.01f);
+
+		if (usePunchChirp) {
+			// Maximum chirp mode: transient boost + chirp echoes
+			// Delay time comes from freq knob (via stage offsets), doubled for longer echo
+			size_t centerStage = disperserStages / 2;
+			size_t delaySamples = disperserDsp.getStageOffset(centerStage) * 2;
+
+			// HarmonicBlend comes from topo (with twist meta position rotating through patterns)
+			disperserDsp.processBufferPunchChirp(buffer, disperserStages, disperser.delay, twistParams.punch,
+			                                     twistParams.chirpAmount, delaySamples, topoParams.harmonicBlend);
+		}
+		else {
+			// Legacy feedback-based processing for meta zones
+			disperserDsp.processBuffer(buffer, disperserStages, dispFeedback, &disperser.smoothedFeedback,
+			                           disperser.delay, dispersion, delayMix, topoParams.zone, crossMix, lowGain,
+			                           highGain, readGain);
+		}
 	}
 }
 
@@ -597,14 +774,19 @@ void ModControllableAudio::writeAttributesToFile(Serializer& writer) {
 	if (disperserFreq != 64) {
 		writer.writeAttribute("disperserFreq", disperserFreq);
 	}
-	if (disperserSpread) {
-		writer.writeAttribute("disperserSpread", disperserSpread);
-	}
-	if (disperserFeedback != 64) {
-		writer.writeAttribute("disperserFeedback", disperserFeedback);
-	}
 	if (disperserStages) {
 		writer.writeAttribute("disperserStages", disperserStages);
+	}
+	// Note: disperser topo/twist are saved via patched params, not here
+	// Secret phases (write as int*10 for precision)
+	if (disperser.phases.metaPhaseTopo != 0.0f) {
+		writer.writeAttribute("disperserPhaseTopo", static_cast<int32_t>(disperser.phases.metaPhaseTopo * 10.0f));
+	}
+	if (disperser.phases.metaPhase != 0.0f) {
+		writer.writeAttribute("disperserPhase", static_cast<int32_t>(disperser.phases.metaPhase * 10.0f));
+	}
+	if (disperser.phases.gammaPhase != 0.0f) {
+		writer.writeAttribute("disperserGamma", static_cast<int32_t>(disperser.phases.gammaPhase * 10.0f));
 	}
 	// Multiband compressor state (only write if enabled or non-default crossover type)
 	if (multibandCompressor.isEnabled()) {
@@ -1129,18 +1311,24 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 		disperserFreq = reader.readTagOrAttributeValueInt();
 		reader.exitTag("disperserFreq");
 	}
-	else if (!strcmp(tagName, "disperserSpread")) {
-		disperserSpread = reader.readTagOrAttributeValueInt();
-		reader.exitTag("disperserSpread");
-	}
-	else if (!strcmp(tagName, "disperserFeedback")) {
-		disperserFeedback = reader.readTagOrAttributeValueInt();
-		reader.exitTag("disperserFeedback");
-	}
 	else if (!strcmp(tagName, "disperserStages")) {
 		disperserStages = reader.readTagOrAttributeValueInt();
 		reader.exitTag("disperserStages");
 	}
+	// Secret phases
+	else if (!strcmp(tagName, "disperserPhaseTopo")) {
+		disperser.phases.metaPhaseTopo = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
+		reader.exitTag("disperserPhaseTopo");
+	}
+	else if (!strcmp(tagName, "disperserPhase")) {
+		disperser.phases.metaPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
+		reader.exitTag("disperserPhase");
+	}
+	else if (!strcmp(tagName, "disperserGamma")) {
+		disperser.phases.gammaPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
+		reader.exitTag("disperserGamma");
+	}
+	// Legacy: disperserSpread and disperserFeedback are ignored (replaced by zones)
 	// Multiband compressor state
 	else if (!strcmp(tagName, "mbEnabled")) {
 		int32_t enabled = reader.readTagOrAttributeValueInt();

@@ -96,6 +96,10 @@ public:
 	bool hasTrebleAdjusted(ParamManager* paramManager);
 	ModelStackWithAutoParam* getParamFromMIDIKnob(MIDIKnob& knob, ModelStackWithThreeMainThings* modelStack) override;
 
+	/// Get last played note code for pitch tracking (override in Sound)
+	/// Returns -1 if no note info available (e.g., clips/samples)
+	[[nodiscard]] virtual int32_t getLastNoteCode() const { return -1; }
+
 	// EQ
 	int32_t bassFreq{}; // These two should eventually not be variables like this
 	int32_t trebleFreq{};
@@ -133,14 +137,12 @@ public:
 	float shaperPhase{0.0f};         // Phase offset for triangle modulation (secret knob)
 
 	// Disperser (allpass cascade with feedback)
-	deluge::dsp::Disperser disperser; // DSP processor with 16 allpass stages
-	uint8_t disperserFreq{64};        // Center frequency (0-127, maps to 50Hz-8kHz)
-	uint8_t disperserSpread{0};       // Frequency spread (0-127, 0=all same, 127=±4 octaves)
-	uint8_t disperserFeedback{64};    // Feedback amount (0-127, 64=none, 0=negative, 127=positive)
-	uint8_t disperserStages{0};       // Number of active stages (0-16, 0 = bypass)
-	q31_t disperserFreqLast{0};       // Previous freq value for smoothing
-	q31_t disperserSpreadLast{0};     // Previous spread value for smoothing
-	q31_t disperserFeedbackLast{0};   // Previous feedback value for smoothing
+	deluge::dsp::Disperser disperserDsp;    // DSP processor with 16 allpass stages
+	deluge::dsp::DisperserParams disperser; // Zone params + secret phases
+	uint8_t disperserFreq{64};              // Center frequency (0-127, maps to 50Hz-8kHz)
+	uint8_t disperserStages{0};             // Number of active stages (0-16, 0 = bypass)
+	q31_t disperserFreqLast{0};             // Previous freq value for smoothing
+	q31_t disperserSpreadLast{0};           // Previous spread value for smoothing
 
 	FilterMode lpfMode;
 	FilterMode hpfMode;

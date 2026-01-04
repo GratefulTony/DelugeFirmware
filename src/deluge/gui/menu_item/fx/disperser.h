@@ -16,15 +16,24 @@
  */
 #pragma once
 
+#include "dsp/disperser.h"
 #include "gui/menu_item/integer.h"
+#include "gui/menu_item/zone_based.h"
 #include "gui/ui/sound_editor.h"
+#include "hid/buttons.h"
+#include "hid/display/display.h"
 #include "hid/display/oled.h"
 #include "model/instrument/kit.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
 #include "model/song/song.h"
+#include "modulation/params/param.h"
 #include "processing/sound/sound.h"
 #include "processing/sound/sound_drum.h"
+#include "util/d_string.h"
 #include <cstdint>
+#include <string>
+
+namespace params = deluge::modulation::params;
 
 namespace deluge::gui::menu_item::fx {
 
@@ -56,67 +65,28 @@ public:
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
 };
 
-// Disperser Spread: Frequency spread across stages (0-127, 0=all same, 127=±4 octaves)
-class DisperserSpread final : public IntegerWithOff {
-public:
-	using IntegerWithOff::IntegerWithOff;
-
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->disperserSpread); }
-	bool usesAffectEntire() override { return true; }
-	void writeCurrentValue() override {
-		int32_t current_value = this->getValue();
-
-		if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
-			Kit* kit = getCurrentKit();
-			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
-				if (thisDrum->type == DrumType::SOUND) {
-					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->disperserSpread = current_value;
-				}
-			}
-		}
-		else {
-			soundEditor.currentModControllable->disperserSpread = current_value;
-		}
-	}
-	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
-	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-};
-
-// Disperser Feedback: Output fed back to input (0-127, 64=none, 0=negative, 127=positive)
-class DisperserFeedback final : public Integer {
-public:
-	using Integer::Integer;
-
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->disperserFeedback); }
-	bool usesAffectEntire() override { return true; }
-	void writeCurrentValue() override {
-		int32_t current_value = this->getValue();
-
-		if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
-			Kit* kit = getCurrentKit();
-			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
-				if (thisDrum->type == DrumType::SOUND) {
-					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->disperserFeedback = current_value;
-				}
-			}
-		}
-		else {
-			soundEditor.currentModControllable->disperserFeedback = current_value;
-		}
-	}
-	[[nodiscard]] int32_t getMinValue() const override { return 0; }
-	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
-	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-};
-
-// Disperser Stages: Number of active allpass stages (0-16, acts as on/off and intensity)
+// Disperser Stages: Number of active allpass stages (0-32, acts as on/off and intensity)
+// CPU cost scales roughly linearly: s8 ≈ 2x reverb, s16 ≈ 4x, s24 ≈ 8x, s32 ≈ 10x+
 class DisperserStages final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
 
 	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->disperserStages); }
+
+	// Dynamic title: show CPU warning for high stage counts
+	[[nodiscard]] std::string_view getTitle() const override {
+		int32_t stages = soundEditor.currentModControllable->disperserStages;
+		if (stages >= 24) {
+			dynamicTitle_ = std::string(IntegerWithOff::getTitle()) + " CPU++";
+		}
+		else if (stages >= 16) {
+			dynamicTitle_ = std::string(IntegerWithOff::getTitle()) + " CPU+";
+		}
+		else {
+			return IntegerWithOff::getTitle();
+		}
+		return dynamicTitle_;
+	}
 	bool usesAffectEntire() override { return true; }
 	void writeCurrentValue() override {
 		int32_t current_value = this->getValue();
@@ -134,7 +104,7 @@ public:
 			soundEditor.currentModControllable->disperserStages = current_value;
 		}
 	}
-	[[nodiscard]] int32_t getMaxValue() const override { return 16; }
+	[[nodiscard]] int32_t getMaxValue() const override { return 32; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
 
 	// Show "OFF" when stages=0 (effect bypassed)
@@ -147,6 +117,187 @@ public:
 		}
 		IntegerWithOff::renderInHorizontalMenu(slot);
 	}
+
+private:
+	mutable std::string dynamicTitle_; // Buffer for CPU warning suffix
+};
+
+/**
+ * Disperser Topology zone control - 8 zones with discrete signal routings
+ *
+ * Zone 0: Cascade - stages in series (current default)
+ * Zone 1: Ping-Pong - stages alternate L/R processing
+ * Zone 2: Bimodal - stages cluster into two frequency groups (formant-like)
+ * Zone 3: Cross-Coupled - L↔R feedback mixing between stages
+ * Zone 4: Pitch Track - frequencies follow note pitch
+ * Zone 5: Nested - Schroeder-style nested allpass structure
+ * Zone 6: Diffuse - randomized per-stage coefficient variation
+ * Zone 7: Spring - chirp/spring reverb character
+ *
+ * Secret menu: Push+twist encoder to adjust metaPhaseTopo
+ * Press encoder (no twist): Opens mod matrix source selection
+ */
+class DisperserTopo final : public ZoneBasedUnpatchedParam<params::UNPATCHED_DISPERSER_TOPO, 8> {
+public:
+	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
+
+	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
+		switch (zoneIndex) {
+		case 0:
+			return "Cascade";
+		case 1:
+			return "PingPong";
+		case 2:
+			return "Bimodal";
+		case 3:
+			return "Cross";
+		case 4:
+			return "Pitch";
+		case 5:
+			return "Nested";
+		case 6:
+			return "Diffuse";
+		case 7:
+			return "Spring";
+		default:
+			return "?";
+		}
+	}
+
+	[[nodiscard]] const char* getShortZoneName(int32_t zoneIndex) const override {
+		switch (zoneIndex) {
+		case 0:
+			return "CA";
+		case 1:
+			return "PP";
+		case 2:
+			return "BI";
+		case 3:
+			return "CR";
+		case 4:
+			return "PT";
+		case 5:
+			return "NE";
+		case 6:
+			return "DI";
+		case 7:
+			return "SP";
+		default:
+			return "??";
+		}
+	}
+
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust metaPhaseTopo
+			Buttons::selectButtonPressUsedUp = true;
+			float& phase = soundEditor.currentModControllable->disperser.phases.metaPhaseTopo;
+			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			char buffer[12];
+			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
+			display->displayPopup(buffer);
+			suppressNotification_ = true;
+		}
+		else {
+			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
+		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
+private:
+	mutable bool suppressNotification_ = false;
+};
+
+/**
+ * Disperser Twist (character) zone control - 8 zones with character modifiers
+ *
+ * Maximum chirp architecture - transient emphasis for bigger chirps.
+ *
+ * Zone 0: Width - Stereo spread via L/R frequency offset
+ * Zone 1: Punch - Transient emphasis before dispersion (bigger chirps!)
+ * Zone 2: Curve - Frequency distribution (low cluster → linear → high cluster)
+ * Zone 3: Chirp - Transient-triggered delay for chirp echoes
+ * Zone 4: QTilt - Q varies across stages (uniform → high sharp → low sharp)
+ * Zones 5-7: Meta - All effects combined with φ-triangle evolution
+ *
+ * Secret menu: Push+twist encoder to adjust metaPhase
+ * Press encoder (no twist): Opens mod matrix source selection
+ */
+class DisperserTwist final : public ZoneBasedUnpatchedParam<params::UNPATCHED_DISPERSER_TWIST, 8> {
+public:
+	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
+
+	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
+		switch (zoneIndex) {
+		case 0:
+			return "Width";
+		case 1:
+			return "Punch"; // Transient boost → bigger chirps
+		case 2:
+			return "Curve"; // Bipolar freq distribution (low→linear→high)
+		case 3:
+			return "Chirp"; // Transient-triggered delay echoes
+		case 4:
+			return "QTilt"; // Q varies across stages
+		case 5:
+		case 6:
+		case 7:
+			return "Meta";
+		default:
+			return "---";
+		}
+	}
+
+	[[nodiscard]] const char* getShortZoneName(int32_t zoneIndex) const override {
+		switch (zoneIndex) {
+		case 0:
+			return "WD";
+		case 1:
+			return "PU"; // Punch
+		case 2:
+			return "CV"; // Curve
+		case 3:
+			return "CH"; // Chirp
+		case 4:
+			return "QT"; // Q Tilt
+		default:
+			return "MT";
+		}
+	}
+
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust metaPhase
+			Buttons::selectButtonPressUsedUp = true;
+			float& phase = soundEditor.currentModControllable->disperser.phases.metaPhase;
+			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			char buffer[12];
+			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
+			display->displayPopup(buffer);
+			suppressNotification_ = true;
+		}
+		else {
+			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
+		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
+private:
+	mutable bool suppressNotification_ = false;
 };
 
 } // namespace deluge::gui::menu_item::fx
