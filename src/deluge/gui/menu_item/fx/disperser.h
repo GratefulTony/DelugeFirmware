@@ -72,22 +72,21 @@ public:
 	using IntegerWithOff::IntegerWithOff;
 
 	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->disperserStages); }
-
-	// Dynamic title: show CPU warning for high stage counts
-	[[nodiscard]] std::string_view getTitle() const override {
-		int32_t stages = soundEditor.currentModControllable->disperserStages;
-		if (stages >= 24) {
-			dynamicTitle_ = std::string(IntegerWithOff::getTitle()) + " CPU++";
-		}
-		else if (stages >= 16) {
-			dynamicTitle_ = std::string(IntegerWithOff::getTitle()) + " CPU+";
-		}
-		else {
-			return IntegerWithOff::getTitle();
-		}
-		return dynamicTitle_;
-	}
 	bool usesAffectEntire() override { return true; }
+
+	void selectEncoderAction(int32_t offset) override {
+		int32_t oldVal = this->getValue();
+		IntegerWithOff::selectEncoderAction(offset);
+		int32_t newVal = this->getValue();
+
+		// Show popup when crossing CPU warning thresholds
+		if ((oldVal < 24 && newVal >= 24) || (oldVal >= 24 && newVal < 24)) {
+			display->displayPopup(newVal >= 24 ? "CPU++" : "");
+		}
+		else if ((oldVal < 16 && newVal >= 16) || (oldVal >= 16 && newVal < 16)) {
+			display->displayPopup(newVal >= 16 ? "CPU+" : "");
+		}
+	}
 	void writeCurrentValue() override {
 		int32_t current_value = this->getValue();
 
@@ -117,9 +116,6 @@ public:
 		}
 		IntegerWithOff::renderInHorizontalMenu(slot);
 	}
-
-private:
-	mutable std::string dynamicTitle_; // Buffer for CPU warning suffix
 };
 
 /**

@@ -553,68 +553,47 @@ void ModControllableAudio::processDisperser(deluge::dsp::StereoBuffer<q31_t> buf
 		}
 		disperser.lastTopoZone = topoParams.zone;
 
-		// Twist zone position controls write gains (0-1), so we use max read feedback
-		// The per-stage write gains from twistParams determine actual feedback level
-		constexpr float baseFeedback = 1.0f;
-
-		// Topology-specific spread and feedback modulation
+		// Topology-specific spread modulation
 		float spreadMod = 1.0f;
-		float feedbackMod = 1.0f;
 		float lrSpreadOffset = twistParams.width; // Full range stereo spread
 
 		switch (topoParams.zone) {
-		case 0: // Cascade: classic disperser, param0 = spread, param1 = feedback boost
+		case 0: // Cascade: classic disperser, param0 = spread
 			spreadMod = topoParams.param0;
-			feedbackMod = 1.0f + topoParams.param1 * 1.0f; // Up to 100% boost (TEST)
 			break;
 
 		case 1: // PingPong: tighter spread for rhythmic effect, alternation via lrOffset
 			spreadMod = topoParams.param0 * 0.7f; // Reduced spread
 			lrSpreadOffset += topoParams.lrOffset * 0.3f;
-			feedbackMod = 1.0f + topoParams.param1 * 0.2f;
 			break;
 
 		case 2: // Stereo: L/R frequency offset for width, param0 = spread, lrOffset = stereo amount
 			spreadMod = topoParams.param0;
 			lrSpreadOffset += topoParams.lrOffset; // Direct stereo spread
-			feedbackMod = 1.0f + topoParams.param1 * 0.25f;
 			break;
 
-		case 3: // Cross: cross-coupled feedback, param0 = cross amount, tighter for comb
-			spreadMod = topoParams.param0 * 0.5f;          // Tighter spread for comb effect
-			feedbackMod = 1.0f + topoParams.param1 * 0.4f; // Higher feedback ceiling
-			// Cross-coupling handled in process loop if we add it
+		case 3:                                   // Cross: cross-coupled, tighter for comb
+			spreadMod = topoParams.param0 * 0.5f; // Tighter spread for comb effect
 			break;
 
 		case 4: // Pitch: placeholder - would track pitch, for now acts like tight comb
 			spreadMod = topoParams.param0 * 0.3f; // Very tight for harmonic effect
-			feedbackMod = 1.0f + topoParams.param1 * 0.35f;
 			break;
 
-		case 5:                                          // Nested: wider spread, moderate feedback for diffusion
+		case 5:                                          // Nested: wider spread for diffusion
 			spreadMod = 0.3f + topoParams.param0 * 0.7f; // Always some spread
-			feedbackMod = 0.8f + topoParams.param1 * 0.3f;
 			break;
 
 		case 6: // Diffuse: randomized feel via param variations
 			spreadMod = topoParams.param0;
-			feedbackMod = 1.0f + topoParams.param1 * 0.25f;
-			// Diffusion comes from coefficient variations (future)
 			break;
 
-		case 7:                                            // Spring: chirp character, high feedback for resonance
-			spreadMod = 0.2f + topoParams.param0 * 0.5f;   // Moderate spread
-			feedbackMod = 1.0f + topoParams.param1 * 0.5f; // Highest feedback boost
+		case 7:                                          // Spring: chirp character
+			spreadMod = 0.2f + topoParams.param0 * 0.5f; // Moderate spread
 			break;
 		}
 
-		// Apply modulations
-		float finalSpread = std::clamp(spreadMod, 0.0f, 1.0f);
-		// Twist zone write gains control feedback intensity; process() has its own 85% cap
-		float finalFeedback = std::clamp(baseFeedback * feedbackMod, 0.0f, 1.0f);
-
-		q31_t dispSpread = static_cast<q31_t>(finalSpread * ONE_Q31);
-		q31_t dispFeedback = static_cast<q31_t>(finalFeedback * ONE_Q31);
+		q31_t dispSpread = static_cast<q31_t>(std::clamp(spreadMod, 0.0f, 1.0f) * ONE_Q31);
 
 		// Pitch tracking: try to get note frequency from Sound, use freq knob as offset
 		// Note: drums use kNoteForDrum=60, so they track to ~261Hz with offset from there
@@ -648,42 +627,22 @@ void ModControllableAudio::processDisperser(deluge::dsp::StereoBuffer<q31_t> buf
 		// Cross mix amount for Cross topology (zone 3)
 		float crossMix = (topoParams.zone == 3) ? (0.3f + topoParams.param0 * 0.5f) : 0.0f;
 
-		// Frequency-dispersed feedback:
-		// - dispersion=0: instant (all stages write at offset 1)
-		// - dispersion=1: natural (frequency-derived offsets from allpass tuning)
-		// - dispersion>1: more comb character (scaled offsets)
-		// delayTime from twist zones maps to dispersion (0-2 range)
-		float dispersion = twistParams.delayTime * 2.0f;
-
-		// Feedforward (flangy) from delayMix
-		float delayMix = twistParams.delayMix;
-
-		// Per-stage write gain curve (shapes which stages contribute to feedback)
-		// Different twist zones set different curves for spectral emphasis
-		float lowGain = twistParams.lowFreqGain;
-		float highGain = twistParams.highFreqGain;
-
-		// Read gain at 1.0 - twist zone position controls feedback via write gains
-		constexpr float readGain = 1.0f;
+		// Delay time comes from freq knob (via stage offsets), doubled for longer echo
+		size_t centerStage = disperserStages / 2;
+		size_t delaySamples = disperserDsp.getStageOffset(centerStage) * 2;
 
 		// Check if we should use punch/chirp processing (zones 1, 3, or meta zones with punch/chirp)
 		bool usePunchChirp = (twistParams.punch > 0.01f || twistParams.chirpAmount > 0.01f);
 
 		if (usePunchChirp) {
-			// Maximum chirp mode: transient boost + chirp echoes
-			// Delay time comes from freq knob (via stage offsets), doubled for longer echo
-			size_t centerStage = disperserStages / 2;
-			size_t delaySamples = disperserDsp.getStageOffset(centerStage) * 2;
-
+			// Punch/chirp mode: transient boost + chirp echoes
 			// HarmonicBlend comes from topo (with twist meta position rotating through patterns)
 			disperserDsp.processBufferPunchChirp(buffer, disperserStages, disperser.delay, twistParams.punch,
 			                                     twistParams.chirpAmount, delaySamples, topoParams.harmonicBlend);
 		}
 		else {
-			// Legacy feedback-based processing for meta zones
-			disperserDsp.processBuffer(buffer, disperserStages, dispFeedback, &disperser.smoothedFeedback,
-			                           disperser.delay, dispersion, delayMix, topoParams.zone, crossMix, lowGain,
-			                           highGain, readGain);
+			// Legacy path: topology routing with per-stage emphasis (twist zones 0, 2, 4)
+			disperserDsp.processBuffer(buffer, disperserStages, topoParams.zone, crossMix);
 		}
 	}
 }

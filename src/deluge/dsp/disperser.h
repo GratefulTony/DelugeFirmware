@@ -230,17 +230,6 @@ struct DisperserTwistParams {
 	// Q Tilt: varies Q across stages
 	// 0 = uniform Q, positive = high-freq stages sharper, negative = low-freq sharper
 	float qTilt{0.0f};
-
-	// Prototype: detuning and harmonic blend (will move to topo phi triangles)
-	float detuning{0};      // Per-stage freq offset spread (0=none, 1=±50 cents) for chorus shimmer
-	float harmonicBlend{0}; // Delay tap balance: 0=f only (default), 0.5=equal f/2f, 1=2f emphasis
-
-	// Legacy fields (kept for meta zone compatibility)
-	float delayTime{0};
-	float delayMix{0};
-	float lowFreqGain{0};
-	float highFreqGain{0};
-	float resonance{0};
 };
 
 /**
@@ -592,34 +581,17 @@ public:
 	}
 
 	/**
-	 * Process a stereo buffer through the disperser with parameter interpolation
+	 * Process a stereo buffer through topology-routed allpass cascade
 	 *
-	 * Frequency-dispersed feedback: write offsets derived from stage frequencies
-	 * - dispersion=0: instant (all stages write at offset 1)
-	 * - dispersion=1: natural (frequency-derived offsets)
-	 * - dispersion>1: more comb character (scaled offsets)
-	 *
-	 * Per-stage write gain shapes which stages contribute to feedback:
-	 * - lowFreqGain/highFreqGain define gain curve across stages
-	 * - Different modes use different curves (e.g., comb emphasizes low-freq)
+	 * Pure allpass processing with topology routing. No feedback/delay.
+	 * For feedback effects, use processBufferPunchChirp instead.
 	 *
 	 * @param buffer Stereo audio buffer to process in-place
 	 * @param stages Number of stages (0 = bypass)
-	 * @param feedback Target feedback amount (q31)
-	 * @param smoothedFeedback Previous smoothed feedback (updated)
-	 * @param delay Shared delay state
-	 * @param dispersion Write offset scale (0=instant, 1=natural, >1=comb)
-	 * @param delayMix Feedforward: head to output (flanging)
 	 * @param topology Topology zone (0=Cascade, etc.)
 	 * @param crossMix Cross-coupling for Cross topology
-	 * @param lowFreqGain Write gain for lowest-frequency stages
-	 * @param highFreqGain Write gain for highest-frequency stages
-	 * @param readGain Safety multiplier on feedback read (dev tuning)
 	 */
-	void processBuffer(StereoBuffer<q31_t> buffer, uint8_t stages, q31_t feedback, q31_t* smoothedFeedback,
-	                   DisperserDelayState& delay, float dispersion = 1.0f, float delayMix = 0.0f, int32_t topology = 0,
-	                   float crossMix = 0.0f, float lowFreqGain = 1.0f, float highFreqGain = 1.0f,
-	                   float readGain = 0.5f) {
+	void processBuffer(StereoBuffer<q31_t> buffer, uint8_t stages, int32_t topology = 0, float crossMix = 0.0f) {
 		if (stages == 0 || buffer.empty()) {
 			return;
 		}
@@ -633,143 +605,67 @@ public:
 		FX_BENCH_SET_TAG(bench, 0, kStageNames[std::min(stages, static_cast<uint8_t>(32)) - 1]);
 		FX_BENCH_SCOPE(bench);
 
-		constexpr q31_t smoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31);
-		q31_t targetSmoothed =
-		    *smoothedFeedback + (multiply_32x32_rshift32(feedback - *smoothedFeedback, smoothingAlpha) << 1);
-		int32_t fbIncrement = (targetSmoothed - *smoothedFeedback) / static_cast<int32_t>(buffer.size());
-		q31_t currentFb = *smoothedFeedback;
-
-		// All topologies now use unified feedback through delay buffer
 		for (auto& sample : buffer) {
-			currentFb += fbIncrement;
 			q31_t outL, outR;
-			processWithFeedback(sample.l, sample.r, outL, outR, stages, currentFb, delay, topology, dispersion,
-			                    delayMix, crossMix, lowFreqGain, highFreqGain);
+			processWithTopology(sample.l, sample.r, outL, outR, stages, topology, crossMix);
 			sample.l = outL;
 			sample.r = outR;
 		}
-
-		*smoothedFeedback = targetSmoothed;
 	}
 
 	/**
-	 * Unified processing with delay buffer feedback for all topologies
+	 * Per-sample processing with topology routing
 	 *
-	 * All topologies share common feedback path:
-	 * 1. Read from delay head → bandpass filter → add to input
-	 * 2. Topology-specific routing through allpass cascade
-	 * 3. Write output to delay buffer
-	 * 4. Optional feedforward from delay head
+	 * Routes through allpass cascade based on topology zone.
+	 * Feedback/delay functionality moved to punchChirp path.
 	 */
-	[[gnu::always_inline]] inline void processWithFeedback(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR,
-	                                                       uint8_t stages, q31_t feedback, DisperserDelayState& delay,
-	                                                       int32_t topology, float dispersion, float delayMix,
-	                                                       float crossMix, float lowFreqGain, float highFreqGain) {
-
+	[[gnu::always_inline]] inline void processWithTopology(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR,
+	                                                       uint8_t stages, int32_t topology, float crossMix) {
 		if (stages == 0) {
 			outL = inL;
 			outR = inR;
-			delay.advanceHead();
 			return;
 		}
 
 		size_t numStages = std::min(static_cast<size_t>(stages), kMaxStages);
-
-		// === COMMON FEEDBACK READ ===
-		q31_t fbGain = feedback;
-		q31_t fbL, fbR;
-		delay.readHead(fbL, fbR);
-		delay.clearHead();
-
-		// Apply feedback gain with hard clamp to prevent runaway
-		// signed_saturate<29> allows ~1/4 of full scale
-		q31_t fbL_scaled = signed_saturate<29>(multiply_32x32_rshift32(fbL, fbGain) << 1);
-		q31_t fbR_scaled = signed_saturate<29>(multiply_32x32_rshift32(fbR, fbGain) << 1);
-		q31_t procL = q31_sat_add(inL, fbL_scaled);
-		q31_t procR = q31_sat_add(inR, fbR_scaled);
 
 		// === TOPOLOGY-SPECIFIC ROUTING ===
 		switch (topology) {
 		case 1: // PingPong
-			processRoutingPingPong(procL, procR, outL, outR, numStages);
+			processRoutingPingPong(inL, inR, outL, outR, numStages);
 			break;
 		case 3: // Cross
-			processRoutingCross(procL, procR, outL, outR, numStages, crossMix);
+			processRoutingCross(inL, inR, outL, outR, numStages, crossMix);
 			break;
 		case 5: // Nested
-			processRoutingNested(procL, procR, outL, outR, numStages);
+			processRoutingNested(inL, inR, outL, outR, numStages);
 			break;
 		case 7: // Spring
-			processRoutingSpring(procL, procR, outL, outR, numStages);
+			processRoutingSpring(inL, inR, outL, outR, numStages);
 			break;
 		default: // 0=Cascade, 2=Stereo, 4=Pitch, 6=Diffuse
-			processRoutingCascade(procL, procR, outL, outR, numStages, delay, dispersion, lowFreqGain, highFreqGain);
+			processRoutingCascade(inL, inR, outL, outR, numStages);
 			break;
-		}
-
-		// === COMMON DELAY WRITE (for non-cascade topologies) ===
-		// Cascade does per-stage writes; others write final output
-		if (topology == 1 || topology == 3 || topology == 5 || topology == 7) {
-			// Single write at center frequency offset
-			size_t offset = stageOffsets_[numStages / 2];
-			if (dispersion < 0.01f) {
-				offset = 1; // Instant feedback mode
-			}
-			// Use average of low/high gain (center freq) × stage normalization
-			float avgGain = (lowFreqGain + highFreqGain) * 0.5f;
-			float stageNorm = 1.875f / std::pow(static_cast<float>(numStages), 0.75f);
-			q31_t writeGain = static_cast<q31_t>(avgGain * stageNorm * ONE_Q31);
-			q31_t writeL = multiply_32x32_rshift32(outL, writeGain) << 1;
-			q31_t writeR = multiply_32x32_rshift32(outR, writeGain) << 1;
-			delay.writeAtOffset(writeL, writeR, offset);
-		}
-
-		delay.advanceHead();
-
-		// === COMMON FEEDFORWARD ===
-		if (delayMix > 0.001f) {
-			q31_t headL, headR;
-			delay.readHead(headL, headR);
-			q31_t combGain = static_cast<q31_t>(delayMix * 0.9f * ONE_Q31);
-			outL = q31_sat_add(outL, multiply_32x32_rshift32(headL, combGain) << 1);
-			outR = q31_sat_add(outR, multiply_32x32_rshift32(headR, combGain) << 1);
 		}
 	}
 
 	/**
-	 * Process with Punch and Chirp for maximum chirp character
+	 * Calculate triangle-folded delay with perfect fifth quantization (once per buffer)
 	 *
-	 * Punch: Transient boost on INPUT before allpass chain → bigger chirps
-	 * Chirp: Delay-based feedback with transient emphasis → chirp echoes
+	 * Folds delay time in octave space to stay within usable range, then quantizes
+	 * to nearest perfect fifth of original pitch to preserve inharmonic character.
 	 *
-	 * @param punch Transient boost amount (0-1, maps to 0-12dB on attacks)
-	 * @param chirpFeedback Feedback amount for chirp echoes (0-1, from twist position)
-	 * @param delaySamples Delay time in samples (float for fractional - smooth pitch)
-	 * @param harmonicBlend Delay tap balance: 0=f only, 0.5=equal f/2f, 1=2f emphasis
+	 * @param delaySamples Raw delay time in samples
+	 * @return Folded and quantized delay time
 	 */
-	[[gnu::always_inline]] inline void processWithPunchChirp(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR,
-	                                                         uint8_t stages, DisperserDelayState& delay, float punch,
-	                                                         float chirpFeedback, float delaySamples,
-	                                                         float harmonicBlend = 0.0f) {
-
-		if (stages == 0) {
-			outL = inL;
-			outR = inR;
-			delay.advanceHead();
-			return;
-		}
-
-		size_t numStages = std::min(static_cast<size_t>(stages), kMaxStages);
-
-		// Delay range constants (match updateCoefficients)
-		constexpr float kMinDelayF = 441.0f; // 10ms at 44.1kHz (~100Hz)
-		constexpr float kMaxOctaves = 4.32f; // log2(8819/441) ≈ 4.32 octaves range
-
-		needsBufferClear_ = false; // Consume flag but don't act on it
+	[[nodiscard]] static float calculateFoldedDelay(float delaySamples) {
+		// Delay range constants
+		constexpr float kMinDelayF = 441.0f;  // 10ms at 44.1kHz (~100Hz)
+		constexpr float kMaxDelayF = 8819.0f; // 200ms at 44.1kHz
+		constexpr float kMaxOctaves = 4.32f;  // log2(8819/441) ≈ 4.32 octaves range
 
 		// Triangle fold in OCTAVE space to get a TARGET, then quantize to octave of ORIGINAL
 		// This preserves user's inharmonic offset while preventing pileup
-		constexpr float kMaxDelayF = 8819.0f; // 200ms at 44.1kHz
 		float octavesFromMin = std::log2(std::max(delaySamples, 1.0f) / kMinDelayF);
 
 		// Triangle fold: bounces between 0 and maxOctaves to get target position
@@ -795,6 +691,39 @@ public:
 		if (foldedDelay < kMinDelayF) {
 			foldedDelay *= 2.0f;
 		}
+
+		return foldedDelay;
+	}
+
+	/**
+	 * Process with Punch and Chirp for maximum chirp character
+	 *
+	 * Punch: Transient boost on INPUT before allpass chain → bigger chirps
+	 * Chirp: Delay-based feedback with transient emphasis → chirp echoes
+	 *
+	 * @param punch Transient boost amount (0-1, maps to 0-12dB on attacks)
+	 * @param chirpFeedback Feedback amount for chirp echoes (0-1, from twist position)
+	 * @param foldedDelay Pre-calculated folded delay time (from calculateFoldedDelay)
+	 * @param harmonicBlend Delay tap balance: 0=f only, 0.5=equal f/2f, 1=2f emphasis
+	 */
+	[[gnu::always_inline]] inline void processWithPunchChirp(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR,
+	                                                         uint8_t stages, DisperserDelayState& delay, float punch,
+	                                                         float chirpFeedback, float foldedDelay,
+	                                                         float harmonicBlend = 0.0f) {
+
+		if (stages == 0) {
+			outL = inL;
+			outR = inR;
+			delay.advanceHead();
+			return;
+		}
+
+		size_t numStages = std::min(static_cast<size_t>(stages), kMaxStages);
+
+		// Minimum delay for clamping 2f tap
+		constexpr float kMinDelayF = 441.0f; // 10ms at 44.1kHz
+
+		needsBufferClear_ = false; // Consume flag but don't act on it
 
 		// Smooth toward folded target for glitch-free transitions
 		// Very slow glide (~5000ms settling) so folds become gradual bends
@@ -896,6 +825,7 @@ public:
 	/**
 	 * Buffer-level wrapper for punch/chirp processing with benchmarking
 	 *
+	 * Calculates triangle-folded delay once per buffer, then processes samples.
 	 * Wraps processWithPunchChirp per-sample calls with FX_BENCH instrumentation.
 	 */
 	void processBufferPunchChirp(StereoBuffer<q31_t> buffer, uint8_t stages, DisperserDelayState& delay, float punch,
@@ -913,10 +843,13 @@ public:
 		FX_BENCH_SET_TAG(bench, 0, kStageNames[std::min(stages, static_cast<uint8_t>(32)) - 1]);
 		FX_BENCH_SCOPE(bench);
 
+		// Calculate folded delay ONCE per buffer (expensive log2/pow/fmod/round)
+		float foldedDelay = calculateFoldedDelay(static_cast<float>(delaySamples));
+
 		for (auto& sample : buffer) {
 			q31_t outL, outR;
-			processWithPunchChirp(sample.l, sample.r, outL, outR, stages, delay, punch, chirpFeedback,
-			                      static_cast<float>(delaySamples), harmonicBlend);
+			processWithPunchChirp(sample.l, sample.r, outL, outR, stages, delay, punch, chirpFeedback, foldedDelay,
+			                      harmonicBlend);
 			sample.l = outL;
 			sample.r = outR;
 		}
@@ -955,35 +888,16 @@ private:
 	// ==================== ROUTING METHODS (used by processWithFeedback) ====================
 	// These handle allpass cascade routing only - feedback is handled by caller
 
-	/// Cascade routing: standard allpass cascade with per-stage delay writes
+	/// Cascade routing: allpass cascade with per-stage emphasis gains
 	[[gnu::always_inline]] inline void processRoutingCascade(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR,
-	                                                         size_t numStages, DisperserDelayState& delay,
-	                                                         float dispersion, float lowFreqGain, float highFreqGain) {
+	                                                         size_t numStages) {
 		int32_t tmp[2] = {inL, inR};
 		int32x2_t proc = vld1_s32(tmp);
-		float gainDelta = (highFreqGain - lowFreqGain) / std::max(1.0f, static_cast<float>(numStages - 1));
-
-		// n^0.75 scaling for stage normalization
-		float stageNorm = 1.875f / std::pow(static_cast<float>(numStages), 0.75f);
 
 		for (size_t i = 0; i < numStages; ++i) {
 			proc = stages_[i].processLR(proc, coeffsL_[i], coeffsR_[i]);
-			// Apply per-stage emphasis gain (includes polarity flip)
 			int32x2_t emphGain = vdup_n_s32(stageGains_[i]);
 			proc = vshl_n_s32(vqrdmulh_s32(proc, emphGain), 1);
-
-			// Per-stage delay write with frequency-dispersed offsets
-			size_t baseOffset = stageOffsets_[i];
-			size_t scaledOffset = (dispersion < 0.01f)
-			                          ? 1
-			                          : std::clamp(static_cast<size_t>(1 + (baseOffset - 1) * dispersion), size_t{1},
-			                                       DisperserDelayState::kMaxDelaySamples - 1);
-
-			float stageGain = std::clamp(lowFreqGain + gainDelta * static_cast<float>(i), 0.0f, 1.0f) * stageNorm;
-			q31_t writeGain = static_cast<q31_t>(stageGain * ONE_Q31);
-			q31_t writeL = multiply_32x32_rshift32(vget_lane_s32(proc, 0), writeGain) << 1;
-			q31_t writeR = multiply_32x32_rshift32(vget_lane_s32(proc, 1), writeGain) << 1;
-			delay.writeAtOffset(writeL, writeR, scaledOffset);
 		}
 
 		outL = vget_lane_s32(proc, 0);
