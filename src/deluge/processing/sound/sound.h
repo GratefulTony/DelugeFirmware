@@ -167,6 +167,7 @@ public:
 
 	ModFXType getModFXType() override;
 	bool setModFXType(ModFXType newType) final;
+	[[nodiscard]] int32_t getLastNoteCode() const override { return lastNoteCode; }
 
 	void patchedParamPresetValueChanged(uint8_t p, ModelStackWithSoundFlags* modelStack, int32_t oldValue,
 	                                    int32_t newValue);

@@ -149,12 +149,16 @@ enum Global : ParamType {
 
 	// Global hybrid params begin
 
-	// There are no global hybrid params, so FIRST_GLOBAL_EXP is set to the same value. If you add a GLOBAL_HYBRID
+	// There are no global hybrid params, so FIRST_GLOBAL_ZONE is set to the same value. If you add a GLOBAL_HYBRID
 	// param, make sure you undo that!
 	FIRST_GLOBAL_HYBRID,
 
+	// Global zone params begin
+	// There are no global zone params (disperser uses unpatched), so FIRST_GLOBAL_EXP is set to the same value.
+	FIRST_GLOBAL_ZONE = FIRST_GLOBAL_HYBRID,
+
 	// Global exp params begin
-	FIRST_GLOBAL_EXP = FIRST_GLOBAL_HYBRID,
+	FIRST_GLOBAL_EXP = FIRST_GLOBAL_ZONE,
 	GLOBAL_DELAY_RATE = FIRST_GLOBAL_EXP,
 	GLOBAL_MOD_FX_RATE,
 	GLOBAL_LFO_FREQ_1,
@@ -211,6 +215,9 @@ enum UnpatchedShared : ParamType {
 	// Sine shaper zone controls (high-res like DOTT vibe)
 	UNPATCHED_SINE_SHAPER_HARMONIC,
 	UNPATCHED_SINE_SHAPER_TWIST,
+	// Disperser zone controls
+	UNPATCHED_DISPERSER_TOPO,
+	UNPATCHED_DISPERSER_TWIST,
 	// Arp
 	UNPATCHED_FIRST_ARP_PARAM,
 	UNPATCHED_ARP_GATE = UNPATCHED_FIRST_ARP_PARAM,

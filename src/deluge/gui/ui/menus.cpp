@@ -639,15 +639,15 @@ HorizontalMenu tableShaperSubMenu{
     {&shaperDriveMenu, &shaperShapeXMenu, &shaperShapeYMenu, &shaperMixMenu},
 };
 
-// Disperser - allpass cascade with feedback
+// Disperser - allpass cascade with zone-based topology and character controls
 fx::DisperserFreq disperserFreqMenu{STRING_FOR_DISPERSER_FREQ};
-fx::DisperserSpread disperserSpreadMenu{STRING_FOR_DISPERSER_SPREAD};
-fx::DisperserFeedback disperserFeedbackMenu{STRING_FOR_DISPERSER_FEEDBACK};
+fx::DisperserTopo disperserTopoMenu{STRING_FOR_DISPERSER_TOPO};
+fx::DisperserTwist disperserTwistMenu{STRING_FOR_DISPERSER_TWIST};
 fx::DisperserStages disperserStagesMenu{STRING_FOR_DISPERSER_STAGES};
 
 HorizontalMenu disperserSubMenu{
     STRING_FOR_DISPERSER_MENU,
-    {&disperserFreqMenu, &disperserSpreadMenu, &disperserFeedbackMenu, &disperserStagesMenu},
+    {&disperserFreqMenu, &disperserTopoMenu, &disperserTwistMenu, &disperserStagesMenu},
 };
 
 // Shaping submenu - contains Sine Shaper, Table Shaper, and Disperser

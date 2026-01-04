@@ -63,6 +63,11 @@ bool shouldClipModToZoneBoundary(Kind kind, int32_t paramID) {
 			return true; // Different algorithm per zone - don't cross
 		}
 	}
+	else if (kind == Kind::UNPATCHED_SOUND || kind == Kind::UNPATCHED_GLOBAL) {
+		if (paramID == UNPATCHED_DISPERSER_TOPO) {
+			return true; // Different algorithm per zone - don't cross
+		}
+	}
 	return false;
 }
 
@@ -121,17 +126,20 @@ int32_t getGoldKnobZoneCount(Kind kind, int32_t paramID) {
 			break;
 		case UNPATCHED_SINE_SHAPER_HARMONIC:
 		case UNPATCHED_SINE_SHAPER_TWIST:
-			// Always 8 zones for sine shaper params (like vibe)
+		case UNPATCHED_DISPERSER_TOPO:
+		case UNPATCHED_DISPERSER_TWIST:
+			// Always 8 zones for zone-based params
 			return 8;
 		default:
 			break;
 		}
 	}
 	else if (kind == Kind::PATCHED) {
+		// Check LOCAL zone params
 		switch (static_cast<Local>(paramID)) {
 		case LOCAL_SINE_SHAPER_HARMONIC:
 		case LOCAL_SINE_SHAPER_TWIST:
-			// Always 8 zones for sine shaper params
+			// Always 8 zones for zone-based params
 			return 8;
 		default:
 			break;
@@ -362,6 +370,8 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 		    [UNPATCHED_MB_COMPRESSOR_BLEND] = STRING_FOR_BLEND,
 		    [UNPATCHED_SINE_SHAPER_HARMONIC] = STRING_FOR_SINE_SHAPER_HARMONIC,
 		    [UNPATCHED_SINE_SHAPER_TWIST] = STRING_FOR_SINE_SHAPER_SYMMETRY,
+		    [UNPATCHED_DISPERSER_TOPO] = STRING_FOR_DISPERSER_TOPO,
+		    [UNPATCHED_DISPERSER_TWIST] = STRING_FOR_DISPERSER_TWIST,
 		    [UNPATCHED_ARP_GATE] = STRING_FOR_ARP_GATE_MENU_TITLE,
 		    [UNPATCHED_ARP_RHYTHM] = STRING_FOR_ARP_RHYTHM_MENU_TITLE,
 		    [UNPATCHED_ARP_SEQUENCE_LENGTH] = STRING_FOR_ARP_SEQUENCE_LENGTH_MENU_TITLE,
@@ -598,6 +608,12 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 			return "sineShaperHarmonic";
 		case UNPATCHED_SINE_SHAPER_TWIST:
 			return "sineShaperSymmetry";
+
+		// Disperser
+		case UNPATCHED_DISPERSER_TOPO:
+			return "disperserTopo";
+		case UNPATCHED_DISPERSER_TWIST:
+			return "disperserTwist";
 
 		case UNPATCHED_ARP_GATE:
 			return "arpGate";

@@ -88,6 +88,19 @@ struct StereoFilterComponent {
 		return vqadd_s32(b, vsub_s32(b, input));
 	}
 
+	/// NEON-vectorized saturating allpass with separate L/R coefficients
+	/// coeffsLR is packed {coeffL, coeffR} for different frequencies per channel
+	[[gnu::always_inline]] int32x2_t doAPFSaturatingLR(int32x2_t input, int32x2_t coeffsLR) {
+		int32x2_t memory = vld1_s32(memory_);
+		int32x2_t diff = vsub_s32(input, memory);
+		int32x2_t a = vqrdmulh_s32(diff, coeffsLR);
+		int32x2_t b = vadd_s32(a, memory);
+		memory = vadd_s32(a, b);
+		vst1_s32(memory_, memory);
+		// Saturating: b + (b - input) instead of b * 2 - input
+		return vqadd_s32(b, vsub_s32(b, input));
+	}
+
 	/// NEON-vectorized lowpass filter for stereo (L/R in parallel)
 	[[gnu::always_inline]] int32x2_t doFilter(int32x2_t input, int32_t moveability) {
 		int32x2_t memory = vld1_s32(memory_);
@@ -136,6 +149,118 @@ struct QuadFilterComponent {
 		memory = vaddq_s32(b, a);
 		vst1q_s32(memory_, memory);
 		return b;
+	}
+};
+
+/// 2nd-order biquad allpass coefficients (for variable Q disperser)
+/// Computed once per buffer, shared across L/R channels
+struct BiquadAllpassCoeffs {
+	// Direct Form II Transposed coefficients
+	// For allpass: b0=a2, b1=a1, b2=1 (mirror symmetry)
+	q31_t a1{0}; // feedback coeff 1 (can exceed 1.0, stored scaled)
+	q31_t a2{0}; // feedback coeff 2 (also = b0)
+	// b1 = a1, b2 = 1.0 (implicit)
+
+	/// Compute coefficients from frequency and Q
+	/// @param fc Center frequency in Hz
+	/// @param Q Quality factor (0.5 = broad, 10+ = sharp/resonant)
+	/// @param fs Sample rate in Hz (default 44100)
+	void compute(float fc, float Q, float fs = 44100.0f) {
+		// Bilinear transform: k = tan(π * fc / fs)
+		float w = 3.14159265358979f * fc / fs;
+		float k = std::tan(std::clamp(w, 0.001f, 1.55f)); // Clamp near Nyquist
+		float k2 = k * k;
+		float kQ = k / std::max(Q, 0.1f);
+		float norm = 1.0f / (1.0f + kQ + k2);
+
+		// a1 = 2*(k² - 1) * norm, can range roughly -2 to +2
+		// a2 = (1 - k/Q + k²) * norm, ranges 0 to 1
+		float a1f = 2.0f * (k2 - 1.0f) * norm;
+		float a2f = (1.0f - kQ + k2) * norm;
+
+		// Store a1 with 0.5x scale to fit in Q31 (will shift in processing)
+		a1 = static_cast<q31_t>(std::clamp(a1f * 0.5f, -1.0f, 0.9999f) * ONE_Q31);
+		a2 = static_cast<q31_t>(std::clamp(a2f, -1.0f, 0.9999f) * ONE_Q31);
+	}
+};
+
+/// 2nd-order biquad allpass filter - stereo NEON implementation
+/// Provides 360° phase shift with variable Q (vs 180° for 1st-order)
+/// Higher Q = sharper phase transition = more "resonant" disperser sound
+struct StereoBiquadAllpass {
+	// State for Direct Form II Transposed (2 states per channel)
+	int32_t s1_[2]{}; // L/R state 1
+	int32_t s2_[2]{}; // L/R state 2
+
+	void reset() {
+		s1_[0] = s1_[1] = 0;
+		s2_[0] = s2_[1] = 0;
+	}
+
+	/// Process stereo sample through 2nd-order allpass
+	/// coeffs.a1 is stored at 0.5x scale, so we shift left after multiply
+	[[gnu::always_inline]] int32x2_t process(int32x2_t input, const BiquadAllpassCoeffs& coeffs) {
+		int32x2_t s1 = vld1_s32(s1_);
+		int32x2_t s2 = vld1_s32(s2_);
+		int32x2_t a1 = vdup_n_s32(coeffs.a1);
+		int32x2_t a2 = vdup_n_s32(coeffs.a2);
+
+		// Direct Form II Transposed:
+		// y = b0*x + s1  (b0 = a2 for allpass)
+		// s1 = b1*x - a1*y + s2  (b1 = a1 for allpass)
+		// s2 = b2*x - a2*y  (b2 = 1 for allpass)
+
+		// y = a2*x + s1
+		int32x2_t a2x = vqrdmulh_s32(input, a2);
+		int32x2_t y = vqadd_s32(a2x, s1);
+
+		// s1 = a1*(x - y) + s2
+		// a1 is stored at 0.5x, so we need to shift. Use 2x multiply approach.
+		int32x2_t diff = vqsub_s32(input, y);
+		int32x2_t a1diff = vqrdmulh_s32(diff, a1);
+		int32x2_t a1diff_scaled = vqadd_s32(a1diff, a1diff); // *2 to compensate 0.5x storage
+		int32x2_t new_s1 = vqadd_s32(a1diff_scaled, s2);
+
+		// s2 = x - a2*y
+		int32x2_t a2y = vqrdmulh_s32(y, a2);
+		int32x2_t new_s2 = vqsub_s32(input, a2y);
+
+		vst1_s32(s1_, new_s1);
+		vst1_s32(s2_, new_s2);
+
+		return y;
+	}
+
+	/// Process with separate L/R coefficients (for stereo spread)
+	[[gnu::always_inline]] int32x2_t processLR(int32x2_t input, const BiquadAllpassCoeffs& coeffsL,
+	                                           const BiquadAllpassCoeffs& coeffsR) {
+		int32x2_t s1 = vld1_s32(s1_);
+		int32x2_t s2 = vld1_s32(s2_);
+
+		// Pack L/R coefficients
+		int32_t a1_arr[2] = {coeffsL.a1, coeffsR.a1};
+		int32_t a2_arr[2] = {coeffsL.a2, coeffsR.a2};
+		int32x2_t a1 = vld1_s32(a1_arr);
+		int32x2_t a2 = vld1_s32(a2_arr);
+
+		// y = a2*x + s1
+		int32x2_t a2x = vqrdmulh_s32(input, a2);
+		int32x2_t y = vqadd_s32(a2x, s1);
+
+		// s1 = a1*(x - y) + s2 (with 2x scale compensation)
+		int32x2_t diff = vqsub_s32(input, y);
+		int32x2_t a1diff = vqrdmulh_s32(diff, a1);
+		int32x2_t a1diff_scaled = vqadd_s32(a1diff, a1diff);
+		int32x2_t new_s1 = vqadd_s32(a1diff_scaled, s2);
+
+		// s2 = x - a2*y
+		int32x2_t a2y = vqrdmulh_s32(y, a2);
+		int32x2_t new_s2 = vqsub_s32(input, a2y);
+
+		vst1_s32(s1_, new_s1);
+		vst1_s32(s2_, new_s2);
+
+		return y;
 	}
 };
 

@@ -206,10 +206,10 @@ public:
  * - getZoneName(int32_t) for zone labels
  * - getFieldValue() / setFieldValue() for the sound's field
  *
- * @tparam PARAM_ID The Local param ID for mod routing (e.g., LOCAL_SINE_SHAPER_TWIST)
+ * @tparam PARAM_ID The patched param ID for mod routing (LOCAL or GLOBAL zone param)
  * @tparam NUM_ZONES Number of zones (typically 8)
  */
-template <params::Local PARAM_ID, int32_t NUM_ZONES = 8>
+template <params::ParamType PARAM_ID, int32_t NUM_ZONES = 8>
 class ZoneBasedPatchedParam : public DecimalWithoutScrolling, public MenuItemWithCCLearning, public Automation {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
@@ -221,10 +221,12 @@ public:
 	[[nodiscard]] virtual const char* getShortZoneName(int32_t zoneIndex) const { return getZoneName(zoneIndex); }
 
 	/// Override to get the field value from the sound (q31_t, 0 to ONE_Q31)
-	[[nodiscard]] virtual q31_t getFieldValue() const = 0;
+	/// Default returns 0 - override if you have a separate field to sync
+	[[nodiscard]] virtual q31_t getFieldValue() const { return 0; }
 
 	/// Override to set the field value on the sound
-	virtual void setFieldValue(q31_t value) = 0;
+	/// Default does nothing - override if you have a separate field to sync
+	virtual void setFieldValue([[maybe_unused]] q31_t value) {}
 
 	[[nodiscard]] int32_t getMaxValue() const override { return kZoneHighResSteps; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
