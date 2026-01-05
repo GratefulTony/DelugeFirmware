@@ -631,19 +631,10 @@ void ModControllableAudio::processDisperser(deluge::dsp::StereoBuffer<q31_t> buf
 		size_t centerStage = disperserStages / 2;
 		size_t delaySamples = disperserDsp.getStageOffset(centerStage) * 2;
 
-		// Check if we should use punch/chirp processing (zones 1, 3, or meta zones with punch/chirp)
-		bool usePunchChirp = (twistParams.punch > 0.01f || twistParams.chirpAmount > 0.01f);
-
-		if (usePunchChirp) {
-			// Punch/chirp mode: transient boost + chirp echoes
-			// HarmonicBlend comes from topo (with twist meta position rotating through patterns)
-			disperserDsp.processBufferPunchChirp(buffer, disperserStages, disperser.delay, twistParams.punch,
-			                                     twistParams.chirpAmount, delaySamples, topoParams.harmonicBlend);
-		}
-		else {
-			// Legacy path: topology routing with per-stage emphasis (twist zones 0, 2, 4)
-			disperserDsp.processBuffer(buffer, disperserStages, topoParams.zone, crossMix);
-		}
+		// Unified processing: topology routing + optional punch/chirp feedback
+		// When punch=0 and chirp=0, this is pure topology routing (no delay access)
+		disperserDsp.processBuffer(buffer, disperserStages, disperser.delay, twistParams.punch, twistParams.chirpAmount,
+		                           delaySamples, topoParams.harmonicBlend, topoParams.zone, crossMix);
 	}
 }
 
