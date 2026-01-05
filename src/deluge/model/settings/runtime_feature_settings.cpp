@@ -223,6 +223,10 @@ void RuntimeFeatureSettings::init() {
 	// DOTT Analyzer - enables/disables the GR meter animation in DOTT menu (default: on)
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DOTTAnalyzer], STRING_FOR_COMMUNITY_FEATURE_DOTT_ANALYZER,
 	                  "dottAnalyzer", RuntimeFeatureStateToggle::On);
+
+	// Disperser HiCPU - enables 9-32 stages (default: off, limited to 8 stages)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DisperserHiCPU],
+	                  STRING_FOR_COMMUNITY_FEATURE_DISPERSER_HI_CPU, "disperserHiCPU", RuntimeFeatureStateToggle::Off);
 }
 
 void RuntimeFeatureSettings::readSettingsFromFile() {

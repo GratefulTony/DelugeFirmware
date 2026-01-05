@@ -25,6 +25,7 @@
 #include "hid/display/oled.h"
 #include "model/instrument/kit.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
+#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "modulation/params/param.h"
 #include "processing/sound/sound.h"
@@ -65,8 +66,9 @@ public:
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
 };
 
-// Disperser Stages: Number of active allpass stages (0-32, acts as on/off and intensity)
+// Disperser Stages: Number of active allpass stages (0-8 or 0-32 with HiCPU enabled)
 // CPU cost scales roughly linearly: s8 ≈ 2x reverb, s16 ≈ 4x, s24 ≈ 8x, s32 ≈ 10x+
+// Higher stage counts (9-32) require DisperserHiCPU community feature to be enabled
 class DisperserStages final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
@@ -74,19 +76,31 @@ public:
 	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->disperserStages); }
 	bool usesAffectEntire() override { return true; }
 
-	void selectEncoderAction(int32_t offset) override {
-		int32_t oldVal = this->getValue();
-		IntegerWithOff::selectEncoderAction(offset);
-		int32_t newVal = this->getValue();
-
-		// Show popup when crossing CPU warning thresholds
-		if ((oldVal < 24 && newVal >= 24) || (oldVal >= 24 && newVal < 24)) {
-			display->displayPopup(newVal >= 24 ? "CPU++" : "");
+	// Show CPU indicator in notification when HiCPU mode is enabled
+	void getNotificationValue(StringBuf& value) override {
+		int32_t val = this->getValue();
+		if (val == 0) {
+			value.append("OFF");
 		}
-		else if ((oldVal < 16 && newVal >= 16) || (oldVal >= 16 && newVal < 16)) {
-			display->displayPopup(newVal >= 16 ? "CPU+" : "");
+		else if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DisperserHiCPU)) {
+			// HiCPU mode: show warnings for high stage counts
+			if (val >= 24) {
+				value.appendInt(val);
+				value.append(" HiCPU!"); // CPU warning (very high)
+			}
+			else if (val >= 16) {
+				value.appendInt(val);
+				value.append(" HiCPU"); // CPU warning (high)
+			}
+			else {
+				value.appendInt(val);
+			}
+		}
+		else {
+			value.appendInt(val);
 		}
 	}
+
 	void writeCurrentValue() override {
 		int32_t current_value = this->getValue();
 
@@ -103,7 +117,11 @@ public:
 			soundEditor.currentModControllable->disperserStages = current_value;
 		}
 	}
-	[[nodiscard]] int32_t getMaxValue() const override { return 32; }
+
+	// Max stages: 8 normally, 32 with HiCPU community feature enabled
+	[[nodiscard]] int32_t getMaxValue() const override {
+		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DisperserHiCPU) ? 32 : 8;
+	}
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
 
 	// Show "OFF" when stages=0 (effect bypassed)

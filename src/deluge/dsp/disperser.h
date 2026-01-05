@@ -30,8 +30,8 @@
  * == Other Improvements ==
  * - [ ] Phi phases: write gain curve (low/high freq emphasis)
  * - [ ] Feedback tuning: punch/chirp levels may need adjustment
- * - [ ] Performance: move expensive float math (std::pow) out of hot paths
- * - [ ] Consolidate processing paths (currently scattered across iterations)
+ * - [x] Performance: use fastmath intrinsics (exp2f, log2f, powf vs std::pow)
+ * - [x] Consolidate processing paths (unified processSample/processBuffer)
  * - [ ] Consider fractional delay interpolation for smoother pitch sweeping
  */
 
@@ -62,6 +62,11 @@ struct DisperserTwistParams;
  * 8 zones each for Topo (topology) and Twist (character)
  */
 constexpr int32_t kDisperserNumZones = 8;
+
+// Fastmath constants (avoid repeated divisions and slow std::pow)
+constexpr float k127Recip = 1.0f / 127.0f; // Reciprocal for MIDI-style 0-127 params
+constexpr float kLog5 = 1.6094379124341f;  // log(5) for std::pow(5,x) → expf(x*kLog5)
+constexpr float kLog10 = 2.302585092994f;  // log(10) for curve exponent range 10.0↔0.1
 
 /**
  * Disperser zone-based parameters
@@ -363,10 +368,10 @@ public:
 		lastEmphasis_ = emphasis;
 
 		// freq: 0-127 -> 1Hz-8kHz (13 octaves)
-		float centerHz = 1.0f * std::pow(2.0f, (freq / 127.0f) * 13.0f);
+		float centerHz = exp2f(freq * k127Recip * 13.0f);
 
 		// spread: 0-127 -> ±4 octaves (used as local spread around each mode in bimodal)
-		float spreadOctaves = (spread / 127.0f) * 4.0f;
+		float spreadOctaves = spread * k127Recip * 4.0f;
 
 		// L/R offset: shift L down, R up by half the offset each
 		float lOffsetOct = -lrOffset * 0.5f;
@@ -377,12 +382,12 @@ public:
 
 		size_t numActive = std::max(static_cast<size_t>(activeStages), size_t{1});
 
-		// Bipolar spread curve: exponent varies from 5.0 (low cluster) to 0.2 (high cluster)
-		// spreadCurve=0: exponent=5.0 (stages cluster toward mode center)
+		// Bipolar spread curve: exponent varies from 10.0 (tight cluster) to 0.1 (extreme spread)
+		// spreadCurve=0: exponent=10.0 (stages cluster tightly toward mode center)
 		// spreadCurve=0.5: exponent=1.0 (linear distribution within mode)
-		// spreadCurve=1: exponent=0.2 (stages spread away from mode center)
+		// spreadCurve=1: exponent=0.1 (stages spread extremely toward edges)
 		float curveClamped = std::clamp(spreadCurve, 0.0f, 1.0f);
-		float exponent = std::pow(5.0f, 1.0f - curveClamped * 2.0f);
+		float exponent = expf((1.0f - curveClamped * 2.0f) * kLog10);
 
 		// Q tilt: multiply Q by factor based on stage position
 		float qTiltClamped = std::clamp(qTilt, -1.0f, 1.0f);
@@ -395,8 +400,9 @@ public:
 			// Two modes centered geometrically around centerHz
 			// separation=1 octave → modeA = center/sqrt(2), modeB = center*sqrt(2)
 			float halfSep = bimodalSeparation * 0.5f;
-			modeAHz = centerHz / std::pow(2.0f, halfSep);
-			modeBHz = centerHz * std::pow(2.0f, halfSep);
+			float sepMult = exp2f(halfSep);
+			modeAHz = centerHz / sepMult;
+			modeBHz = centerHz * sepMult;
 		}
 
 		for (size_t i = 0; i < kMaxStages; ++i) {
@@ -421,7 +427,7 @@ public:
 					    static_cast<float>(indexInMode) / std::max(1.0f, static_cast<float>(stagesInMode - 1));
 
 					// Apply power curve within mode (log-distributed distance from center)
-					float curved = std::pow(tLocal, exponent);
+					float curved = powf(tLocal, exponent);
 
 					// Mode A: positive offset (upward), Mode B: negative offset (downward)
 					// Clamping at 20Hz/16kHz handles boundaries naturally
@@ -429,13 +435,13 @@ public:
 
 					// Each mode uses half the spread range
 					float localSpread = spreadOctaves * 0.5f;
-					stageHzBase = modeCenter * std::pow(2.0f, localPosition * localSpread);
+					stageHzBase = modeCenter * exp2f(localPosition * localSpread);
 				}
 				else {
 					// Normal single-mode distribution
-					float curved = std::pow(t, exponent);
+					float curved = powf(t, exponent);
 					float stagePosition = curved * 2.0f - 1.0f;
-					stageHzBase = centerHz * std::pow(2.0f, stagePosition * spreadOctaves);
+					stageHzBase = centerHz * exp2f(stagePosition * spreadOctaves);
 				}
 			}
 			else {
@@ -444,7 +450,7 @@ public:
 			}
 
 			// Per-stage Q with tilt
-			float qFactor = std::pow(2.0f, qTiltClamped * 2.0f * (t * 2.0f - 1.0f));
+			float qFactor = exp2f(qTiltClamped * 2.0f * (t * 2.0f - 1.0f));
 			float stageQ = std::clamp(qBase * qFactor, 0.5f, 20.0f);
 
 			// Per-stage detuning: alternating +/- cents for chorus shimmer
@@ -458,8 +464,8 @@ public:
 			}
 
 			// Apply L/R offset + detuning and clamp to useful range (1Hz floor for subharmonics)
-			float stageHzL = std::clamp(stageHzBase * std::pow(2.0f, lOffsetOct + detuneOct), 1.0f, 16000.0f);
-			float stageHzR = std::clamp(stageHzBase * std::pow(2.0f, rOffsetOct + detuneOct), 1.0f, 16000.0f);
+			float stageHzL = std::clamp(stageHzBase * exp2f(lOffsetOct + detuneOct), 1.0f, 16000.0f);
+			float stageHzR = std::clamp(stageHzBase * exp2f(rOffsetOct + detuneOct), 1.0f, 16000.0f);
 
 			// Compute 2nd-order biquad allpass coefficients with per-stage Q
 			coeffsL_[i].compute(stageHzL, stageQ, static_cast<float>(kSampleRate));
@@ -476,7 +482,7 @@ public:
 			float rawOffset = kSampleRate / avgHz;
 
 			// Triangle fold in octave space to get a TARGET position (guides octave selection)
-			float octavesFromMin = std::log2(std::max(rawOffset, 1.0f) / kMinOffsetF);
+			float octavesFromMin = log2f(std::max(rawOffset, 1.0f) / kMinOffsetF);
 			if (octavesFromMin < 0.0f || octavesFromMin > kMaxOctaves) {
 				float doubled = 2.0f * kMaxOctaves;
 				octavesFromMin = std::fmod(std::fmod(octavesFromMin, doubled) + doubled, doubled);
@@ -484,13 +490,13 @@ public:
 					octavesFromMin = doubled - octavesFromMin;
 				}
 			}
-			float targetOffset = kMinOffsetF * std::pow(2.0f, octavesFromMin);
+			float targetOffset = kMinOffsetF * exp2f(octavesFromMin);
 
 			// Quantize to nearest perfect fifth of ORIGINAL pitch (preserves user's offset)
 			constexpr float kFifth = 0.5849625f; // log2(3/2)
-			float idealShift = std::log2(targetOffset / rawOffset);
+			float idealShift = log2f(targetOffset / rawOffset);
 			float quantizedShift = std::round(idealShift / kFifth) * kFifth;
-			float octaveOffset = rawOffset * std::pow(2.0f, quantizedShift);
+			float octaveOffset = rawOffset * exp2f(quantizedShift);
 
 			// Ensure result is in range - adjust by one octave if needed
 			if (octaveOffset > kMaxOffsetF) {
@@ -581,43 +587,10 @@ public:
 	}
 
 	/**
-	 * Process a stereo buffer through topology-routed allpass cascade
-	 *
-	 * Pure allpass processing with topology routing. No feedback/delay.
-	 * For feedback effects, use processBufferPunchChirp instead.
-	 *
-	 * @param buffer Stereo audio buffer to process in-place
-	 * @param stages Number of stages (0 = bypass)
-	 * @param topology Topology zone (0=Cascade, etc.)
-	 * @param crossMix Cross-coupling for Cross topology
-	 */
-	void processBuffer(StereoBuffer<q31_t> buffer, uint8_t stages, int32_t topology = 0, float crossMix = 0.0f) {
-		if (stages == 0 || buffer.empty()) {
-			return;
-		}
-
-		// Stage count tags for benchmarking (s1, s2, ..., s32)
-		static constexpr const char* kStageNames[] = {"s1",  "s2",  "s3",  "s4",  "s5",  "s6",  "s7",  "s8",
-		                                              "s9",  "s10", "s11", "s12", "s13", "s14", "s15", "s16",
-		                                              "s17", "s18", "s19", "s20", "s21", "s22", "s23", "s24",
-		                                              "s25", "s26", "s27", "s28", "s29", "s30", "s31", "s32"};
-		FX_BENCH_DECLARE(bench, "disperser");
-		FX_BENCH_SET_TAG(bench, 0, kStageNames[std::min(stages, static_cast<uint8_t>(32)) - 1]);
-		FX_BENCH_SCOPE(bench);
-
-		for (auto& sample : buffer) {
-			q31_t outL, outR;
-			processWithTopology(sample.l, sample.r, outL, outR, stages, topology, crossMix);
-			sample.l = outL;
-			sample.r = outR;
-		}
-	}
-
-	/**
 	 * Per-sample processing with topology routing
 	 *
 	 * Routes through allpass cascade based on topology zone.
-	 * Feedback/delay functionality moved to punchChirp path.
+	 * Called by processBufferPunchChirp after feedback read, before delay write.
 	 */
 	[[gnu::always_inline]] inline void processWithTopology(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR,
 	                                                       uint8_t stages, int32_t topology, float crossMix) {
@@ -666,7 +639,7 @@ public:
 
 		// Triangle fold in OCTAVE space to get a TARGET, then quantize to octave of ORIGINAL
 		// This preserves user's inharmonic offset while preventing pileup
-		float octavesFromMin = std::log2(std::max(delaySamples, 1.0f) / kMinDelayF);
+		float octavesFromMin = log2f(std::max(delaySamples, 1.0f) / kMinDelayF);
 
 		// Triangle fold: bounces between 0 and maxOctaves to get target position
 		if (octavesFromMin < 0.0f || octavesFromMin > kMaxOctaves) {
@@ -676,13 +649,13 @@ public:
 				octavesFromMin = doubled - octavesFromMin;
 			}
 		}
-		float targetDelay = kMinDelayF * std::pow(2.0f, octavesFromMin);
+		float targetDelay = kMinDelayF * exp2f(octavesFromMin);
 
 		// Quantize to nearest perfect fifth of ORIGINAL pitch (preserves user's inharmonic offset)
 		constexpr float kFifth = 0.5849625f; // log2(3/2)
-		float idealShift = std::log2(targetDelay / delaySamples);
+		float idealShift = log2f(targetDelay / delaySamples);
 		float quantizedShift = std::round(idealShift / kFifth) * kFifth;
-		float foldedDelay = delaySamples * std::pow(2.0f, quantizedShift);
+		float foldedDelay = delaySamples * exp2f(quantizedShift);
 
 		// Ensure result is in range - adjust by one octave if needed
 		if (foldedDelay > kMaxDelayF) {
@@ -696,20 +669,22 @@ public:
 	}
 
 	/**
-	 * Process with Punch and Chirp for maximum chirp character
+	 * Process a single stereo sample through disperser
 	 *
-	 * Punch: Transient boost on INPUT before allpass chain → bigger chirps
-	 * Chirp: Delay-based feedback with transient emphasis → chirp echoes
+	 * Unified processing path with topology routing and optional feedback.
+	 * When punch=0 and chirp=0, this is pure topology routing (no delay access).
 	 *
-	 * @param punch Transient boost amount (0-1, maps to 0-12dB on attacks)
-	 * @param chirpFeedback Feedback amount for chirp echoes (0-1, from twist position)
-	 * @param foldedDelay Pre-calculated folded delay time (from calculateFoldedDelay)
+	 * @param punch Transient boost amount (0-1, 0=disabled)
+	 * @param chirp Feedback amount for chirp echoes (0-1, 0=disabled)
+	 * @param foldedDelay Pre-calculated folded delay time
 	 * @param harmonicBlend Delay tap balance: 0=f only, 0.5=equal f/2f, 1=2f emphasis
+	 * @param topology Topology zone for routing (0=Cascade, 1=PingPong, etc.)
+	 * @param crossMix Cross-coupling amount for Cross topology
 	 */
-	[[gnu::always_inline]] inline void processWithPunchChirp(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR,
-	                                                         uint8_t stages, DisperserDelayState& delay, float punch,
-	                                                         float chirpFeedback, float foldedDelay,
-	                                                         float harmonicBlend = 0.0f) {
+	[[gnu::always_inline]] inline void processSample(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR, uint8_t stages,
+	                                                 DisperserDelayState& delay, float punch, float chirp,
+	                                                 float foldedDelay, float harmonicBlend, int32_t topology,
+	                                                 float crossMix) {
 
 		if (stages == 0) {
 			outL = inL;
@@ -717,8 +692,6 @@ public:
 			delay.advanceHead();
 			return;
 		}
-
-		size_t numStages = std::min(static_cast<size_t>(stages), kMaxStages);
 
 		// Minimum delay for clamping 2f tap
 		constexpr float kMinDelayF = 441.0f; // 10ms at 44.1kHz
@@ -753,7 +726,7 @@ public:
 		}
 
 		// === READ FEEDBACK (before allpass so echoes get dispersed too) ===
-		float fbAmount = std::max(punch, chirpFeedback);
+		float fbAmount = std::max(punch, chirp);
 		if (fbAmount > 0.01f) {
 			q31_t fbL, fbR;
 			delay.readHead(fbL, fbR);
@@ -769,34 +742,22 @@ public:
 			procR = q31_sat_add(procR, fbR_scaled);
 		}
 
-		// === ALLPASS CASCADE with per-stage emphasis gains ===
-		int32_t tmp[2] = {procL, procR};
-		int32x2_t proc = vld1_s32(tmp);
-
-		for (size_t i = 0; i < numStages; ++i) {
-			proc = stages_[i].processLR(proc, coeffsL_[i], coeffsR_[i]);
-			// Apply per-stage emphasis gain (includes polarity flip)
-			// stageGains_ stored as gain * (ONE_Q31/2), so shift left 1 after multiply
-			int32x2_t gain = vdup_n_s32(stageGains_[i]);
-			proc = vshl_n_s32(vqrdmulh_s32(proc, gain), 1);
-		}
-
-		outL = vget_lane_s32(proc, 0);
-		outR = vget_lane_s32(proc, 1);
+		// === ALLPASS CASCADE with topology routing ===
+		processWithTopology(procL, procR, outL, outR, stages, topology, crossMix);
 
 		// === WRITE TO DELAY at f and optionally 2f ===
 		// harmonicBlend controls f/2f balance: 0=f only, 0.5=equal, 1=2f emphasis
 		// When harmonicBlend=0, skip 2f write entirely for efficiency
 		// Uses fractional writes for smooth pitch transitions
-		if (chirpFeedback > 0.01f) {
+		if (chirp > 0.01f) {
 			float delayF = smoothDelay; // Already clamped to folding range
 
 			// Transient-focused write: lower base prevents DC accumulation
 			// while transient boost preserves punchy attack character
 			// Tuning: 80/20 preserves full mojo, rare DC self-resolves over time
 			// (75/25 very close; 70/30 loses some sustain; 50/50 too thin)
-			float baseWrite = chirpFeedback * 0.8f;
-			float transientBoost = chirpFeedback * transient * 0.2f;
+			float baseWrite = chirp * 0.8f;
+			float transientBoost = chirp * transient * 0.2f;
 			float writeAmount = std::min(baseWrite + transientBoost, 0.99f);
 
 			// Gain balance: harmonicBlend=0 → f=1.0, 2f=0; harmonicBlend=1 → f=0.5, 2f=0.8
@@ -823,18 +784,18 @@ public:
 	}
 
 	/**
-	 * Buffer-level wrapper for punch/chirp processing with benchmarking
+	 * Process a stereo buffer through disperser
 	 *
-	 * Calculates triangle-folded delay once per buffer, then processes samples.
-	 * Wraps processWithPunchChirp per-sample calls with FX_BENCH instrumentation.
+	 * Unified processing with topology routing and optional punch/chirp feedback.
+	 * Calculates triangle-folded delay once per buffer for efficiency.
 	 */
-	void processBufferPunchChirp(StereoBuffer<q31_t> buffer, uint8_t stages, DisperserDelayState& delay, float punch,
-	                             float chirpFeedback, size_t delaySamples, float harmonicBlend = 0.0f) {
+	void processBuffer(StereoBuffer<q31_t> buffer, uint8_t stages, DisperserDelayState& delay, float punch, float chirp,
+	                   size_t delaySamples, float harmonicBlend, int32_t topology, float crossMix) {
 		if (stages == 0 || buffer.empty()) {
 			return;
 		}
 
-		// Stage count tags for benchmarking (shared with processBuffer)
+		// Stage count tags for benchmarking
 		static constexpr const char* kStageNames[] = {"s1",  "s2",  "s3",  "s4",  "s5",  "s6",  "s7",  "s8",
 		                                              "s9",  "s10", "s11", "s12", "s13", "s14", "s15", "s16",
 		                                              "s17", "s18", "s19", "s20", "s21", "s22", "s23", "s24",
@@ -848,8 +809,8 @@ public:
 
 		for (auto& sample : buffer) {
 			q31_t outL, outR;
-			processWithPunchChirp(sample.l, sample.r, outL, outR, stages, delay, punch, chirpFeedback, foldedDelay,
-			                      harmonicBlend);
+			processSample(sample.l, sample.r, outL, outR, stages, delay, punch, chirp, foldedDelay, harmonicBlend,
+			              topology, crossMix);
 			sample.l = outL;
 			sample.r = outR;
 		}
@@ -870,14 +831,6 @@ public:
 		}
 		// Initialize stage gains to unity (1.0 stored as ONE_Q31/2 for multiply scaling)
 		stageGains_.fill(ONE_Q31 / 2);
-		feedback_[0] = 0;
-		feedback_[1] = 0;
-		dcPrevIn_[0] = 0;
-		dcPrevIn_[1] = 0;
-		dcPrevOut_[0] = 0;
-		dcPrevOut_[1] = 0;
-		springFeedback_[0] = 0;
-		springFeedback_[1] = 0;
 		fastEnv_[0] = 0;
 		fastEnv_[1] = 0;
 		slowEnv_[0] = 0;
@@ -885,8 +838,8 @@ public:
 	}
 
 private:
-	// ==================== ROUTING METHODS (used by processWithFeedback) ====================
-	// These handle allpass cascade routing only - feedback is handled by caller
+	// ==================== ROUTING METHODS (used by processWithTopology) ====================
+	// These handle allpass cascade routing only - pure phase processing, no feedback
 
 	/// Cascade routing: allpass cascade with per-stage emphasis gains
 	[[gnu::always_inline]] inline void processRoutingCascade(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR,
@@ -923,8 +876,10 @@ private:
 			procL = vget_lane_s32(vec, 0);
 		}
 
-		// R processes through second half + cross-feed from L
-		q31_t procR = q31_sat_add(inR, procL >> 2); // 25% cross-feed from L
+		// R processes through second half + cross-feed from L (blend, not add)
+		// 80% inR + 20% procL = unity gain
+		q31_t procR = q31_sat_add(multiply_32x32_rshift32(inR, 0x66666666) << 1,    // 0.8
+		                          multiply_32x32_rshift32(procL, 0x19999999) << 1); // 0.2
 		for (size_t i = half; i < numStages; ++i) {
 			int32_t tmp[2] = {procR, procR};
 			int32x2_t vec = vld1_s32(tmp);
@@ -935,9 +890,12 @@ private:
 			procR = vget_lane_s32(vec, 0);
 		}
 
-		// Cross-mix outputs for stereo ping-pong character
-		outL = q31_sat_add(procL, procR >> 1);
-		outR = q31_sat_add(procR, procL >> 1);
+		// Cross-mix outputs with unity gain (blend, not add)
+		// 67% self + 33% other = 100% total
+		outL = q31_sat_add(multiply_32x32_rshift32(procL, 0x55555555) << 1,  // 0.67
+		                   multiply_32x32_rshift32(procR, 0x2AAAAAAB) << 1); // 0.33
+		outR = q31_sat_add(multiply_32x32_rshift32(procR, 0x55555555) << 1, multiply_32x32_rshift32(procL, 0x2AAAAAAB)
+		                                                                        << 1);
 	}
 
 	/// Cross routing: L↔R swap every 4 stages for swirling stereo
@@ -994,8 +952,9 @@ private:
 		}
 
 		// Outer chain (second half) - fed by inner for nested structure
-		// 70% blend of inner into outer input
-		int32x2_t outerIn = vqadd_s32(input, vqrdmulh_s32(inner, vdup_n_s32(0x59999999)));
+		// Unity gain blend: 50% input + 50% inner
+		int32x2_t outerIn =
+		    vqadd_s32(vqrdmulh_s32(input, vdup_n_s32(0x40000000)), vqrdmulh_s32(inner, vdup_n_s32(0x40000000)));
 		int32x2_t outer = outerIn;
 		for (size_t i = half; i < numStages; ++i) {
 			outer = stages_[i].processLR(outer, coeffsL_[i], coeffsR_[i]);
@@ -1004,11 +963,13 @@ private:
 			outer = vshl_n_s32(vqrdmulh_s32(outer, emphGain), 1);
 		}
 
-		// Cross-mix L/R at output for stereo diffusion
+		// Cross-mix L/R with unity gain (blend, not add): 80% self + 20% other
 		q31_t outLraw = vget_lane_s32(outer, 0);
 		q31_t outRraw = vget_lane_s32(outer, 1);
-		outL = q31_sat_add(outLraw, outRraw >> 2); // 25% cross-mix
-		outR = q31_sat_add(outRraw, outLraw >> 2);
+		outL = q31_sat_add(multiply_32x32_rshift32(outLraw, 0x66666666) << 1,  // 0.8
+		                   multiply_32x32_rshift32(outRraw, 0x19999999) << 1); // 0.2
+		outR = q31_sat_add(multiply_32x32_rshift32(outRraw, 0x66666666) << 1,
+		                   multiply_32x32_rshift32(outLraw, 0x19999999) << 1);
 	}
 
 	/// Spring routing: Multi-tap capture for chirp character
@@ -1043,16 +1004,19 @@ private:
 			}
 		}
 
-		// Blend taps into output for spring character
-		int32x2_t tapBlend =
-		    vqadd_s32(vqrdmulh_s32(tap1Val, vdup_n_s32(0x20000000)), vqrdmulh_s32(tap2Val, vdup_n_s32(0x20000000)));
-		proc = vqadd_s32(proc, tapBlend);
+		// Blend taps with main output for spring character (unity gain)
+		// 70% proc + 15% tap1 + 15% tap2 = 100%
+		int32x2_t blended = vqadd_s32(vqrdmulh_s32(proc, vdup_n_s32(0x59999999)),     // 0.7
+		                              vqrdmulh_s32(tap1Val, vdup_n_s32(0x13333333))); // 0.15
+		blended = vqadd_s32(blended, vqrdmulh_s32(tap2Val, vdup_n_s32(0x13333333)));  // 0.15
 
-		// Cross-mix L/R for stereo interest
-		q31_t outLraw = vget_lane_s32(proc, 0);
-		q31_t outRraw = vget_lane_s32(proc, 1);
-		outL = q31_sat_add(outLraw, outRraw >> 3);
-		outR = q31_sat_add(outRraw, outLraw >> 3);
+		// Cross-mix L/R with unity gain (blend, not add): 87.5% self + 12.5% other
+		q31_t outLraw = vget_lane_s32(blended, 0);
+		q31_t outRraw = vget_lane_s32(blended, 1);
+		outL = q31_sat_add(multiply_32x32_rshift32(outLraw, 0x70000000) << 1,  // 0.875
+		                   multiply_32x32_rshift32(outRraw, 0x10000000) << 1); // 0.125
+		outR = q31_sat_add(multiply_32x32_rshift32(outRraw, 0x70000000) << 1,
+		                   multiply_32x32_rshift32(outLraw, 0x10000000) << 1);
 	}
 
 	std::array<filter::StereoBiquadAllpass, kMaxStages> stages_{};  // 2nd-order biquad allpasses
@@ -1064,11 +1028,6 @@ private:
 		gains.fill(ONE_Q31 / 2); // Initialize to unity (1.0 in our storage format)
 		return gains;
 	}(); // Per-stage gain with sign for polarity flip
-	q31_t feedback_[2]{};
-	q31_t dcPrevIn_[2]{};
-	q31_t dcPrevOut_[2]{};
-	q31_t lpfState_[2]{};          // 1-pole LPF state for bandpass feedback
-	q31_t springFeedback_[2]{};    // Secondary feedback tap for Spring topology
 	float smoothedDelay_{0.0f};    // Smoothed delay time for pitch glide
 	bool needsBufferClear_{false}; // Set by updateCoefficients when octave wrap detected
 

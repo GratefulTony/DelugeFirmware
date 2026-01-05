@@ -25,11 +25,12 @@ static SettingToggle menuDynamicsEnabled(RuntimeFeatureSettingType::DynamicsSoun
 static SettingToggle menuDynamicsFineGoldKnobCharacter(RuntimeFeatureSettingType::DynamicsFineGoldKnobCharacter);
 static SettingToggle menuDynamicsFineGoldKnobVibe(RuntimeFeatureSettingType::DynamicsFineGoldKnobVibe);
 static SettingToggle menuDOTTAnalyzer(RuntimeFeatureSettingType::DOTTAnalyzer);
+static SettingToggle menuDisperserHiCPU(RuntimeFeatureSettingType::DisperserHiCPU);
 
 DynamicsSoundDesignMenu::DynamicsSoundDesignMenu()
     : Submenu(l10n::String::STRING_FOR_COMMUNITY_FEATURE_DYNAMICS_SOUND_DESIGN,
               {&menuDynamicsEnabled, &menuDynamicsFineGoldKnobCharacter, &menuDynamicsFineGoldKnobVibe,
-               &menuDOTTAnalyzer}) {
+               &menuDOTTAnalyzer, &menuDisperserHiCPU}) {
 }
 
 std::string_view DynamicsSoundDesignMenu::getTitle() const {

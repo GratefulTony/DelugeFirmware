@@ -54,8 +54,8 @@ SettingToggle menuShowBatteryLevel(RuntimeFeatureSettingType::ShowBatteryLevel);
 SettingToggle menuModFXPostDOTT(RuntimeFeatureSettingType::ModFXPostDOTT);
 
 // Number of top-level entries: total settings minus non-top-level minus dynamics submenu entries
-// The 4 dynamics settings are grouped into menuDynamicsSoundDesignSubmenu, so we subtract 3 (4 settings - 1 submenu)
-constexpr size_t kNumTopLevelEntries = RuntimeFeatureSettingType::MaxElement - kNonTopLevelSettings - 3;
+// The 5 dynamics settings are grouped into menuDynamicsSoundDesignSubmenu, so we subtract 4 (5 settings - 1 submenu)
+constexpr size_t kNumTopLevelEntries = RuntimeFeatureSettingType::MaxElement - kNonTopLevelSettings - 4;
 
 std::array<MenuItem*, kNumTopLevelEntries> subMenuEntries{&menuDrumRandomizer,
                                                           &menuFineTempo,
