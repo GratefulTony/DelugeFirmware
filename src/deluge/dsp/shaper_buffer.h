@@ -77,7 +77,8 @@ struct ShaperSmoothingContextQ16 {
 	return {state, kShaperSmoothingAlphaQ16, target};
 }
 
-// TODO: Remove float shapeBuffer functions - not used, shapeBufferInt32 is the intended signal path
+// TODO: Migrate audio clips (global_effectable_for_clip.cpp) to shapeBufferInt32, then remove float path
+// The float path has +6dB gain (kPreGain * kPostGain = 2.0) that int32 path doesn't have
 /**
  * Process a mono buffer through the TableShaper waveshaper
  *
@@ -205,7 +206,9 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 
 		q31_t input = sample;
 		if (needsGainAdjust) {
-			input = static_cast<q31_t>(static_cast<float>(sample) * boostGain);
+			// Clamp to prevent overflow when boostGain > 1 and sample is near INT32_MAX
+			input =
+			    static_cast<q31_t>(std::clamp(static_cast<float>(sample) * boostGain, -2147483648.0f, 2147483647.0f));
 		}
 
 		// processInt32 handles: drive gain, table lookup, and amplitude-dependent blend
@@ -291,8 +294,11 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 		q31_t inputL = sample.l;
 		q31_t inputR = sample.r;
 		if (needsGainAdjust) {
-			inputL = static_cast<q31_t>(static_cast<float>(sample.l) * boostGain);
-			inputR = static_cast<q31_t>(static_cast<float>(sample.r) * boostGain);
+			// Clamp to prevent overflow when boostGain > 1 and sample is near INT32_MAX
+			inputL =
+			    static_cast<q31_t>(std::clamp(static_cast<float>(sample.l) * boostGain, -2147483648.0f, 2147483647.0f));
+			inputR =
+			    static_cast<q31_t>(std::clamp(static_cast<float>(sample.r) * boostGain, -2147483648.0f, 2147483647.0f));
 		}
 
 		// processInt32 handles: drive gain, table lookup, and amplitude-dependent blend

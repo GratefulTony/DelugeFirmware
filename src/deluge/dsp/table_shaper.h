@@ -347,24 +347,27 @@ public:
 		int32_t clampedInput = std::max(scaledInput, static_cast<int32_t>(-2147483647));
 		int32_t absInput = clampedInput < 0 ? -clampedInput : clampedInput;
 
-		// Compute threshold for amplitude-dependent blend
+		// Threshold calculation for amplitude-dependent blend
 		// At mixNorm=0: threshold = INT32_MAX (always dry)
-		// At mixNorm=2: threshold = kThresholdForFullWet (just negative enough for full wet)
-		//
-		// The minimum threshold for "always wet" is derived from slope formula:
-		// blendSlope_Q8 = 512 + (mixNorm_Q16 >> 6), max at mixNorm=131072
-		// For blend=1: diff_Q16 * slope >> 8 >= kOne_Q16
-		// For silence: diff = -threshold, diff_Q16 = diff >> 15
+		// At mixNorm=131072: threshold = kThresholdForFullWet (negative, ensures silence gets 100% wet)
 		constexpr int32_t kInt32Max = 2147483647;
 		constexpr int64_t kInt32Max64 = 2147483647;
 		constexpr int32_t kOne_Q16 = 65536;
-		constexpr int32_t kMaxMixNorm_Q16 = 131072;
-		constexpr int32_t kMaxSlope_Q8 = 512 + (kMaxMixNorm_Q16 >> 6); // 2560 at max mix
-		constexpr int64_t kDiffQ16ForFullWet = (kOne_Q16 << 8) / kMaxSlope_Q8;
-		constexpr int64_t kThresholdForFullWet = -(kDiffQ16ForFullWet << 15);
 
-		// Map mixNorm [0, 131072] to threshold [INT32_MAX, kThresholdForFullWet]
-		constexpr int64_t kThresholdRange = kInt32Max64 - kThresholdForFullWet; // ≈ 2.36B
+		// Quadratic slope: explodes near 100% mix for sharp transitions
+		// At mixNorm=0: slope = 256 (Q8.8, = 1.0)
+		// At mixNorm=131072: slope = 256 + 16384 = 16640 (Q8.8, ≈ 65.0)
+		int64_t mixSquared = static_cast<int64_t>(mixNorm_Q16) * mixNorm_Q16;
+		int32_t blendSlope_Q8 = 256 + static_cast<int32_t>(mixSquared >> 20);
+
+		// For silence at max mix to get blend=1.0:
+		// -threshold_Q16 * slope >> 8 >= 65536
+		// At max slope=16640: threshold <= -(65536 << 8 / 16640) << 15 ≈ -33M
+		// Use -36M for margin
+		constexpr int64_t kThresholdForFullWet = -36 * 1024 * 1024; // -36M
+		constexpr int64_t kThresholdRange = kInt32Max64 - kThresholdForFullWet;
+
+		// Linear threshold mapping: [INT32_MAX, kThresholdForFullWet]
 		int64_t threshold64 = kInt32Max64 - ((kThresholdRange * mixNorm_Q16) >> 17);
 
 		// diff = absInput - threshold, computed in int64 to avoid overflow
@@ -379,24 +382,27 @@ public:
 		int32_t diff_clamped = static_cast<int32_t>(std::min(diff64, static_cast<int64_t>(kInt32Max)));
 		int32_t diff_Q16 = diff_clamped >> 15;
 
-		// blendSlope = 2 + mixNorm * 4, stored as Q8.8 for multiply headroom
-		// At mixNorm=0: slope=2 (512 in Q8.8), at mixNorm=2: slope=10 (2560 in Q8.8)
-		// blendSlope_Q8 = 512 + (mixNorm_Q16 >> 6) [mixNorm*4 in Q8 = mixNorm_Q16 >> 8 * 4 = >> 6]
-		int32_t blendSlope_Q8 = 512 + (mixNorm_Q16 >> 6);
-
-		// blend_Q16 = diff_Q16 * blendSlope_Q8, need to shift result
-		// diff_Q16 * blendSlope_Q8 gives Q24, shift right 8 for Q16
+		// Linear blend calculation: blend = diff * slope
 		int32_t blend_Q16 = (diff_Q16 * blendSlope_Q8) >> 8;
+
+		// Clamp to [0, 65536] before smoothstep
+		if (blend_Q16 > kOne_Q16) {
+			blend_Q16 = kOne_Q16;
+		}
+
+		// Smoothstep curve: t²(3-2t) for natural crossfade
+		// Eliminates harsh transitions at blend boundaries
+		{
+			int32_t t = blend_Q16;
+			int64_t t2 = (static_cast<int64_t>(t) * t) >> 16; // Q16
+			// 3 in Q16 = 196608, 2t in Q16 = t << 1
+			int64_t factor = 196608 - (t << 1); // (3 - 2t) in Q16
+			blend_Q16 = static_cast<int32_t>((t2 * factor) >> 16);
+		}
 
 		// Table lookup (both scaledInput and lookup are clipped to INT32_MAX)
 		uint32_t tableInput = static_cast<uint32_t>(scaledInput) + 2147483648u;
 		int32_t lookup = lookupFunctionInt(tableInput);
-
-		// Clamp blend to [0, 65536] (0 to 1.0)
-		if (blend_Q16 >= kOne_Q16) {
-			// Fully wet - scale back to original level
-			return static_cast<int32_t>(static_cast<float>(lookup) / inputScale_);
-		}
 
 		// Blend at scaled level (both signals clipped to same peak)
 		int32_t blend_Q30 = blend_Q16 << 14;
