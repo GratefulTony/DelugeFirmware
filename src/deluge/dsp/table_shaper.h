@@ -330,60 +330,84 @@ public:
 	/// @return Output sample at same level as input (unity gain when undriven)
 	[[gnu::always_inline]] int32_t processInt32Q16(int32_t input, int32_t driveGain_Q30, int32_t mixNorm_Q16 = 131072) {
 		// Input drive knob = input gain (original behavior)
-		int32_t afterDrive = multiply_32x32_rshift32(input, driveGain_Q30) << 2;
+		// Must saturate to prevent wraparound at high drive + high input levels
+		int32_t afterDrive = lshiftAndSaturate<2>(multiply_32x32_rshift32(input, driveGain_Q30));
 
 		// Fast path: bypass when linear (tables may be deallocated)
 		if (isLinear_) {
-			return afterDrive;
+			return afterDrive; // Return driven signal (consistent with dry path)
 		}
 
-		// Scale to fill table range using bit shift (inputScale_ is power of 2, e.g. 128 = 2^7)
-		// Input is bounded by drive stage, so overflow not expected
-		int32_t scaledInput = afterDrive << inputScaleShift_;
+		// Scale to fill table range using float multiply (inputScale_ is typically 128)
+		int32_t scaledInput = static_cast<int32_t>(
+		    std::clamp(static_cast<float>(afterDrive) * inputScale_, -2147483648.0f, 2147483647.0f));
 
-		// Amplitude-dependent blend using Q16 fixed-point
-		// absNorm_Q16: abs(scaledInput) >> 15 gives top 17 bits as Q16 [0, 65536]
-		int32_t absInput = scaledInput < 0 ? -scaledInput : scaledInput;
-		int32_t absNorm_Q16 = absInput >> 15; // Q31 to Q16.16
+		// Amplitude-dependent blend: threshold determines which amplitudes get wet
+		// absInput is in [0, INT32_MAX] after scaling
+		int32_t clampedInput = std::max(scaledInput, static_cast<int32_t>(-2147483647));
+		int32_t absInput = clampedInput < 0 ? -clampedInput : clampedInput;
 
-		// threshold_Q16 = (1 - mixNorm) in Q16: 65536 - mixNorm_Q16
-		// Range: [-65536, 65536] for mixNorm in [0, 2]
+		// Compute threshold for amplitude-dependent blend
+		// At mixNorm=0: threshold = INT32_MAX (always dry)
+		// At mixNorm=2: threshold = kThresholdForFullWet (just negative enough for full wet)
+		//
+		// The minimum threshold for "always wet" is derived from slope formula:
+		// blendSlope_Q8 = 512 + (mixNorm_Q16 >> 6), max at mixNorm=131072
+		// For blend=1: diff_Q16 * slope >> 8 >= kOne_Q16
+		// For silence: diff = -threshold, diff_Q16 = diff >> 15
+		constexpr int32_t kInt32Max = 2147483647;
+		constexpr int64_t kInt32Max64 = 2147483647;
 		constexpr int32_t kOne_Q16 = 65536;
-		int32_t threshold_Q16 = kOne_Q16 - mixNorm_Q16;
+		constexpr int32_t kMaxMixNorm_Q16 = 131072;
+		constexpr int32_t kMaxSlope_Q8 = 512 + (kMaxMixNorm_Q16 >> 6); // 2560 at max mix
+		constexpr int64_t kDiffQ16ForFullWet = (kOne_Q16 << 8) / kMaxSlope_Q8;
+		constexpr int64_t kThresholdForFullWet = -(kDiffQ16ForFullWet << 15);
 
-		// diff_Q16 = absNorm - threshold, early exit if <= 0 (fully dry)
-		int32_t diff_Q16 = absNorm_Q16 - threshold_Q16;
-		if (diff_Q16 <= 0) {
-			return afterDrive;
+		// Map mixNorm [0, 131072] to threshold [INT32_MAX, kThresholdForFullWet]
+		constexpr int64_t kThresholdRange = kInt32Max64 - kThresholdForFullWet; // ≈ 2.36B
+		int64_t threshold64 = kInt32Max64 - ((kThresholdRange * mixNorm_Q16) >> 17);
+
+		// diff = absInput - threshold, computed in int64 to avoid overflow
+		// At high mix (threshold very negative), diff can exceed INT32_MAX
+		int64_t diff64 = static_cast<int64_t>(absInput) - threshold64;
+		if (diff64 <= 0) {
+			return afterDrive; // Return driven (but unshaped) signal
 		}
 
-		// Fixed blend slope of 4 (shift instead of multiply)
-		// Ramps from 0 to 1.0 over 25% of amplitude range above threshold
-		int32_t blend_Q16 = diff_Q16 << 2;
+		// Convert diff to Q16 for blend calculation
+		// Clamp diff64 to int32 range before shifting (prevents overflow in blend calc)
+		int32_t diff_clamped = static_cast<int32_t>(std::min(diff64, static_cast<int64_t>(kInt32Max)));
+		int32_t diff_Q16 = diff_clamped >> 15;
 
-		// Fully wet when blend >= 1.0
-		if (blend_Q16 >= kOne_Q16) {
-			// Fully wet path
-			uint32_t tableInput = static_cast<uint32_t>(scaledInput) + 2147483648u;
-			int32_t lookup = lookupFunctionInt(tableInput);
-			return lookup >> inputScaleShift_;
-		}
+		// blendSlope = 2 + mixNorm * 4, stored as Q8.8 for multiply headroom
+		// At mixNorm=0: slope=2 (512 in Q8.8), at mixNorm=2: slope=10 (2560 in Q8.8)
+		// blendSlope_Q8 = 512 + (mixNorm_Q16 >> 6) [mixNorm*4 in Q8 = mixNorm_Q16 >> 8 * 4 = >> 6]
+		int32_t blendSlope_Q8 = 512 + (mixNorm_Q16 >> 6);
 
-		// Table lookup for wet signal
+		// blend_Q16 = diff_Q16 * blendSlope_Q8, need to shift result
+		// diff_Q16 * blendSlope_Q8 gives Q24, shift right 8 for Q16
+		int32_t blend_Q16 = (diff_Q16 * blendSlope_Q8) >> 8;
+
+		// Table lookup (both scaledInput and lookup are clipped to INT32_MAX)
 		uint32_t tableInput = static_cast<uint32_t>(scaledInput) + 2147483648u;
 		int32_t lookup = lookupFunctionInt(tableInput);
-		int32_t wet = lookup >> inputScaleShift_;
 
-		// Blend dry/wet using Q16: out = dry * (1-blend) + wet * blend
-		// Use multiply_32x32_rshift32 for efficiency (treats args as Q31, result Q31)
-		// Convert blend_Q16 to Q31: blend_Q31 = blend_Q16 << 15
-		int32_t blend_Q31 = blend_Q16 << 15;
-		int32_t oneMinusBlend_Q31 = (kOne_Q16 << 15) - blend_Q31;
+		// Clamp blend to [0, 65536] (0 to 1.0)
+		if (blend_Q16 >= kOne_Q16) {
+			// Fully wet - scale back to original level
+			return static_cast<int32_t>(static_cast<float>(lookup) / inputScale_);
+		}
 
-		// dry * (1-blend) + wet * blend, all in Q31 multiply then sum
-		int32_t dryPart = multiply_32x32_rshift32(afterDrive, oneMinusBlend_Q31) << 1;
-		int32_t wetPart = multiply_32x32_rshift32(wet, blend_Q31) << 1;
-		return dryPart + wetPart;
+		// Blend at scaled level (both signals clipped to same peak)
+		int32_t blend_Q30 = blend_Q16 << 14;
+		int32_t oneMinusBlend_Q30 = (kOne_Q16 << 14) - blend_Q30;
+
+		int32_t dryPart = multiply_32x32_rshift32(scaledInput, oneMinusBlend_Q30) << 2;
+		int32_t wetPart = multiply_32x32_rshift32(lookup, blend_Q30) << 2;
+		int32_t blended = dryPart + wetPart;
+
+		// Scale back to original level
+		return static_cast<int32_t>(static_cast<float>(blended) / inputScale_);
 	}
 
 	/// Process a single sample using integer-only path (legacy float interface)
@@ -832,7 +856,6 @@ private:
 	// - Output = lookup / inputScale (unity gain: boost in, attenuate out)
 	int32_t expectedPeak_{1 << 26}; // 67,108,864 - theoretical FM max (reference only)
 	float inputScale_{128.0f};      // Calibrated: FM v=127 saturates near drive=0 (2^7 for bit-shift efficiency)
-	int inputScaleShift_{7};        // log2(inputScale_) for bit-shift output scaling (128 = 2^7)
 	float outputScale_{static_cast<float>(1 << 26) / (32767.0f * 65536.0f)}; // Float path only (deprecated)
 
 public:
@@ -843,8 +866,6 @@ public:
 		// Input scale: maps expectedPeak to INT32_MAX (fills table proportionally)
 		constexpr float kInt32Max = 2147483647.0f;
 		inputScale_ = kInt32Max / static_cast<float>(peak);
-		// Compute shift for bit-shift output scaling (assumes inputScale_ is ~power of 2)
-		inputScaleShift_ = static_cast<int>(std::log2(inputScale_) + 0.5f);
 		// Output scale for unity gain: peak / (32767 * 65536)
 		// Lookup returns Q16.15 (table_int16 * 65536), this converts back to input level
 		constexpr float kLookupFullScale = 32767.0f * 65536.0f;

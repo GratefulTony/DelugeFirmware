@@ -41,16 +41,13 @@ constexpr q31_t kShaperSmoothingAlpha = static_cast<q31_t>(0.0005 * ONE_Q31);
 constexpr q31_t kShaperDcBlockCoeff = static_cast<q31_t>((5.0f / 44100.0f) * ONE_Q31);
 
 /// Subtractive gain staging analysis (from voice.cpp):
-/// - FM: LOCAL_VOLUME applied before shaper via sourceAmplitude → signal varies with velocity
-/// - Subtractive: LOCAL_VOLUME applied AFTER shaper → signal always at full osc level
+/// - FM: sourceAmplitude at full level → signal at ~23M peak
+/// - Subtractive: oscillators scaled by >> 4 OR filterGain (both ~16x attenuation)
 ///
-/// Empirically measured:
-/// - FM at max velocity (v=127): inputScale=128 → notch near drive=-11
-/// - Subtractive: similar saturation point, no base attenuation needed
-///
-/// FilterGain compensation adjusts when resonance changes filterGain from neutral
+/// The shaper table is designed to handle varying input levels via the drive knob.
+/// Subtractive signals use a smaller portion of the table at neutral drive.
+/// FilterGain compensation only adjusts for resonance-induced level changes.
 constexpr int32_t kShaperNeutralFilterGainInt = 1 << 28; // filterGain at neutral settings (integer)
-constexpr float kShaperNeutralFilterGainInvF = 1.0f / static_cast<float>(1 << 28); // precomputed reciprocal
 
 /// Context for per-sample IIR parameter smoothing during buffer processing
 struct ShaperSmoothingContext {
@@ -170,7 +167,9 @@ inline void shapeBuffer(StereoBuffer<q31_t> buffer, TableShaper& shaper, q31_t d
  */
 inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDrive, q31_t mix,
                              int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters, q31_t* dcBlockState) {
-	if (mix <= 0 || buffer.empty()) {
+	// Hybrid param range: [-1073741824, +1073741824], bypass at minimum
+	constexpr q31_t kHybridMin = -1073741824;
+	if (mix <= kHybridMin || buffer.empty()) {
 		return;
 	}
 
@@ -181,18 +180,16 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 
 	// Compute gain adjustment for subtractive mode
 	// filterGain=0 means FM mode (no adjustment needed)
-	// Only adjust when hasFilters and filterGain deviates from neutral
+	// filterGain>0 means subtractive: compensate for resonance-induced level changes
+	// At neutral filterGain (2^28), boostGain = 1.0 (no adjustment)
+	// High resonance (low filterGain) → boost; low resonance (high filterGain) → attenuate
 	bool needsGainAdjust = (filterGain > 0) && hasFilters;
-	int32_t boostGain_Q28 = 1 << 28; // 1.0 in Q28
-	int32_t attenGain_Q28 = 1 << 28;
+	float boostGain = 1.0f;
+	float attenGain = 1.0f;
 
 	if (needsGainAdjust) {
-		float filterGainF = static_cast<float>(filterGain);
-		float boostGain = static_cast<float>(kShaperNeutralFilterGainInt) / filterGainF;
-		float attenGain = filterGainF * kShaperNeutralFilterGainInvF;
-		// Convert to Q28 for integer multiply in loop
-		boostGain_Q28 = static_cast<int32_t>(boostGain * (1 << 28));
-		attenGain_Q28 = static_cast<int32_t>(attenGain * (1 << 28));
+		boostGain = static_cast<float>(kShaperNeutralFilterGainInt) / static_cast<float>(filterGain);
+		attenGain = 1.0f / boostGain;
 		// Skip per-sample multiply if effectively unity
 		needsGainAdjust = (filterGain != kShaperNeutralFilterGainInt);
 	}
@@ -208,14 +205,14 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 
 		q31_t input = sample;
 		if (needsGainAdjust) {
-			input = static_cast<q31_t>((static_cast<int64_t>(sample) * boostGain_Q28) >> 28);
+			input = static_cast<q31_t>(static_cast<float>(sample) * boostGain);
 		}
 
 		// processInt32 handles: drive gain, table lookup, and amplitude-dependent blend
 		q31_t out = shaper.processInt32(input, ctx.current, mixCtx.current);
 
 		if (needsGainAdjust) {
-			out = static_cast<q31_t>((static_cast<int64_t>(out) * attenGain_Q28) >> 28);
+			out = static_cast<q31_t>(static_cast<float>(out) * attenGain);
 		}
 
 		// DC blocker: HPF by subtracting lowpassed signal (removes DC from asymmetric waveshaping)
@@ -255,7 +252,9 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDrive,
                              q31_t mix, int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters,
                              q31_t* dcBlockStateL, q31_t* dcBlockStateR) {
-	if (mix <= 0 || buffer.empty()) {
+	// Hybrid param range: [-1073741824, +1073741824], bypass at minimum
+	constexpr q31_t kHybridMin = -1073741824;
+	if (mix <= kHybridMin || buffer.empty()) {
 		return;
 	}
 
@@ -266,18 +265,16 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 
 	// Compute gain adjustment for subtractive mode
 	// filterGain=0 means FM mode (no adjustment needed)
-	// Only adjust when hasFilters and filterGain deviates from neutral
+	// filterGain>0 means subtractive: compensate for resonance-induced level changes
+	// At neutral filterGain (2^28), boostGain = 1.0 (no adjustment)
+	// High resonance (low filterGain) → boost; low resonance (high filterGain) → attenuate
 	bool needsGainAdjust = (filterGain > 0) && hasFilters;
-	int32_t boostGain_Q28 = 1 << 28; // 1.0 in Q28
-	int32_t attenGain_Q28 = 1 << 28;
+	float boostGain = 1.0f;
+	float attenGain = 1.0f;
 
 	if (needsGainAdjust) {
-		float filterGainF = static_cast<float>(filterGain);
-		float boostGain = static_cast<float>(kShaperNeutralFilterGainInt) / filterGainF;
-		float attenGain = filterGainF * kShaperNeutralFilterGainInvF;
-		// Convert to Q28 for integer multiply in loop
-		boostGain_Q28 = static_cast<int32_t>(boostGain * (1 << 28));
-		attenGain_Q28 = static_cast<int32_t>(attenGain * (1 << 28));
+		boostGain = static_cast<float>(kShaperNeutralFilterGainInt) / static_cast<float>(filterGain);
+		attenGain = 1.0f / boostGain;
 		// Skip per-sample multiply if effectively unity
 		needsGainAdjust = (filterGain != kShaperNeutralFilterGainInt);
 	}
@@ -294,8 +291,8 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 		q31_t inputL = sample.l;
 		q31_t inputR = sample.r;
 		if (needsGainAdjust) {
-			inputL = static_cast<q31_t>((static_cast<int64_t>(sample.l) * boostGain_Q28) >> 28);
-			inputR = static_cast<q31_t>((static_cast<int64_t>(sample.r) * boostGain_Q28) >> 28);
+			inputL = static_cast<q31_t>(static_cast<float>(sample.l) * boostGain);
+			inputR = static_cast<q31_t>(static_cast<float>(sample.r) * boostGain);
 		}
 
 		// processInt32 handles: drive gain, table lookup, and amplitude-dependent blend
@@ -303,8 +300,8 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 		q31_t outR = shaper.processInt32(inputR, ctx.current, mixCtx.current);
 
 		if (needsGainAdjust) {
-			outL = static_cast<q31_t>((static_cast<int64_t>(outL) * attenGain_Q28) >> 28);
-			outR = static_cast<q31_t>((static_cast<int64_t>(outR) * attenGain_Q28) >> 28);
+			outL = static_cast<q31_t>(static_cast<float>(outL) * attenGain);
+			outR = static_cast<q31_t>(static_cast<float>(outR) * attenGain);
 		}
 
 		// DC blocker: HPF by subtracting lowpassed signal (removes DC from asymmetric waveshaping)

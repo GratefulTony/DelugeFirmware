@@ -91,7 +91,6 @@ int32_t getParamNeutralValue(int32_t p) {
 	case params::GLOBAL_REVERB_AMOUNT:
 	case params::GLOBAL_VOLUME_POST_FX:
 	case params::LOCAL_VOLUME:
-	case params::LOCAL_SHAPER_MIX:
 		return 134217728;
 
 	case params::LOCAL_MODULATOR_0_VOLUME:
@@ -122,6 +121,7 @@ int32_t getParamNeutralValue(int32_t p) {
 	case params::LOCAL_OSC_B_PHASE_WIDTH:
 	case params::LOCAL_SHAPER_DRIVE: // Bipolar: 0 = unity, negative = attenuation
 	case params::LOCAL_SINE_SHAPER_DRIVE:
+	case params::LOCAL_SHAPER_MIX:           // Unipolar mix: 0 at knob min, 100% at knob max
 	case params::LOCAL_SINE_SHAPER_TWIST:    // Pure modulation (base stored in field)
 	case params::LOCAL_SINE_SHAPER_HARMONIC: // Pure modulation (base stored in field)
 		return 0;

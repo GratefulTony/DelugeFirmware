@@ -74,7 +74,6 @@ enum Local : ParamType {
 	LOCAL_MODULATOR_0_VOLUME,
 	LOCAL_MODULATOR_1_VOLUME,
 	LOCAL_FOLD,
-	LOCAL_SHAPER_MIX,
 
 	// Local non-volume params begin
 	FIRST_LOCAL_NON_VOLUME,
@@ -100,6 +99,7 @@ enum Local : ParamType {
 	LOCAL_PAN,
 	LOCAL_SHAPER_DRIVE,      // XY distortion drive (additive mod: base + mod)
 	LOCAL_SINE_SHAPER_DRIVE, // Sine shaper drive (additive mod: base + mod)
+	LOCAL_SHAPER_MIX,        // Shaper wet/dry mix (additive mod: base + mod)
 
 	// Local zone params begin (pure modulation pass-through, scaling handled by ZoneBasedParam)
 	FIRST_LOCAL_ZONE,

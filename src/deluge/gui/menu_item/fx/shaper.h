@@ -186,7 +186,7 @@ private:
 };
 
 // Mix: Patched param for amplitude-dependent wet/dry blend (0 = dry, max = full wet)
-// Uses unipolar range 0-128 where 0 = bypass, 128 = full effect
+// Uses bipolar param range (INT32_MIN to INT32_MAX) displayed as 0-128
 class TableShaperMix : public patched_param::Integer {
 public:
 	static constexpr int32_t kMixMenuRange = 128;
@@ -236,28 +236,24 @@ protected:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMixMenuRange; }
 
 	void readCurrentValue() override {
-		// Scale q31 (0 to 2^31-1 for unipolar) to menu range (0 to 128)
-		int32_t q31Value = soundEditor.currentParamManager->getPatchedParamSet()->getValue(getP());
-		// For unipolar: shift right by 24 bits, clamp negative to 0
-		int32_t menuValue = q31Value >> 24;
-		if (menuValue < 0) {
-			menuValue = 0;
-		}
-		// ONE_Q31 >> 24 = 127, but we want to show 128 at max
-		if (q31Value >= ONE_Q31 - (1 << 23)) { // Close enough to max
-			menuValue = kMixMenuRange;
-		}
+		// Scale bipolar param (INT32_MIN to INT32_MAX) to menu range (0 to 128)
+		int32_t paramValue = soundEditor.currentParamManager->getPatchedParamSet()->getValue(getP());
+		// Same formula as computeCurrentValueForStandardMenuItem but with 128 range
+		int32_t menuValue = (((int64_t)paramValue + 2147483648) * kMixMenuRange + 2147483648) >> 32;
 		this->setValue(menuValue);
 	}
 
 	int32_t getFinalValue() override {
 		int32_t value = this->getValue();
-		// Scale 0-128 back to q31 (0 to 2^31-1)
-		// Special case: 128 << 24 = 0x80000000 which overflows to INT32_MIN
+		// Scale 0-128 back to bipolar param (INT32_MIN to INT32_MAX)
 		if (value >= kMixMenuRange) {
-			return ONE_Q31; // 2147483647
+			return 2147483647; // INT32_MAX
 		}
-		return value << 24;
+		if (value <= 0) {
+			return -2147483648; // INT32_MIN
+		}
+		// (2^32 / 128) = 33554432
+		return static_cast<int32_t>(static_cast<uint32_t>(value) * 33554432) - 2147483648;
 	}
 };
 

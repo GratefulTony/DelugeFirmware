@@ -174,16 +174,29 @@ public:
 	 * Table is normalized for FM signal levels (~23M peak). Subtractive signals
 	 * should be boosted before processing to ensure full table utilization.
 	 */
-	/// Convert volume param output to mixNorm - call once per buffer, not per sample
-	/// Returns Q16.16 fixed-point: 65536 = 1.0, max ~131072 for mixNorm=2
+	/// Convert hybrid param output to mixNorm - call once per buffer, not per sample
+	/// Input: hybrid param after getFinalParameterValueHybrid() - range [-1073741824, +1073741824]
+	/// Maps full range linearly to [0, 131072] (0 to 2.0 in Q16)
+	/// Returns Q16.16 fixed-point: 65536 = 1.0, 131072 = 2.0 (full wet)
 	[[gnu::always_inline]] static inline int32_t mixParamToNormQ16(int32_t mix) {
-		if (mix <= 0) {
+		constexpr int32_t kHybridMin = -1073741824;
+
+		// Early exit for bypass (at or below minimum)
+		if (mix <= kHybridMin) {
 			return 0;
 		}
-		// pow(x, 0.7) = exp(0.7 * log(x)) using fast math
-		float normalized = static_cast<float>(mix) / static_cast<float>(1 << 30);
-		float mixNorm = fastExp(0.7f * fastLog(normalized)) * 2.0f;
-		return static_cast<int32_t>(mixNorm * 65536.0f);
+
+		// Linear mapping: [-1073741824, +1073741824] → [0, 131072]
+		// offset = mix + 1073741824, range [0, 2147483648]
+		// mixNorm_Q16 = offset >> 14 (divides by 16384, maps to [0, 131072])
+		uint32_t offset = static_cast<uint32_t>(mix - kHybridMin);
+		int32_t mixNorm_Q16 = static_cast<int32_t>(offset >> 14);
+
+		// Clamp to max (safety for modulation overflow)
+		if (mixNorm_Q16 > 131072) {
+			mixNorm_Q16 = 131072;
+		}
+		return mixNorm_Q16;
 	}
 
 	/// Process with integer mixNorm (Q16.16 format: 65536 = 1.0)

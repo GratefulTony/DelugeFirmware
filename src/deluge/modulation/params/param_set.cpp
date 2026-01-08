@@ -542,7 +542,7 @@ void PatchedParamSet::notifyParamModifiedInSomeWay(ModelStackWithAutoParam const
 int32_t PatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWithAutoParam* modelStack) {
 	if (modelStack
 	    && (modelStack->paramId == params::LOCAL_OSC_A_PHASE_WIDTH
-	        || modelStack->paramId == params::LOCAL_OSC_B_PHASE_WIDTH || modelStack->paramId == params::LOCAL_SHAPER_MIX
+	        || modelStack->paramId == params::LOCAL_OSC_B_PHASE_WIDTH
 	        || isPatchedHighResZoneParam(modelStack->paramId))) {
 		// Unipolar params: map 0..INT32_MAX to knobPos -64..+64
 		if (paramValue == 2147483647) {
@@ -563,7 +563,7 @@ int32_t PatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWithA
 int32_t PatchedParamSet::knobPosToParamValue(int32_t knobPos, ModelStackWithAutoParam* modelStack) {
 	if (modelStack
 	    && (modelStack->paramId == params::LOCAL_OSC_A_PHASE_WIDTH
-	        || modelStack->paramId == params::LOCAL_OSC_B_PHASE_WIDTH || modelStack->paramId == params::LOCAL_SHAPER_MIX
+	        || modelStack->paramId == params::LOCAL_OSC_B_PHASE_WIDTH
 	        || isPatchedHighResZoneParam(modelStack->paramId))) {
 		// Unipolar params: map knobPos -64..+64 to 0..INT32_MAX
 		if (knobPos >= 64) {
