@@ -34,12 +34,6 @@ namespace deluge::dsp {
 /// Per-sample IIR alpha for q31 parameter smoothing (~40ms time constant at 44.1kHz)
 constexpr q31_t kShaperSmoothingAlpha = static_cast<q31_t>(0.0005 * ONE_Q31);
 
-/// DC blocker coefficient for ~5Hz cutoff at 44.1kHz (removes DC from asymmetric waveshaping)
-/// alpha = fc / fs = 5 / 44100 ≈ 0.000113
-/// 5Hz gives <-0.1dB at 30Hz - essentially transparent to bass content
-/// Matches multiband compressor's kDCBlockCoeff
-constexpr q31_t kShaperDcBlockCoeff = static_cast<q31_t>((5.0f / 44100.0f) * ONE_Q31);
-
 /// Subtractive gain staging analysis (from voice.cpp):
 /// - FM: sourceAmplitude at full level → signal at ~23M peak
 /// - Subtractive: oscillators scaled by >> 4 OR filterGain (both ~16x attenuation)
@@ -77,82 +71,14 @@ struct ShaperSmoothingContextQ16 {
 	return {state, kShaperSmoothingAlphaQ16, target};
 }
 
-// TODO: Migrate audio clips (global_effectable_for_clip.cpp) to shapeBufferInt32, then remove float path
-// The float path has +6dB gain (kPreGain * kPostGain = 2.0) that int32 path doesn't have
-/**
- * Process a mono buffer through the TableShaper waveshaper
- *
- * @param buffer Audio buffer to process in-place
- * @param shaper The Shaper instance (with pre-generated table)
- * @param drive Patched drive parameter (q31)
- * @param smoothedDrive Previous drive value for smoothing (updated)
- * @param mix Wet/dry blend (q31, 0 = bypass)
- * @param prevX ADAA state (previous input sample), nullptr if AA disabled
- */
-inline void shapeBuffer(std::span<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDrive, q31_t mix,
-                        float* prevX = nullptr) {
-	if (mix <= 0 || buffer.empty()) {
-		return;
-	}
-
-	FX_BENCH_DECLARE(bench, "shaper_table");
-	FX_BENCH_SCOPE(bench);
-
-	auto ctx = prepareShaperSmoothing(*smoothedDrive, drive);
-
-	for (auto& sample : buffer) {
-		ctx.current += multiply_32x32_rshift32(ctx.target - ctx.current, ctx.alpha) * 2;
-		q31_t wet = shaper.process(sample, ctx.current, prevX);
-		q31_t dry = multiply_32x32_rshift32(sample, ONE_Q31 - mix) << 1;
-		wet = multiply_32x32_rshift32(wet, mix) << 1;
-		sample = add_saturate(dry, wet);
-	}
-
-	*smoothedDrive = ctx.current;
-}
-
-/**
- * Process a stereo buffer through the TableShaper waveshaper
- *
- * @param buffer Stereo audio buffer to process in-place
- * @param shaper The Shaper instance (with pre-generated table)
- * @param drive Patched drive parameter (q31)
- * @param smoothedDrive Previous drive value for smoothing (updated)
- * @param mix Wet/dry blend (q31, 0 = bypass)
- * @param prevXL Left channel ADAA state (previous input sample), nullptr if AA disabled
- * @param prevXR Right channel ADAA state (previous input sample), nullptr if AA disabled
- */
-inline void shapeBuffer(StereoBuffer<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDrive, q31_t mix,
-                        float* prevXL = nullptr, float* prevXR = nullptr) {
-	if (mix <= 0 || buffer.empty()) {
-		return;
-	}
-
-	FX_BENCH_DECLARE(bench, "shaper_table");
-	FX_BENCH_SCOPE(bench);
-
-	auto ctx = prepareShaperSmoothing(*smoothedDrive, drive);
-
-	for (auto& sample : buffer) {
-		ctx.current += multiply_32x32_rshift32(ctx.target - ctx.current, ctx.alpha) * 2;
-		q31_t wetL = shaper.process(sample.l, ctx.current, prevXL);
-		q31_t wetR = shaper.process(sample.r, ctx.current, prevXR);
-		q31_t dryL = multiply_32x32_rshift32(sample.l, ONE_Q31 - mix) << 1;
-		q31_t dryR = multiply_32x32_rshift32(sample.r, ONE_Q31 - mix) << 1;
-		wetL = multiply_32x32_rshift32(wetL, mix) << 1;
-		wetR = multiply_32x32_rshift32(wetR, mix) << 1;
-		sample.l = add_saturate(dryL, wetL);
-		sample.r = add_saturate(dryR, wetR);
-	}
-
-	*smoothedDrive = ctx.current;
-}
-
 /**
  * Process a mono buffer through the TableShaper using integer-only path (no floats)
  *
  * Table operates at FM signal levels. For subtractive synths, pass filterGain to
  * dynamically compute the boost needed to match FM operating levels.
+ *
+ * Note: No DC blocking here - table normalization handles transfer function DC,
+ * and downstream processing provides DC blocking at the output stage.
  *
  * @param buffer Audio buffer to process in-place
  * @param shaper The Shaper instance (with pre-generated table)
@@ -164,10 +90,9 @@ inline void shapeBuffer(StereoBuffer<q31_t> buffer, TableShaper& shaper, q31_t d
  *                   For FM mode or subtractive without filters: pass 0.
  *                   When 0, no boost is applied (FM mode) or fixed boost for no-filter case.
  * @param hasFilters For subtractive mode: true if filters are active
- * @param dcBlockState DC blocker state for removing DC offset from asymmetric waveshaping (per-voice)
  */
 inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDrive, q31_t mix,
-                             int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters, q31_t* dcBlockState) {
+                             int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters) {
 	// Hybrid param range: [-1073741824, +1073741824], bypass at minimum
 	constexpr q31_t kHybridMin = -1073741824;
 	if (mix <= kHybridMin || buffer.empty()) {
@@ -218,14 +143,6 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 			out = static_cast<q31_t>(static_cast<float>(out) * attenGain);
 		}
 
-		// DC blocker: HPF by subtracting lowpassed signal (removes DC from asymmetric waveshaping)
-		if (dcBlockState) {
-			q31_t lpf = *dcBlockState;
-			q31_t delta = multiply_32x32_rshift32(out - lpf, kShaperDcBlockCoeff) << 1;
-			lpf += delta;
-			*dcBlockState = lpf;
-			out = out - lpf;
-		}
 		sample = out;
 	}
 
@@ -235,10 +152,12 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 
 /**
  * Process a stereo buffer through the TableShaper using integer-only path (no floats)
- * Includes subtractive mixing: >50% mix subtracts dry from wet to isolate harmonics
  *
  * Table operates at FM signal levels. For subtractive synths, pass filterGain to
  * dynamically compute the boost needed to match FM operating levels.
+ *
+ * Note: No DC blocking here - table normalization handles transfer function DC,
+ * and downstream processing provides DC blocking at the output stage.
  *
  * @param buffer Stereo audio buffer to process in-place
  * @param shaper The Shaper instance (with pre-generated table)
@@ -249,12 +168,9 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
  * @param filterGain For subtractive mode: pass the filterGain from filter config.
  *                   For FM mode: pass 0 (no boost needed).
  * @param hasFilters For subtractive mode: true if filters are active
- * @param dcBlockStateL Left DC blocker state (per-voice)
- * @param dcBlockStateR Right DC blocker state (per-voice)
  */
 inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDrive,
-                             q31_t mix, int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters,
-                             q31_t* dcBlockStateL, q31_t* dcBlockStateR) {
+                             q31_t mix, int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters) {
 	// Hybrid param range: [-1073741824, +1073741824], bypass at minimum
 	constexpr q31_t kHybridMin = -1073741824;
 	if (mix <= kHybridMin || buffer.empty()) {
@@ -310,19 +226,6 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 			outR = static_cast<q31_t>(static_cast<float>(outR) * attenGain);
 		}
 
-		// DC blocker: HPF by subtracting lowpassed signal (removes DC from asymmetric waveshaping)
-		if (dcBlockStateL && dcBlockStateR) {
-			q31_t lpfL = *dcBlockStateL;
-			q31_t lpfR = *dcBlockStateR;
-			q31_t deltaL = multiply_32x32_rshift32(outL - lpfL, kShaperDcBlockCoeff) << 1;
-			q31_t deltaR = multiply_32x32_rshift32(outR - lpfR, kShaperDcBlockCoeff) << 1;
-			lpfL += deltaL;
-			lpfR += deltaR;
-			*dcBlockStateL = lpfL;
-			*dcBlockStateR = lpfR;
-			outL = outL - lpfL;
-			outR = outR - lpfR;
-		}
 		sample.l = outL;
 		sample.r = outR;
 	}

@@ -57,6 +57,8 @@ struct TableShaperParams {
 	float rectifierWeight{0.0f};
 	float threshold{1.0f};
 	float asymmetry{0.5f};
+	float deadzoneWidth{0.0f}; // 0 = no deadzone, 1 = 90% deadzone (10% passthrough)
+	float deadzonePhase{0.5f}; // Center of passthrough window: 0.5 = x=0 (zero crossing)
 
 	/// Clamp all parameters to valid 0-1 range
 	void clamp() {
@@ -69,13 +71,15 @@ struct TableShaperParams {
 		rectifierWeight = std::clamp(rectifierWeight, 0.0f, 1.0f);
 		threshold = std::clamp(threshold, 0.0f, 1.0f);
 		asymmetry = std::clamp(asymmetry, 0.0f, 1.0f);
+		deadzoneWidth = std::clamp(deadzoneWidth, 0.0f, 1.0f);
+		deadzonePhase = std::clamp(deadzonePhase, 0.0f, 1.0f);
 	}
 
 	bool operator!=(const TableShaperParams& o) const {
 		return drive != o.drive || tanhWeight != o.tanhWeight || polyWeight != o.polyWeight
 		       || hardKneeWeight != o.hardKneeWeight || chebyWeight != o.chebyWeight
 		       || sineFoldWeight != o.sineFoldWeight || rectifierWeight != o.rectifierWeight || threshold != o.threshold
-		       || asymmetry != o.asymmetry;
+		       || asymmetry != o.asymmetry || deadzoneWidth != o.deadzoneWidth || deadzonePhase != o.deadzonePhase;
 	}
 };
 
@@ -111,6 +115,12 @@ public:
 	// false = int32 path only, saves ~16KB and speeds up regeneration
 	// true = enables float ADAA path (process() with prevX state)
 	static constexpr bool kGenerateADAA = false;
+
+	// Energy-balanced phase compression:
+	// false = midpoint centering only (full amplitude, DC handled downstream)
+	// true = compress dominant-energy half to balance mean while keeping full amplitude
+	// This warps the x-axis, subtly changing harmonic content but achieving both goals
+	static constexpr bool kEnergyBalancedPhase = true;
 	// =============================================================================
 
 	static constexpr size_t kTableMask = kTableSize - 1;
@@ -329,9 +339,10 @@ public:
 	/// @param mixNorm_Q16 Normalized mix in Q16.16 (65536 = 1.0, 131072 = 2.0 full wet)
 	/// @return Output sample at same level as input (unity gain when undriven)
 	[[gnu::always_inline]] int32_t processInt32Q16(int32_t input, int32_t driveGain_Q30, int32_t mixNorm_Q16 = 131072) {
-		// Input drive knob = input gain (original behavior)
-		// Must saturate to prevent wraparound at high drive + high input levels
-		int32_t afterDrive = lshiftAndSaturate<2>(multiply_32x32_rshift32(input, driveGain_Q30));
+		// d⁴ curve: 0.5x at center (matches original), 8x at max (extended range)
+		int32_t d2 = multiply_32x32_rshift32(driveGain_Q30, driveGain_Q30) << 2;
+		int32_t d4 = multiply_32x32_rshift32(d2, d2) << 2;
+		int32_t afterDrive = lshiftAndSaturate<5>(multiply_32x32_rshift32(input, d4));
 
 		// Fast path: bypass when linear (tables may be deallocated)
 		if (isLinear_) {
@@ -349,55 +360,52 @@ public:
 
 		// Threshold calculation for amplitude-dependent blend
 		// At mixNorm=0: threshold = INT32_MAX (always dry)
-		// At mixNorm=131072: threshold = kThresholdForFullWet (negative, ensures silence gets 100% wet)
+		// At mixNorm=131072: threshold = kThresholdForFullWet (negative, ensures blend=1.0 for all amplitudes)
 		constexpr int32_t kInt32Max = 2147483647;
 		constexpr int64_t kInt32Max64 = 2147483647;
 		constexpr int32_t kOne_Q16 = 65536;
+		constexpr int32_t kMaxMix = 131072;
 
-		// Quadratic slope: explodes near 100% mix for sharp transitions
-		// At mixNorm=0: slope = 256 (Q8.8, = 1.0)
-		// At mixNorm=131072: slope = 256 + 16384 = 16640 (Q8.8, ≈ 65.0)
+		// Quadratic slope: steeper at high mix for sharper transitions
+		// At mixNorm=0: slope = kBaseSlope (Q8.8, = 1.0)
+		// At mixNorm=kMaxMix: slope = kBaseSlope + (kMaxMix² >> kSlopeShift)
+		// Then scaled by blendAggressionMult_Q8_ (from X): [0.5x, 2.0x]
+		constexpr int32_t kBaseSlope = 256;
+		constexpr int32_t kSlopeShift = 20;
 		int64_t mixSquared = static_cast<int64_t>(mixNorm_Q16) * mixNorm_Q16;
-		int32_t blendSlope_Q8 = 256 + static_cast<int32_t>(mixSquared >> 20);
+		int32_t baseSlope = kBaseSlope + static_cast<int32_t>(mixSquared >> kSlopeShift);
+		int32_t blendSlope_Q8 = (baseSlope * blendAggressionMult_Q8_) >> 8;
 
-		// For silence at max mix to get blend=1.0:
-		// -threshold_Q16 * slope >> 8 >= 65536
-		// At max slope=16640: threshold <= -(65536 << 8 / 16640) << 15 ≈ -33M
-		// Use -36M for margin
-		constexpr int64_t kThresholdForFullWet = -36 * 1024 * 1024; // -36M
-		constexpr int64_t kThresholdRange = kInt32Max64 - kThresholdForFullWet;
+		// Derive threshold from slope formula to ensure blend=1.0 at any amplitude when mix is max
+		// For blend_Q16 = 65536: diff_Q16 * slope >= 65536 << 8 = 16777216
+		// At max slope: diff_Q16 >= 16777216 / maxSlope, round up
+		// In Q31: diff >= requiredDiffQ16 << 15
+		// For input=0 to get full blend: threshold = -diff
+		constexpr int32_t kMaxSlope = kBaseSlope + ((static_cast<int64_t>(kMaxMix) * kMaxMix) >> kSlopeShift);
+		constexpr int32_t kBlendTarget = kOne_Q16 << 8;                                  // 16777216
+		constexpr int32_t kRequiredDiffQ16 = (kBlendTarget + kMaxSlope - 1) / kMaxSlope; // ceiling division
+		constexpr int64_t kThresholdForFullWet = -(static_cast<int64_t>(kRequiredDiffQ16) << 15);
 
 		// Linear threshold mapping: [INT32_MAX, kThresholdForFullWet]
+		constexpr int64_t kThresholdRange = kInt32Max64 - kThresholdForFullWet; // 2,180,546,559
 		int64_t threshold64 = kInt32Max64 - ((kThresholdRange * mixNorm_Q16) >> 17);
 
-		// diff = absInput - threshold, computed in int64 to avoid overflow
-		// At high mix (threshold very negative), diff can exceed INT32_MAX
+		// diff = absInput - threshold
 		int64_t diff64 = static_cast<int64_t>(absInput) - threshold64;
 		if (diff64 <= 0) {
 			return afterDrive; // Return driven (but unshaped) signal
 		}
 
 		// Convert diff to Q16 for blend calculation
-		// Clamp diff64 to int32 range before shifting (prevents overflow in blend calc)
 		int32_t diff_clamped = static_cast<int32_t>(std::min(diff64, static_cast<int64_t>(kInt32Max)));
 		int32_t diff_Q16 = diff_clamped >> 15;
 
 		// Linear blend calculation: blend = diff * slope
 		int32_t blend_Q16 = (diff_Q16 * blendSlope_Q8) >> 8;
 
-		// Clamp to [0, 65536] before smoothstep
+		// Clamp to [0, 65536] (0 to 1.0)
 		if (blend_Q16 > kOne_Q16) {
 			blend_Q16 = kOne_Q16;
-		}
-
-		// Smoothstep curve: t²(3-2t) for natural crossfade
-		// Eliminates harsh transitions at blend boundaries
-		{
-			int32_t t = blend_Q16;
-			int64_t t2 = (static_cast<int64_t>(t) * t) >> 16; // Q16
-			// 3 in Q16 = 196608, 2t in Q16 = t << 1
-			int64_t factor = 196608 - (t << 1); // (3 - 2t) in Q16
-			blend_Q16 = static_cast<int32_t>((t2 * factor) >> 16);
 		}
 
 		// Table lookup (both scaledInput and lookup are clipped to INT32_MAX)
@@ -463,6 +471,15 @@ private:
 		tablesDirty_ = false;
 		bool willBeLinear = isLinear(); // Check params, but don't set isLinear_ yet
 
+		// Compute blend aggression from drive (X axis)
+		// Quadratic curve: very gentle at low X, snappy at high X
+		// Range: [0.1, 2.0] → 20x dynamic range
+		// At X=0: slope so gentle that full mix range is needed for full blend
+		// At X=127: snappy onset, wet kicks in quickly
+		float driveSquared = params_.drive * params_.drive;
+		float aggression = 0.1f + driveSquared * 1.9f; // [0.1, 2.0]
+		blendAggressionMult_Q8_ = static_cast<int32_t>(aggression * 256.0f);
+
 		if (willBeLinear) {
 			// Linear bypass: deallocate tables to save memory
 			// Process functions have isLinear_ fast-path that doesn't use tables
@@ -505,13 +522,9 @@ private:
 		float invWeightSum = (weightSum > 0.001f) ? (1.0f / weightSum) : 1.0f;
 		bool hasWeights = (weightSum >= 0.001f);
 
-		// Generate tables - track positive and negative peaks separately for asymmetric normalization
-		float peakPos = 0.0f; // Maximum positive value
-		float peakNeg = 0.0f; // Maximum negative value (stored as positive for easy comparison)
-		float dx = 2.0f / static_cast<float>(kTableSize);
-
-		for (size_t i = 0; i <= kTableSize; ++i) {
-			float x = (static_cast<float>(i) / kTableScale) - 1.0f; // -1 to +1
+		// Lambda to evaluate transfer function at a given x position
+		// Returns f(x) in [-1, +1] range
+		auto evaluateTransfer = [&](float x) -> float {
 			float mag = std::fabs(x);
 			float sign = (x >= 0.0f) ? 1.0f : -1.0f;
 
@@ -526,12 +539,7 @@ private:
 				float norm = (mag - T) / (1.0f - T); // 0 at threshold, 1 at max
 				norm = std::fmin(norm, 1.0f);
 
-				// ==========================================================
-				// Intensity: overdrive the basis functions for richer harmonics
-				// At drive=0: intensity=1 (gentle)
-				// At drive=1: intensity=2 (2x overdrive, moderate saturation)
-				// This pushes the input beyond 1.0 to create actual clipping/folding
-				// ==========================================================
+				// Intensity: overdrive for richer harmonics
 				float intensity = 1.0f + params_.drive * 1.0f;
 				float overdriven = norm * intensity;
 
@@ -539,68 +547,45 @@ private:
 				float kEff = k * ((x >= 0.0f) ? asymRatio : (2.0f - asymRatio));
 				float invTanhNorm = (x >= 0.0f) ? invTanhNormPos : invTanhNormNeg;
 
-				// =========================================================
-				// BASIS 1: Tanh (warm, smooth) - using fast approximation
-				// Classic tube-like saturation, pure odd harmonics
-				// Overdrive creates harder saturation
-				// =========================================================
+				// BASIS 1: Tanh (warm, smooth)
 				float tanh_out = fastTanh(overdriven * kEff) * invTanhNorm;
 
-				// =========================================================
 				// BASIS 2: Polynomial soft clip (bright, edgy)
-				// Higher order polynomial with overdrive for more harmonics
-				// x - x³/3 + x⁵/5 creates 3rd and 5th harmonics
-				// =========================================================
 				float od2 = overdriven * overdriven;
 				float od3 = od2 * overdriven;
 				float od5 = od3 * od2;
 				float poly_out = overdriven - od3 * 0.333333f + od5 * 0.2f;
-				poly_out = fastTanh(poly_out); // Soft limit the result
+				poly_out = fastTanh(poly_out);
 
-				// =========================================================
 				// BASIS 3: Hard clip (crisp, aggressive)
-				// True hard clipping creates rich odd harmonics
-				// =========================================================
 				float hardClip_out = std::fmin(std::fmax(overdriven, -1.0f), 1.0f);
 
-				// =========================================================
 				// BASIS 4: Chebyshev T5 wavefolder (fold, synthy)
-				// T5(x) = 16x⁵ - 20x³ + 5x, with overdrive creates multiple folds
-				// Input scaled to create 2-3 folds at full drive
-				// =========================================================
-				float cheby_in = overdriven * 1.2f; // Moderate fold scaling
+				float cheby_in = overdriven * 1.2f;
 				float cheby_in2 = cheby_in * cheby_in;
 				float cheby_in3 = cheby_in2 * cheby_in;
 				float cheby_in5 = cheby_in3 * cheby_in2;
 				float cheby_raw = 16.0f * cheby_in5 - 20.0f * cheby_in3 + 5.0f * cheby_in;
-				// Closed-form triangle fold into [-1, 1] (period = 4)
 				float cheby_phase = std::fmod(cheby_raw + 1.0f, 4.0f);
 				if (cheby_phase < 0.0f)
 					cheby_phase += 4.0f;
 				float cheby_out = (cheby_phase <= 2.0f) ? (cheby_phase - 1.0f) : (3.0f - cheby_phase);
 				cheby_out = std::fabs(cheby_out);
 
-				// =========================================================
-				// BASIS 5: Sine folder (Gold) - harmonic-rich folding
-				// tanh(x/a)*sin(b*x)/y + tanh(x) with multiple folds
-				// Higher frequency sine for richer harmonics
-				// =========================================================
-				constexpr float kSineFoldA = 0.4f;                     // Tanh envelope softness
-				float sineFoldB = 3.14159265f * (1.0f + drive * 1.0f); // 1-2 folds
+				// BASIS 5: Sine folder (Gold)
+				constexpr float kSineFoldA = 0.4f;
+				float sineFoldB = 3.14159265f * (1.0f + drive * 1.0f);
 				float sineFold_raw =
 				    fastTanh(overdriven / kSineFoldA) * std::sin(sineFoldB * overdriven) + fastTanh(overdriven) * 0.3f;
 				float sineFold_out = std::fabs(sineFold_raw);
 				sineFold_out = std::fmin(sineFold_out, 1.0f);
 
-				// =========================================================
-				// BASIS 6: Rectifier (diode) - asymmetric, even harmonics
-				// Full-wave rectifier with variable bias for rich even harmonics
-				// =========================================================
-				float bias = 0.2f * drive; // Adds DC offset for even harmonics
+				// BASIS 6: Rectifier (diode)
+				float bias = 0.2f * drive;
 				float rect_raw = std::fabs(overdriven + bias) - bias;
-				float rect_out = fastTanh(rect_raw * 2.0f); // Soft limit
+				float rect_out = fastTanh(rect_raw * 2.0f);
 
-				// Blend using weights (normalized by sum)
+				// Blend using weights
 				float basis_out;
 				if (!hasWeights) {
 					basis_out = norm;
@@ -612,68 +597,236 @@ private:
 					            * invWeightSum;
 				}
 
-				// ==========================================================
-				// Drive-dependent blend toward linear (like tanh envelope)
-				// At drive=0: output = norm (completely linear/transparent)
-				// At drive=1: output = basis_out (full nonlinear character)
-				// This unifies X-axis control across all basis functions
-				// ==========================================================
+				// Drive-dependent blend toward linear
 				basis_out = norm + (basis_out - norm) * drive;
 
 				// Map back to output range
 				f_val = sign * (T + (1.0f - T) * std::fabs(basis_out));
 			}
 
-			// Track positive and negative peaks separately for asymmetric normalization
-			if (f_val > peakPos) {
-				peakPos = f_val;
-			}
-			else if (f_val < 0.0f && -f_val > peakNeg) {
-				peakNeg = -f_val;
+			// Apply deadzone modifier: use tiny epsilon instead of hard zero
+			// This preserves some signal for DC balancing while being effectively silent
+			if (params_.deadzoneWidth > 0.001f) {
+				// Max 80% deadzone (20% minimum passthrough) to avoid extreme DC imbalance
+				float passthrough = 1.0f - 0.8f * params_.deadzoneWidth;
+				float centerX = params_.deadzonePhase * 2.0f - 1.0f;
+				float halfWindow = passthrough;
+				float lowX = centerX - halfWindow;
+				float highX = centerX + halfWindow;
+				if (x < lowX || x > highX) {
+					// ±4 bits at int16 output (avoids rounding to zero)
+					constexpr float kDeadzoneEpsilon = 4.0f / 32767.0f;
+					f_val = (f_val >= 0.0f) ? kDeadzoneEpsilon : -kDeadzoneEpsilon;
+				}
 			}
 
-			// Store to appropriate tables based on configuration
+			return f_val;
+		};
+
+		// Temporary float table for processing
+		std::vector<float> tempFloat(kTableSize + 1);
+
+		// 128-bucket phase warp: find quiet zone and balance opposite pairs
+		constexpr int kNumBuckets = 128;
+		constexpr size_t kBucketSize = (kTableSize + 1) / kNumBuckets;
+		float bucketSum[kNumBuckets] = {0};    // Signed sum (for energy balance)
+		float bucketAbsSum[kNumBuckets] = {0}; // Absolute sum (for quiet zone)
+
+		// Pass 1a: Generate raw transfer function, find min/max for centering
+		float rawMax = -1e30f;
+		float rawMin = 1e30f;
+		for (size_t i = 0; i <= kTableSize; ++i) {
+			float x = (static_cast<float>(i) / kTableScale) - 1.0f;
+			float val = evaluateTransfer(x);
+			tempFloat[i] = val;
+			if (val > rawMax)
+				rawMax = val;
+			if (val < rawMin)
+				rawMin = val;
+		}
+
+		// Compute midpoint for centering BEFORE bucket analysis
+		float rawMidpoint = (rawMax + rawMin) * 0.5f;
+
+		// Pass 1b: Collect bucket stats on CENTERED values
+		if constexpr (kEnergyBalancedPhase) {
+			for (size_t i = 0; i <= kTableSize; ++i) {
+				float centeredVal = tempFloat[i] - rawMidpoint;
+				int b = std::min(static_cast<int>(i / kBucketSize), kNumBuckets - 1);
+				bucketSum[b] += centeredVal;
+				bucketAbsSum[b] += std::fabs(centeredVal);
+			}
+		}
+
+		// Compute warp parameters from bucket analysis
+		float quietZoneX = 0.0f;
+		float warpBoundaries[kNumBuckets + 1]; // Warped x positions for each bucket boundary
+		bool applyPhaseWarp = false;
+
+		if constexpr (kEnergyBalancedPhase) {
+			// Find quiet zone using weighted absolute amplitude
+			// For each proposed center, weight buckets by proximity (closer = higher weight)
+			constexpr float kBucketWidth = 2.0f / kNumBuckets;
+
+			int bestBoundary = kNumBuckets / 2;
+			float minWeightedAbs = 1e30f;
+
+			for (int center = 1; center < kNumBuckets; ++center) {
+				float weightedAbs = 0.0f;
+				float totalWeight = 0.0f;
+
+				for (int b = 0; b < kNumBuckets; ++b) {
+					// Distance from this bucket to proposed center (in bucket units)
+					float dist = std::fabs(static_cast<float>(b) + 0.5f - static_cast<float>(center));
+
+					// Weight: inverse square decay (inner buckets matter more)
+					float weight = 1.0f / (1.0f + dist * dist);
+
+					weightedAbs += weight * bucketAbsSum[b];
+					totalWeight += weight;
+				}
+
+				weightedAbs /= totalWeight; // Normalize by total weight
+
+				if (weightedAbs < minWeightedAbs) {
+					minWeightedAbs = weightedAbs;
+					bestBoundary = center;
+				}
+			}
+
+			int minPairStart = std::clamp(bestBoundary - 1, 0, kNumBuckets - 2);
+
+			// Origin at the detected boundary
+			quietZoneX = (minPairStart + 1) * kBucketWidth - 1.0f;
+
+			// Build cumulative energy from inner (adjacent to origin) to outer
+			// Left side: buckets minPairStart, minPairStart-1, ... going outward
+			// Right side: buckets minPairStart+1, minPairStart+2, ... going outward
+			int numLeftBuckets = minPairStart + 1;
+			int numRightBuckets = kNumBuckets - minPairStart - 1;
+			int numPairs = std::min(numLeftBuckets, numRightBuckets);
+
+			float cumLeft[kNumBuckets / 2] = {0};
+			float cumRight[kNumBuckets / 2] = {0};
+
+			for (int p = 0; p < numPairs; ++p) {
+				int leftIdx = minPairStart - p;
+				int rightIdx = minPairStart + 1 + p;
+				cumLeft[p] = (p > 0 ? cumLeft[p - 1] : 0.0f) + (leftIdx >= 0 ? bucketSum[leftIdx] : 0.0f);
+				cumRight[p] = (p > 0 ? cumRight[p - 1] : 0.0f) + (rightIdx < kNumBuckets ? bucketSum[rightIdx] : 0.0f);
+			}
+
+			// Initialize warp boundaries to unwarped positions (relative to quietZoneX as origin)
+			for (int b = 0; b <= kNumBuckets; ++b) {
+				warpBoundaries[b] = b * kBucketWidth - 1.0f;
+			}
+
+			// Compute warped boundaries to balance opposite pairs
+			// For each pair level, shift boundary to equalize cumulative energy
+			for (int p = 0; p < numPairs; ++p) {
+				float imbalance = cumLeft[p] + cumRight[p]; // Should be ~0 for balance
+				float totalMag = std::fabs(cumLeft[p]) + std::fabs(cumRight[p]);
+
+				if (totalMag > 0.01f) {
+					// Shift proportional to imbalance: positive imbalance means right is heavier
+					float shiftFraction = imbalance / totalMag * 0.5f;
+					// Limit shift to avoid extreme warping
+					shiftFraction = std::clamp(shiftFraction, -0.4f, 0.4f);
+
+					// Apply shift to boundaries at this level (from origin)
+					int leftBoundaryIdx = minPairStart - p;      // Left boundary moving outward
+					int rightBoundaryIdx = minPairStart + 2 + p; // Right boundary moving outward
+
+					if (leftBoundaryIdx >= 0 && leftBoundaryIdx <= kNumBuckets) {
+						warpBoundaries[leftBoundaryIdx] -= shiftFraction * kBucketWidth;
+					}
+					if (rightBoundaryIdx >= 0 && rightBoundaryIdx <= kNumBuckets) {
+						warpBoundaries[rightBoundaryIdx] -= shiftFraction * kBucketWidth;
+					}
+
+					applyPhaseWarp = true;
+				}
+			}
+
+			// Also apply if quiet zone is significantly off-center
+			if (std::fabs(quietZoneX) > 0.1f) {
+				applyPhaseWarp = true;
+			}
+		}
+
+		// Lambda to apply piecewise linear warp
+		constexpr float kBucketWidthWarp = 2.0f / kNumBuckets;
+		auto applyWarp = [&](float x) -> float {
+			if (!applyPhaseWarp) {
+				return x;
+			}
+
+			// First apply quiet-zone centering (shift so quietZoneX → 0)
+			float xCentered = x + quietZoneX;
+
+			// Then apply piecewise linear warp based on bucket boundaries
+			// Find which bucket segment x falls into and interpolate
+			float xNorm = (xCentered + 1.0f) / kBucketWidthWarp; // [0, kNumBuckets]
+			int segment = static_cast<int>(std::floor(xNorm));
+			segment = std::clamp(segment, 0, kNumBuckets - 1);
+
+			float segFrac = xNorm - segment;
+
+			// Interpolate between warped boundaries
+			float warpedX = warpBoundaries[segment] + segFrac * (warpBoundaries[segment + 1] - warpBoundaries[segment]);
+
+			return std::clamp(warpedX, -1.0f, 1.0f);
+		};
+
+		// Pass 2: Generate final table with phase warp (analytical - no resampling artifacts)
+		float fMax = -1e30f;
+		float fMin = 1e30f;
+
+		for (size_t i = 0; i <= kTableSize; ++i) {
+			float x = (static_cast<float>(i) / kTableScale) - 1.0f;
+
+			float val;
+			if (applyPhaseWarp) {
+				float xWarped = applyWarp(x);
+				val = evaluateTransfer(xWarped);
+			}
+			else {
+				val = tempFloat[i]; // Use pre-computed value
+			}
+
+			tempFloat[i] = val;
+			if (val > fMax)
+				fMax = val;
+			if (val < fMin)
+				fMin = val;
+		}
+
+		// Midpoint centering in float
+		float midpoint = (fMax + fMin) * 0.5f;
+		float peakToPeak = fMax - fMin;
+		normalizationGain_ = (peakToPeak > 0.001f) ? (2.0f / peakToPeak) : 1.0f;
+		normalizationGainInt_ = static_cast<int32_t>(normalizationGain_);
+
+		// Final pass: center, normalize, and convert to int16
+		float dx = 2.0f / static_cast<float>(kTableSize);
+
+		for (size_t i = 0; i <= kTableSize; ++i) {
+			float val = (tempFloat[i] - midpoint) * normalizationGain_;
+
+			// Store to ADAA tables if enabled
 			if constexpr (kGenerateADAA) {
-				fTable_[i] = f_val;
+				fTable_[i] = val;
 
-				// Compute antiderivative using trapezoidal integration
-				// F(x) = ∫f(x)dx, approximated incrementally
 				if (i == 0) {
 					FTable_[i] = 0.0f;
 				}
 				else {
-					// Trapezoidal rule: F(x) = F(x-dx) + (f(x) + f(x-dx)) * dx / 2
 					FTable_[i] = FTable_[i - 1] + (fTable_[i] + fTable_[i - 1]) * dx * 0.5f;
 				}
 			}
 
-			// Always populate int table (used by processNoAAInt32)
-			// Bake in normalization incrementally to avoid second pass
-			// Note: we'll rescale after finding true peak
-			fTableInt_[i] = static_cast<int16_t>(std::clamp(f_val * 32767.0f, -32767.0f, 32767.0f));
-		}
-
-		// Compute asymmetric normalization gains
-		// This maps positive values to [0, 1] and negative values to [-1, 0] independently
-		// Ensures full dynamic range utilization for asymmetric wavefunctions (e.g., rectifier)
-		float normGainPos = (peakPos > 0.01f) ? (1.0f / peakPos) : 1.0f;
-		float normGainNeg = (peakNeg > 0.01f) ? (1.0f / peakNeg) : 1.0f;
-
-		// For backward compatibility, normalizationGain_ uses the smaller gain (larger peak)
-		normalizationGain_ = std::fmin(normGainPos, normGainNeg);
-
-		// Integer normalization: Q15 format (32767 = 1.0)
-		normalizationGainInt_ = static_cast<int32_t>(normalizationGain_ * 32767.0f);
-
-		// Apply asymmetric normalization to integer table
-		// Positive values scaled by normGainPos, negative by normGainNeg
-		bool needsNormalization = (peakPos > 0.01f || peakNeg > 0.01f);
-		if (needsNormalization) {
-			for (size_t i = 0; i <= kTableSize; ++i) {
-				float val = static_cast<float>(fTableInt_[i]);
-				float normalized = (val >= 0.0f) ? (val * normGainPos) : (val * normGainNeg);
-				fTableInt_[i] = static_cast<int16_t>(std::clamp(normalized, -32767.0f, 32767.0f));
-			}
+			// Convert to int16
+			fTableInt_[i] = static_cast<int16_t>(std::clamp(val * 32767.0f, -32767.0f, 32767.0f));
 		}
 
 		// NOW safe to tell audio thread tables are ready
@@ -851,6 +1004,11 @@ private:
 	float normalizationGain_{1.0f};       // Peak normalization (float)
 	int32_t normalizationGainInt_{32767}; // Peak normalization (fixed-point, Q15 format)
 
+	// Blend aggression: derived from X (drive), affects mix curve sharpness
+	// Q8 format: 256 = 1.0x, range [128, 512] for [0.5x, 2.0x]
+	// Low X = gentle transitions, high X = snappy onset
+	int32_t blendAggressionMult_Q8_{256};
+
 	// Expected peak level for int32 path (set at table generation time)
 	// Used to normalize input/output so the table "expects" signals at this level
 	// FM at max LOCAL_VOLUME + max OSC_VOLUME = 2^26 (~67M)
@@ -988,6 +1146,11 @@ struct TableShaperXYMapper {
 		float ph275 = phi::wrapPhase(ph * phi::kPhi275);
 		float ph100 = phi::wrapPhase(ph * phi::kPhi100);
 
+		// Deadzone phi triangles - use slower frequencies for smooth evolution
+		// Initial offset 0.75 places width in dead region [0.5,1) at phaseOffset=0
+		float phDzWidth = phi::wrapPhase(ph * phi::kPhiN050); // φ^-0.5 (slower)
+		float phDzPhase = phi::wrapPhase(ph * phi::kPhi033);  // φ^0.33
+
 		// Apply phase offsets and period scaling for interference patterns (φ-power frequencies)
 		// Each parameter rotates at its own irrational rate - no alignments possible
 		auto base = [yNorm, freqMult, periodScale](float freq) {
@@ -1006,6 +1169,22 @@ struct TableShaperXYMapper {
 		float asymFreqMult = 1.0f + yNorm * yNorm * (kAccelFactor * 0.5f);
 		float asymBase = static_cast<float>(static_cast<double>(yNorm) * phi::kPhi100 * asymFreqMult * periodScale);
 		p.asymmetry = 0.3f + triangleSimpleUnipolar(phi::wrapPhase(asymBase + ph100), kPhaseWidth) * 0.4f;
+
+		// Deadzone modifier: inactive at phaseOffset=0, oscillates as secret knob increases
+		// Width uses duty=0.5 with initial offset 0.75 to start in dead region
+		// At phaseOffset=0: phDzWidth=0, offset 0.75 → phase=0.75 → in dead region → output=0
+		constexpr float kDeadzoneDuty = 0.5f;
+		constexpr float kDeadzoneWidthOffset = 0.75f; // Places phase in dead region [0.5,1) at start
+		float dzWidthBase = static_cast<float>(static_cast<double>(yNorm) * phi::kPhiN050 * freqMult * periodScale);
+		p.deadzoneWidth =
+		    triangleSimpleUnipolar(phi::wrapPhase(dzWidthBase + phDzWidth + kDeadzoneWidthOffset), kDeadzoneDuty);
+
+		// Phase center oscillates freely (doesn't need to start inactive)
+		// 30% duty cycle + squared result → spends most time near 0, occasional excursions to 1
+		constexpr float kDeadzonePhaseDuty = 0.30f;
+		float dzPhaseBase = static_cast<float>(static_cast<double>(yNorm) * phi::kPhi033 * freqMult * periodScale);
+		float dzPhaseRaw = triangleSimpleUnipolar(phi::wrapPhase(dzPhaseBase + phDzPhase), kDeadzonePhaseDuty);
+		p.deadzonePhase = dzPhaseRaw * dzPhaseRaw; // Square to spend less time near 1
 
 		return p;
 	}

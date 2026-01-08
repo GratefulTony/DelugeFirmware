@@ -182,11 +182,9 @@ bool Voice::noteOn(ModelStackWithSoundFlags* modelStack, int32_t newNoteCodeBefo
 		lastSaturationTanHWorkingValue[0] = 2147483648;
 		lastSaturationTanHWorkingValue[1] = 2147483648;
 
-		// Reset ADAA state and DC blocker for Table Shaper
+		// Reset ADAA state for Table Shaper
 		shaperPrevXL = 0.0f;
 		shaperPrevXR = 0.0f;
-		shaperDcBlockL = 0;
-		shaperDcBlockR = 0;
 
 		// Reset sine shaper state (DC blocker, feedback, feedback LPF, stereo LFO)
 		sineShaperState = deluge::dsp::SineShaperVoiceState{};
@@ -1542,8 +1540,7 @@ skipUnisonPart: {}
 			// For FM, pass 0 (no boost needed)
 			q31_t shaperFilterGain = boostSubtractive ? filterGain : 0;
 			dsp::shapeBufferInt32(stereo_osc_buffer, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
-			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), &shaperDcBlockL,
-			                      &shaperDcBlockR);
+			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters());
 		}
 
 		// Filters
@@ -1657,7 +1654,7 @@ skipUnisonPart: {}
 			// For FM, pass 0 (no boost needed)
 			q31_t shaperFilterGain = boostSubtractive ? filterGain : 0;
 			dsp::shapeBufferInt32(std::span{oscBuffer, n}, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
-			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), &shaperDcBlockL);
+			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters());
 		}
 
 		filterSet.renderLong(std::span{oscBuffer, n});

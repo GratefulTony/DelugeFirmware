@@ -79,10 +79,6 @@ public:
 	float shaperPrevXL{0.0f};
 	float shaperPrevXR{0.0f};
 
-	// Per-voice DC blocker state for Table Shaper (removes DC from asymmetric waveshaping)
-	q31_t shaperDcBlockL{0};
-	q31_t shaperDcBlockR{0};
-
 	// Per-voice sine shaper state (DC blocker, feedback, feedback LPF, stereo LFO)
 	deluge::dsp::SineShaperVoiceState sineShaperState;
 

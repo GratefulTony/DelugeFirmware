@@ -47,11 +47,9 @@ struct ShaperState {
 	bool aa{false};     // Anti-aliasing enabled (default off, reserved for future use)
 	float phase{0.0f};  // Phase offset for triangle modulation (secret knob)
 
-	// DSP smoothing/filter state
+	// DSP smoothing state
 	q31_t driveLast{0};           // Previous drive value for smoothing
 	int32_t mixNormLast_Q16{0};   // Previous mixNorm value for smoothing (Q16.16 format)
-	q31_t filterL{0};             // Post-saturation lowpass state L
-	q31_t filterR{0};             // Post-saturation lowpass state R
 	float prevXL{0.0f};           // ADAA state L (previous input sample)
 	float prevXR{0.0f};           // ADAA state R (previous input sample)
 	float smoothedNormGain{1.0f}; // Smoothed normalization gain (tracks table's normalizationGain_)
@@ -63,8 +61,6 @@ struct ShaperState {
 	void resetDspState() {
 		driveLast = 0;
 		mixNormLast_Q16 = 0;
-		filterL = 0;
-		filterR = 0;
 		prevXL = 0.0f;
 		prevXR = 0.0f;
 	}

@@ -28,6 +28,7 @@
 #include "model/action/action.h"
 #include "model/action/action_logger.h"
 #include "model/settings/runtime_feature_settings.h"
+#include "modulation/params/param_set.h"
 #include "processing/engines/audio_engine.h"
 #include <limits>
 #include <string.h>
@@ -132,12 +133,15 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	}
 
 	// Table Shaper (for audio clips)
-	// Benchmarking happens inside shapeBuffer
+	// Uses same patched params as voices (LOCAL_SHAPER_DRIVE/MIX)
+	// Benchmarking happens inside shapeBufferInt32
 	if (shaper.isEnabled()) {
-		q31_t satDrive = static_cast<q31_t>(shaper.drive) << 24;
-		q31_t satMix = static_cast<q31_t>(shaper.mix) << 24;
-		// ADAA disabled (kGenerateADAA = false), use non-ADAA float path
-		deluge::dsp::shapeBuffer(global_effectable_audio, shaperDsp, satDrive, &shaper.driveLast, satMix);
+		PatchedParamSet* patchedParams = paramManagerForClip->getPatchedParamSet();
+		q31_t satDrive = patchedParams->getValue(params::LOCAL_SHAPER_DRIVE);
+		q31_t satMix = patchedParams->getValue(params::LOCAL_SHAPER_MIX);
+		// Audio clips: no voice filters (filterGain=0)
+		deluge::dsp::shapeBufferInt32(global_effectable_audio, shaperDsp, satDrive, &shaper.driveLast, satMix,
+		                              &shaper.mixNormLast_Q16, 0, false);
 	}
 
 	// Render saturation (builtin shaper using getTanHAntialiased)
