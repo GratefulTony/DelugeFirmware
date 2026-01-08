@@ -15,8 +15,8 @@ The Table Shaper is an experimental Zone 4 addition to the XY Shaper, featuring:
 - `src/deluge/dsp/table_shaper.h` - Core parametric shaper with ADAA
 - `src/deluge/dsp/shaper.h` - Wrapper class, integrates Zone 4 with existing zones
 - `src/deluge/dsp/fast_math.h` - Fast math approximations (fastTanh, fastExp, etc.)
-- `src/deluge/gui/menu_item/fx/shaper.h` - Menu item with MomentumEncoder
-- `src/deluge/gui/menu_item/momentum_encoder.h` - High-resolution encoder helper
+- `src/deluge/gui/menu_item/fx/shaper.h` - Menu item with VelocityEncoder
+- `src/deluge/gui/menu_item/velocity_encoder.h` - High-resolution encoder helper
 
 ### Key Classes
 

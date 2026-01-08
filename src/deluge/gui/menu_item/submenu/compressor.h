@@ -156,14 +156,18 @@ private:
 			bool saturating = compressor.isBandSaturating(bandIndex);
 
 			// Bar 1: Output level (unipolar, grows upward from bottom)
-			int32_t outH = scaleUnipolar(outputLevel, meterHeight);
+			// Leave 3px at top for saturation indicator (2px) + 1px gap
+			int32_t outH = scaleUnipolar(outputLevel, meterHeight - 3);
 			for (int32_t dy = 0; dy < outH; dy++) {
 				canvas.drawPixel(xPos, bottomY - dy);
 			}
 
-			// Saturation indicator at top of output bar
+			// Saturation indicator at top (2px wide spanning both columns, 2px tall)
 			if (saturating) {
 				canvas.drawPixel(xPos, meterY);
+				canvas.drawPixel(xPos + 1, meterY);
+				canvas.drawPixel(xPos, meterY + 1);
+				canvas.drawPixel(xPos + 1, meterY + 1);
 			}
 
 			// Bar 2: GR (bipolar, from center)

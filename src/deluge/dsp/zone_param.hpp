@@ -26,6 +26,50 @@
 
 namespace deluge::dsp {
 
+// ============================================================================
+// Zone computation helpers (work on any q31_t value)
+// ============================================================================
+
+/// Result of zone computation
+struct ZoneInfo {
+	int32_t index;   ///< Zone index (0 to numZones-1)
+	float position;  ///< Position within zone (0.0 to 1.0)
+	q31_t zoneStart; ///< Start of current zone in q31
+	q31_t zoneWidth; ///< Width of one zone in q31
+};
+
+/// Compute zone width for given number of zones
+[[nodiscard]] constexpr q31_t computeZoneWidth(int32_t numZones) {
+	return ONE_Q31 / numZones;
+}
+
+/// Compute zone info from a q31 value
+[[nodiscard]] inline ZoneInfo computeZoneQ31(q31_t value, int32_t numZones) {
+	q31_t zoneWidth = computeZoneWidth(numZones);
+	int32_t index = std::clamp(static_cast<int32_t>(value / zoneWidth), static_cast<int32_t>(0),
+	                           static_cast<int32_t>(numZones - 1));
+	q31_t zoneStart = index * zoneWidth;
+	float position = static_cast<float>(value - zoneStart) / static_cast<float>(zoneWidth);
+	return {index, position, zoneStart, zoneWidth};
+}
+
+/// Check if value is in or past a specific zone (e.g., "is this in zone 5+?")
+[[nodiscard]] constexpr bool isInZoneOrLater(q31_t value, int32_t zoneIndex, int32_t numZones) {
+	return value >= (computeZoneWidth(numZones) * zoneIndex);
+}
+
+/// Get the start position of a zone in q31
+[[nodiscard]] constexpr q31_t getZoneStart(int32_t zoneIndex, int32_t numZones) {
+	return computeZoneWidth(numZones) * zoneIndex;
+}
+
+/// Convert zone position (0.0-1.0) to display value (0-127)
+[[nodiscard]] constexpr int32_t zonePositionToDisplay(float position) {
+	return static_cast<int32_t>(position * 127.0f);
+}
+
+// ============================================================================
+
 /**
  * Zone-based parameter with configurable behavior
  *
@@ -44,23 +88,24 @@ struct ZoneBasedParam {
 
 	static constexpr int32_t kNumZones = NUM_ZONES;
 	static constexpr bool kClipToZone = CLIP_TO_ZONE;
-	static constexpr q31_t kZoneWidth = ONE_Q31 / NUM_ZONES;
+	static constexpr q31_t kZoneWidth = computeZoneWidth(NUM_ZONES);
+
+	/// Get full zone info (index, position, start, width)
+	[[nodiscard]] ZoneInfo getZoneInfo() const { return computeZoneQ31(value, NUM_ZONES); }
 
 	/// Get zone index (0 to NUM_ZONES-1)
-	[[nodiscard]] int32_t getZoneIndex() const {
-		return std::clamp(static_cast<int32_t>(value / kZoneWidth), static_cast<int32_t>(0),
-		                  static_cast<int32_t>(NUM_ZONES - 1));
-	}
+	[[nodiscard]] int32_t getZoneIndex() const { return getZoneInfo().index; }
 
 	/// Get position within current zone (0.0 to 1.0)
-	[[nodiscard]] float getPosInZone() const {
-		int32_t zone = getZoneIndex();
-		q31_t zoneStart = zone * kZoneWidth;
-		return static_cast<float>(value - zoneStart) / static_cast<float>(kZoneWidth);
-	}
+	[[nodiscard]] float getPosInZone() const { return getZoneInfo().position; }
 
 	/// Get global position across all zones (0.0 to 1.0)
 	[[nodiscard]] float getGlobalPos() const { return static_cast<float>(value) / static_cast<float>(ONE_Q31); }
+
+	/// Check if value is in or past a specific zone
+	[[nodiscard]] bool isInZoneOrLater(int32_t zoneIndex) const {
+		return dsp::isInZoneOrLater(value, zoneIndex, NUM_ZONES);
+	}
 
 	/// Combine field value with scaled modulation
 	/// @param modulation Raw modulation value (full bipolar range)

@@ -40,11 +40,15 @@
 #include "definitions_cxx.hpp"
 #include "dsp/filter/ladder_components.h"
 #include "dsp/phi_triangle.hpp"
+#include "dsp/zone_param.hpp"
 #include "io/debug/fx_benchmark.h"
+#include "modulation/params/param.h"
+#include "storage/field_serialization.h"
 #include "util/fixedpoint.h"
 #include <arm_neon.h>
 #include <array>
 #include <cmath>
+#include <cstring>
 
 namespace deluge::dsp {
 
@@ -57,11 +61,9 @@ namespace deluge::dsp {
 struct DisperserTopoParams;
 struct DisperserTwistParams;
 
-/**
- * Number of zones for disperser knobs
- * 8 zones each for Topo (topology) and Twist (character)
- */
-constexpr int32_t kDisperserNumZones = 8;
+/// Zone count derived from param definition (single source of truth)
+constexpr int32_t kDisperserNumZones =
+    modulation::params::getZoneParamInfo(modulation::params::GLOBAL_DISPERSER_TOPO).zoneCount;
 
 // Fastmath constants (avoid repeated divisions and slow std::pow)
 constexpr float k127Recip = 1.0f / 127.0f; // Reciprocal for MIDI-style 0-127 params
@@ -156,20 +158,91 @@ struct DisperserDelayState {
 	}
 };
 
+/**
+ * Secret knob phases - three unbounded phase offsets for disperser
+ *
+ * Accessed via push+twist on encoders. These shift the φ-triangle
+ * constellation without changing the zone selection.
+ */
+struct SecretPhases {
+	float metaPhase{0};     // Push Twist encoder
+	float metaPhaseTopo{0}; // Push Topo encoder
+	float gammaPhase{0};    // Push third encoder (×100 multiplier)
+
+	/// Effective phase for meta zones: metaPhase + 100*gammaPhase
+	[[nodiscard]] double effectiveMeta() const {
+		return static_cast<double>(metaPhase) + 100.0 * static_cast<double>(gammaPhase);
+	}
+
+	/// Effective phase for topology: metaPhaseTopo + 100*gammaPhase
+	[[nodiscard]] double effectiveTopo() const {
+		return static_cast<double>(metaPhaseTopo) + 100.0 * static_cast<double>(gammaPhase);
+	}
+
+	void writeToFile(Serializer& writer) const {
+		WRITE_FLOAT(writer, metaPhase, "dispMeta", 10.0f);
+		WRITE_FLOAT(writer, metaPhaseTopo, "dispMetaTopo", 10.0f);
+		WRITE_FLOAT(writer, gammaPhase, "dispGamma", 10.0f);
+	}
+
+	bool readTag(Deserializer& reader, const char* tagName) {
+		READ_FLOAT(reader, tagName, metaPhase, "dispMeta", 10.0f);
+		READ_FLOAT(reader, tagName, metaPhaseTopo, "dispMetaTopo", 10.0f);
+		READ_FLOAT(reader, tagName, gammaPhase, "dispGamma", 10.0f);
+		return false;
+	}
+};
+
 struct DisperserParams {
 	// Secret knob phases (unbounded, accessed via push+twist on encoders)
-	phi::SecretPhases phases;
+	SecretPhases phases;
+
+	// Zone base values for modulation (like sine shaper pattern)
+	// Topo clips to zone boundaries (different algorithms per zone)
+	// Twist allows cross-zone modulation (continuous modifier space)
+	ZoneBasedParam<kDisperserNumZones, true> topo;
+	ZoneBasedParam<kDisperserNumZones, false> twist;
+
+	// User-facing knob values
+	uint8_t freq{64};  // Center frequency (0-127, maps to 1Hz-8kHz)
+	uint8_t stages{0}; // Number of active stages (0-32, 0 = bypass)
 
 	// DSP smoothing state (per-sound, persists across buffers)
 	q31_t smoothedTopo{0};
 	q31_t smoothedTwist{0};
 	q31_t smoothedFeedback{0}; // For feedback interpolation in processBuffer
+	q31_t smoothedFreq{0};     // Previous freq value for coefficient smoothing
+	q31_t smoothedSpread{0};   // Previous spread value for coefficient smoothing
 
 	// Zone tracking for filter state reset on zone boundary crossing
 	int32_t lastTopoZone{-1}; // -1 = uninitialized
 
 	// Shared delay line for comb resonance (all topologies can use)
 	DisperserDelayState delay;
+
+	/// Check if disperser is enabled
+	[[nodiscard]] bool isEnabled() const { return stages > 0; }
+
+	/// Write disperser params to file (only non-default values)
+	void writeToFile(Serializer& writer) const {
+		WRITE_FIELD_DEFAULT(writer, freq, "dispFreq", 64);
+		WRITE_FIELD(writer, stages, "dispStages");
+		WRITE_ZONE(writer, topo.value, "dispTopo");
+		WRITE_ZONE(writer, twist.value, "dispTwist");
+		phases.writeToFile(writer);
+	}
+
+	/// Read a tag into disperser params, returns true if tag was handled
+	bool readTag(Deserializer& reader, const char* tagName) {
+		READ_FIELD(reader, tagName, freq, "dispFreq");
+		READ_FIELD(reader, tagName, stages, "dispStages");
+		READ_ZONE(reader, tagName, topo.value, "dispTopo");
+		READ_ZONE(reader, tagName, twist.value, "dispTwist");
+		if (phases.readTag(reader, tagName)) {
+			return true;
+		}
+		return false;
+	}
 };
 
 /**
@@ -235,6 +308,10 @@ struct DisperserTwistParams {
 	// Q Tilt: varies Q across stages
 	// 0 = uniform Q, positive = high-freq stages sharper, negative = low-freq sharper
 	float qTilt{0.0f};
+
+	// Phase offset for detuning/harmonicBlend in topo (computed from twist meta position)
+	// In meta zones (5-7), twist position rotates through topo's phi triangle patterns
+	float phaseOffset{0.0f};
 };
 
 /**
@@ -405,6 +482,11 @@ public:
 			modeBHz = centerHz * sepMult;
 		}
 
+		// Pre-compute detuning in octaves (check once, not per-stage)
+		// detuning=1.0 means ±50 cents (≈±0.042 octaves)
+		bool useDetuning = detuning > 0.001f;
+		float maxDetuneOct = useDetuning ? (50.0f * detuning / 1200.0f) : 0.0f;
+
 		for (size_t i = 0; i < kMaxStages; ++i) {
 			float stageHzBase;
 			float t; // 0..1 position for Q tilt (global across all stages)
@@ -453,15 +535,9 @@ public:
 			float qFactor = exp2f(qTiltClamped * 2.0f * (t * 2.0f - 1.0f));
 			float stageQ = std::clamp(qBase * qFactor, 0.5f, 20.0f);
 
-			// Per-stage detuning: alternating +/- cents for chorus shimmer
-			// detuning=1.0 means ±50 cents (≈±0.042 octaves)
+			// Per-stage detuning: alternating +/- for chorus shimmer
 			// Pattern: even stages detune up, odd stages detune down
-			float detuneOct = 0.0f;
-			if (detuning > 0.001f) {
-				float maxDetuneCents = 50.0f * detuning;
-				float detuneSign = (i & 1) ? -1.0f : 1.0f;
-				detuneOct = detuneSign * (maxDetuneCents / 1200.0f); // cents to octaves
-			}
+			float detuneOct = useDetuning ? (((i & 1) ? -1.0f : 1.0f) * maxDetuneOct) : 0.0f;
 
 			// Apply L/R offset + detuning and clamp to useful range (1Hz floor for subharmonics)
 			float stageHzL = std::clamp(stageHzBase * exp2f(lOffsetOct + detuneOct), 1.0f, 16000.0f);
@@ -472,40 +548,11 @@ public:
 			coeffsR_[i].compute(stageHzR, stageQ, static_cast<float>(kSampleRate));
 
 			// Calculate delay offset for this stage (based on average frequency)
-			// offset = sampleRate / freq → higher freq = shorter offset
-			// Triangle fold in OCTAVE space, then quantize to octave of ORIGINAL pitch
-			// This preserves user's inharmonic offset while preventing pileup
-			constexpr float kMinOffsetF = 441.0f;  // 10ms at 44.1kHz (~100Hz)
-			constexpr float kMaxOffsetF = 8819.0f; // 200ms at 44.1kHz (~5Hz)
-			constexpr float kMaxOctaves = 4.32f;   // log2(8819/441) ≈ 4.32 octaves range
+			// Uses shared triangle fold + fifth quantization logic
 			float avgHz = (stageHzL + stageHzR) * 0.5f;
 			float rawOffset = kSampleRate / avgHz;
-
-			// Triangle fold in octave space to get a TARGET position (guides octave selection)
-			float octavesFromMin = log2f(std::max(rawOffset, 1.0f) / kMinOffsetF);
-			if (octavesFromMin < 0.0f || octavesFromMin > kMaxOctaves) {
-				float doubled = 2.0f * kMaxOctaves;
-				octavesFromMin = std::fmod(std::fmod(octavesFromMin, doubled) + doubled, doubled);
-				if (octavesFromMin > kMaxOctaves) {
-					octavesFromMin = doubled - octavesFromMin;
-				}
-			}
-			float targetOffset = kMinOffsetF * exp2f(octavesFromMin);
-
-			// Quantize to nearest perfect fifth of ORIGINAL pitch (preserves user's offset)
-			constexpr float kFifth = 0.5849625f; // log2(3/2)
-			float idealShift = log2f(targetOffset / rawOffset);
-			float quantizedShift = std::round(idealShift / kFifth) * kFifth;
-			float octaveOffset = rawOffset * exp2f(quantizedShift);
-
-			// Ensure result is in range - adjust by one octave if needed
-			if (octaveOffset > kMaxOffsetF) {
-				octaveOffset *= 0.5f;
-			}
-			if (octaveOffset < kMinOffsetF) {
-				octaveOffset *= 2.0f;
-			}
-			size_t offset = static_cast<size_t>(std::clamp(octaveOffset, kMinOffsetF, kMaxOffsetF));
+			float foldedOffset = calculateFoldedDelay(rawOffset);
+			size_t offset = static_cast<size_t>(foldedOffset);
 
 			size_t prevOffset = stageOffsets_[i];
 			stageOffsets_[i] = std::clamp(offset, size_t{1}, DisperserDelayState::kMaxDelaySamples - 1);
@@ -590,10 +637,10 @@ public:
 	 * Per-sample processing with topology routing
 	 *
 	 * Routes through allpass cascade based on topology zone.
-	 * Called by processBufferPunchChirp after feedback read, before delay write.
+	 * Called by processSample after feedback read, before delay write.
 	 */
 	[[gnu::always_inline]] inline void processWithTopology(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR,
-	                                                       uint8_t stages, int32_t topology, float crossMix) {
+	                                                       uint8_t stages, int32_t topology, q31_t crossGain) {
 		if (stages == 0) {
 			outL = inL;
 			outR = inR;
@@ -608,7 +655,10 @@ public:
 			processRoutingPingPong(inL, inR, outL, outR, numStages);
 			break;
 		case 3: // Cross
-			processRoutingCross(inL, inR, outL, outR, numStages, crossMix);
+			processRoutingCross(inL, inR, outL, outR, numStages, crossGain);
+			break;
+		case 4: // Parallel
+			processRoutingParallel(inL, inR, outL, outR, numStages);
 			break;
 		case 5: // Nested
 			processRoutingNested(inL, inR, outL, outR, numStages);
@@ -616,7 +666,7 @@ public:
 		case 7: // Spring
 			processRoutingSpring(inL, inR, outL, outR, numStages);
 			break;
-		default: // 0=Cascade, 2=Stereo, 4=Pitch, 6=Diffuse
+		default: // 0=Cascade, 2=Bimodal, 6=Diffuse
 			processRoutingCascade(inL, inR, outL, outR, numStages);
 			break;
 		}
@@ -679,12 +729,12 @@ public:
 	 * @param foldedDelay Pre-calculated folded delay time
 	 * @param harmonicBlend Delay tap balance: 0=f only, 0.5=equal f/2f, 1=2f emphasis
 	 * @param topology Topology zone for routing (0=Cascade, 1=PingPong, etc.)
-	 * @param crossMix Cross-coupling amount for Cross topology
+	 * @param crossGain Pre-computed cross-coupling gain for Cross topology (q31)
 	 */
 	[[gnu::always_inline]] inline void processSample(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR, uint8_t stages,
 	                                                 DisperserDelayState& delay, float punch, float chirp,
 	                                                 float foldedDelay, float harmonicBlend, int32_t topology,
-	                                                 float crossMix) {
+	                                                 q31_t crossGain) {
 
 		if (stages == 0) {
 			outL = inL;
@@ -743,7 +793,7 @@ public:
 		}
 
 		// === ALLPASS CASCADE with topology routing ===
-		processWithTopology(procL, procR, outL, outR, stages, topology, crossMix);
+		processWithTopology(procL, procR, outL, outR, stages, topology, crossGain);
 
 		// === WRITE TO DELAY at f and optionally 2f ===
 		// harmonicBlend controls f/2f balance: 0=f only, 0.5=equal, 1=2f emphasis
@@ -807,10 +857,13 @@ public:
 		// Calculate folded delay ONCE per buffer (expensive log2/pow/fmod/round)
 		float foldedDelay = calculateFoldedDelay(static_cast<float>(delaySamples));
 
+		// Precompute crossGain from crossMix (40-90% based on crossMix)
+		q31_t crossGain = static_cast<q31_t>((0.4f + crossMix * 0.5f) * ONE_Q31);
+
 		for (auto& sample : buffer) {
 			q31_t outL, outR;
 			processSample(sample.l, sample.r, outL, outR, stages, delay, punch, chirp, foldedDelay, harmonicBlend,
-			              topology, crossMix);
+			              topology, crossGain);
 			sample.l = outL;
 			sample.r = outR;
 		}
@@ -864,31 +917,24 @@ private:
 		if (half == 0)
 			half = 1;
 
-		// L processes through first half of stages
-		q31_t procL = inL;
+		// L processes through first half of stages (mono: duplicate to both lanes)
+		int32x2_t vecL = vdup_n_s32(inL);
 		for (size_t i = 0; i < half; ++i) {
-			int32_t tmp[2] = {procL, procL};
-			int32x2_t vec = vld1_s32(tmp);
-			vec = stages_[i].processLR(vec, coeffsL_[i], coeffsR_[i]);
-			// Apply per-stage emphasis gain
-			int32x2_t emphGain = vdup_n_s32(stageGains_[i]);
-			vec = vshl_n_s32(vqrdmulh_s32(vec, emphGain), 1);
-			procL = vget_lane_s32(vec, 0);
+			vecL = stages_[i].processLR(vecL, coeffsL_[i], coeffsR_[i]);
+			vecL = vshl_n_s32(vqrdmulh_s32(vecL, vdup_n_s32(stageGains_[i])), 1);
 		}
+		q31_t procL = vget_lane_s32(vecL, 0);
 
 		// R processes through second half + cross-feed from L (blend, not add)
 		// 80% inR + 20% procL = unity gain
-		q31_t procR = q31_sat_add(multiply_32x32_rshift32(inR, 0x66666666) << 1,    // 0.8
-		                          multiply_32x32_rshift32(procL, 0x19999999) << 1); // 0.2
+		q31_t procRstart = q31_sat_add(multiply_32x32_rshift32(inR, 0x66666666) << 1,    // 0.8
+		                               multiply_32x32_rshift32(procL, 0x19999999) << 1); // 0.2
+		int32x2_t vecR = vdup_n_s32(procRstart);
 		for (size_t i = half; i < numStages; ++i) {
-			int32_t tmp[2] = {procR, procR};
-			int32x2_t vec = vld1_s32(tmp);
-			vec = stages_[i].processLR(vec, coeffsL_[i], coeffsR_[i]);
-			// Apply per-stage emphasis gain
-			int32x2_t emphGain = vdup_n_s32(stageGains_[i]);
-			vec = vshl_n_s32(vqrdmulh_s32(vec, emphGain), 1);
-			procR = vget_lane_s32(vec, 0);
+			vecR = stages_[i].processLR(vecR, coeffsL_[i], coeffsR_[i]);
+			vecR = vshl_n_s32(vqrdmulh_s32(vecR, vdup_n_s32(stageGains_[i])), 1);
 		}
+		q31_t procR = vget_lane_s32(vecR, 0);
 
 		// Cross-mix outputs with unity gain (blend, not add)
 		// 67% self + 33% other = 100% total
@@ -900,36 +946,62 @@ private:
 
 	/// Cross routing: L↔R swap every 4 stages for swirling stereo
 	[[gnu::always_inline]] inline void processRoutingCross(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR,
-	                                                       size_t numStages, float crossMix) {
-		// Cross amount: 40% to 90% based on crossMix
-		q31_t crossGain = static_cast<q31_t>((0.4f + crossMix * 0.5f) * ONE_Q31);
-
-		q31_t procL = inL;
-		q31_t procR = inR;
+	                                                       size_t numStages, q31_t crossGain) {
+		// Build initial vector: L in lane 0, R in lane 1
+		int32x2_t proc = vset_lane_s32(inR, vdup_n_s32(inL), 1);
 
 		for (size_t i = 0; i < numStages; ++i) {
-			int32_t tmp[2] = {procL, procR};
-			int32x2_t proc = vld1_s32(tmp);
 			proc = stages_[i].processLR(proc, coeffsL_[i], coeffsR_[i]);
-			// Apply per-stage emphasis gain
-			int32x2_t emphGain = vdup_n_s32(stageGains_[i]);
-			proc = vshl_n_s32(vqrdmulh_s32(proc, emphGain), 1);
-			procL = vget_lane_s32(proc, 0);
-			procR = vget_lane_s32(proc, 1);
+			proc = vshl_n_s32(vqrdmulh_s32(proc, vdup_n_s32(stageGains_[i])), 1);
 
 			// Cross-swap every 4 stages for swirling stereo character
 			if ((i & 3) == 3) {
-				q31_t newL = q31_sat_add(multiply_32x32_rshift32(procL, ONE_Q31 - crossGain) << 1,
+				q31_t procL = vget_lane_s32(proc, 0);
+				q31_t procR = vget_lane_s32(proc, 1);
+				q31_t keepGain = ONE_Q31 - crossGain;
+				q31_t newL = q31_sat_add(multiply_32x32_rshift32(procL, keepGain) << 1,
 				                         multiply_32x32_rshift32(procR, crossGain) << 1);
-				q31_t newR = q31_sat_add(multiply_32x32_rshift32(procR, ONE_Q31 - crossGain) << 1,
+				q31_t newR = q31_sat_add(multiply_32x32_rshift32(procR, keepGain) << 1,
 				                         multiply_32x32_rshift32(procL, crossGain) << 1);
-				procL = newL;
-				procR = newR;
+				proc = vset_lane_s32(newR, vdup_n_s32(newL), 1);
 			}
 		}
 
-		outL = procL;
-		outR = procR;
+		outL = vget_lane_s32(proc, 0);
+		outR = vget_lane_s32(proc, 1);
+	}
+
+	/// Parallel routing: Two parallel cascades for thick, chorus-like character
+	/// Less phase smear than series cascade, more like multiple detuned sources
+	[[gnu::always_inline]] inline void processRoutingParallel(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR,
+	                                                          size_t numStages) {
+		size_t half = numStages / 2;
+		if (half == 0)
+			half = 1;
+
+		// Build input vector once
+		int32x2_t input = vset_lane_s32(inR, vdup_n_s32(inL), 1);
+
+		// Path A: first half of stages
+		int32x2_t pathA = input;
+		for (size_t i = 0; i < half; ++i) {
+			pathA = stages_[i].processLR(pathA, coeffsL_[i], coeffsR_[i]);
+			pathA = vshl_n_s32(vqrdmulh_s32(pathA, vdup_n_s32(stageGains_[i])), 1);
+		}
+
+		// Path B: second half of stages (parallel, not series!)
+		int32x2_t pathB = input; // Same input, not pathA output
+		for (size_t i = half; i < numStages; ++i) {
+			pathB = stages_[i].processLR(pathB, coeffsL_[i], coeffsR_[i]);
+			pathB = vshl_n_s32(vqrdmulh_s32(pathB, vdup_n_s32(stageGains_[i])), 1);
+		}
+
+		// Sum paths with 50% each for unity gain
+		int32x2_t sum =
+		    vqadd_s32(vqrdmulh_s32(pathA, vdup_n_s32(0x40000000)), vqrdmulh_s32(pathB, vdup_n_s32(0x40000000)));
+
+		outL = vget_lane_s32(sum, 0);
+		outR = vget_lane_s32(sum, 1);
 	}
 
 	/// Nested routing: Schroeder-style inner/outer chains for diffuse character
@@ -1050,5 +1122,141 @@ private:
 	float lastEmphasis_{999.0f};   // Force initial calculation (bipolar, so 999 triggers)
 	                               // Note: Delay buffers are in DisperserDelayState (shared state), not here
 };
+
+// ============================================================================
+// Pitch Tracking Helpers
+// ============================================================================
+
+/// Convert MIDI note code to Hz (A4=440Hz standard)
+/// Note code 60 = middle C (C3) = ~130.81 Hz
+/// A4 (note 69) = 440 Hz
+[[gnu::always_inline]] inline float noteCodeToHz(int32_t noteCode) {
+	// Standard formula: Hz = 440 * 2^((noteCode - 69) / 12)
+	return 440.0f * exp2f((static_cast<float>(noteCode) - 69.0f) / 12.0f);
+}
+
+/// Convert Hz to 0-127 range for disperser (matching 1Hz-8kHz = 13 octaves)
+[[gnu::always_inline]] inline uint8_t hzToDisperserFreq(float hz) {
+	// Inverse of: centerHz = 1.0f * exp2f((freq / 127.0f) * 13.0f)
+	// freq = 127 * log2(hz) / 13
+	float octaves = log2f(std::max(hz, 1.0f));
+	return static_cast<uint8_t>(std::clamp(octaves * 127.0f / 13.0f, 0.0f, 127.0f));
+}
+
+// ============================================================================
+// Encapsulated Processing Function
+// ============================================================================
+
+/**
+ * Process disperser effect on audio buffer (encapsulated API)
+ *
+ * Handles param combination, smoothing, topology dispatch, and DSP processing.
+ * Follows the sine shaper pattern: all impl details inside, clean callsite.
+ *
+ * @param buffer Audio buffer to process in place
+ * @param dsp Disperser DSP engine
+ * @param params DisperserParams state (freq, stages, zones, smoothing, delay)
+ * @param topoPreset Topo value from patched params (automation)
+ * @param topoCables Topo modulation from mod matrix cables
+ * @param twistPreset Twist value from patched params (automation)
+ * @param twistCables Twist modulation from mod matrix cables
+ * @param noteCode Last played note for pitch tracking (-1 if none)
+ */
+inline void processDisperser(StereoBuffer<q31_t> buffer, Disperser& dsp, DisperserParams& params, q31_t topoPreset,
+                             q31_t topoCables, q31_t twistPreset, q31_t twistCables, int32_t noteCode) {
+	if (!params.isEnabled() || buffer.empty()) {
+		return;
+	}
+
+	// Combine preset + cables using zone-aware scaling (like sine shaper pattern)
+	q31_t topoValue = params.topo.combinePresetAndCables(topoPreset, topoCables);
+	q31_t twistValue = params.twist.combinePresetAndCables(twistPreset, twistCables);
+
+	// Smooth zone params for DSP
+	constexpr q31_t smoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31);
+	params.smoothedTopo += (multiply_32x32_rshift32(topoValue - params.smoothedTopo, smoothingAlpha) << 1);
+	params.smoothedTwist += (multiply_32x32_rshift32(twistValue - params.smoothedTwist, smoothingAlpha) << 1);
+
+	// Compute derived parameters from zones (twist first - provides phaseOffset for topo)
+	DisperserTwistParams twistParams = computeDisperserTwistParams(params.smoothedTwist, &params);
+	DisperserTopoParams topoParams = computeDisperserTopoParams(params.smoothedTopo, &params, twistParams.phaseOffset);
+
+	// Reset filter state when crossing zone boundaries to avoid artifacts
+	if (params.lastTopoZone != topoParams.zone && params.lastTopoZone >= 0) {
+		dsp.reset();
+	}
+	params.lastTopoZone = topoParams.zone;
+
+	// Topology-specific spread modulation
+	float spreadMod = 1.0f;
+	float lrSpreadOffset = twistParams.width; // Full range stereo spread
+
+	switch (topoParams.zone) {
+	case 0: // Cascade: classic disperser, param0 = spread
+		spreadMod = topoParams.param0;
+		break;
+	case 1: // PingPong: tighter spread for rhythmic effect, alternation via lrOffset
+		spreadMod = topoParams.param0 * 0.7f;
+		lrSpreadOffset += topoParams.lrOffset * 0.3f;
+		break;
+	case 2: // Stereo: L/R frequency offset for width, param0 = spread, lrOffset = stereo amount
+		spreadMod = topoParams.param0;
+		lrSpreadOffset += topoParams.lrOffset;
+		break;
+	case 3: // Cross: cross-coupled, tighter for comb
+		spreadMod = topoParams.param0 * 0.5f;
+		break;
+	case 4: // Pitch: placeholder - would track pitch, for now acts like tight comb
+		spreadMod = topoParams.param0 * 0.3f;
+		break;
+	case 5: // Nested: wider spread for diffusion
+		spreadMod = 0.3f + topoParams.param0 * 0.7f;
+		break;
+	case 6: // Diffuse: randomized feel via param variations
+		spreadMod = topoParams.param0;
+		break;
+	case 7: // Spring: chirp character
+		spreadMod = 0.2f + topoParams.param0 * 0.5f;
+		break;
+	}
+
+	q31_t dispSpread = static_cast<q31_t>(std::clamp(spreadMod, 0.0f, 1.0f) * ONE_Q31);
+
+	// Pitch tracking: try to get note frequency, use freq knob as offset
+	// Note: drums use kNoteForDrum=60, so they track to ~261Hz with offset from there
+	uint8_t effectiveFreq = params.freq;
+	if (noteCode >= 0 && noteCode < 128) {
+		// Got a valid note - use it as base frequency
+		float noteHz = noteCodeToHz(noteCode);
+
+		// Freq knob becomes bipolar offset: 64=center (no offset), 0=-6.5 octaves, 127=+6.5 octaves
+		float offsetOctaves = (static_cast<float>(params.freq) - 64.0f) / 64.0f * 6.5f;
+		float offsetHz = noteHz * exp2f(offsetOctaves);
+		effectiveFreq = hzToDisperserFreq(offsetHz);
+	}
+	// else: no pitch info (clips/samples), use freq knob as absolute frequency
+
+	// Convert freq to q31
+	q31_t dispFreq = static_cast<q31_t>(effectiveFreq) << 24;
+
+	// Bimodal separation: topoParams.param0 in Bimodal zone (2), else 0
+	float bimodalSeparation = (topoParams.zone == 2) ? topoParams.param0 : 0.0f;
+
+	// Update coefficients with smoothing (lrOffset creates stereo width, Q from topo zone)
+	dsp.updateCoefficientsSmoothed(dispFreq, dispSpread, &params.smoothedFreq, &params.smoothedSpread, lrSpreadOffset,
+	                               topoParams.q, params.stages, twistParams.spreadCurve, twistParams.qTilt,
+	                               bimodalSeparation, topoParams.detuning, topoParams.emphasis);
+
+	// Cross mix amount for Cross topology (zone 3)
+	float crossMix = (topoParams.zone == 3) ? (0.3f + topoParams.param0 * 0.5f) : 0.0f;
+
+	// Delay time comes from freq knob (via stage offsets), doubled for longer echo
+	size_t centerStage = params.stages / 2;
+	size_t delaySamples = dsp.getStageOffset(centerStage) * 2;
+
+	// Unified processing: topology routing + optional punch/chirp feedback
+	dsp.processBuffer(buffer, params.stages, params.delay, twistParams.punch, twistParams.chirpAmount, delaySamples,
+	                  topoParams.harmonicBlend, topoParams.zone, crossMix);
+}
 
 } // namespace deluge::dsp

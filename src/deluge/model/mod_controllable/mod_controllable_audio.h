@@ -64,7 +64,8 @@ public:
 	                              int32_t readAutomationUpToPos, ArpeggiatorSettings* arpSettings, Song* song);
 	void processSRRAndBitcrushing(deluge::dsp::StereoBuffer<q31_t> buffer, int32_t* postFXVolume,
 	                              ParamManager* paramManager);
-	void processDisperser(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager);
+	void processDisperser(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager, q31_t topoCables = 0,
+	                      q31_t twistCables = 0);
 	static void writeParamAttributesToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,
 	                                       int32_t* valuesForOverride = nullptr);
 	static void writeParamTagsToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,
@@ -123,26 +124,12 @@ public:
 	deluge::dsp::SineTableShaperParams sineShaper;
 
 	// Table Shaper with X/Y shape control
-	deluge::dsp::TableShaper shaper; // DSP processor with lookup table
-	uint8_t shaperDrive{0};          // Input gain / saturation amount (0-127)
-	uint8_t shaperShapeX{0};         // Soft→Hard axis (0-127)
-	uint16_t shaperShapeY{0};        // Clean→Weird axis (0-1023, high-res multi-zone)
-	uint8_t shaperMix{0};            // Wet/dry blend (0 = bypass)
-	bool shaperAA{false};            // Anti-aliasing enabled (default off, reserved for future use)
-	q31_t shaperDriveLast{0};        // Previous drive value for smoothing
-	q31_t shaperFilterL{0};          // Post-saturation lowpass state L
-	q31_t shaperFilterR{0};          // Post-saturation lowpass state R
-	float shaperPrevXL{0.0f};        // ADAA state L (previous input sample)
-	float shaperPrevXR{0.0f};        // ADAA state R (previous input sample)
-	float shaperPhase{0.0f};         // Phase offset for triangle modulation (secret knob)
+	deluge::dsp::TableShaper shaperDsp; // DSP processor with lookup table
+	deluge::dsp::ShaperState shaper;    // All shaper state (knob values, smoothing, ADAA)
 
 	// Disperser (allpass cascade with feedback)
-	deluge::dsp::Disperser disperserDsp;    // DSP processor with 16 allpass stages
-	deluge::dsp::DisperserParams disperser; // Zone params + secret phases
-	uint8_t disperserFreq{64};              // Center frequency (0-127, maps to 50Hz-8kHz)
-	uint8_t disperserStages{0};             // Number of active stages (0-16, 0 = bypass)
-	q31_t disperserFreqLast{0};             // Previous freq value for smoothing
-	q31_t disperserSpreadLast{0};           // Previous spread value for smoothing
+	deluge::dsp::Disperser disperserDsp;    // DSP processor
+	deluge::dsp::DisperserParams disperser; // All disperser state (freq, stages, zones, smoothing, delay)
 
 	FilterMode lpfMode;
 	FilterMode hpfMode;

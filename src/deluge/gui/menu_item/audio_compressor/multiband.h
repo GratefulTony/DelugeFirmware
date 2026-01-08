@@ -23,8 +23,8 @@
 #include "gui/l10n/l10n.h"
 #include "gui/menu_item/decimal.h"
 #include "gui/menu_item/menu_item_with_cc_learning.h"
-#include "gui/menu_item/momentum_encoder.h"
 #include "gui/menu_item/value_scaling.h"
+#include "gui/menu_item/velocity_encoder.h"
 #include "gui/menu_item/zone_based.h"
 #include "gui/ui/sound_editor.h"
 #include "hid/display/display.h"
@@ -126,6 +126,7 @@ public:
 
 /// Menu item for high crossover frequency (Hz)
 /// Range: 200Hz to 8000Hz. Clamped to stay above low crossover.
+/// Click encoder to toggle soft clipping on/off.
 class HighCrossover final : public DecimalWithoutScrolling, public MenuItemWithCCLearning {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
@@ -371,7 +372,8 @@ public:
 
 /// Character control (replaces knee) - controls width, knee, timing, skew via zones
 /// Zones: Width, Timing, Skew, Punch, Air, Rich, OTT, OWLTT
-class Character final : public ZoneBasedUnpatchedParam<params::UNPATCHED_MB_COMPRESSOR_CHARACTER, 8> {
+/// Secret menu: push+turn encoder to adjust feel meta phase offset
+class Character final : public ZoneBasedUnpatchedParam<params::UNPATCHED_MB_COMPRESSOR_CHARACTER> {
 public:
 	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
 
@@ -384,6 +386,37 @@ public:
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
 		       && modControllable->multibandCompressor.isEnabled();
 	}
+
+	// Override to add secret menu for feel meta phase adjustment
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust feelMetaPhase (unbounded, wraps per phi constant in DSP)
+			Buttons::selectButtonPressUsedUp = true;
+			auto& comp = soundEditor.currentModControllable->multibandCompressor;
+			float phase = comp.getFeelMetaPhase();
+			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			comp.setFeelMetaPhase(phase);
+			// Show current value on display
+			char buffer[12];
+			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
+			display->displayPopup(buffer);
+			suppressNotification_ = true;
+		}
+		else {
+			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
+		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
+private:
+	mutable bool suppressNotification_ = false;
 };
 
 /// Up/Down ratio skew control (balance between upward and downward compression)
@@ -432,7 +465,7 @@ public:
 /// Vibe control - controls phase relationships between oscillations in Feel
 /// Zones: Sync, Spread, Pairs, Cascade, Invert, Pulse, Drift, Chaos
 /// Secret menu: push+turn encoder to adjust twist phase offset
-class Vibe final : public ZoneBasedUnpatchedParam<params::UNPATCHED_MB_COMPRESSOR_VIBE, 8> {
+class Vibe final : public ZoneBasedUnpatchedParam<params::UNPATCHED_MB_COMPRESSOR_VIBE> {
 public:
 	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
 
@@ -733,6 +766,18 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kNumModes - 1; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
+
+	/// Click encoder to toggle soft clipping
+	MenuItem* selectButtonPress() override {
+		auto& comp = soundEditor.currentModControllable->multibandCompressor;
+		bool newState = !comp.isSoftClipEnabled();
+		comp.setSoftClipEnabled(newState);
+		display->displayPopup(newState ? "CLIP" : "noCL");
+		return NO_NAVIGATION;
+	}
+
+	/// Prevent entering as submenu - stay on horizontal menu
+	bool shouldEnterSubmenu() override { return false; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign);

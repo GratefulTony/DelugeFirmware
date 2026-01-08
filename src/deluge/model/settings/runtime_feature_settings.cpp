@@ -206,16 +206,6 @@ void RuntimeFeatureSettings::init() {
 	                  STRING_FOR_COMMUNITY_FEATURE_DYNAMICS_SOUND_DESIGN, "dynamicsSoundDesign",
 	                  RuntimeFeatureStateToggle::Off);
 
-	// Fine gold knob control for Character (within Dynamics Sound Design submenu)
-	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DynamicsFineGoldKnobCharacter],
-	                  STRING_FOR_COMMUNITY_FEATURE_DYNAMICS_FINE_GOLD_KNOB_CHARACTER, "dynamicsFineGoldKnobCharacter",
-	                  RuntimeFeatureStateToggle::On);
-
-	// Fine gold knob control for Vibe (within Dynamics Sound Design submenu)
-	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DynamicsFineGoldKnobVibe],
-	                  STRING_FOR_COMMUNITY_FEATURE_DYNAMICS_FINE_GOLD_KNOB_VIBE, "dynamicsFineGoldKnobVibe",
-	                  RuntimeFeatureStateToggle::On);
-
 	// Mod FX Post DOTT - places modulation FX after DOTT and stutter (default: off, ModFX before stutter/DOTT)
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::ModFXPostDOTT], STRING_FOR_COMMUNITY_FEATURE_MOD_FX_POST_DOTT,
 	                  "modFXPostDOTT", RuntimeFeatureStateToggle::Off);

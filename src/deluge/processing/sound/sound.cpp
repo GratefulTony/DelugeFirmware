@@ -146,7 +146,8 @@ void Sound::initParams(ParamManager* paramManager) {
 	    getParamFromUserValue(params::GLOBAL_VOLUME_POST_FX, 40));
 	patchedParams->params[params::GLOBAL_VOLUME_POST_REVERB_SEND].setCurrentValueBasicForSetup(0);
 	patchedParams->params[params::LOCAL_FOLD].setCurrentValueBasicForSetup(-2147483648);
-	patchedParams->params[params::LOCAL_SHAPER_DRIVE].setCurrentValueBasicForSetup(0);      // Unity gain at 12 o'clock
+	patchedParams->params[params::LOCAL_SHAPER_DRIVE].setCurrentValueBasicForSetup(0); // Unity gain at 12 o'clock
+	patchedParams->params[params::LOCAL_SHAPER_MIX].setCurrentValueBasicForSetup(0);   // No mix (bypass) by default
 	patchedParams->params[params::LOCAL_SINE_SHAPER_DRIVE].setCurrentValueBasicForSetup(0); // Unity gain at 12 o'clock
 	patchedParams->params[params::LOCAL_HPF_RESONANCE].setCurrentValueBasicForSetup(-2147483648);
 	patchedParams->params[params::LOCAL_HPF_FREQ].setCurrentValueBasicForSetup(-2147483648);
@@ -2564,9 +2565,12 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, deluge::dsp::Stere
 
 	int32_t modFXDepth = paramFinalValues[params::GLOBAL_MOD_FX_DEPTH - params::FIRST_GLOBAL];
 	int32_t modFXRate = paramFinalValues[params::GLOBAL_MOD_FX_RATE - params::FIRST_GLOBAL];
+	// Disperser modulation cables (for mod matrix support)
+	q31_t topoCables = paramFinalValues[params::GLOBAL_DISPERSER_TOPO - params::FIRST_GLOBAL];
+	q31_t twistCables = paramFinalValues[params::GLOBAL_DISPERSER_TWIST - params::FIRST_GLOBAL];
 
 	processSRRAndBitcrushing(sound_stereo, &postFXVolume, paramManager);
-	processDisperser(sound_stereo, paramManager);
+	processDisperser(sound_stereo, paramManager, topoCables, twistCables);
 
 	// Check if ModFX should run after DOTT and stutter
 	bool modFXPostDOTT =

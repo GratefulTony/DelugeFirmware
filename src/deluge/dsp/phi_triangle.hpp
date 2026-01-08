@@ -21,7 +21,6 @@
 
 #pragma once
 
-#include "dsp/util.hpp"
 #include <cmath>
 
 namespace deluge::dsp::phi {
@@ -36,6 +35,7 @@ namespace deluge::dsp::phi {
 constexpr float kPhi = 1.6180340f; // Golden ratio (φ)
 
 // Negative powers (slower than base)
+constexpr float kPhiN100 = 0.6180340f; // φ^-1 = 1/φ
 constexpr float kPhiN050 = 0.7861513f; // φ^-0.5
 constexpr float kPhiN025 = 0.8872984f; // φ^-0.25
 
@@ -52,166 +52,29 @@ constexpr float kPhi175 = 2.3197171f; // φ^1.75
 constexpr float kPhi200 = 2.6180340f; // φ^2.0
 constexpr float kPhi225 = 2.9603110f; // φ^2.25
 
+// Higher powers (for multiband compressor)
+constexpr float kPhi250 = 3.3302077f; // φ^2.5
+constexpr float kPhi275 = 3.7515562f; // φ^2.75
+constexpr float kPhi300 = 4.2360680f; // φ^3.0
+constexpr float kPhi325 = 4.7742114f; // φ^3.25
+constexpr float kPhi350 = 5.3884156f; // φ^3.5
+constexpr float kPhi360 = 5.7067284f; // φ^3.6
+constexpr float kPhi375 = 6.0409418f; // φ^3.75
+constexpr float kPhi385 = 6.4408314f; // φ^3.85
+constexpr float kPhi400 = 6.8541020f; // φ^4.0
+
 /**
- * Wrap phase*freq to [0,1) using double precision
+ * Wrap phase to [0,1) with double precision
  *
- * Double precision maintains accuracy even when phase (from secret knobs)
- * reaches very large values (gamma can be 10^15 before issues).
+ * Use double precision for the computation to handle large secret knob values
+ * (gamma can reach 10^15 before precision issues). Result is always [0,1) so
+ * float output is sufficient.
  *
- * @param phase Raw phase value (may be large, from secret knobs)
- * @param freq φ-power frequency multiplier
+ * @param phase Raw phase value (may be very large from secret knobs)
  * @return Wrapped phase in [0,1)
  */
-[[gnu::always_inline]] inline float wrapPhase(double phase, float freq) {
-	double scaled = phase * static_cast<double>(freq);
-	return static_cast<float>(scaled - std::floor(scaled));
-}
-
-/**
- * Frequency modulation factor for triangle acceleration
- *
- * As position increases, triangles can speed up. The speedup amount
- * varies with the wrapped phase, creating complex beating patterns.
- *
- * Pattern: fm = 1.0 + pos * (base + vary * phXXX)
- * - At pos=0: fm=1.0 (base rate)
- * - At pos=1: fm=1.0+(base+vary*ph) (25-50% faster typically)
- *
- * @param pos Position in zone (0-1)
- * @param wrappedPh Wrapped phase for this frequency
- * @param base Base speedup at pos=1 (default 0.25 = 25%)
- * @param vary Additional speedup variation (default 0.25 = +25%)
- * @return Frequency multiplier (1.0 to ~1.5)
- */
-[[gnu::always_inline]] inline float freqMod(float pos, float wrappedPh, float base = 0.25f, float vary = 0.25f) {
-	return 1.0f + pos * (base + vary * wrappedPh);
-}
-
-/**
- * Secret knob phases - three unbounded phase offsets
- *
- * Accessed via push+twist on encoders. These shift the entire
- * φ-triangle constellation without changing the zone selection.
- *
- * - metaPhase: Primary offset (e.g., push Twist encoder)
- * - metaPhaseTopo: Topology offset (e.g., push Topo encoder)
- * - gammaPhase: Coarse offset, multiplied by 100 (e.g., push third encoder)
- */
-struct SecretPhases {
-	float metaPhase{0};
-	float metaPhaseTopo{0};
-	float gammaPhase{0};
-
-	/// Effective phase for meta zones: metaPhase + 100*gammaPhase
-	[[nodiscard]] double effectiveMeta() const {
-		return static_cast<double>(metaPhase) + 100.0 * static_cast<double>(gammaPhase);
-	}
-
-	/// Effective phase for topology: just metaPhaseTopo
-	[[nodiscard]] double effectiveTopo() const { return static_cast<double>(metaPhaseTopo); }
-};
-
-/**
- * Pre-wrapped phases for all standard φ-power frequencies
- *
- * Compute once per zone update, then reuse for all triangle evaluations.
- * Uses double precision internally to handle large secret knob values.
- */
-struct WrappedPhases {
-	// Negative powers
-	float phN050{0}, phN025{0};
-	// Positive powers
-	float ph025{0}, ph033{0}, ph050{0}, ph067{0}, ph075{0}, ph100{0};
-	float ph125{0}, ph150{0}, ph175{0}, ph200{0}, ph225{0};
-
-	/// Construct from raw phase value (uses double precision)
-	static WrappedPhases fromRaw(double rawPhase) {
-		WrappedPhases wp;
-		wp.phN050 = wrapPhase(rawPhase, kPhiN050);
-		wp.phN025 = wrapPhase(rawPhase, kPhiN025);
-		wp.ph025 = wrapPhase(rawPhase, kPhi025);
-		wp.ph033 = wrapPhase(rawPhase, kPhi033);
-		wp.ph050 = wrapPhase(rawPhase, kPhi050);
-		wp.ph067 = wrapPhase(rawPhase, kPhi067);
-		wp.ph075 = wrapPhase(rawPhase, kPhi075);
-		wp.ph100 = wrapPhase(rawPhase, kPhi100);
-		wp.ph125 = wrapPhase(rawPhase, kPhi125);
-		wp.ph150 = wrapPhase(rawPhase, kPhi150);
-		wp.ph175 = wrapPhase(rawPhase, kPhi175);
-		wp.ph200 = wrapPhase(rawPhase, kPhi200);
-		wp.ph225 = wrapPhase(rawPhase, kPhi225);
-		return wp;
-	}
-};
-
-/**
- * Compute a φ-modulated triangle parameter
- *
- * This is the core pattern used throughout zone-based effects:
- *   triangleFunc(pos * phiFreq * freqMod + wrappedPhase + offset, duty)
- *
- * @param pos Position in zone (0-1)
- * @param phiFreq φ-power frequency (e.g., kPhi050)
- * @param fm Frequency modulation factor (from freqMod())
- * @param wrappedPh Wrapped phase for this frequency
- * @param offset Fixed phase offset for this parameter
- * @param duty Triangle duty cycle (default 0.8)
- * @return Unipolar triangle value (0-1)
- */
-[[gnu::always_inline]] inline float phiTriangleUnipolar(float pos, float phiFreq, float fm, float wrappedPh,
-                                                        float offset, float duty = 0.8f) {
-	return triangleSimpleUnipolar(pos * phiFreq * fm + wrappedPh + offset, duty);
-}
-
-/**
- * Compute a bipolar φ-modulated triangle parameter
- *
- * Same as phiTriangleUnipolar but returns -1 to +1 range.
- * Useful for sign-based mode selection (positive = mode A, negative = mode B).
- *
- * @param pos Position in zone (0-1)
- * @param phiFreq φ-power frequency (e.g., kPhi075)
- * @param fm Frequency modulation factor
- * @param wrappedPh Wrapped phase for this frequency
- * @param offset Fixed phase offset
- * @param duty Triangle duty cycle (default 0.5)
- * @return Bipolar triangle value (-1 to +1)
- */
-[[gnu::always_inline]] inline float phiTriangleBipolar(float pos, float phiFreq, float fm, float wrappedPh,
-                                                       float offset, float duty = 0.5f) {
-	return triangleFloat(pos * phiFreq * fm + wrappedPh + offset, duty);
-}
-
-/**
- * Helper to compute common "scale * param" pattern with clipping
- *
- * Many zone params use: scale = min(triangle*2, 1) * param_triangle
- * This creates smooth ramps with saturation.
- *
- * @param scale Scale triangle value (0-1, will be doubled and clipped)
- * @param param Parameter triangle value (0-1)
- * @return Combined value (0-1)
- */
-[[gnu::always_inline]] inline float scaleParam(float scale, float param) {
-	return std::min(scale * 2.0f, 1.0f) * param;
-}
-
-/**
- * Bipolar sign-based mode selection
- *
- * For triangles that select between two modes based on sign:
- * - Positive triangle → mode A amount
- * - Negative triangle → mode B amount
- *
- * @param tri Bipolar triangle value (-1 to +1)
- * @param scale Scale factor (0-1)
- * @param[out] modeA Amount for positive mode
- * @param[out] modeB Amount for negative mode
- */
-[[gnu::always_inline]] inline void bipolarSelect(float tri, float scale, float& modeA, float& modeB) {
-	float absTri = std::abs(tri);
-	modeA = scale * ((tri > 0.0f) ? absTri : 0.0f);
-	modeB = scale * ((tri < 0.0f) ? absTri : 0.0f);
+[[gnu::always_inline]] inline float wrapPhase(double phase) {
+	return static_cast<float>(phase - std::floor(phase));
 }
 
 } // namespace deluge::dsp::phi

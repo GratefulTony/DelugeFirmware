@@ -21,6 +21,7 @@
 #include "dsp/fast_math.h"
 #include "dsp_ng/core/types.hpp"
 #include "util/waves.h"
+#include <arm_neon.h>
 #include <cmath>
 #include <span>
 
@@ -32,15 +33,6 @@ namespace deluge::dsp {
 
 /// Smoothing time constant (~100ms at 44.1kHz with 128-sample buffers)
 constexpr q31_t kSmoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31);
-
-/// DC blocker coefficient for 5Hz cutoff at 44.1kHz
-/// alpha = 2 * pi * fc / fs = 2 * pi * 5 / 44100 ≈ 0.000712
-constexpr q31_t kDcBlockerAlpha = static_cast<q31_t>(0.000712 * ONE_Q31);
-
-/// Feedback LPF coefficient for ~6kHz cutoff at 44.1kHz
-/// alpha = 1 - exp(-2π * fc / fs) ≈ 0.58 for fc=6kHz
-/// Tames harsh high harmonics in feedback loop
-constexpr q31_t kFeedbackLpfAlpha = static_cast<q31_t>(0.58 * ONE_Q31);
 
 /// Per-sample IIR alpha for q31 parameter smoothing (~40ms time constant at 44.1kHz)
 /// Matches float kPerSampleAlpha for consistent behavior across q31/float params
@@ -169,76 +161,16 @@ inline float triangleFloat(float phase, float duty = 1.0f) {
 }
 
 // ============================================================================
-// Multi-Zone Knob Helpers
-// ============================================================================
-// Utilities for parameters that divide their range into discrete zones,
-// each with distinct behavior. Used by sine shaper, multiband compressor,
-// table shaper, etc.
-
-/// Result of zone calculation - index and position within zone
-struct ZoneInfo {
-	int32_t index;  ///< Zone index (0 to numZones-1)
-	float position; ///< Position within zone (0.0 to 1.0)
-};
-
-/// Normalize q31 parameter to 0.0-1.0 float
-[[gnu::always_inline]] inline float normalizeQ31(q31_t value) {
-	return static_cast<float>(value) / static_cast<float>(ONE_Q31);
-}
-
-/// Compute zone index and position from normalized parameter (0.0-1.0)
-/// @param normalized Parameter value normalized to 0.0-1.0 range
-/// @param numZones Number of zones (typically 8)
-/// @return ZoneInfo with index (0 to numZones-1) and position (0.0-1.0)
-[[gnu::always_inline]] inline ZoneInfo computeZone(float normalized, int32_t numZones) {
-	float zoneFloat = normalized * static_cast<float>(numZones);
-	int32_t index = std::min(numZones - 1, static_cast<int32_t>(zoneFloat));
-	float position = zoneFloat - static_cast<float>(index);
-	return {index, position};
-}
-
-/// Compute zone index and position directly from q31 parameter
-/// Uses integer division for zone index to match clipping boundaries exactly
-/// (float-based calculation has precision issues near zone boundaries)
-/// @param param Parameter value in q31 format (0 to ONE_Q31)
-/// @param numZones Number of zones (typically 8)
-/// @return ZoneInfo with index (0 to numZones-1) and position (0.0-1.0)
-[[gnu::always_inline]] inline ZoneInfo computeZoneQ31(q31_t param, int32_t numZones) {
-	// Use integer division for zone index to match clipping boundaries
-	q31_t zoneWidth = ONE_Q31 / numZones;
-	int32_t rawIndex = static_cast<int32_t>(param / zoneWidth);
-	int32_t index = (rawIndex < 0) ? 0 : (rawIndex >= numZones) ? (numZones - 1) : rawIndex;
-	// Use float for position within zone (smooth interpolation)
-	q31_t zoneStart = static_cast<q31_t>(index) * zoneWidth;
-	float position = static_cast<float>(param - zoneStart) / static_cast<float>(zoneWidth);
-	return {index, position};
-}
-
-/// Convert zone position (0.0-1.0) to display value (0-127)
-[[gnu::always_inline]] inline int32_t zonePositionToDisplay(float position) {
-	return static_cast<int32_t>(position * 127.0f);
-}
-
-/// Compute position within a specific zone from global normalized position
-/// @param normalized Global parameter value (0.0-1.0)
-/// @param zoneIndex Target zone index
-/// @param numZones Total number of zones
-/// @return Position within zone (0.0-1.0), clamped
-[[gnu::always_inline]] inline float positionInZone(float normalized, int32_t zoneIndex, int32_t numZones) {
-	float zoneSize = 1.0f / static_cast<float>(numZones);
-	float zoneStart = static_cast<float>(zoneIndex) * zoneSize;
-	return std::clamp((normalized - zoneStart) / zoneSize, 0.0f, 1.0f);
-}
-
-// ============================================================================
 // Wavefolder
 // ============================================================================
 
-/**
- * Fold reduces the input by the amount it's over the level
- */
 constexpr q31_t FOLD_MIN = 0.1 * ONE_Q31;
 constexpr q31_t THREE_FOURTHS = 0.75 * ONE_Q31;
+
+/**
+ * Simple wavefolder - folds input by the amount it exceeds the level
+ * Used by the Wavefold FX effect
+ */
 inline q31_t fold(q31_t input, q31_t level) {
 	// no folding occurs if max is 0 or if max is greater than input
 	// to keep the knob range consistent fold starts from 0 and
@@ -256,6 +188,19 @@ inline q31_t fold(q31_t input, q31_t level) {
 	// this avoids inverting the wave
 	return 2 * extra - input;
 }
+
+/**
+ * foldBuffer folds a whole buffer. Works for stereo too
+ * Used by the Wavefold FX effect
+ */
+inline void foldBuffer(std::span<q31_t> buffer, q31_t foldLevel) {
+	for (auto& sample : buffer) {
+		auto out = fold(sample, foldLevel);
+		// volume compensation
+		sample = out + 4 * multiply_32x32_rshift32(out, foldLevel);
+	}
+}
+
 /**
  * Polynomial waveshaper with double-cascade for rich harmonic content
  *
@@ -335,17 +280,6 @@ inline void foldBufferPolyApproximationSmoothed(StereoBuffer<q31_t> buffer, q31_
 	                                    level, smoothedLevel);
 }
 
-/**
- * foldBuffer folds a whole buffer. Works for stereo too
- */
-inline void foldBuffer(std::span<q31_t> buffer, q31_t foldLevel) {
-	for (auto& sample : buffer) {
-		auto out = fold(sample, foldLevel);
-		// volume compensation
-		sample = out + 4 * multiply_32x32_rshift32(out, foldLevel);
-	}
-}
-
 // ============================================================================
 // Enhanced Wavefolder with additional parameters
 // ============================================================================
@@ -402,6 +336,58 @@ inline void wavefoldBufferEnhanced(std::span<q31_t> buffer, q31_t level, q31_t d
 inline void wavefoldBufferEnhanced(StereoBuffer<q31_t> buffer, q31_t level, q31_t drive, q31_t symmetry) {
 	wavefoldBufferEnhanced(std::span<q31_t>{reinterpret_cast<q31_t*>(buffer.data()), buffer.size() * 2}, level, drive,
 	                       symmetry);
+}
+
+// ============================================================================
+// Soft Clipping
+// ============================================================================
+// Gentle 2:1 ratio above knee to prevent harsh clipping.
+// Used in multiband compressor to limit per-band peaks before summing.
+
+/// Default soft clip headroom: +6dB above 0dBFS (2x)
+/// Bands can peak at +6dB individually, so 3 bands summing gives +15.5dB worst case
+/// Output clipper then catches anything above its threshold
+constexpr q31_t kSoftClipHeadroom = 2; // multiplier: 1=0dB, 2=+6dB, 4=+12dB
+
+/// Soft clip a scalar sample with 2:1 ratio above knee
+/// @param x Input sample in q31
+/// @param knee Clipping knee point (default: EFFECTIVE_0DBFS_Q31 * headroom)
+/// @return Soft-clipped sample
+[[gnu::always_inline]] inline q31_t softClip(q31_t x, q31_t knee) {
+	if (x > knee) {
+		return knee + ((x - knee) >> 1);
+	}
+	if (x < -knee) {
+		return -knee + ((x + knee) >> 1);
+	}
+	return x;
+}
+
+/// Soft clip 4 q31 samples using NEON SIMD
+/// @param x 4 input samples as NEON vector
+/// @param knee Clipping knee point
+/// @return 4 soft-clipped samples
+[[gnu::always_inline]] inline int32x4_t softClip_NEON(int32x4_t x, int32_t knee) {
+	const int32x4_t kneeVec = vdupq_n_s32(knee);
+	const int32x4_t negKneeVec = vdupq_n_s32(-knee);
+
+	// For samples above knee: output = knee + (x - knee) / 2
+	// For samples below -knee: output = -knee + (x + knee) / 2
+
+	// Positive side: excess above knee, halved
+	int32x4_t posExcess = vqsubq_s32(x, kneeVec);
+	int32x4_t posHalf = vshrq_n_s32(posExcess, 1);
+	int32x4_t posClipped = vaddq_s32(kneeVec, posHalf);
+
+	// Negative side: excess below -knee, halved
+	int32x4_t negExcess = vqsubq_s32(x, negKneeVec);
+	int32x4_t negHalf = vshrq_n_s32(negExcess, 1);
+	int32x4_t negClipped = vaddq_s32(negKneeVec, negHalf);
+
+	// Select: use posClipped if x > knee, negClipped if x < -knee, else x
+	int32x4_t result = vminq_s32(x, posClipped);
+	result = vmaxq_s32(result, negClipped);
+	return result;
 }
 
 } // namespace deluge::dsp

@@ -182,9 +182,11 @@ bool Voice::noteOn(ModelStackWithSoundFlags* modelStack, int32_t newNoteCodeBefo
 		lastSaturationTanHWorkingValue[0] = 2147483648;
 		lastSaturationTanHWorkingValue[1] = 2147483648;
 
-		// Reset ADAA state for Table Shaper
+		// Reset ADAA state and DC blocker for Table Shaper
 		shaperPrevXL = 0.0f;
 		shaperPrevXR = 0.0f;
+		shaperDcBlockL = 0;
+		shaperDcBlockR = 0;
 
 		// Reset sine shaper state (DC blocker, feedback, feedback LPF, stereo LFO)
 		sineShaperState = deluge::dsp::SineShaperVoiceState{};
@@ -1517,41 +1519,31 @@ skipUnisonPart: {}
 			dsp::foldBufferPolyApproximation(stereo_osc_buffer, paramFinalValues[params::LOCAL_FOLD]);
 		}
 
+		// Subtractive synths have oscillators scaled by >> 4 or filterGain (both ~quiet),
+		// so boost input to match FM operating levels, then attenuate output
+		bool boostSubtractive = (synthMode == SynthMode::SUBTRACTIVE);
+
 		// Sine Shaper (per-voice, mod-matrix routable drive, harmonic, and twist)
-		if (sound.sineShaper.mix > 0) {
-			q31_t sineDrive = paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE];
-			// Zone params: patcher outputs cables, DSP combines with preset
-			q31_t harmonicPreset = paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_HARMONIC);
-			q31_t twistPreset = paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_TWIST);
-			q31_t sineHarmonic = sound.sineShaper.harmonic.combinePresetAndCables(
-			    harmonicPreset, paramFinalValues[params::LOCAL_SINE_SHAPER_HARMONIC]);
-			q31_t sineTwist = sound.sineShaper.twist.combinePresetAndCables(
-			    twistPreset, paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST]);
-			q31_t sineMix = static_cast<q31_t>(sound.sineShaper.mix) << 24;
-
-			// Smooth Twist at source - derived values inherit smoothness
-			// Harmonic not smoothed: per-sample weight smoothing handles Zone 1/2, zone boundaries allowed to click
-			q31_t smoothedTwist = dsp::smoothParam(&sound.sineShaper.smoothedTwist, sineTwist);
-
-			auto twistParams = dsp::computeSineShaperTwistParams(smoothedTwist, &sound.sineShaper);
-
-			// Subtractive mode WITHOUT filters runs at >> 4 attenuation vs FM's << 3 boost
-			// Pre-boost input and post-attenuate wet to normalize waveshaper operating point
-			// Only boost when filters are OFF (with filters, filterGain handles level)
-			bool boostSubtractive = (synthMode == SynthMode::SUBTRACTIVE) && !sound.hasFilters();
-
-			// Benchmarking happens inside sineShapeBuffer with zone tags and sub-aggregations
-			dsp::sineShapeBuffer(stereo_osc_buffer, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperState,
-			                     sineHarmonic, sineMix, twistParams, &sound.sineShaper, nullptr, boostSubtractive);
+		if (sound.sineShaper.isEnabled()) {
+			dsp::processSineShaper(stereo_osc_buffer, &sound.sineShaper, &sineShaperState,
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE],
+			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_HARMONIC),
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_HARMONIC],
+			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_TWIST),
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST], boostSubtractive);
 		}
 
-		// Table Shaper (per-voice, mod-matrix routable drive)
+		// Table Shaper (per-voice, mod-matrix routable drive and mix)
 		// Benchmarking happens inside shapeBuffer with "table" tag
-		if (sound.shaperMix > 0) {
+		if (sound.shaper.shapeX > 0) {
 			q31_t satDrive = paramFinalValues[params::LOCAL_SHAPER_DRIVE];
-			q31_t satMix = static_cast<q31_t>(sound.shaperMix) << 24;
-			// Integer-only path for benchmarking (no floats, like builtin)
-			dsp::shapeBufferInt32(stereo_osc_buffer, sound.shaper, satDrive, &sound.shaperDriveLast, satMix);
+			q31_t satMix = paramFinalValues[params::LOCAL_SHAPER_MIX];
+			// For subtractive, pass filterGain to compute dynamic boost
+			// For FM, pass 0 (no boost needed)
+			q31_t shaperFilterGain = boostSubtractive ? filterGain : 0;
+			dsp::shapeBufferInt32(stereo_osc_buffer, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
+			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), &shaperDcBlockL,
+			                      &shaperDcBlockR);
 		}
 
 		// Filters
@@ -1642,42 +1634,30 @@ skipUnisonPart: {}
 			dsp::foldBufferPolyApproximation(std::span{oscBuffer, n}, foldAmount);
 		}
 
+		// Subtractive synths have oscillators scaled by >> 4 or filterGain (both ~quiet),
+		// so boost input to match FM operating levels, then attenuate output
+		bool boostSubtractive = (synthMode == SynthMode::SUBTRACTIVE);
+
 		// Sine Shaper (per-voice, mod-matrix routable drive, harmonic, and twist) - mono path
-		if (sound.sineShaper.mix > 0) {
-			q31_t sineDrive = paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE];
-			// Zone params: patcher outputs cables, DSP combines with preset
-			q31_t harmonicPreset = paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_HARMONIC);
-			q31_t twistPreset = paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_TWIST);
-			q31_t sineHarmonic = sound.sineShaper.harmonic.combinePresetAndCables(
-			    harmonicPreset, paramFinalValues[params::LOCAL_SINE_SHAPER_HARMONIC]);
-			q31_t sineTwist = sound.sineShaper.twist.combinePresetAndCables(
-			    twistPreset, paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST]);
-			q31_t sineMix = static_cast<q31_t>(sound.sineShaper.mix) << 24;
-
-			// Smooth Twist at source - derived values inherit smoothness
-			// Harmonic not smoothed: per-sample weight smoothing handles Zone 1/2, zone boundaries allowed to click
-			q31_t smoothedTwist = dsp::smoothParam(&sound.sineShaper.smoothedTwist, sineTwist);
-
-			// Mono path: Zone 0 (Asym) works, Zone 1 (Wide stereo) ignored
-			auto twistParams = dsp::computeSineShaperTwistParams(smoothedTwist, &sound.sineShaper);
-
-			// Subtractive mode WITHOUT filters runs at >> 4 attenuation vs FM's << 3 boost
-			// Pre-boost input and post-attenuate wet to normalize waveshaper operating point
-			// Only boost when filters are OFF (with filters, filterGain handles level)
-			bool boostSubtractive = (synthMode == SynthMode::SUBTRACTIVE) && !sound.hasFilters();
-
-			// Benchmarking happens inside sineShapeBuffer with zone tags and sub-aggregations
-			dsp::sineShapeBuffer(std::span{oscBuffer, n}, sineDrive, &sound.sineShaper.smoothedDrive, &sineShaperState,
-			                     sineHarmonic, sineMix, twistParams, &sound.sineShaper, nullptr, boostSubtractive);
+		if (sound.sineShaper.isEnabled()) {
+			dsp::processSineShaper(std::span{oscBuffer, n}, &sound.sineShaper, &sineShaperState,
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE],
+			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_HARMONIC),
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_HARMONIC],
+			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_TWIST),
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST], boostSubtractive);
 		}
 
 		// Table Shaper (per-voice, mod-matrix routable drive) - mono path
 		// Benchmarking happens inside shapeBuffer with "table" tag
-		if (sound.shaperMix > 0) {
+		if (sound.shaper.shapeX > 0) {
 			q31_t satDrive = paramFinalValues[params::LOCAL_SHAPER_DRIVE];
-			q31_t satMix = static_cast<q31_t>(sound.shaperMix) << 24;
-			// Integer-only path for benchmarking (no floats, like builtin)
-			dsp::shapeBufferInt32(std::span{oscBuffer, n}, sound.shaper, satDrive, &sound.shaperDriveLast, satMix);
+			q31_t satMix = paramFinalValues[params::LOCAL_SHAPER_MIX];
+			// For subtractive, pass filterGain to compute dynamic boost
+			// For FM, pass 0 (no boost needed)
+			q31_t shaperFilterGain = boostSubtractive ? filterGain : 0;
+			dsp::shapeBufferInt32(std::span{oscBuffer, n}, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
+			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), &shaperDcBlockL);
 		}
 
 		filterSet.renderLong(std::span{oscBuffer, n});

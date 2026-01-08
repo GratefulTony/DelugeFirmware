@@ -632,7 +632,8 @@ fx::TableShaperDrive shaperDriveMenu{STRING_FOR_SHAPER_DRIVE, STRING_FOR_SHAPER_
                                      RenderingStyle::BAR};
 fx::TableShaperShapeX shaperShapeXMenu{STRING_FOR_SHAPER_SHAPE_X};
 fx::TableShaperShapeY shaperShapeYMenu{STRING_FOR_SHAPER_SHAPE_Y};
-fx::TableShaperMix shaperMixMenu{STRING_FOR_SHAPER_MIX};
+fx::TableShaperMix shaperMixMenu{STRING_FOR_SHAPER_MIX, STRING_FOR_SHAPER_MIX, params::LOCAL_SHAPER_MIX,
+                                 RenderingStyle::BAR};
 
 HorizontalMenu tableShaperSubMenu{
     STRING_FOR_TABLE_SHAPER_MENU,

@@ -26,10 +26,14 @@
 #include "dsp/filter/allpass_crossover.h"
 #include "dsp/filter/ladder_components.h"
 #include "dsp/filter/lr_crossover.h"
+#include "dsp/phi_triangle.hpp"
 #include "dsp/util.hpp"
+#include "dsp/zone_param.hpp" // For computeZoneQ31
 #include "dsp_ng/core/types.hpp"
 #include "io/debug/fx_benchmark.h"
 #include "io/debug/print.h"
+#include "modulation/params/param.h"
+#include "storage/field_serialization.h"
 #include "util/fixedpoint.h"
 #include "util/functions.h"
 #include <array>
@@ -168,8 +172,11 @@ public:
 
 	void setRatioUp(q31_t r) {
 		ratioUpKnob_ = r;
-		// Map 0-ONE_Q31 to 0-1.0 (0 = no expansion, 1 = full expansion)
-		fractionUp_ = float(r) / ONE_Q31f;
+		// Map 0-ONE_Q31 to 0-1.0 with power curve for balanced feel
+		// Quiet signals are typically 3-4x further below threshold than loud signals are above,
+		// so x^3 curve compensates: at 50% knob, fractionUp=0.125 vs fractionDown=0.5
+		float linear = float(r) / ONE_Q31f;
+		fractionUp_ = linear * linear * linear; // x^3 curve
 	}
 
 	/// Set per-band output level (0 to ONE_Q31) - applied after compression
@@ -347,18 +354,17 @@ public:
 	/// @param bufferL Left channel samples
 	/// @param bufferR Right channel samples
 	/// @param numSamples Number of samples in each buffer
-	/// @param stride Pre-computed stride for peak detection
 	/// @param alpha Pre-computed IIR alpha (hoisted from response calculation)
 	/// @param oneMinusAlpha Pre-computed (1-alpha)
 	/// @param useAvg Use average instead of max for less stereo linking
 	/// Optimized: alpha hoisted out of audio loop, computed only when response changes
-	void updateLevel(const q31_t* bufferL, const q31_t* bufferR, size_t numSamples, size_t stride, float alpha,
-	                 float oneMinusAlpha, bool useAvg) {
+	void updateLevel(const q31_t* bufferL, const q31_t* bufferR, size_t numSamples, float alpha, float oneMinusAlpha,
+	                 bool useAvg) {
 		q31_t peak = 0;
 
-		// Peak detection with pre-computed stride
+		// Peak detection - scan all samples for accurate envelope tracking
 		// useAvg: average preserves stereo width better, max is tighter control
-		for (size_t i = 0; i < numSamples; i += stride) {
+		for (size_t i = 0; i < numSamples; ++i) {
 			q31_t L = bufferL[i];
 			q31_t R = bufferR[i];
 			L = (L < 0) ? -L : L;
@@ -447,8 +453,11 @@ enum class VibeZone : uint8_t {
 class MultibandCompressor {
 public:
 	static constexpr int kNumBands = 3;
-	static constexpr int kNumCharacterZones = 8;
-	static constexpr int kNumVibeZones = 8;
+	/// Zone counts derived from param definitions (single source of truth)
+	static constexpr int kNumCharacterZones =
+	    modulation::params::getZoneParamInfo(modulation::params::UNPATCHED_MB_COMPRESSOR_CHARACTER).zoneCount;
+	static constexpr int kNumVibeZones =
+	    modulation::params::getZoneParamInfo(modulation::params::UNPATCHED_MB_COMPRESSOR_VIBE).zoneCount;
 
 	enum class Band : uint8_t { Low = 0, Mid = 1, High = 2 };
 
@@ -503,9 +512,6 @@ public:
 		crossoverLR4Fast_.setLowCrossover(freqHz);
 		crossoverTwisted_.setLowCrossover(freqHz);
 		crossoverTwist3_.setLowCrossover(freqHz);
-		// Update max stride for low band (Nyquist = sampleRate/2/stride >= lowCrossover)
-		// stride <= sampleRate / (2 * lowCrossover)
-		maxStridePerBand_[0] = std::clamp(static_cast<size_t>(kSampleRate / (2.0f * freqHz)), size_t{2}, size_t{32});
 	}
 
 	/// Set crossover frequency between mid and high bands
@@ -519,9 +525,6 @@ public:
 		crossoverLR4Fast_.setHighCrossover(freqHz);
 		crossoverTwisted_.setHighCrossover(freqHz);
 		crossoverTwist3_.setHighCrossover(freqHz);
-		// Update max stride for mid band (Nyquist = sampleRate/2/stride >= highCrossover)
-		// stride <= sampleRate / (2 * highCrossover)
-		maxStridePerBand_[1] = std::clamp(static_cast<size_t>(kSampleRate / (2.0f * freqHz)), size_t{2}, size_t{32});
 	}
 
 	/// Get low crossover frequency in Hz
@@ -625,7 +628,18 @@ public:
 		characterComputed_ = true;
 
 		// Determine zone (0-7) and position within zone (0.0-1.0)
-		auto [zone, zonePos] = computeZoneQ31(c, kNumCharacterZones);
+		auto zoneInfo = computeZoneQ31(c, kNumCharacterZones);
+		int32_t zone = zoneInfo.index;
+		float zonePos = zoneInfo.position;
+
+		// Compute wrapped phases from feelMetaPhase_ (creates divergent offsets per phi constant)
+		// Using small phi powers (1.1-1.6 range) so common offset -0.3 works for all
+		float ph025 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi025);
+		float ph033 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi033);
+		float ph050 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi050);
+		float ph067 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi067);
+		float ph075 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi075);
+		float ph100 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi100);
 
 		// === Compute derived parameters based on zone ===
 		// Each zone has characteristic curves for width, knee, timing, skew
@@ -633,18 +647,20 @@ public:
 		// Response: 0=smooth (~145ms), 1=punchy (~2ms) - extended range
 		// Detection time varies from ~2ms (transient-accurate) to ~145ms (glue-like)
 		switch (zone) {
-		case 3:                                  // Punch: fast detection for transients (2-4ms)
+		case 3:                                // Punch: very fast detection for transients
+			response_ = 0.9f + zonePos * 0.1f; // 0.9→1.0 (faster)
+			break;
 		case 6:                                  // OTT: fast for classic aggressive response
 			response_ = 0.85f + zonePos * 0.15f; // 0.85→1.0
 			break;
-		case 4:                                  // Air: slow detection for smooth glue (70-145ms)
-		case 5:                                  // Rich: slow for warm sustain
+		case 4:                                // Air: slow detection for smooth glue (70-145ms)
+			response_ = 0.1f - zonePos * 0.1f; // 0.1→0.0 (slower)
+			break;
+		case 5:                                  // Rich: slow for warm sustain (unchanged)
 			response_ = 0.15f - zonePos * 0.15f; // 0.15→0.0
 			break;
-		case 7: { // OWLTT: oscillates full range for dynamic breathing
-			// Phi-power frequencies for non-repeating patterns (same constants as Chaos zone)
-			constexpr float kFreq2 = 2.0581f; // φ^1.5 ≈ 2
-			response_ = 0.5f + 0.5f * triangleFloat(zonePos * kFreq2 + vibePhaseWidth_[0] - 0.25f);
+		case 7: { // OWLTT: oscillates full range for dynamic breathing (0.85x freq)
+			response_ = 0.5f + 0.5f * triangleFloat(zonePos * phi::kPhi150 * 0.85f + vibePhaseWidth_[0] + ph033 - 0.3f);
 			break;
 		}
 		default:
@@ -657,34 +673,35 @@ public:
 		// "Weird" crossover types (1,2,3,9) allow bass stereo/inversion
 		bool weirdXover = (crossoverType_ == 1 || crossoverType_ == 2 || crossoverType_ == 3 || crossoverType_ == 9);
 		switch (zone) {
-		case 0: // Width: sweep from narrow/inverted to enhanced, highs slightly wider
-			bandWidth_[0] = weirdXover ? (-0.5f + zonePos * 1.5f) : (0.5f + zonePos * 0.5f); // weird: -0.5→1.0
-			bandWidth_[1] = 0.5f + zonePos * 0.9f;
-			bandWidth_[2] = 0.5f + zonePos * 1.1f;
+		case 0: // Width: sweep from narrow/inverted to very enhanced (same baseline, wider range)
+			bandWidth_[0] = weirdXover ? (-0.5f + zonePos * 1.8f) : (0.5f + zonePos * 0.7f); // weird: -0.5→1.3
+			bandWidth_[1] = 0.5f + zonePos * 1.2f;                                           // 0.5→1.7 (was 0.5→1.4)
+			bandWidth_[2] = 0.5f + zonePos * 1.5f;                                           // 0.5→2.0 (was 0.5→1.6)
 			break;
-		case 4: // Air: wide stereo, highs enhanced for spaciousness
-			bandWidth_[0] = weirdXover ? (0.5f + zonePos * 0.3f) : 0.5f;
-			bandWidth_[1] = 1.0f + zonePos * 0.2f;
-			bandWidth_[2] = 1.1f + zonePos * 0.4f;
+		case 4: // Air: very wide stereo, highs super enhanced
+			bandWidth_[0] = weirdXover ? (0.5f + zonePos * 0.5f) : 0.5f;
+			bandWidth_[1] = 1.0f + zonePos * 0.5f; // 1.0→1.5 (was 1.0→1.2)
+			bandWidth_[2] = 1.1f + zonePos * 0.7f; // 1.1→1.8 (was 1.1→1.5)
 			break;
 		case 6: // OTT: wide for that classic sound
-			bandWidth_[0] = weirdXover ? (0.5f + zonePos * 0.3f) : 0.5f;
-			bandWidth_[1] = 1.0f + zonePos * 0.25f;
-			bandWidth_[2] = 1.0f + zonePos * 0.35f;
+			bandWidth_[0] = weirdXover ? (0.5f + zonePos * 0.5f) : 0.5f;
+			bandWidth_[1] = 1.0f + zonePos * 0.5f; // 1.0→1.5 (was 1.0→1.25)
+			bandWidth_[2] = 1.0f + zonePos * 0.7f; // 1.0→1.7 (was 1.0→1.35)
 			break;
-		case 3: // Punch: tighter mids for impact, normal highs
-			bandWidth_[0] = weirdXover ? (0.3f + zonePos * 0.4f) : 0.5f;
-			bandWidth_[1] = 0.7f + zonePos * 0.2f;
-			bandWidth_[2] = 0.9f + zonePos * 0.2f;
+		case 3: // Punch: tight mids for focused impact
+			bandWidth_[0] = weirdXover ? (0.3f + zonePos * 0.5f) : 0.5f;
+			bandWidth_[1] = 0.7f + zonePos * 0.1f; // 0.7→0.8 (was 0.7→0.9, tighter)
+			bandWidth_[2] = 0.9f + zonePos * 0.2f; // 0.9→1.1
 			break;
-		case 7: { // OWLTT: phi-modulated per-band width oscillation, bass can invert on weird
-			constexpr float kFreq1 = 1.618f;  // φ ≈ 1.618
-			constexpr float kFreq2 = 2.0581f; // φ^1.5 ≈ 2
-			constexpr float kFreq3 = 2.9603f; // φ^2.25 ≈ 3
+		case 7: { // OWLTT: phi-modulated per-band width oscillation (0.85x freq, stronger)
 			bandWidth_[0] =
-			    weirdXover ? (-0.3f + 1.0f * triangleFloat(zonePos * kFreq1 + vibePhaseWidth_[0] - 0.25f)) : 0.5f;
-			bandWidth_[1] = 0.8f + 0.5f * triangleFloat(zonePos * kFreq2 + vibePhaseWidth_[1] - 0.25f);
-			bandWidth_[2] = 0.9f + 0.5f * triangleFloat(zonePos * kFreq3 + vibePhaseWidth_[2] - 0.25f);
+			    weirdXover
+			        ? (-0.3f + 1.2f * triangleFloat(zonePos * phi::kPhi100 * 0.85f + vibePhaseWidth_[0] + ph025 - 0.3f))
+			        : 0.5f;
+			bandWidth_[1] =
+			    0.8f + 0.7f * triangleFloat(zonePos * phi::kPhi150 * 0.85f + vibePhaseWidth_[1] + ph033 - 0.3f);
+			bandWidth_[2] =
+			    0.9f + 0.7f * triangleFloat(zonePos * phi::kPhi225 * 0.85f + vibePhaseWidth_[2] + ph050 - 0.3f);
 			break;
 		}
 		default:
@@ -695,20 +712,23 @@ public:
 
 		// Knee: 0=hard, 1=soft
 		switch (zone) {
-		case 0: // Width: start with steepish knee (0.2), soften as width increases
-			knee_ = 0.2f + zonePos * 0.4f;
+		case 0:                            // Width: start with steepish knee, soften dramatically as width increases
+			knee_ = 0.2f + zonePos * 0.6f; // 0.2→0.8 (was 0.2→0.6)
 			break;
-		case 4: // Air: soft for smoothness
-		case 5: // Rich: soft for warmth
+		case 4:                             // Air: soft for smoothness
+			knee_ = 0.6f + zonePos * 0.35f; // 0.6→0.95 (was 0.6→0.9)
+			break;
+		case 5: // Rich: soft for warmth (unchanged)
 			knee_ = 0.6f + zonePos * 0.3f;
 			break;
-		case 3: // Punch: hard knee for transients
+		case 3:                              // Punch: very hard knee for transients
+			knee_ = 0.05f + zonePos * 0.15f; // 0.05→0.2 (was 0.1→0.3, harder)
+			break;
 		case 6: // OTT: medium-hard for aggression
 			knee_ = 0.1f + zonePos * 0.2f;
 			break;
-		case 7: {                             // OWLTT: varies dramatically (with vibe phase offset)
-			constexpr float kFreq3 = 2.9603f; // φ^2.25 ≈ 3
-			knee_ = 0.5f + 0.4f * triangleFloat(zonePos * kFreq3 + vibePhaseKnee_ - 0.25f);
+		case 7: { // OWLTT: varies with vibe phase offset (0.85x freq, stronger)
+			knee_ = 0.5f + 0.45f * triangleFloat(zonePos * phi::kPhi225 * 0.85f + vibePhaseKnee_ + ph050 - 0.3f);
 			break;
 		}
 		default:
@@ -718,33 +738,33 @@ public:
 		// Per-band timing offsets: multiplier on base attack/release (0.5x to 2x)
 		// Stored as offset from 1.0 (so 0 = no change, -0.5 = half speed, +1.0 = double)
 		switch (zone) {
-		case 1:                                 // Timing: sweep from uniform to differentiated
-			timingOffset_[0] = -0.3f * zonePos; // Low slower
+		case 1:                                 // Timing: sweep from uniform to very differentiated
+			timingOffset_[0] = -0.5f * zonePos; // Low slower (was -0.3)
 			timingOffset_[1] = 0.0f;
-			timingOffset_[2] = 0.3f * zonePos; // High faster
+			timingOffset_[2] = 0.5f * zonePos; // High faster (was 0.3)
 			break;
-		case 3: // Punch: fast attack across all bands
-			timingOffset_[0] = -0.4f - zonePos * 0.2f;
-			timingOffset_[1] = -0.3f - zonePos * 0.2f;
-			timingOffset_[2] = -0.2f - zonePos * 0.2f;
+		case 3:                                        // Punch: very fast attack across all bands
+			timingOffset_[0] = -0.5f - zonePos * 0.3f; // (was -0.4 - 0.2)
+			timingOffset_[1] = -0.4f - zonePos * 0.3f; // (was -0.3 - 0.2)
+			timingOffset_[2] = -0.3f - zonePos * 0.3f; // (was -0.2 - 0.2)
 			break;
-		case 4: // Air: fast high band
-			timingOffset_[0] = 0.2f;
+		case 4:                                       // Air: slow bass, fast high band
+			timingOffset_[0] = 0.3f + zonePos * 0.2f; // 0.3→0.5 (was 0.2, slower bass)
 			timingOffset_[1] = 0.0f;
-			timingOffset_[2] = -0.4f - zonePos * 0.3f;
+			timingOffset_[2] = -0.5f - zonePos * 0.3f; // -0.5→-0.8 (was -0.4 - 0.3)
 			break;
-		case 6: // OTT: classic fast timing
-			timingOffset_[0] = -0.2f;
-			timingOffset_[1] = -0.3f;
-			timingOffset_[2] = -0.4f;
+		case 6:                                        // OTT: classic fast timing, more aggressive
+			timingOffset_[0] = -0.3f - zonePos * 0.1f; // (was -0.2)
+			timingOffset_[1] = -0.4f - zonePos * 0.1f; // (was -0.3)
+			timingOffset_[2] = -0.5f - zonePos * 0.1f; // (was -0.4)
 			break;
-		case 7: {                             // OWLTT: chaos (with vibe phase offsets)
-			constexpr float kFreq4 = 4.2360f; // φ^3.0 ≈ 4
-			constexpr float kFreq5 = 5.3884f; // φ^3.5 ≈ 5
-			constexpr float kFreq6 = 6.0409f; // φ^3.75 ≈ 6
-			timingOffset_[0] = 0.5f * triangleFloat(zonePos * kFreq4 + vibePhaseTiming_[0] - 0.25f);
-			timingOffset_[1] = 0.5f * triangleFloat(zonePos * kFreq5 + 0.333f + vibePhaseTiming_[1] - 0.25f);
-			timingOffset_[2] = 0.5f * triangleFloat(zonePos * kFreq6 + 0.667f + vibePhaseTiming_[2] - 0.25f);
+		case 7: { // OWLTT: chaos (with vibe phase offsets, 0.85x freq, stronger)
+			timingOffset_[0] =
+			    0.6f * triangleFloat(zonePos * phi::kPhi300 * 0.85f + vibePhaseTiming_[0] + ph067 - 0.3f);
+			timingOffset_[1] =
+			    0.6f * triangleFloat(zonePos * phi::kPhi350 * 0.85f + 0.333f + vibePhaseTiming_[1] + ph075 - 0.3f);
+			timingOffset_[2] =
+			    0.6f * triangleFloat(zonePos * phi::kPhi375 * 0.85f + 0.667f + vibePhaseTiming_[2] + ph100 - 0.3f);
 			break;
 		}
 		default:
@@ -753,37 +773,119 @@ public:
 
 		// Per-band skew: -1=upward, 0=balanced, +1=downward
 		switch (zone) {
-		case 2:                               // Skew: sweep through skew variations
-			skewOffset_[0] = -0.5f + zonePos; // Low: up→balanced
+		case 2:                                      // Skew: sweep through more extreme skew variations
+			skewOffset_[0] = -0.7f + zonePos * 1.2f; // Low: -0.7→0.5 (was -0.5→0.5)
 			skewOffset_[1] = 0.0f;
-			skewOffset_[2] = 0.5f - zonePos; // High: down→balanced
+			skewOffset_[2] = 0.7f - zonePos * 1.2f; // High: 0.7→-0.5 (was 0.5→-0.5)
 			break;
-		case 4: // Air: upward on highs
+		case 4: // Air: strong upward on highs
 			skewOffset_[0] = 0.0f;
-			skewOffset_[1] = -0.2f * zonePos;
-			skewOffset_[2] = -0.5f - zonePos * 0.3f;
+			skewOffset_[1] = -0.3f * zonePos;        // (was -0.2)
+			skewOffset_[2] = -0.6f - zonePos * 0.3f; // -0.6→-0.9 (was -0.5 - 0.3)
 			break;
-		case 5: // Rich: upward emphasis
+		case 5: // Rich: upward emphasis (unchanged)
 			skewOffset_[0] = -0.3f - zonePos * 0.3f;
 			skewOffset_[1] = -0.4f - zonePos * 0.3f;
 			skewOffset_[2] = -0.2f - zonePos * 0.2f;
 			break;
-		case 6: // OTT: balanced aggressive
-			skewOffset_[0] = 0.1f;
+		case 6:                                     // OTT: more differentiated skew
+			skewOffset_[0] = 0.2f + zonePos * 0.1f; // slight downward on bass
 			skewOffset_[1] = 0.0f;
-			skewOffset_[2] = -0.1f;
+			skewOffset_[2] = -0.2f - zonePos * 0.1f; // upward on highs
 			break;
-		case 7: {                             // OWLTT: extreme variation (with vibe phase offsets)
-			constexpr float kFreq4 = 4.2360f; // φ^3.0 ≈ 4
-			constexpr float kFreq5 = 5.3884f; // φ^3.5 ≈ 5
-			constexpr float kFreq6 = 6.0409f; // φ^3.75 ≈ 6
-			skewOffset_[0] = 0.8f * triangleFloat(zonePos * kFreq5 + vibePhaseSkew_[0] - 0.25f);
-			skewOffset_[1] = 0.8f * triangleFloat(zonePos * kFreq4 + 0.167f + vibePhaseSkew_[1] - 0.25f);
-			skewOffset_[2] = 0.8f * triangleFloat(zonePos * kFreq6 + 0.333f + vibePhaseSkew_[2] - 0.25f);
+		case 7: { // OWLTT: variation (with vibe phase offsets, 0.85x freq, stronger)
+			skewOffset_[0] = 0.9f * triangleFloat(zonePos * phi::kPhi350 * 0.85f + vibePhaseSkew_[0] + ph075 - 0.3f);
+			skewOffset_[1] =
+			    0.9f * triangleFloat(zonePos * phi::kPhi300 * 0.85f + 0.167f + vibePhaseSkew_[1] + ph067 - 0.3f);
+			skewOffset_[2] =
+			    0.9f * triangleFloat(zonePos * phi::kPhi375 * 0.85f + 0.333f + vibePhaseSkew_[2] + ph100 - 0.3f);
 			break;
 		}
 		default:
 			skewOffset_[0] = skewOffset_[1] = skewOffset_[2] = 0.0f;
+		}
+
+		// Zone multipliers for vibe/feel modulation: [zone][param]
+		// Params: 0-2=width, 3=knee, 4-6=timing, 7-9=skew
+		// clang-format off
+		static constexpr float kVibeZoneMult[7][10] = {
+			{0.3f, 0.4f, 0.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}, // Width
+			{0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.4f, 0.4f, 0.0f, 0.0f, 0.0f}, // Timing
+			{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.5f, 0.5f}, // Skew
+			{0.2f, 0.2f, 0.2f, 0.2f, 0.3f, 0.3f, 0.3f, 0.0f, 0.0f, 0.0f}, // Punch
+			{0.2f, 0.3f, 0.4f, 0.2f, 0.3f, 0.0f, 0.3f, 0.0f, 0.3f, 0.4f}, // Air
+			{0.0f, 0.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.4f, 0.4f, 0.3f}, // Rich
+			{0.0f, 0.3f, 0.4f, 0.2f, 0.2f, 0.2f, 0.2f, 0.2f, 0.0f, 0.2f}, // OTT
+		};
+		static constexpr float kFeelZoneMult[7][10] = {
+			{0.15f, 0.20f, 0.25f, 0.15f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f}, // Width
+			{0.00f, 0.00f, 0.00f, 0.00f, 0.20f, 0.20f, 0.20f, 0.00f, 0.00f, 0.00f}, // Timing
+			{0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.25f, 0.25f, 0.25f}, // Skew
+			{0.10f, 0.10f, 0.10f, 0.10f, 0.15f, 0.15f, 0.15f, 0.00f, 0.00f, 0.00f}, // Punch
+			{0.10f, 0.15f, 0.20f, 0.10f, 0.15f, 0.00f, 0.15f, 0.00f, 0.15f, 0.20f}, // Air
+			{0.00f, 0.00f, 0.00f, 0.15f, 0.00f, 0.00f, 0.00f, 0.20f, 0.20f, 0.15f}, // Rich
+			{0.00f, 0.15f, 0.20f, 0.10f, 0.10f, 0.10f, 0.10f, 0.10f, 0.00f, 0.10f}, // OTT
+		};
+		// clang-format on
+
+		// Apply vibe and feelMetaPhase modulation to non-OWLTT zones
+		if (zone != 7) {
+			float vibeModAmount = 0.3f * (static_cast<float>(vibeKnob_) / ONE_Q31f);
+			bool applyVibe = vibeModAmount > 0.01f;
+			bool applyFeel = std::abs(feelMetaPhase_) > 0.01f;
+
+			if (applyVibe || applyFeel) {
+				const float* vm = kVibeZoneMult[zone];
+				const float* fm = kFeelZoneMult[zone];
+
+				// Phi triangles for feel modulation (small phi powers, common -0.3 offset peaks near pos=1)
+				float phiTri[6] = {
+				    triangleFloat(zonePos * phi::kPhi025 + ph025 - 0.3f),
+				    triangleFloat(zonePos * phi::kPhi033 + ph033 - 0.3f),
+				    triangleFloat(zonePos * phi::kPhi050 + ph050 - 0.3f),
+				    triangleFloat(zonePos * phi::kPhi067 + ph067 - 0.3f),
+				    triangleFloat(zonePos * phi::kPhi075 + ph075 - 0.3f),
+				    triangleFloat(zonePos * phi::kPhi100 + ph100 - 0.3f),
+				};
+				// Vibe triangles (pre-computed phases, staggered by 0.33)
+				float vibeTri[10] = {
+				    triangleFloat(vibePhaseWidth_[0]),          triangleFloat(vibePhaseWidth_[1] + 0.33f),
+				    triangleFloat(vibePhaseWidth_[2] + 0.67f),  triangleFloat(vibePhaseKnee_),
+				    triangleFloat(vibePhaseTiming_[0]),         triangleFloat(vibePhaseTiming_[1] + 0.33f),
+				    triangleFloat(vibePhaseTiming_[2] + 0.67f), triangleFloat(vibePhaseSkew_[0]),
+				    triangleFloat(vibePhaseSkew_[1] + 0.33f),   triangleFloat(vibePhaseSkew_[2] + 0.67f),
+				};
+				// Phi index mapping: width uses 0,1,2; knee uses 2; timing uses 3,4,5; skew uses 4,3,5
+				static constexpr int8_t kPhiIdx[10] = {0, 1, 2, 2, 3, 4, 5, 4, 3, 5};
+
+				// Apply to width
+				for (int i = 0; i < 3; i++) {
+					if (applyVibe && vm[i] != 0.0f)
+						bandWidth_[i] += vibeModAmount * vm[i] * vibeTri[i];
+					if (applyFeel && fm[i] != 0.0f)
+						bandWidth_[i] += fm[i] * phiTri[kPhiIdx[i]];
+				}
+				// Apply to knee
+				if (applyVibe && vm[3] != 0.0f)
+					knee_ += vibeModAmount * vm[3] * vibeTri[3];
+				if (applyFeel && fm[3] != 0.0f)
+					knee_ += fm[3] * phiTri[kPhiIdx[3]];
+				knee_ = std::clamp(knee_, 0.0f, 1.0f);
+				// Apply to timing
+				for (int i = 0; i < 3; i++) {
+					if (applyVibe && vm[4 + i] != 0.0f)
+						timingOffset_[i] += vibeModAmount * vm[4 + i] * vibeTri[4 + i];
+					if (applyFeel && fm[4 + i] != 0.0f)
+						timingOffset_[i] += fm[4 + i] * phiTri[kPhiIdx[4 + i]];
+				}
+				// Apply to skew
+				for (int i = 0; i < 3; i++) {
+					if (applyVibe && vm[7 + i] != 0.0f)
+						skewOffset_[i] += vibeModAmount * vm[7 + i] * vibeTri[7 + i];
+					if (applyFeel && fm[7 + i] != 0.0f)
+						skewOffset_[i] += fm[7 + i] * phiTri[kPhiIdx[7 + i]];
+				}
+			}
 		}
 
 		// Update pre-computed envelope alpha values
@@ -835,7 +937,9 @@ public:
 		characterComputed_ = false;
 
 		// Determine zone (0-7) and position within zone (0.0-1.0)
-		auto [zone, zonePos] = computeZoneQ31(v, kNumVibeZones);
+		auto zoneInfo = computeZoneQ31(v, kNumVibeZones);
+		int32_t zone = zoneInfo.index;
+		float zonePos = zoneInfo.position;
 
 		// Twist modulation: 10 triangle periods, 75% duty cycle (zero until halfway up vibe)
 		// Global vibe position (0.0 to 1.0 across entire knob range)
@@ -907,44 +1011,29 @@ public:
 			vibePhaseSkew_ = {0.15f * zonePos, 0.35f * zonePos, 0.25f * zonePos};
 			break;
 
-		case 7: { // Chaos: phi-power frequencies with secret phase offset (like sine shaper)
-			// φ^n values chosen to approximate original integer frequencies
-			constexpr float kFreq3 = 2.9603f;  // φ^2.25 ≈ 3
-			constexpr float kFreq4 = 4.2360f;  // φ^3.0 ≈ 4
-			constexpr float kFreq5 = 5.3884f;  // φ^3.5 ≈ 5
-			constexpr float kFreq6 = 6.0409f;  // φ^3.75 ≈ 6
-			constexpr float kFreq7 = 6.8541f;  // φ^4.0 ≈ 7
-			constexpr float kFreq4b = 4.7742f; // φ^3.25 ≈ 4.8 (variant)
-			constexpr float kFreq5b = 5.7067f; // φ^3.6 ≈ 5.7 (variant)
-			constexpr float kFreq6b = 6.4408f; // φ^3.85 ≈ 6.4 (variant)
-
+		case 7: { // Chaos: phi-power frequencies with secret phase offset
 			// Use double for phase wrapping to maintain precision at large values
-			// Same pattern as sine shaper's metaPhase/gammaPhase handling
 			double phRaw = static_cast<double>(vibeTwistPhase_);
-			auto wrapPh = [](double ph, double freq) {
-				double scaled = ph * freq;
-				return static_cast<float>(scaled - std::floor(scaled));
-			};
 
 			// Per-frequency phase offsets - irrational frequencies create non-repeating divergence
-			float ph3 = wrapPh(phRaw, kFreq3);
-			float ph4 = wrapPh(phRaw, kFreq4);
-			float ph5 = wrapPh(phRaw, kFreq5);
-			float ph6 = wrapPh(phRaw, kFreq6);
-			float ph7 = wrapPh(phRaw, kFreq7);
-			float ph4b = wrapPh(phRaw, kFreq4b);
-			float ph5b = wrapPh(phRaw, kFreq5b);
-			float ph6b = wrapPh(phRaw, kFreq6b);
+			float ph225 = phi::wrapPhase(phRaw * phi::kPhi225);
+			float ph300 = phi::wrapPhase(phRaw * phi::kPhi300);
+			float ph350 = phi::wrapPhase(phRaw * phi::kPhi350);
+			float ph375 = phi::wrapPhase(phRaw * phi::kPhi375);
+			float ph400 = phi::wrapPhase(phRaw * phi::kPhi400);
+			float ph325 = phi::wrapPhase(phRaw * phi::kPhi325);
+			float ph360 = phi::wrapPhase(phRaw * phi::kPhi360);
+			float ph385 = phi::wrapPhase(phRaw * phi::kPhi385);
 
-			float wpVal = 0.5f * triangleFloat(zonePos * kFreq3 - 0.25f + ph3);
+			float wpVal = 0.5f * triangleFloat(zonePos * phi::kPhi225 - 0.25f + ph225);
 			vibePhaseWidth_ = {wpVal, wpVal, wpVal};
-			vibePhaseKnee_ = 0.5f * triangleFloat(zonePos * kFreq4 + ph4);
-			vibePhaseTiming_[0] = 0.5f * triangleFloat(zonePos * kFreq5 - 0.25f + ph5);
-			vibePhaseTiming_[1] = 0.5f * triangleFloat(zonePos * kFreq6 + 0.083f + ph6);
-			vibePhaseTiming_[2] = 0.5f * triangleFloat(zonePos * kFreq7 + 0.417f + ph7);
-			vibePhaseSkew_[0] = 0.5f * triangleFloat(zonePos * kFreq4b + 0.25f + ph4b);
-			vibePhaseSkew_[1] = 0.5f * triangleFloat(zonePos * kFreq5b - 0.083f + ph5b);
-			vibePhaseSkew_[2] = 0.5f * triangleFloat(zonePos * kFreq6b + 0.583f + ph6b);
+			vibePhaseKnee_ = 0.5f * triangleFloat(zonePos * phi::kPhi300 + ph300);
+			vibePhaseTiming_[0] = 0.5f * triangleFloat(zonePos * phi::kPhi350 - 0.25f + ph350);
+			vibePhaseTiming_[1] = 0.5f * triangleFloat(zonePos * phi::kPhi375 + 0.083f + ph375);
+			vibePhaseTiming_[2] = 0.5f * triangleFloat(zonePos * phi::kPhi400 + 0.417f + ph400);
+			vibePhaseSkew_[0] = 0.5f * triangleFloat(zonePos * phi::kPhi325 + 0.25f + ph325);
+			vibePhaseSkew_[1] = 0.5f * triangleFloat(zonePos * phi::kPhi360 - 0.083f + ph360);
+			vibePhaseSkew_[2] = 0.5f * triangleFloat(zonePos * phi::kPhi385 + 0.583f + ph385);
 			break;
 		}
 
@@ -964,6 +1053,16 @@ public:
 
 	/// Get twist phase offset
 	[[nodiscard]] float getVibeTwistPhase() const { return vibeTwistPhase_; }
+
+	/// Set feel meta phase offset (secret menu parameter, unbounded - wraps per phi constant)
+	/// Push+twist on Feel encoder to adjust. Shifts all phi triangles in Feel zones.
+	void setFeelMetaPhase(float phase) {
+		feelMetaPhase_ = phase;
+		characterComputed_ = false; // Invalidate cache to recompute with new phase
+	}
+
+	/// Get feel meta phase offset
+	[[nodiscard]] float getFeelMetaPhase() const { return feelMetaPhase_; }
 
 	/// Get current vibe zone for display
 	[[nodiscard]] VibeZone getVibeZone() const {
@@ -1304,18 +1403,14 @@ public:
 		constexpr float kThresholdRefdB = 21.49f;
 
 		// Process each band - envelope detection
-		// updateLevel uses pre-computed alpha (fixed-point) and stride varies by band
-		// maxStridePerBand_ is computed from crossover frequencies (updated in setLow/HighCrossover)
+		// updateLevel scans all samples for accurate peak tracking
 		// Use average (less stereo linking) when high band width > 1 (enhanced stereo)
 		bool useAvgEnvelope = bandWidth_[2] > 1.0f;
 		std::array<float, kNumBands> bandGains;
 		for (size_t b = 0; b < kNumBands; ++b) {
-			// Compute stride: 2 (tight) to 32 (punchy), clamped by band's Nyquist limit
-			size_t stride = std::min(2 + static_cast<size_t>(response_ * 30.0f), maxStridePerBand_[b]);
-
 			// Calculate level using float IIR with pre-computed alpha (hoisted from response calc)
-			bands_[b].updateLevel(bandBufferL[b].data(), bandBufferR[b].data(), buffer.size(), stride, alpha_,
-			                      oneMinusAlpha_, useAvgEnvelope);
+			bands_[b].updateLevel(bandBufferL[b].data(), bandBufferR[b].data(), buffer.size(), alpha_, oneMinusAlpha_,
+			                      useAvgEnvelope);
 
 			// Calculate compression gain
 			// Use character-derived knee and add per-band skew offset to global skew
@@ -1365,6 +1460,11 @@ public:
 		int32x4_t bandPeakVec1 = vdupq_n_s32(0);
 		int32x4_t bandPeakVec2 = vdupq_n_s32(0);
 
+		// Soft clip knee points: bands at +6dB, output at 0dBFS
+		// When disabled, use ONE_Q31 so soft clip never engages (pass-through)
+		const int32_t bandClipKnee = softClipEnabled_ ? (EFFECTIVE_0DBFS_Q31 * 2) : ONE_Q31;
+		const int32_t outputClipKnee = softClipEnabled_ ? EFFECTIVE_0DBFS_Q31 : ONE_Q31;
+
 		const size_t numSamples = buffer.size();
 		const size_t vectorLen = numSamples & ~3; // Round down to multiple of 4
 
@@ -1380,6 +1480,8 @@ public:
 			int32x4_t msR0 = vsubq_s32(mid0, sideScaled0);
 			int32x4_t scaledL0 = applyShiftedGainNeon(msL0, mantissa0, bandCombinedGain[0].shift);
 			int32x4_t scaledR0 = applyShiftedGainNeon(msR0, mantissa0, bandCombinedGain[0].shift);
+			scaledL0 = softClip_NEON(scaledL0, bandClipKnee);
+			scaledR0 = softClip_NEON(scaledR0, bandClipKnee);
 
 			int32x4_t sumL = scaledL0;
 			int32x4_t sumR = scaledR0;
@@ -1398,6 +1500,8 @@ public:
 			int32x4_t msR1 = vsubq_s32(mid1, sideScaled1);
 			int32x4_t scaledL1 = applyShiftedGainNeon(msL1, mantissa1, bandCombinedGain[1].shift);
 			int32x4_t scaledR1 = applyShiftedGainNeon(msR1, mantissa1, bandCombinedGain[1].shift);
+			scaledL1 = softClip_NEON(scaledL1, bandClipKnee);
+			scaledR1 = softClip_NEON(scaledR1, bandClipKnee);
 			sumL = vqaddq_s32(sumL, scaledL1);
 			sumR = vqaddq_s32(sumR, scaledR1);
 
@@ -1415,6 +1519,8 @@ public:
 			int32x4_t msR2 = vsubq_s32(mid2, sideScaled2);
 			int32x4_t scaledL2 = applyShiftedGainNeon(msL2, mantissa2, bandCombinedGain[2].shift);
 			int32x4_t scaledR2 = applyShiftedGainNeon(msR2, mantissa2, bandCombinedGain[2].shift);
+			scaledL2 = softClip_NEON(scaledL2, bandClipKnee);
+			scaledR2 = softClip_NEON(scaledR2, bandClipKnee);
 			sumL = vqaddq_s32(sumL, scaledL2);
 			sumR = vqaddq_s32(sumR, scaledR2);
 
@@ -1422,9 +1528,11 @@ public:
 				bandPeakVec2 = vmaxq_s32(bandPeakVec2, vmaxq_s32(vabsq_s32(scaledL2), vabsq_s32(scaledR2)));
 			}
 
-			// === Output gain ===
+			// === Output gain + soft clip ===
 			int32x4_t outLVec = applyShiftedGainNeon(sumL, mantissaOut, outputGainShifted.shift);
 			int32x4_t outRVec = applyShiftedGainNeon(sumR, mantissaOut, outputGainShifted.shift);
+			outLVec = softClip_NEON(outLVec, outputClipKnee);
+			outRVec = softClip_NEON(outRVec, outputClipKnee);
 
 			if (doMetering) {
 				peakVec = vmaxq_s32(peakVec, vmaxq_s32(vabsq_s32(outLVec), vabsq_s32(outRVec)));
@@ -1459,33 +1567,33 @@ public:
 			// Band 0 (bass): M/S with per-band width
 			q31_t mid0 = (bandBufferL[0][i] >> 1) + (bandBufferR[0][i] >> 1);
 			q31_t side0 = (bandBufferL[0][i] >> 1) - (bandBufferR[0][i] >> 1);
-			q31_t sideScaled0 = multiply_32x32_rshift32(side0, widthFixedBass);
-			q31_t scaledL0 = applyShiftedGain(mid0 + sideScaled0, bandCombinedGain[0]);
-			q31_t scaledR0 = applyShiftedGain(mid0 - sideScaled0, bandCombinedGain[0]);
+			q31_t sideScaled0 = multiply_32x32_rshift32(side0, widthFixedBass) << 1;
+			q31_t scaledL0 = softClip(applyShiftedGain(mid0 + sideScaled0, bandCombinedGain[0]), bandClipKnee);
+			q31_t scaledR0 = softClip(applyShiftedGain(mid0 - sideScaled0, bandCombinedGain[0]), bandClipKnee);
 			sumL = add_saturate(sumL, scaledL0);
 			sumR = add_saturate(sumR, scaledR0);
 
 			// Band 1 (mid): M/S with per-band width
 			q31_t mid1 = (bandBufferL[1][i] >> 1) + (bandBufferR[1][i] >> 1);
 			q31_t side1 = (bandBufferL[1][i] >> 1) - (bandBufferR[1][i] >> 1);
-			q31_t sideScaled1 = multiply_32x32_rshift32(side1, widthFixedMid);
-			q31_t scaledL1 = applyShiftedGain(mid1 + sideScaled1, bandCombinedGain[1]);
-			q31_t scaledR1 = applyShiftedGain(mid1 - sideScaled1, bandCombinedGain[1]);
+			q31_t sideScaled1 = multiply_32x32_rshift32(side1, widthFixedMid) << 1;
+			q31_t scaledL1 = softClip(applyShiftedGain(mid1 + sideScaled1, bandCombinedGain[1]), bandClipKnee);
+			q31_t scaledR1 = softClip(applyShiftedGain(mid1 - sideScaled1, bandCombinedGain[1]), bandClipKnee);
 			sumL = add_saturate(sumL, scaledL1);
 			sumR = add_saturate(sumR, scaledR1);
 
 			// Band 2 (high): M/S with per-band width
 			q31_t mid2 = (bandBufferL[2][i] >> 1) + (bandBufferR[2][i] >> 1);
 			q31_t side2 = (bandBufferL[2][i] >> 1) - (bandBufferR[2][i] >> 1);
-			q31_t sideScaled2 = multiply_32x32_rshift32(side2, widthFixedHigh);
-			q31_t scaledL2 = applyShiftedGain(mid2 + sideScaled2, bandCombinedGain[2]);
-			q31_t scaledR2 = applyShiftedGain(mid2 - sideScaled2, bandCombinedGain[2]);
+			q31_t sideScaled2 = multiply_32x32_rshift32(side2, widthFixedHigh) << 1;
+			q31_t scaledL2 = softClip(applyShiftedGain(mid2 + sideScaled2, bandCombinedGain[2]), bandClipKnee);
+			q31_t scaledR2 = softClip(applyShiftedGain(mid2 - sideScaled2, bandCombinedGain[2]), bandClipKnee);
 			sumL = add_saturate(sumL, scaledL2);
 			sumR = add_saturate(sumR, scaledR2);
 
-			// Output gain
-			q31_t outL = applyShiftedGain(sumL, outputGainShifted);
-			q31_t outR = applyShiftedGain(sumR, outputGainShifted);
+			// Output gain + soft clip
+			q31_t outL = softClip(applyShiftedGain(sumL, outputGainShifted), outputClipKnee);
+			q31_t outR = softClip(applyShiftedGain(sumR, outputGainShifted), outputClipKnee);
 
 			// DC block
 			buffer[i].l = outL - dcBlockL_.doFilter(outL, kDCBlockCoeff);
@@ -1532,7 +1640,7 @@ public:
 				meterNeedsRefresh_ = true;
 
 				// Saturation detection with hold timer (~500ms) - only on refresh frames
-				constexpr q31_t saturationThreshold = static_cast<q31_t>(EFFECTIVE_0DBFS_Q31 * 1.33);
+				constexpr q31_t saturationThreshold = EFFECTIVE_0DBFS_Q31;
 				for (size_t b = 0; b < kNumBands; ++b) {
 					if (bandOutputPeak_[b] > saturationThreshold) {
 						bandSaturationHoldCounter_[b] = kIndicatorHoldBuffers / kMeterRefreshBuffers;
@@ -1544,8 +1652,8 @@ public:
 				}
 
 				// Clipping detection with hold timer - only on refresh frames
-				constexpr int64_t clipThreshold64 = static_cast<int64_t>(EFFECTIVE_0DBFS_Q31 * 1.33);
-				if (outputPeak_ > static_cast<q31_t>(clipThreshold64)) {
+				constexpr q31_t clipThreshold = EFFECTIVE_0DBFS_Q31;
+				if (outputPeak_ > clipThreshold) {
 					clippingHoldCounter_ = kIndicatorHoldBuffers / kMeterRefreshBuffers;
 				}
 				else if (clippingHoldCounter_ > 0) {
@@ -1752,6 +1860,7 @@ private:
 	std::array<float, kNumBands> vibePhaseSkew_{0.0f, 0.0f, 0.0f};   // Phase offsets for skew
 	float vibeTwist_ = 1.0f;                                         // Twist amount for Twisted/Twist3 (0-1)
 	float vibeTwistPhase_ = 0.0f;                                    // Secret phase offset for twist modulation
+	float feelMetaPhase_ = 0.0f;                                     // Secret phase offset for feel phi triangles
 
 	// Enable/disable zone (0 = off, >ONE_Q31/2 = on)
 	q31_t enabledZone_{0};
@@ -1795,6 +1904,80 @@ private:
 	bool meterNeedsRefresh_{false}; // Set by audio path, cleared by UI
 
 public:
+	// ========== Serialization ==========
+
+	/// Write multiband compressor state to file (only non-default values)
+	void writeToFile(Serializer& writer) const {
+		if (isEnabled()) {
+			deluge::storage::writeAttributeInt(writer, "mbEnabled", 1);
+		}
+		WRITE_FIELD_DEFAULT(writer, crossoverType_, "mbCrossoverType", 2);
+		WRITE_FLOAT(writer, vibeTwistPhase_, "mbVibeTwistPhase", 10.0f);
+		WRITE_FLOAT(writer, feelMetaPhase_, "mbFeelMetaPhase", 10.0f);
+
+		// Per-band offsets (write with index suffix)
+		for (size_t i = 0; i < kNumBands; ++i) {
+			q31_t thresholdOffset = getThresholdOffset(i);
+			q31_t ratioOffset = getRatioOffset(i);
+			q31_t bandwidthOffset = getBandwidthOffset(i);
+
+			char tag[24];
+			if (thresholdOffset != 0) {
+				snprintf(tag, sizeof(tag), "mbThresholdOffset%zu", i);
+				deluge::storage::writeAttributeHex(writer, tag, thresholdOffset);
+			}
+			if (ratioOffset != 0) {
+				snprintf(tag, sizeof(tag), "mbRatioOffset%zu", i);
+				deluge::storage::writeAttributeHex(writer, tag, ratioOffset);
+			}
+			if (bandwidthOffset != 0) {
+				snprintf(tag, sizeof(tag), "mbBandwidthOffset%zu", i);
+				deluge::storage::writeAttributeHex(writer, tag, bandwidthOffset);
+			}
+		}
+	}
+
+	/// Read a tag into multiband compressor state, returns true if tag was handled
+	bool readTag(Deserializer& reader, const char* tagName) {
+		if (std::strcmp(tagName, "mbEnabled") == 0) {
+			int32_t enabled = deluge::storage::readAndExitTag(reader, tagName);
+			setEnabledZone(enabled ? ONE_Q31 : 0);
+			return true;
+		}
+		READ_FIELD(reader, tagName, crossoverType_, "mbCrossoverType");
+		READ_FLOAT(reader, tagName, vibeTwistPhase_, "mbVibeTwistPhase", 10.0f);
+		READ_FLOAT(reader, tagName, feelMetaPhase_, "mbFeelMetaPhase", 10.0f);
+
+		// Per-band offsets (check each index)
+		for (size_t i = 0; i < kNumBands; ++i) {
+			char tag[24];
+			q31_t value;
+
+			snprintf(tag, sizeof(tag), "mbThresholdOffset%zu", i);
+			if (std::strcmp(tagName, tag) == 0) {
+				value = deluge::storage::readHexAndExitTag(reader, tagName);
+				setThresholdOffset(i, value);
+				return true;
+			}
+
+			snprintf(tag, sizeof(tag), "mbRatioOffset%zu", i);
+			if (std::strcmp(tagName, tag) == 0) {
+				value = deluge::storage::readHexAndExitTag(reader, tagName);
+				setRatioOffset(i, value);
+				return true;
+			}
+
+			snprintf(tag, sizeof(tag), "mbBandwidthOffset%zu", i);
+			if (std::strcmp(tagName, tag) == 0) {
+				value = deluge::storage::readHexAndExitTag(reader, tagName);
+				setBandwidthOffset(i, value);
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	/// Check if meter display needs refresh (called by UI)
 	/// Returns true once per refresh interval, then auto-clears
 	[[nodiscard]] bool checkAndClearMeterRefresh() {
@@ -1809,12 +1992,13 @@ public:
 	void setMeteringEnabled(bool enabled) { meteringEnabled_ = enabled; }
 	[[nodiscard]] bool isMeteringEnabled() const { return meteringEnabled_; }
 
+	/// Enable/disable soft clipping on bands and output
+	void setSoftClipEnabled(bool enabled) { softClipEnabled_ = enabled; }
+	[[nodiscard]] bool isSoftClipEnabled() const { return softClipEnabled_; }
+
 private:
 	bool meteringEnabled_{true}; // Metering calculations enabled (can be disabled to save CPU)
-
-	// Per-band max stride for peak detection (computed from crossover frequencies)
-	// High band fixed at 4 (Nyquist ~5512Hz), low/mid computed dynamically
-	std::array<size_t, kNumBands> maxStridePerBand_{32, 11, 4};
+	bool softClipEnabled_{true}; // Soft clipping on bands and output (prevents harsh digital clipping)
 };
 
 } // namespace deluge::dsp

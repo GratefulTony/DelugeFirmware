@@ -91,6 +91,7 @@ int32_t getParamNeutralValue(int32_t p) {
 	case params::GLOBAL_REVERB_AMOUNT:
 	case params::GLOBAL_VOLUME_POST_FX:
 	case params::LOCAL_VOLUME:
+	case params::LOCAL_SHAPER_MIX:
 		return 134217728;
 
 	case params::LOCAL_MODULATOR_0_VOLUME:

@@ -26,10 +26,14 @@
 // harmonic extraction, and buffer processing functions.
 
 #include "dsp/fast_math.h"         // For fastSinHalfPi (rect2 optimization)
+#include "dsp/phi_triangle.hpp"    // For φ-power constants
 #include "dsp/util.hpp"            // For smoothing helpers, polynomial primitives
 #include "dsp/zone_param.hpp"      // For ZoneBasedParam template
 #include "io/debug/fx_benchmark.h" // For FX benchmarking
-#include <arm_neon.h>              // For NEON SIMD vectorization
+#include "modulation/params/param.h"
+#include "storage/field_serialization.h"
+#include <arm_neon.h> // For NEON SIMD vectorization
+#include <cstring>
 
 namespace deluge::dsp {
 
@@ -78,8 +82,9 @@ prepareNeonSmoothing(float c0, float c1, float c2, float c3, float t0, float t1,
 	return vgetq_lane_f32(v, 3);
 }
 
-// Number of harmonic zones (0-6 = various, 7 = Poly)
-constexpr int32_t kNumHarmonicZones = 8;
+/// Zone count derived from param definition (single source of truth)
+constexpr int32_t kNumHarmonicZones =
+    modulation::params::getZoneParamInfo(modulation::params::LOCAL_SINE_SHAPER_HARMONIC).zoneCount;
 
 // Harmonic zone names for benchmarking tags (based on harmonic parameter, not twist)
 // Zones 0-1: Chebyshev polynomial waveshaping
@@ -151,6 +156,44 @@ struct SineTableShaperParams {
 	float cachedTargetC1{0};
 	float cachedTargetC3L{0}, cachedTargetC5L{0}, cachedTargetC7L{0}, cachedTargetC9L{0};
 	float cachedTargetC3R{0}, cachedTargetC5R{0}, cachedTargetC7R{0}, cachedTargetC9R{0};
+
+	// ========================================================================
+	// Encapsulated Processing API
+	// ========================================================================
+	// Simplifies callsites by hiding param combination, smoothing, and twist computation.
+	// Use prepareVoiceParams() for patched params (voices), prepareClipParams() for unpatched (clips).
+
+	/// Check if effect is enabled (mix > 0)
+	[[nodiscard]] bool isEnabled() const { return mix > 0; }
+
+	/// Get mix as q31_t
+	[[nodiscard]] q31_t getMixQ31() const { return static_cast<q31_t>(mix) << 24; }
+
+	/// Get drive as q31_t (for clip path where drive is stored locally)
+	[[nodiscard]] q31_t getDriveQ31() const { return static_cast<q31_t>(drive) << 24; }
+
+	/// Write sine shaper params to file (only non-default values)
+	void writeToFile(Serializer& writer) const {
+		WRITE_FIELD(writer, drive, "sineShaperDrive");
+		WRITE_FIELD(writer, mix, "sineShaperMix");
+		WRITE_ZONE(writer, harmonic.value, "sineShaperHarmonicBase");
+		WRITE_ZONE(writer, twist.value, "sineShaperTwistBase");
+		WRITE_FLOAT(writer, metaPhase, "sineShaperMetaPhase", 10.0f);
+		WRITE_FLOAT(writer, metaPhaseHarmonic, "sineShaperMetaPhaseH", 10.0f);
+		WRITE_FLOAT(writer, gammaPhase, "sineShaperGamma", 10.0f);
+	}
+
+	/// Read a tag into sine shaper params, returns true if tag was handled
+	bool readTag(Deserializer& reader, const char* tagName) {
+		READ_FIELD(reader, tagName, drive, "sineShaperDrive");
+		READ_FIELD(reader, tagName, mix, "sineShaperMix");
+		READ_ZONE(reader, tagName, harmonic.value, "sineShaperHarmonicBase");
+		READ_ZONE(reader, tagName, twist.value, "sineShaperTwistBase");
+		READ_FLOAT(reader, tagName, metaPhase, "sineShaperMetaPhase", 10.0f);
+		READ_FLOAT(reader, tagName, metaPhaseHarmonic, "sineShaperMetaPhaseH", 10.0f);
+		READ_FLOAT(reader, tagName, gammaPhase, "sineShaperGamma", 10.0f);
+		return false;
+	}
 };
 
 /// Per-voice state for sine shaper DSP (must be separate from per-sound params)
@@ -404,34 +447,19 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
 	}
 	else {
 		// Zone 4+: Meta - unified triangle evolution, all shift with (pos + ph)
-		// Fractional φ powers for tighter frequency spacing (all irrational, never align)
-		constexpr float kPhi025 = 1.1271566f;  // φ^0.25
-		constexpr float kPhi033 = 1.1746627f;  // φ^0.33
-		constexpr float kPhi050 = 1.2720196f;  // φ^0.5
-		constexpr float kPhi067 = 1.3871872f;  // φ^0.67
-		constexpr float kPhi075 = 1.4352958f;  // φ^0.75
-		constexpr float kPhi100 = 1.6180340f;  // φ^1.0
-		constexpr float kPhiN025 = 0.8872984f; // φ^-0.25
-		constexpr float kPhiN050 = 0.7861513f; // φ^-0.5
-
 		// Use double for ph wrapping to maintain precision at large gamma values (gamma < 10^15 ok)
 		double phRaw = ssParams ? static_cast<double>(ssParams->metaPhase) + 100.0 * ssParams->gammaPhase : 0.0;
 		float pos = static_cast<float>(smoothedTwist - kZone4) / static_cast<float>(ONE_Q31 - kZone4);
 
 		// Scale and wrap ph per-frequency to preserve irrational divergence with large ph values
-		// pos * freq maintains full precision, ph * freq is wrapped to 0-1 after scaling
-		auto wrapPh = [](double ph, double freq) {
-			double scaled = ph * freq;
-			return static_cast<float>(scaled - std::floor(scaled));
-		};
-		float ph025 = wrapPh(phRaw, kPhi025);
-		float ph033 = wrapPh(phRaw, kPhi033);
-		float ph050 = wrapPh(phRaw, kPhi050);
-		float ph067 = wrapPh(phRaw, kPhi067);
-		float ph075 = wrapPh(phRaw, kPhi075);
-		float ph100 = wrapPh(phRaw, kPhi100);
-		float phN025 = wrapPh(phRaw, kPhiN025);
-		float phN050 = wrapPh(phRaw, kPhiN050);
+		float ph025 = phi::wrapPhase(phRaw * phi::kPhi025);
+		float ph033 = phi::wrapPhase(phRaw * phi::kPhi033);
+		float ph050 = phi::wrapPhase(phRaw * phi::kPhi050);
+		float ph067 = phi::wrapPhase(phRaw * phi::kPhi067);
+		float ph075 = phi::wrapPhase(phRaw * phi::kPhi075);
+		float ph100 = phi::wrapPhase(phRaw * phi::kPhi100);
+		float phN025 = phi::wrapPhase(phRaw * phi::kPhiN025);
+		float phN050 = phi::wrapPhase(phRaw * phi::kPhiN050);
 
 		// Per-effect freqMult: ramps 1.0→(1.25-1.5), peaks at pos=1, phXXX varies the peak
 		float fmW = 1.0f + pos * (0.25f + 0.25f * ph025);
@@ -445,29 +473,29 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
 		// offset = duty - (freq * 0.5 * 1.125) mod 1, where 1.125 = fmX at pos=0.5, phXXX=0
 
 		// Width: scale(φ^0.25)*2 clipped * param(φ^0.5), duty 0.8/0.7 for broad coverage
-		float wS = std::min(triangleSimpleUnipolar(pos * kPhi025 * fmW + ph025 + 0.166f, 0.8f) * 2.0f, 1.0f);
-		float wP = triangleSimpleUnipolar(pos * kPhi050 * fmW + ph050 + 0.984f, 0.7f);
+		float wS = std::min(triangleSimpleUnipolar(pos * phi::kPhi025 * fmW + ph025 + 0.166f, 0.8f) * 2.0f, 1.0f);
+		float wP = triangleSimpleUnipolar(pos * phi::kPhi050 * fmW + ph050 + 0.984f, 0.7f);
 		result.stereoWidth = wS * wP;
-		result.stereoPhaseOffset = triangleSimpleUnipolar(pos * kPhi067 * fmW + ph067 + 0.720f, 0.5f);
-		result.stereoFreqMult = 1.0f + 0.5f * triangleSimpleUnipolar(pos * kPhi100 * fmW + ph100 + 0.590f);
+		result.stereoPhaseOffset = triangleSimpleUnipolar(pos * phi::kPhi067 * fmW + ph067 + 0.720f, 0.5f);
+		result.stereoFreqMult = 1.0f + 0.5f * triangleSimpleUnipolar(pos * phi::kPhi100 * fmW + ph100 + 0.590f);
 
 		// Evens: bipolar rectified, scale(φ^0.33) * param(φ^0.75), sign selects mode
-		float eS = triangleSimpleUnipolar(pos * kPhi033 * fmE + ph033 + 0.970f, 0.5f);
-		float eT = triangleFloat(pos * kPhi075 * fmE + ph075 + 0.896f, 0.5f);
+		float eS = triangleSimpleUnipolar(pos * phi::kPhi033 * fmE + ph033 + 0.970f, 0.5f);
+		float eT = triangleFloat(pos * phi::kPhi075 * fmE + ph075 + 0.896f, 0.5f);
 		float eAbs = std::abs(eT);
 		result.evenAmount = eS * ((eT > 0.0f) ? eAbs : 0.0f);
 		result.evenDryBlend = eS * ((eT < 0.0f) ? eAbs : 0.0f);
 
 		// Rect: bipolar rectified, scale(φ^0.67) * param(φ^1.0), sign selects mode
-		float rS = triangleSimpleUnipolar(pos * kPhi067 * fmR + ph067 + 0.910f, 0.5f);
-		float rT = triangleFloat(pos * kPhi100 * fmR + ph100 + 0.845f, 0.5f);
+		float rS = triangleSimpleUnipolar(pos * phi::kPhi067 * fmR + ph067 + 0.910f, 0.5f);
+		float rT = triangleFloat(pos * phi::kPhi100 * fmR + ph100 + 0.845f, 0.5f);
 		float rAbs = std::abs(rT);
 		result.rectAmount = rS * ((rT > 0.0f) ? rAbs : 0.0f);
 		result.rect2Amount = rS * ((rT < 0.0f) ? rAbs : 0.0f);
 
 		// Feedback: scale(φ^-0.25) * param(φ^-0.5), quadratic param for safety
-		float fS = triangleSimpleUnipolar(pos * kPhiN025 * fmF + phN025 + 0.001f, 0.8f);
-		float fP = triangleSimpleUnipolar(pos * kPhiN050 * fmF + phN050 + 0.058f, 0.8f);
+		float fS = triangleSimpleUnipolar(pos * phi::kPhiN025 * fmF + phN025 + 0.001f, 0.8f);
+		float fP = triangleSimpleUnipolar(pos * phi::kPhiN050 * fmF + phN050 + 0.058f, 0.8f);
 		result.feedbackAmount = fS * fP * fP * 0.25f;
 	}
 
@@ -1223,12 +1251,9 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 	// Also reduce feedback by up to 10% as drive increases (tames high-drive feedback)
 	constexpr float kFeedbackScale = 0.25f;
 	float fbScale = kFeedbackScale;
-	// Zone 7 starts at 7 * zoneWidth (consistent with computeZoneQ31)
-	constexpr q31_t kZone7Start = (kNumHarmonicZones - 1) * (ONE_Q31 / kNumHarmonicZones);
-	if (smoothedHarmonic >= kZone7Start) {
-		float zone7Pos = static_cast<float>(smoothedHarmonic - kZone7Start) / static_cast<float>(ONE_Q31 - kZone7Start);
-		fbScale *= (1.0f - zone7Pos); // 100% at start, 0% at end of Zone 7
-		fbScale *= 0.707f;            // -3dB for Zone 7 (poly is hotter)
+	if (zoneInfo.index == kNumHarmonicZones - 1) {
+		fbScale *= (1.0f - zoneInfo.position); // 100% at start, 0% at end of Zone 7
+		fbScale *= 0.707f;                     // -3dB for Zone 7 (poly is hotter)
 	}
 	// Drive-based reduction: up to 10% at max drive (tames high-drive feedback)
 	float driveNorm = static_cast<float>(drive) / static_cast<float>(ONE_Q31);
@@ -1559,12 +1584,9 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	// Also reduce feedback by up to 10% as drive increases (tames high-drive feedback)
 	constexpr float kFeedbackScale = 0.25f;
 	float fbScale = kFeedbackScale;
-	// Zone 7 starts at 7 * zoneWidth (consistent with computeZoneQ31)
-	constexpr q31_t kZone7Start = (kNumHarmonicZones - 1) * (ONE_Q31 / kNumHarmonicZones);
-	if (smoothedHarmonic >= kZone7Start) {
-		float zone7Pos = static_cast<float>(smoothedHarmonic - kZone7Start) / static_cast<float>(ONE_Q31 - kZone7Start);
-		fbScale *= (1.0f - zone7Pos); // 100% at start, 0% at end of Zone 7
-		fbScale *= 0.707f;            // -3dB for Zone 7 (poly is hotter)
+	if (zoneInfo.index == kNumHarmonicZones - 1) {
+		fbScale *= (1.0f - zoneInfo.position); // 100% at start, 0% at end of Zone 7
+		fbScale *= 0.707f;                     // -3dB for Zone 7 (poly is hotter)
 	}
 	// Drive-based reduction: -10% at max drive
 	float driveNorm = static_cast<float>(drive) / static_cast<float>(ONE_Q31);
@@ -1704,6 +1726,88 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	params->smoothedC7R = getNeonLane2(neonCtxR.current);
 	params->smoothedC9R = getNeonLane3(neonCtxR.current);
 	*smoothedDrive = currentDrive; // Write back final drive value
+}
+
+// ============================================================================
+// Encapsulated Processing API
+// ============================================================================
+// Simplifies callsites by hiding param combination, smoothing, and twist computation.
+
+/**
+ * Process sine shaper for voice path (patched params with mod matrix routing)
+ *
+ * Encapsulates: param combination, twist smoothing, twist param computation, buffer processing.
+ * Call when sineShaper.isEnabled() returns true.
+ *
+ * @param buffer Stereo audio buffer to process in-place
+ * @param params Sine shaper params (modified: smoothedTwist, smoothedDrive updated)
+ * @param state Per-voice state (modified: DC blocker, feedback, LFO phase)
+ * @param driveFinal Final drive from patcher (paramFinalValues[LOCAL_SINE_SHAPER_DRIVE])
+ * @param harmonicPreset Harmonic preset from param set
+ * @param harmonicCables Harmonic cables from patcher (paramFinalValues[LOCAL_SINE_SHAPER_HARMONIC])
+ * @param twistPreset Twist preset from param set
+ * @param twistCables Twist cables from patcher (paramFinalValues[LOCAL_SINE_SHAPER_TWIST])
+ * @param boostSubtractive True for subtractive mode without filters
+ */
+inline void processSineShaper(StereoBuffer<q31_t> buffer, SineTableShaperParams* params, SineShaperVoiceState* state,
+                              q31_t driveFinal, q31_t harmonicPreset, q31_t harmonicCables, q31_t twistPreset,
+                              q31_t twistCables, bool boostSubtractive = false) {
+	// Combine preset + cables using zone-aware scaling
+	q31_t sineHarmonic = params->harmonic.combinePresetAndCables(harmonicPreset, harmonicCables);
+	q31_t sineTwist = params->twist.combinePresetAndCables(twistPreset, twistCables);
+
+	// Smooth twist at source - derived values inherit smoothness
+	q31_t smoothedTwist = smoothParam(&params->smoothedTwist, sineTwist);
+
+	// Compute twist-derived params
+	auto twistParams = computeSineShaperTwistParams(smoothedTwist, params);
+
+	// Process buffer
+	sineShapeBuffer(buffer, driveFinal, &params->smoothedDrive, state, sineHarmonic, params->getMixQ31(), twistParams,
+	                params, nullptr, boostSubtractive);
+}
+
+/**
+ * Process sine shaper for clip path (unpatched params, no mod matrix)
+ *
+ * Encapsulates: param combination, twist smoothing, twist param computation, buffer processing.
+ * Call when sineShaper.isEnabled() returns true.
+ *
+ * @param buffer Stereo audio buffer to process in-place
+ * @param params Sine shaper params (modified: smoothedTwist, smoothedDrive updated)
+ * @param state Per-clip state (modified: DC blocker, feedback, LFO phase)
+ * @param harmonicMod Harmonic modulation from unpatched params
+ * @param twistMod Twist modulation from unpatched params
+ */
+inline void processSineShaper(StereoBuffer<q31_t> buffer, SineTableShaperParams* params, SineShaperVoiceState* state,
+                              q31_t harmonicMod, q31_t twistMod) {
+	// Combine field + modulation using zone-aware scaling
+	q31_t sineHarmonic = params->harmonic.combineWithMod(harmonicMod);
+	q31_t sineTwist = params->twist.combineWithMod(twistMod);
+
+	// Smooth twist at source - derived values inherit smoothness
+	q31_t smoothedTwist = smoothParam(&params->smoothedTwist, sineTwist);
+
+	// Compute twist-derived params
+	auto twistParams = computeSineShaperTwistParams(smoothedTwist, params);
+
+	// Process buffer (drive from local field, no subtractive boost for clips)
+	sineShapeBuffer(buffer, params->getDriveQ31(), &params->smoothedDrive, state, sineHarmonic, params->getMixQ31(),
+	                twistParams, params);
+}
+
+/**
+ * Process sine shaper mono buffer for voice path
+ */
+inline void processSineShaper(std::span<q31_t> buffer, SineTableShaperParams* params, SineShaperVoiceState* state,
+                              q31_t driveFinal, q31_t harmonicPreset, q31_t harmonicCables, q31_t twistPreset,
+                              q31_t twistCables, bool boostSubtractive = false) {
+	q31_t sineHarmonic = params->harmonic.combinePresetAndCables(harmonicPreset, harmonicCables);
+	q31_t sineTwist = params->twist.combinePresetAndCables(twistPreset, twistCables);
+	q31_t smoothedTwist = smoothParam(&params->smoothedTwist, sineTwist);
+	auto twistParams = computeSineShaperTwistParams(smoothedTwist, params);
+	sineShapeBuffer(buffer, driveFinal, &params->smoothedDrive, state, sineHarmonic, params->getMixQ31(), twistParams,
+	                params, nullptr, boostSubtractive);
 }
 
 } // namespace deluge::dsp

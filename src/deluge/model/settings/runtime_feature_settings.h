@@ -67,8 +67,6 @@ enum RuntimeFeatureSettingType : uint32_t {
 	TrimFromStartOfAudioClip,
 	ShowBatteryLevel,
 	DynamicsSoundDesign,
-	DynamicsFineGoldKnobCharacter,
-	DynamicsFineGoldKnobVibe,
 	ModFXPostDOTT,
 	DOTTAnalyzer,
 	DisperserHiCPU,

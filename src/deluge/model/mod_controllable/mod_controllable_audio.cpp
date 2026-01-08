@@ -49,22 +49,6 @@ namespace params = deluge::modulation::params;
 
 extern int32_t spareRenderingBuffer[][SSI_TX_BUFFER_NUM_SAMPLES];
 
-/// Convert MIDI-like note code to frequency in Hz
-/// Note code 60 = middle C (C3) = ~130.81 Hz
-/// A4 (note 69) = 440 Hz
-[[gnu::always_inline]] inline float noteCodeToHz(int32_t noteCode) {
-	// Standard formula: Hz = 440 * 2^((noteCode - 69) / 12)
-	return 440.0f * std::pow(2.0f, (static_cast<float>(noteCode) - 69.0f) / 12.0f);
-}
-
-/// Convert Hz to 0-127 range for disperser (matching 1Hz-8kHz = 13 octaves)
-[[gnu::always_inline]] inline uint8_t hzToDisperserFreq(float hz) {
-	// Inverse of: centerHz = 1.0f * std::pow(2.0f, (freq / 127.0f) * 13.0f)
-	// freq = 127 * log2(hz) / 13
-	float octaves = std::log2(std::max(hz, 1.0f));
-	return static_cast<uint8_t>(std::clamp(octaves * 127.0f / 13.0f, 0.0f, 127.0f));
-}
-
 ModControllableAudio::ModControllableAudio() {
 
 	// Grain
@@ -126,18 +110,12 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	midi_knobs = other->midi_knobs; // Could fail if no RAM... not too big a concern
 	delay = other->delay;
 	stutterConfig = other->stutterConfig;
-	// Shaper
-	shaperDrive = other->shaperDrive;
-	shaperShapeX = other->shaperShapeX;
-	shaperShapeY = other->shaperShapeY;
-	shaperMix = other->shaperMix;
-	shaperPhase = other->shaperPhase;
-	if (shaperDrive || shaperMix) {
-		shaper.regenerateTable(shaperShapeX, shaperShapeY, shaperPhase);
+	// Shaper (all user params in shaper struct)
+	shaper = other->shaper;
+	if (shaper.isEnabled()) {
+		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.phase);
 	}
-	// Disperser
-	disperserFreq = other->disperserFreq;
-	disperserStages = other->disperserStages;
+	// Disperser (freq, stages, zones all inside disperser struct)
 	disperser = other->disperser;
 	// Multiband compressor state
 	multibandCompressor.setEnabledZone(other->multibandCompressor.getEnabledZone());
@@ -509,133 +487,29 @@ void ModControllableAudio::processSRRAndBitcrushing(deluge::dsp::StereoBuffer<q3
 	}
 }
 
-void ModControllableAudio::processDisperser(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager) {
+void ModControllableAudio::processDisperser(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager,
+                                            q31_t topoCables, q31_t twistCables) {
 	using namespace deluge::dsp;
+	using namespace deluge::modulation::params;
 
-	if (disperserStages > 0) {
-		using namespace deluge::modulation::params;
-
-		// Read zone values from unpatched params (like multiband compressor)
-		q31_t topoValue = 0;
-		q31_t twistValue = 0;
-		if (paramManager != nullptr && paramManager->containsAnyParamCollectionsIncludingExpression()) {
-			UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
-			if (unpatchedParams != nullptr) {
-				topoValue = unpatchedParams->getValue(UNPATCHED_DISPERSER_TOPO);
-				twistValue = unpatchedParams->getValue(UNPATCHED_DISPERSER_TWIST);
-			}
-		}
-
-		// Smooth zone params for DSP
-		constexpr q31_t smoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31);
-		disperser.smoothedTopo += (multiply_32x32_rshift32(topoValue - disperser.smoothedTopo, smoothingAlpha) << 1);
-		disperser.smoothedTwist += (multiply_32x32_rshift32(twistValue - disperser.smoothedTwist, smoothingAlpha) << 1);
-
-		// Compute twist phase offset for detuning/harmonicBlend (meta zones only)
-		// In twist zones 5-7, position rotates through topo's phi triangle patterns
-		constexpr q31_t kZoneWidth = ONE_Q31 / kDisperserNumZones;
-		constexpr q31_t kZone5 = kZoneWidth * 5;
-		float twistPhaseOffset = 0.0f;
-		if (disperser.smoothedTwist >= kZone5) {
-			float twistMetaPos =
-			    static_cast<float>(disperser.smoothedTwist - kZone5) / static_cast<float>(ONE_Q31 - kZone5);
-			twistPhaseOffset = twistMetaPos * 5.0f; // 5 cycles per full meta sweep (like sine shaper)
-		}
-
-		// Compute derived parameters from zones
-		DisperserTopoParams topoParams =
-		    computeDisperserTopoParams(disperser.smoothedTopo, &disperser, twistPhaseOffset);
-		DisperserTwistParams twistParams = computeDisperserTwistParams(disperser.smoothedTwist, &disperser);
-
-		// Reset filter state when crossing zone boundaries to avoid artifacts
-		if (disperser.lastTopoZone != topoParams.zone && disperser.lastTopoZone >= 0) {
-			disperserDsp.reset();
-		}
-		disperser.lastTopoZone = topoParams.zone;
-
-		// Topology-specific spread modulation
-		float spreadMod = 1.0f;
-		float lrSpreadOffset = twistParams.width; // Full range stereo spread
-
-		switch (topoParams.zone) {
-		case 0: // Cascade: classic disperser, param0 = spread
-			spreadMod = topoParams.param0;
-			break;
-
-		case 1: // PingPong: tighter spread for rhythmic effect, alternation via lrOffset
-			spreadMod = topoParams.param0 * 0.7f; // Reduced spread
-			lrSpreadOffset += topoParams.lrOffset * 0.3f;
-			break;
-
-		case 2: // Stereo: L/R frequency offset for width, param0 = spread, lrOffset = stereo amount
-			spreadMod = topoParams.param0;
-			lrSpreadOffset += topoParams.lrOffset; // Direct stereo spread
-			break;
-
-		case 3:                                   // Cross: cross-coupled, tighter for comb
-			spreadMod = topoParams.param0 * 0.5f; // Tighter spread for comb effect
-			break;
-
-		case 4: // Pitch: placeholder - would track pitch, for now acts like tight comb
-			spreadMod = topoParams.param0 * 0.3f; // Very tight for harmonic effect
-			break;
-
-		case 5:                                          // Nested: wider spread for diffusion
-			spreadMod = 0.3f + topoParams.param0 * 0.7f; // Always some spread
-			break;
-
-		case 6: // Diffuse: randomized feel via param variations
-			spreadMod = topoParams.param0;
-			break;
-
-		case 7:                                          // Spring: chirp character
-			spreadMod = 0.2f + topoParams.param0 * 0.5f; // Moderate spread
-			break;
-		}
-
-		q31_t dispSpread = static_cast<q31_t>(std::clamp(spreadMod, 0.0f, 1.0f) * ONE_Q31);
-
-		// Pitch tracking: try to get note frequency from Sound, use freq knob as offset
-		// Note: drums use kNoteForDrum=60, so they track to ~261Hz with offset from there
-		uint8_t effectiveFreq = disperserFreq;
-		int32_t noteCode = getLastNoteCode();
-		if (noteCode >= 0 && noteCode < 128) {
-			// Got a valid note - use it as base frequency
-			float noteHz = noteCodeToHz(noteCode);
-
-			// Freq knob becomes bipolar offset: 64=center (no offset), 0=-6.5 octaves, 127=+6.5 octaves
-			float offsetOctaves = (static_cast<float>(disperserFreq) - 64.0f) / 64.0f * 6.5f;
-			float offsetHz = noteHz * std::pow(2.0f, offsetOctaves);
-			effectiveFreq = hzToDisperserFreq(offsetHz);
-		}
-		// else: no pitch info (clips/samples), use freq knob as absolute frequency
-
-		// Convert freq to q31
-		q31_t dispFreq = static_cast<q31_t>(effectiveFreq) << 24;
-
-		// Bimodal separation: topoParams.param0 in Bimodal zone (2), else 0
-		float bimodalSeparation = (topoParams.zone == 2) ? topoParams.param0 : 0.0f;
-
-		// Update coefficients with smoothing (lrOffset creates stereo width, Q from topo zone)
-		// Pass active stage count, spread curve, Q tilt, bimodal separation, detuning, and emphasis
-		// Detuning/emphasis now come from topo (with twist meta position rotating through patterns)
-		disperserDsp.updateCoefficientsSmoothed(dispFreq, dispSpread, &disperserFreqLast, &disperserSpreadLast,
-		                                        lrSpreadOffset, topoParams.q, disperserStages, twistParams.spreadCurve,
-		                                        twistParams.qTilt, bimodalSeparation, topoParams.detuning,
-		                                        topoParams.emphasis);
-
-		// Cross mix amount for Cross topology (zone 3)
-		float crossMix = (topoParams.zone == 3) ? (0.3f + topoParams.param0 * 0.5f) : 0.0f;
-
-		// Delay time comes from freq knob (via stage offsets), doubled for longer echo
-		size_t centerStage = disperserStages / 2;
-		size_t delaySamples = disperserDsp.getStageOffset(centerStage) * 2;
-
-		// Unified processing: topology routing + optional punch/chirp feedback
-		// When punch=0 and chirp=0, this is pure topology routing (no delay access)
-		disperserDsp.processBuffer(buffer, disperserStages, disperser.delay, twistParams.punch, twistParams.chirpAmount,
-		                           delaySamples, topoParams.harmonicBlend, topoParams.zone, crossMix);
+	if (!disperser.isEnabled()) {
+		return;
 	}
+
+	// Get preset values from patched param set (for mod matrix support)
+	q31_t topoPreset = 0;
+	q31_t twistPreset = 0;
+	if (paramManager != nullptr && paramManager->containsAnyParamCollectionsIncludingExpression()) {
+		PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
+		if (patchedParams != nullptr) {
+			topoPreset = patchedParams->getValue(GLOBAL_DISPERSER_TOPO);
+			twistPreset = patchedParams->getValue(GLOBAL_DISPERSER_TWIST);
+		}
+	}
+
+	// Call encapsulated processing (handles param combination, smoothing, topology dispatch)
+	dsp::processDisperser(buffer, disperserDsp, disperser, topoPreset, topoCables, twistPreset, twistCables,
+	                      getLastNoteCode());
 }
 
 inline void ModControllableAudio::doEQ(bool doBass, bool doTreble, int32_t* inputL, int32_t* inputR, int32_t bassAmount,
@@ -680,71 +554,11 @@ void ModControllableAudio::writeAttributesToFile(Serializer& writer) {
 	if (clippingAmount) {
 		writer.writeAttribute("clippingAmount", clippingAmount);
 	}
-	// Sine shaper params (only write if non-default)
-	// Harmonic and Twist fields are base values; patched params add modulation
-	if (sineShaper.drive) {
-		writer.writeAttribute("sineShaperDrive", sineShaper.drive);
-	}
-	if (sineShaper.harmonic != 0) {
-		writer.writeAttribute("sineShaperHarmonicBase", sineShaper.harmonic);
-	}
-	if (sineShaper.twist != 0) {
-		writer.writeAttribute("sineShaperTwistBase", sineShaper.twist);
-	}
-	if (sineShaper.mix) {
-		writer.writeAttribute("sineShaperMix", sineShaper.mix);
-	}
-	// Meta zone phase offsets (stored as int, scaled by 10)
-	if (sineShaper.metaPhase != 0.0f) {
-		writer.writeAttribute("sineShaperMetaPhase", static_cast<int32_t>(sineShaper.metaPhase * 10.0f));
-	}
-	if (sineShaper.metaPhaseHarmonic != 0.0f) {
-		writer.writeAttribute("sineShaperMetaPhaseH", static_cast<int32_t>(sineShaper.metaPhaseHarmonic * 10.0f));
-	}
-	if (sineShaper.gammaPhase != 0.0f) {
-		writer.writeAttribute("sineShaperGamma", static_cast<int32_t>(sineShaper.gammaPhase * 10.0f));
-	}
-	// Shaper params (only write if non-default)
-	if (shaperDrive) {
-		writer.writeAttribute("shaperDrive", shaperDrive);
-	}
-	if (shaperShapeX) {
-		writer.writeAttribute("shaperShapeX", shaperShapeX);
-	}
-	if (shaperShapeY) {
-		writer.writeAttribute("shaperShapeY", shaperShapeY);
-	}
-	if (shaperMix) {
-		writer.writeAttribute("shaperMix", shaperMix);
-	}
-	if (shaperPhase != 0.0f) {
-		writer.writeAttribute("shaperPhase", static_cast<int32_t>(shaperPhase * 10.0f));
-	}
-	// Disperser params (only write if non-default)
-	if (disperserFreq != 64) {
-		writer.writeAttribute("disperserFreq", disperserFreq);
-	}
-	if (disperserStages) {
-		writer.writeAttribute("disperserStages", disperserStages);
-	}
-	// Note: disperser topo/twist are saved via patched params, not here
-	// Secret phases (write as int*10 for precision)
-	if (disperser.phases.metaPhaseTopo != 0.0f) {
-		writer.writeAttribute("disperserPhaseTopo", static_cast<int32_t>(disperser.phases.metaPhaseTopo * 10.0f));
-	}
-	if (disperser.phases.metaPhase != 0.0f) {
-		writer.writeAttribute("disperserPhase", static_cast<int32_t>(disperser.phases.metaPhase * 10.0f));
-	}
-	if (disperser.phases.gammaPhase != 0.0f) {
-		writer.writeAttribute("disperserGamma", static_cast<int32_t>(disperser.phases.gammaPhase * 10.0f));
-	}
-	// Multiband compressor state (only write if enabled or non-default crossover type)
-	if (multibandCompressor.isEnabled()) {
-		writer.writeAttribute("mbEnabled", 1);
-	}
-	if (multibandCompressor.getCrossoverType() != 2) { // 2 = LR2 (default)
-		writer.writeAttribute("mbCrossoverType", multibandCompressor.getCrossoverType());
-	}
+	// New FX params with encapsulated serialization
+	sineShaper.writeToFile(writer);
+	shaper.writeToFile(writer);
+	disperser.writeToFile(writer);
+	multibandCompressor.writeToFile(writer);
 }
 
 void ModControllableAudio::writeTagsToFile(Serializer& writer) {
@@ -810,34 +624,6 @@ void ModControllableAudio::writeTagsToFile(Serializer& writer) {
 	writer.writeAttribute("compHPF", compressor.getSidechain());
 	writer.writeAttribute("compBlend", compressor.getBlend().raw());
 	writer.closeTag();
-
-	// Multiband compressor per-band offsets (only write if non-zero to save space)
-	for (size_t i = 0; i < 3; ++i) {
-		q31_t thresholdOffset = multibandCompressor.getThresholdOffset(i);
-		q31_t ratioOffset = multibandCompressor.getRatioOffset(i);
-		q31_t bandwidthOffset = multibandCompressor.getBandwidthOffset(i);
-
-		if (thresholdOffset != 0) {
-			char attrName[32];
-			snprintf(attrName, sizeof(attrName), "mbThresholdOffset%zu", i);
-			writer.writeAttributeHex(attrName, thresholdOffset, 8);
-		}
-		if (ratioOffset != 0) {
-			char attrName[32];
-			snprintf(attrName, sizeof(attrName), "mbRatioOffset%zu", i);
-			writer.writeAttributeHex(attrName, ratioOffset, 8);
-		}
-		if (bandwidthOffset != 0) {
-			char attrName[32];
-			snprintf(attrName, sizeof(attrName), "mbBandwidthOffset%zu", i);
-			writer.writeAttributeHex(attrName, bandwidthOffset, 8);
-		}
-	}
-	// Vibe twist phase (secret menu param, scaled by 10 like sine shaper)
-	float vibeTwistPhase = multibandCompressor.getVibeTwistPhase();
-	if (vibeTwistPhase != 0.0f) {
-		writer.writeAttribute("mbVibeTwistPhase", static_cast<int32_t>(vibeTwistPhase * 10.0f));
-	}
 
 	// Stutter
 	writer.writeOpeningTagBeginning("stutter");
@@ -1203,133 +989,21 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 		clippingAmount = reader.readTagOrAttributeValueInt();
 		reader.exitTag("clippingAmount");
 	}
-	else if (!strcmp(tagName, "sineShaperDrive")) {
-		sineShaper.drive = reader.readTagOrAttributeValueInt();
-		reader.exitTag("sineShaperDrive");
+	// New FX params with encapsulated deserialization
+	else if (sineShaper.readTag(reader, tagName)) {
+		// Tag handled by sineShaper
 	}
-	else if (!strcmp(tagName, "sineShaperHarmonicBase")) {
-		sineShaper.harmonic = reader.readTagOrAttributeValueInt();
-		reader.exitTag("sineShaperHarmonicBase");
+	else if (shaper.readTag(reader, tagName)) {
+		// Regenerate table after any shaper param change
+		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.phase);
 	}
-	else if (!strcmp(tagName, "sineShaperTwistBase")) {
-		sineShaper.twist = reader.readTagOrAttributeValueInt();
-		reader.exitTag("sineShaperTwistBase");
-	}
-	else if (!strcmp(tagName, "sineShaperMix")) {
-		sineShaper.mix = reader.readTagOrAttributeValueInt();
-		reader.exitTag("sineShaperMix");
-	}
-	else if (!strcmp(tagName, "sineShaperMetaPhase")) {
-		sineShaper.metaPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
-		reader.exitTag("sineShaperMetaPhase");
-	}
-	else if (!strcmp(tagName, "sineShaperMetaPhaseH")) {
-		sineShaper.metaPhaseHarmonic = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
-		reader.exitTag("sineShaperMetaPhaseH");
-	}
-	else if (!strcmp(tagName, "sineShaperGamma")) {
-		sineShaper.gammaPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
-		reader.exitTag("sineShaperGamma");
-	}
-	// Shaper params
-	else if (!strcmp(tagName, "shaperDrive")) {
-		shaperDrive = reader.readTagOrAttributeValueInt();
-		shaper.regenerateTable(shaperShapeX, shaperShapeY, shaperPhase);
-		reader.exitTag("shaperDrive");
-	}
-	else if (!strcmp(tagName, "shaperShapeX")) {
-		shaperShapeX = reader.readTagOrAttributeValueInt();
-		shaper.regenerateTable(shaperShapeX, shaperShapeY, shaperPhase);
-		reader.exitTag("shaperShapeX");
-	}
-	else if (!strcmp(tagName, "shaperShapeY")) {
-		shaperShapeY = reader.readTagOrAttributeValueInt();
-		shaper.regenerateTable(shaperShapeX, shaperShapeY, shaperPhase);
-		reader.exitTag("shaperShapeY");
-	}
-	else if (!strcmp(tagName, "shaperMix")) {
-		shaperMix = reader.readTagOrAttributeValueInt();
-		reader.exitTag("shaperMix");
-	}
-	else if (!strcmp(tagName, "shaperPhase")) {
-		shaperPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
-		shaper.regenerateTable(shaperShapeX, shaperShapeY, shaperPhase);
-		reader.exitTag("shaperPhase");
-	}
-	// Disperser params
-	else if (!strcmp(tagName, "disperserFreq")) {
-		disperserFreq = reader.readTagOrAttributeValueInt();
-		reader.exitTag("disperserFreq");
-	}
-	else if (!strcmp(tagName, "disperserStages")) {
-		disperserStages = reader.readTagOrAttributeValueInt();
-		reader.exitTag("disperserStages");
-	}
-	// Secret phases
-	else if (!strcmp(tagName, "disperserPhaseTopo")) {
-		disperser.phases.metaPhaseTopo = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
-		reader.exitTag("disperserPhaseTopo");
-	}
-	else if (!strcmp(tagName, "disperserPhase")) {
-		disperser.phases.metaPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
-		reader.exitTag("disperserPhase");
-	}
-	else if (!strcmp(tagName, "disperserGamma")) {
-		disperser.phases.gammaPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f;
-		reader.exitTag("disperserGamma");
+	else if (disperser.readTag(reader, tagName)) {
+		// Tag handled by disperser
 	}
 	// Legacy: disperserSpread and disperserFeedback are ignored (replaced by zones)
 	// Multiband compressor state
-	else if (!strcmp(tagName, "mbEnabled")) {
-		int32_t enabled = reader.readTagOrAttributeValueInt();
-		multibandCompressor.setEnabledZone(enabled ? ONE_Q31 : 0);
-		reader.exitTag("mbEnabled");
-	}
-	else if (!strcmp(tagName, "mbCrossoverType")) {
-		multibandCompressor.setCrossoverType(reader.readTagOrAttributeValueInt());
-		reader.exitTag("mbCrossoverType");
-	}
-
-	// Per-band offsets for multiband compressor
-	else if (!strcmp(tagName, "mbThresholdOffset0")) {
-		multibandCompressor.setThresholdOffset(0, reader.readTagOrAttributeValueHex(0));
-		reader.exitTag("mbThresholdOffset0");
-	}
-	else if (!strcmp(tagName, "mbThresholdOffset1")) {
-		multibandCompressor.setThresholdOffset(1, reader.readTagOrAttributeValueHex(0));
-		reader.exitTag("mbThresholdOffset1");
-	}
-	else if (!strcmp(tagName, "mbThresholdOffset2")) {
-		multibandCompressor.setThresholdOffset(2, reader.readTagOrAttributeValueHex(0));
-		reader.exitTag("mbThresholdOffset2");
-	}
-	else if (!strcmp(tagName, "mbRatioOffset0")) {
-		multibandCompressor.setRatioOffset(0, reader.readTagOrAttributeValueHex(0));
-		reader.exitTag("mbRatioOffset0");
-	}
-	else if (!strcmp(tagName, "mbRatioOffset1")) {
-		multibandCompressor.setRatioOffset(1, reader.readTagOrAttributeValueHex(0));
-		reader.exitTag("mbRatioOffset1");
-	}
-	else if (!strcmp(tagName, "mbRatioOffset2")) {
-		multibandCompressor.setRatioOffset(2, reader.readTagOrAttributeValueHex(0));
-		reader.exitTag("mbRatioOffset2");
-	}
-	else if (!strcmp(tagName, "mbBandwidthOffset0")) {
-		multibandCompressor.setBandwidthOffset(0, reader.readTagOrAttributeValueHex(0));
-		reader.exitTag("mbBandwidthOffset0");
-	}
-	else if (!strcmp(tagName, "mbBandwidthOffset1")) {
-		multibandCompressor.setBandwidthOffset(1, reader.readTagOrAttributeValueHex(0));
-		reader.exitTag("mbBandwidthOffset1");
-	}
-	else if (!strcmp(tagName, "mbBandwidthOffset2")) {
-		multibandCompressor.setBandwidthOffset(2, reader.readTagOrAttributeValueHex(0));
-		reader.exitTag("mbBandwidthOffset2");
-	}
-	else if (!strcmp(tagName, "mbVibeTwistPhase")) {
-		multibandCompressor.setVibeTwistPhase(static_cast<float>(reader.readTagOrAttributeValueInt()) * 0.1f);
-		reader.exitTag("mbVibeTwistPhase");
+	else if (multibandCompressor.readTag(reader, tagName)) {
+		// Tag handled by multibandCompressor
 	}
 
 	// Arpeggiator

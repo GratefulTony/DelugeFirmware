@@ -22,15 +22,12 @@ namespace deluge::gui::menu_item::runtime_feature {
 
 // Menu items for the submenu
 static SettingToggle menuDynamicsEnabled(RuntimeFeatureSettingType::DynamicsSoundDesign);
-static SettingToggle menuDynamicsFineGoldKnobCharacter(RuntimeFeatureSettingType::DynamicsFineGoldKnobCharacter);
-static SettingToggle menuDynamicsFineGoldKnobVibe(RuntimeFeatureSettingType::DynamicsFineGoldKnobVibe);
 static SettingToggle menuDOTTAnalyzer(RuntimeFeatureSettingType::DOTTAnalyzer);
 static SettingToggle menuDisperserHiCPU(RuntimeFeatureSettingType::DisperserHiCPU);
 
 DynamicsSoundDesignMenu::DynamicsSoundDesignMenu()
     : Submenu(l10n::String::STRING_FOR_COMMUNITY_FEATURE_DYNAMICS_SOUND_DESIGN,
-              {&menuDynamicsEnabled, &menuDynamicsFineGoldKnobCharacter, &menuDynamicsFineGoldKnobVibe,
-               &menuDOTTAnalyzer, &menuDisperserHiCPU}) {
+              {&menuDynamicsEnabled, &menuDOTTAnalyzer, &menuDisperserHiCPU}) {
 }
 
 std::string_view DynamicsSoundDesignMenu::getTitle() const {

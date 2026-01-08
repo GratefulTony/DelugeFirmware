@@ -74,6 +74,7 @@ enum Local : ParamType {
 	LOCAL_MODULATOR_0_VOLUME,
 	LOCAL_MODULATOR_1_VOLUME,
 	LOCAL_FOLD,
+	LOCAL_SHAPER_MIX,
 
 	// Local non-volume params begin
 	FIRST_LOCAL_NON_VOLUME,
@@ -153,12 +154,13 @@ enum Global : ParamType {
 	// param, make sure you undo that!
 	FIRST_GLOBAL_HYBRID,
 
-	// Global zone params begin
-	// There are no global zone params (disperser uses unpatched), so FIRST_GLOBAL_EXP is set to the same value.
+	// Global zone params begin (pure modulation pass-through, scaling handled by ZoneBasedParam)
 	FIRST_GLOBAL_ZONE = FIRST_GLOBAL_HYBRID,
+	GLOBAL_DISPERSER_TOPO = FIRST_GLOBAL_ZONE, // Disperser topology zone (clips to boundaries)
+	GLOBAL_DISPERSER_TWIST,                    // Disperser character zone (allows cross-zone)
 
 	// Global exp params begin
-	FIRST_GLOBAL_EXP = FIRST_GLOBAL_ZONE,
+	FIRST_GLOBAL_EXP,
 	GLOBAL_DELAY_RATE = FIRST_GLOBAL_EXP,
 	GLOBAL_MOD_FX_RATE,
 	GLOBAL_LFO_FREQ_1,
@@ -293,25 +295,68 @@ constexpr ParamType kUnpatchedAndPatchedMaximum = kMaxNumUnpatchedParams + UNPAT
 
 static_assert(kMaxNumUnpatchedParams < STATIC_START, "Error: Too many UNPATCHED parameters, (collision with STATIC)");
 
+// ============================================================================
+// Zone-based parameter configuration
+// ============================================================================
+
+/// Configuration for zone-based parameters
+struct ZoneParamInfo {
+	int32_t zoneCount;
+	int32_t resolution; // Encoder steps: 1024 for zone params, 128 standard
+};
+
+/// Default configuration for zone-based params
+constexpr ZoneParamInfo kZoneParamDefault{8, 1024};
+/// Default configuration for non-zone params
+constexpr ZoneParamInfo kStandardParamDefault{1, 128};
+
+/// Get zone configuration for a patched param (constexpr for compile-time use in templates)
+constexpr ZoneParamInfo getZoneParamInfo(ParamType param) {
+	switch (param) {
+	case LOCAL_SINE_SHAPER_HARMONIC:
+	case LOCAL_SINE_SHAPER_TWIST:
+	case GLOBAL_DISPERSER_TOPO:
+	case GLOBAL_DISPERSER_TWIST:
+		return kZoneParamDefault;
+	default:
+		return kStandardParamDefault;
+	}
+}
+
+/// Get zone configuration for an unpatched param
+constexpr ZoneParamInfo getZoneParamInfo(UnpatchedShared param) {
+	switch (param) {
+	case UNPATCHED_SINE_SHAPER_HARMONIC:
+	case UNPATCHED_SINE_SHAPER_TWIST:
+	case UNPATCHED_DISPERSER_TOPO:
+	case UNPATCHED_DISPERSER_TWIST:
+	case UNPATCHED_MB_COMPRESSOR_CHARACTER:
+	case UNPATCHED_MB_COMPRESSOR_VIBE:
+		return kZoneParamDefault;
+	default:
+		return kStandardParamDefault;
+	}
+}
+
+/// Get zone configuration by Kind + paramID (for runtime dispatch)
+inline ZoneParamInfo getZoneParamInfo(Kind kind, int32_t paramID) {
+	if (kind == Kind::UNPATCHED_SOUND || kind == Kind::UNPATCHED_GLOBAL) {
+		return getZoneParamInfo(static_cast<UnpatchedShared>(paramID));
+	}
+	if (kind == Kind::PATCHED) {
+		return getZoneParamInfo(static_cast<ParamType>(paramID));
+	}
+	return {1, 128};
+}
+
 bool isParamBipolar(Kind kind, int32_t paramID);
 bool isParamPan(Kind kind, int32_t paramID);
 bool isParamPitch(Kind kind, int32_t paramID);
 bool isParamPitchBend(Kind kind, int32_t paramID);
 bool isParamHybridDrive(Kind kind, int32_t paramID);
-/// Returns zone count for zone-based params (e.g., 8 for sine shaper TWIST/HARMONIC)
-/// Returns 0 for non-zone-based params. Used by patcher for modulation scaling.
-int32_t getParamZoneCount(Kind kind, int32_t paramID);
-/// Returns true if modulation should be clipped to zone boundaries (no cross-zone modulation)
-/// Useful when different zones have fundamentally different algorithms (e.g., Harmonic)
-bool shouldClipModToZoneBoundary(Kind kind, int32_t paramID);
 bool isParamArpRhythm(Kind kind, int32_t paramID);
 bool isParamStutter(Kind kind, int32_t paramID);
 bool isParamQuantizedStutter(Kind kind, int32_t paramID, ModControllableAudio* modControllableAudio);
-
-/// Returns the number of zones for zone-based parameters (e.g., CHARACTER=8, VIBE=8)
-/// Returns 1 for non-zone-based parameters (no scaling needed)
-/// Used by gold knob handling to scale movements for finer control within zones
-int32_t getGoldKnobZoneCount(Kind kind, int32_t paramID);
 
 bool isVibratoPatchCableShortcut(int32_t xDisplay, int32_t yDisplay);
 bool isSidechainPatchCableShortcut(int32_t xDisplay, int32_t yDisplay);

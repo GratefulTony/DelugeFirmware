@@ -425,12 +425,14 @@ static bool isMultibandCompressorParam(int32_t paramId) {
 
 // Helper to check if an unpatched param is a high-resolution zone-based param (unipolar, 1024-step)
 static bool isHighResZoneParam(int32_t paramId) {
-	return paramId == params::UNPATCHED_SINE_SHAPER_HARMONIC || paramId == params::UNPATCHED_SINE_SHAPER_TWIST;
+	return paramId == params::UNPATCHED_SINE_SHAPER_HARMONIC || paramId == params::UNPATCHED_SINE_SHAPER_TWIST
+	       || paramId == params::UNPATCHED_DISPERSER_TOPO || paramId == params::UNPATCHED_DISPERSER_TWIST;
 }
 
 // Helper to check if a patched param is a high-resolution zone-based param (unipolar, 1024-step)
 static bool isPatchedHighResZoneParam(int32_t paramId) {
-	return paramId == params::LOCAL_SINE_SHAPER_TWIST || paramId == params::LOCAL_SINE_SHAPER_HARMONIC;
+	return paramId == params::LOCAL_SINE_SHAPER_TWIST || paramId == params::LOCAL_SINE_SHAPER_HARMONIC
+	       || paramId == params::GLOBAL_DISPERSER_TOPO || paramId == params::GLOBAL_DISPERSER_TWIST;
 }
 
 int32_t UnpatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWithAutoParam* modelStack) {
@@ -540,7 +542,7 @@ void PatchedParamSet::notifyParamModifiedInSomeWay(ModelStackWithAutoParam const
 int32_t PatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWithAutoParam* modelStack) {
 	if (modelStack
 	    && (modelStack->paramId == params::LOCAL_OSC_A_PHASE_WIDTH
-	        || modelStack->paramId == params::LOCAL_OSC_B_PHASE_WIDTH
+	        || modelStack->paramId == params::LOCAL_OSC_B_PHASE_WIDTH || modelStack->paramId == params::LOCAL_SHAPER_MIX
 	        || isPatchedHighResZoneParam(modelStack->paramId))) {
 		// Unipolar params: map 0..INT32_MAX to knobPos -64..+64
 		if (paramValue == 2147483647) {
@@ -561,7 +563,7 @@ int32_t PatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWithA
 int32_t PatchedParamSet::knobPosToParamValue(int32_t knobPos, ModelStackWithAutoParam* modelStack) {
 	if (modelStack
 	    && (modelStack->paramId == params::LOCAL_OSC_A_PHASE_WIDTH
-	        || modelStack->paramId == params::LOCAL_OSC_B_PHASE_WIDTH
+	        || modelStack->paramId == params::LOCAL_OSC_B_PHASE_WIDTH || modelStack->paramId == params::LOCAL_SHAPER_MIX
 	        || isPatchedHighResZoneParam(modelStack->paramId))) {
 		// Unipolar params: map knobPos -64..+64 to 0..INT32_MAX
 		if (knobPos >= 64) {

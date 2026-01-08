@@ -20,8 +20,8 @@
 #include "gui/menu_item/automation/automation.h"
 #include "gui/menu_item/decimal.h"
 #include "gui/menu_item/menu_item_with_cc_learning.h"
-#include "gui/menu_item/momentum_encoder.h" // VelocityEncoder and zone render helpers
 #include "gui/menu_item/source_selection/regular.h"
+#include "gui/menu_item/velocity_encoder.h" // VelocityEncoder and zone render helpers
 #include "gui/ui/sound_editor.h"
 #include "hid/buttons.h"
 #include "hid/display/display.h"
@@ -38,32 +38,54 @@ namespace deluge::gui::menu_item {
 // Re-export ZoneBasedParam from dsp namespace for convenience
 using dsp::ZoneBasedParam;
 
-// High resolution constants for zone-based menus (1024 steps)
-constexpr int32_t kZoneHighResSteps = 1024;
-constexpr int32_t kZoneHighResShift = 21; // 31 - 10 = 21 (2^10 = 1024)
-
-/// Convert q31 param value to menu value (0-1024)
-inline int32_t zoneParamToMenuValue(q31_t value) {
-	constexpr q31_t kOverflowThreshold = 2147483647 - (1 << 20); // INT32_MAX - rounding term
-	if (value > kOverflowThreshold) {
-		return kZoneHighResSteps;
+/// Compute bit shift for resolution (31 - log2(resolution))
+/// Only valid for power-of-2 resolutions
+constexpr int32_t resolutionToShift(int32_t resolution) {
+	// Count trailing zeros to get log2
+	int32_t shift = 31;
+	while (resolution > 1) {
+		resolution >>= 1;
+		shift--;
 	}
-	return (value + (1 << 20)) >> kZoneHighResShift;
+	return shift;
 }
 
-/// Convert menu value (0-1024) to q31 param value
-inline q31_t zoneMenuValueToParam(int32_t menuValue) {
-	if (menuValue >= kZoneHighResSteps) {
+/// Convert q31 param value to menu value with given resolution
+template <int32_t RESOLUTION>
+inline int32_t paramToMenuValue(q31_t value) {
+	constexpr int32_t kShift = resolutionToShift(RESOLUTION);
+	constexpr q31_t kRounding = 1 << (kShift - 1);
+	constexpr q31_t kOverflowThreshold = 2147483647 - kRounding;
+	if (value > kOverflowThreshold) {
+		return RESOLUTION;
+	}
+	return (value + kRounding) >> kShift;
+}
+
+/// Convert menu value to q31 param value with given resolution
+template <int32_t RESOLUTION>
+inline q31_t menuValueToParam(int32_t menuValue) {
+	constexpr int32_t kShift = resolutionToShift(RESOLUTION);
+	if (menuValue >= RESOLUTION) {
 		return 2147483647; // INT32_MAX
 	}
-	return menuValue << kZoneHighResShift;
+	return menuValue << kShift;
+}
+
+// Legacy aliases for 1024-step resolution (used by existing code)
+constexpr int32_t kZoneHighResSteps = 1024;
+inline int32_t zoneParamToMenuValue(q31_t value) {
+	return paramToMenuValue<1024>(value);
+}
+inline q31_t zoneMenuValueToParam(int32_t menuValue) {
+	return menuValueToParam<1024>(menuValue);
 }
 
 /**
  * Base class for zone-based high-resolution menu items
  *
  * Provides:
- * - 1024 resolution with velocity-sensitive encoder
+ * - Configurable resolution with velocity-sensitive encoder
  * - Zone name rendering (OLED and horizontal menu)
  * - Common display value scaling (0-50)
  *
@@ -73,8 +95,9 @@ inline q31_t zoneMenuValueToParam(int32_t menuValue) {
  * - isRelevant() if gating is needed
  *
  * @tparam NUM_ZONES Number of zones (typically 8)
+ * @tparam RESOLUTION Encoder steps (typically 1024 for zone params)
  */
-template <int32_t NUM_ZONES = 8>
+template <int32_t NUM_ZONES = 8, int32_t RESOLUTION = 1024>
 class ZoneBasedMenuItem : public DecimalWithoutScrolling {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
@@ -85,13 +108,13 @@ public:
 	/// Override to provide 2-char abbreviation for 7-segment display (default: first 2 chars of zone name)
 	[[nodiscard]] virtual const char* getShortZoneName(int32_t zoneIndex) const { return getZoneName(zoneIndex); }
 
-	[[nodiscard]] int32_t getMaxValue() const override { return kZoneHighResSteps; }
+	[[nodiscard]] int32_t getMaxValue() const override { return RESOLUTION; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
 	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
-	// Scale 0-1024 to 0-50 for display (matches gold knob popup range)
-	[[nodiscard]] float getDisplayValue() override { return (this->getValue() * 50.0f) / kZoneHighResSteps; }
+	// Scale to 0-50 for display (matches gold knob popup range)
+	[[nodiscard]] float getDisplayValue() override { return (this->getValue() * 50.0f) / RESOLUTION; }
 
 	void selectEncoderAction(int32_t offset) override {
 		DecimalWithoutScrolling::selectEncoderAction(velocity_.getScaledOffset(offset));
@@ -99,19 +122,18 @@ public:
 
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
 		// Capture 'this' to call virtual getZoneName
-		renderZoneInHorizontalMenu(slot, this->getValue(), kZoneHighResSteps, NUM_ZONES,
+		renderZoneInHorizontalMenu(slot, this->getValue(), RESOLUTION, NUM_ZONES,
 		                           [this](int32_t z) { return this->getZoneName(z); });
 	}
 
 protected:
 	void drawPixelsForOled() override {
-		drawZoneForOled(this->getValue(), kZoneHighResSteps, NUM_ZONES,
-		                [this](int32_t z) { return this->getZoneName(z); });
+		drawZoneForOled(this->getValue(), RESOLUTION, NUM_ZONES, [this](int32_t z) { return this->getZoneName(z); });
 	}
 
 	// 7-segment: show zone abbreviation + position (e.g., "SY50" for Sync at 50%)
 	void drawActualValue(bool justDidHorizontalScroll = false) override {
-		int32_t zoneWidth = kZoneHighResSteps / NUM_ZONES;
+		int32_t zoneWidth = RESOLUTION / NUM_ZONES;
 		int32_t zoneIndex = std::min(this->getValue() / zoneWidth, NUM_ZONES - 1);
 		int32_t posInZone = this->getValue() - (zoneIndex * zoneWidth);
 		int32_t posPercent = (posInZone * 99) / zoneWidth; // 0-99
@@ -137,20 +159,24 @@ protected:
  * Provides CC learning and reads/writes via UnpatchedParamSet.
  *
  * @tparam PARAM_ID The UnpatchedShared param ID
- * @tparam NUM_ZONES Number of zones (typically 8)
+ * @tparam NUM_ZONES Number of zones (derived from PARAM_ID via getZoneParamInfo)
+ * @tparam RESOLUTION Encoder steps (derived from PARAM_ID via getZoneParamInfo)
  */
-template <params::UnpatchedShared PARAM_ID, int32_t NUM_ZONES = 8>
-class ZoneBasedUnpatchedParam : public ZoneBasedMenuItem<NUM_ZONES>, public MenuItemWithCCLearning, public Automation {
+template <params::UnpatchedShared PARAM_ID, int32_t NUM_ZONES = params::getZoneParamInfo(PARAM_ID).zoneCount,
+          int32_t RESOLUTION = params::getZoneParamInfo(PARAM_ID).resolution>
+class ZoneBasedUnpatchedParam : public ZoneBasedMenuItem<NUM_ZONES, RESOLUTION>,
+                                public MenuItemWithCCLearning,
+                                public Automation {
 public:
-	using ZoneBasedMenuItem<NUM_ZONES>::ZoneBasedMenuItem;
+	using ZoneBasedMenuItem<NUM_ZONES, RESOLUTION>::ZoneBasedMenuItem;
 
 	void readCurrentValue() override {
 		q31_t value = soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(PARAM_ID);
-		this->setValue(zoneParamToMenuValue(value));
+		this->setValue(paramToMenuValue<RESOLUTION>(value));
 	}
 
 	void writeCurrentValue() override {
-		q31_t value = zoneMenuValueToParam(this->getValue());
+		q31_t value = menuValueToParam<RESOLUTION>(this->getValue());
 		char modelStackMemory[MODEL_STACK_MAX_SIZE];
 		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(modelStackMemory);
 		ModelStackWithAutoParam* modelStackWithParam = modelStack->getUnpatchedAutoParamFromId(PARAM_ID);
@@ -198,7 +224,7 @@ public:
  * pure modulation (neutral = 0). DSP combines: field + scaledMod.
  *
  * Provides:
- * - Zone-based high-resolution display (1024 steps, 8 zones)
+ * - Zone-based display with configurable resolution
  * - Mod matrix routing via PatchedParam (press encoder to access sources)
  * - CC learning for the patched param
  *
@@ -207,9 +233,11 @@ public:
  * - getFieldValue() / setFieldValue() for the sound's field
  *
  * @tparam PARAM_ID The patched param ID for mod routing (LOCAL or GLOBAL zone param)
- * @tparam NUM_ZONES Number of zones (typically 8)
+ * @tparam NUM_ZONES Number of zones (derived from PARAM_ID via getZoneParamInfo)
+ * @tparam RESOLUTION Encoder steps (derived from PARAM_ID via getZoneParamInfo)
  */
-template <params::ParamType PARAM_ID, int32_t NUM_ZONES = 8>
+template <params::ParamType PARAM_ID, int32_t NUM_ZONES = params::getZoneParamInfo(PARAM_ID).zoneCount,
+          int32_t RESOLUTION = params::getZoneParamInfo(PARAM_ID).resolution>
 class ZoneBasedPatchedParam : public DecimalWithoutScrolling, public MenuItemWithCCLearning, public Automation {
 public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
@@ -228,20 +256,20 @@ public:
 	/// Default does nothing - override if you have a separate field to sync
 	virtual void setFieldValue([[maybe_unused]] q31_t value) {}
 
-	[[nodiscard]] int32_t getMaxValue() const override { return kZoneHighResSteps; }
+	[[nodiscard]] int32_t getMaxValue() const override { return RESOLUTION; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
 	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
-	// Scale 0-1024 to 0-50 for display (matches gold knob popup range)
-	[[nodiscard]] float getDisplayValue() override { return (this->getValue() * 50.0f) / kZoneHighResSteps; }
+	// Scale to 0-50 for display (matches gold knob popup range)
+	[[nodiscard]] float getDisplayValue() override { return (this->getValue() * 50.0f) / RESOLUTION; }
 
 	void selectEncoderAction(int32_t offset) override {
 		DecimalWithoutScrolling::selectEncoderAction(velocity_.getScaledOffset(offset));
 	}
 
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
-		renderZoneInHorizontalMenu(slot, this->getValue(), kZoneHighResSteps, NUM_ZONES,
+		renderZoneInHorizontalMenu(slot, this->getValue(), RESOLUTION, NUM_ZONES,
 		                           [this](int32_t z) { return this->getZoneName(z); });
 	}
 
@@ -277,12 +305,12 @@ public:
 	// Read from patched param preset (automation/gold knob modify this)
 	void readCurrentValue() override {
 		q31_t value = soundEditor.currentParamManager->getPatchedParamSet()->getValue(PARAM_ID);
-		this->setValue(zoneParamToMenuValue(value));
+		this->setValue(paramToMenuValue<RESOLUTION>(value));
 	}
 
 	// Write to patched param preset
 	void writeCurrentValue() override {
-		q31_t value = zoneMenuValueToParam(this->getValue());
+		q31_t value = menuValueToParam<RESOLUTION>(this->getValue());
 		char modelStackMemory[MODEL_STACK_MAX_SIZE];
 		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(modelStackMemory);
 		ModelStackWithAutoParam* modelStackWithParam = modelStack->getPatchedAutoParamFromId(PARAM_ID);
@@ -297,13 +325,12 @@ public:
 
 protected:
 	void drawPixelsForOled() override {
-		drawZoneForOled(this->getValue(), kZoneHighResSteps, NUM_ZONES,
-		                [this](int32_t z) { return this->getZoneName(z); });
+		drawZoneForOled(this->getValue(), RESOLUTION, NUM_ZONES, [this](int32_t z) { return this->getZoneName(z); });
 	}
 
 	// 7-segment: show zone abbreviation + position (e.g., "SY50" for Sync at 50%)
 	void drawActualValue(bool justDidHorizontalScroll = false) override {
-		int32_t zoneWidth = kZoneHighResSteps / NUM_ZONES;
+		int32_t zoneWidth = RESOLUTION / NUM_ZONES;
 		int32_t zoneIndex = std::min(this->getValue() / zoneWidth, NUM_ZONES - 1);
 		int32_t posInZone = this->getValue() - (zoneIndex * zoneWidth);
 		int32_t posPercent = (posInZone * 99) / zoneWidth; // 0-99

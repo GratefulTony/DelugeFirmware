@@ -844,14 +844,14 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 	params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
 
 	// Apply zone-based scaling for fine control within zones
-	int32_t numZones = params::getGoldKnobZoneCount(kind, modelStackWithParam->paramId);
+	int32_t numZones = params::getZoneParamInfo(kind, modelStackWithParam->paramId).zoneCount;
 	int32_t scaledOffset = offset;
 	int32_t value = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
 	int32_t knobPos;
 	int32_t newKnobPos;
 
 	if (numZones > 1) {
-		// High-resolution zone-based params: directly modify param value for 1024 steps
+		// High-resolution zone-based params: directly modify param value
 		// Reset accumulator if switching to a different param
 		if (modelStackWithParam->paramId != lastZoneScaleParamId || kind != lastZoneScaleParamKind) {
 			zoneScaleAccumulator = 0.0f;
@@ -859,17 +859,17 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 			lastZoneScaleParamKind = kind;
 		}
 
-		// Each encoder tick = 1/1024 of full range (128 steps × 8 zones)
+		// Resolution from ZoneParamInfo (e.g., 1024 = 128 steps × 8 zones)
 		// Full range is 0 to INT32_MAX for unipolar params
-		constexpr int32_t kHighResSteps = 1024;
-		constexpr int32_t kStepSize = 2147483647 / kHighResSteps; // ~2.1M per step
+		int32_t resolution = params::getZoneParamInfo(kind, modelStackWithParam->paramId).resolution;
+		int32_t stepSize = 2147483647 / resolution;
 
 		// Accumulate and apply integer steps
 		zoneScaleAccumulator += static_cast<float>(offset);
 		int32_t steps = static_cast<int32_t>(zoneScaleAccumulator);
 		zoneScaleAccumulator -= steps;
 
-		int32_t newValue = value + steps * kStepSize;
+		int32_t newValue = value + steps * stepSize;
 		newValue = std::clamp(newValue, 0_i32, INT32_MAX);
 
 		// Convert to knobPos for display purposes

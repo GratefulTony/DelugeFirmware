@@ -22,8 +22,10 @@
 #pragma once
 
 #include "dsp/fast_math.h"
+#include "dsp/phi_triangle.hpp"
 #include "dsp/util.hpp"
 #include "util/fixedpoint.h"
+#include "util/functions.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -123,7 +125,7 @@ public:
 		clamped.clamp();
 		if (clamped != params_) {
 			params_ = clamped;
-			regenerateTables(); // Immediate regeneration in UI thread
+			regenerateTables();
 		}
 	}
 
@@ -134,6 +136,7 @@ public:
 	/// Only checks drive (X axis) - threshold shouldn't cause bypass since user explicitly set X > 0
 	[[nodiscard]] bool isLinear() const { return params_.drive < 0.001f; }
 
+	// TODO: Remove float ADAA path - not used, int32 path is the intended signal path
 	/// Process a single sample with ADAA (uses internal state)
 	/// @param x Input sample in range [-1, 1]
 	/// @return Processed sample (peak-normalized)
@@ -305,6 +308,7 @@ public:
 		return std::clamp(result, -1.0f, 1.0f);
 	}
 
+	// TODO: Remove float processNoAA - not used, int32 path is the intended signal path
 	/// Process a single sample (direct table lookup, no ADAA)
 	/// Note: Uses same headroom as process() for consistent levels when toggling AA
 	[[gnu::always_inline]] float processNoAA(float x) {
@@ -319,21 +323,79 @@ public:
 		return lookupFunction(x) * normalizationGain_ * kHeadroom;
 	}
 
-	/// Process a single sample using integer-only path (no floats, like builtin)
-	/// @param input Input sample in uint32 format (0 = -1.0, 2^31 = 0, 2^32-1 = +1.0)
-	/// @return Output sample in int32 format (scaled for Q31 output after wrapper post-gain)
-	[[gnu::always_inline]] int32_t processNoAAInt32(uint32_t input) {
+	/// Process a single sample using integer-only path with Q16 mix parameter
+	/// @param input Input sample in raw signal format (e.g., ~23M for FM, ~1.4M for subtractive)
+	/// @param driveGain_Q30 Pre-computed drive gain in Q30 format
+	/// @param mixNorm_Q16 Normalized mix in Q16.16 (65536 = 1.0, 131072 = 2.0 full wet)
+	/// @return Output sample at same level as input (unity gain when undriven)
+	[[gnu::always_inline]] int32_t processInt32Q16(int32_t input, int32_t driveGain_Q30, int32_t mixNorm_Q16 = 131072) {
+		// Input drive knob = input gain (original behavior)
+		int32_t afterDrive = multiply_32x32_rshift32(input, driveGain_Q30) << 2;
+
 		// Fast path: bypass when linear (tables may be deallocated)
 		if (isLinear_) {
-			// Linear identity: convert uint32 to signed (unity gain)
-			// Input: 0 = -1.0, 2^31 = 0, 2^32-1 = +1.0
-			// Output: same range as table output [-2.15B, 2.15B]
-			return static_cast<int32_t>(input - 2147483648u);
+			return afterDrive;
 		}
-		// Table already has normalization + headroom baked in
-		// lookupFunctionInt returns int16 * 65536 = Q16.15 format
-		// Just return the lookup result - wrapper applies post-gain
-		return lookupFunctionInt(input);
+
+		// Scale to fill table range using bit shift (inputScale_ is power of 2, e.g. 128 = 2^7)
+		// Input is bounded by drive stage, so overflow not expected
+		int32_t scaledInput = afterDrive << inputScaleShift_;
+
+		// Amplitude-dependent blend using Q16 fixed-point
+		// absNorm_Q16: abs(scaledInput) >> 15 gives top 17 bits as Q16 [0, 65536]
+		int32_t absInput = scaledInput < 0 ? -scaledInput : scaledInput;
+		int32_t absNorm_Q16 = absInput >> 15; // Q31 to Q16.16
+
+		// threshold_Q16 = (1 - mixNorm) in Q16: 65536 - mixNorm_Q16
+		// Range: [-65536, 65536] for mixNorm in [0, 2]
+		constexpr int32_t kOne_Q16 = 65536;
+		int32_t threshold_Q16 = kOne_Q16 - mixNorm_Q16;
+
+		// diff_Q16 = absNorm - threshold, early exit if <= 0 (fully dry)
+		int32_t diff_Q16 = absNorm_Q16 - threshold_Q16;
+		if (diff_Q16 <= 0) {
+			return afterDrive;
+		}
+
+		// Fixed blend slope of 4 (shift instead of multiply)
+		// Ramps from 0 to 1.0 over 25% of amplitude range above threshold
+		int32_t blend_Q16 = diff_Q16 << 2;
+
+		// Fully wet when blend >= 1.0
+		if (blend_Q16 >= kOne_Q16) {
+			// Fully wet path
+			uint32_t tableInput = static_cast<uint32_t>(scaledInput) + 2147483648u;
+			int32_t lookup = lookupFunctionInt(tableInput);
+			return lookup >> inputScaleShift_;
+		}
+
+		// Table lookup for wet signal
+		uint32_t tableInput = static_cast<uint32_t>(scaledInput) + 2147483648u;
+		int32_t lookup = lookupFunctionInt(tableInput);
+		int32_t wet = lookup >> inputScaleShift_;
+
+		// Blend dry/wet using Q16: out = dry * (1-blend) + wet * blend
+		// Use multiply_32x32_rshift32 for efficiency (treats args as Q31, result Q31)
+		// Convert blend_Q16 to Q31: blend_Q31 = blend_Q16 << 15
+		int32_t blend_Q31 = blend_Q16 << 15;
+		int32_t oneMinusBlend_Q31 = (kOne_Q16 << 15) - blend_Q31;
+
+		// dry * (1-blend) + wet * blend, all in Q31 multiply then sum
+		int32_t dryPart = multiply_32x32_rshift32(afterDrive, oneMinusBlend_Q31) << 1;
+		int32_t wetPart = multiply_32x32_rshift32(wet, blend_Q31) << 1;
+		return dryPart + wetPart;
+	}
+
+	/// Process a single sample using integer-only path (legacy float interface)
+	/// Uses stored inputScale_/outputScale_ set via setExpectedPeak()
+	/// @param input Input sample in raw signal format (e.g., ~23M for FM, ~1.4M for subtractive)
+	/// @param driveGain_Q30 Pre-computed drive gain in Q30 format
+	/// @param mixNorm Normalized mix (0 = full dry, 2 = full wet), for amplitude-dependent blend
+	/// @return Output sample at same level as input (unity gain when undriven)
+	[[gnu::always_inline]] int32_t processInt32(int32_t input, int32_t driveGain_Q30, float mixNorm = 2.0f) {
+		// Convert float mixNorm to Q16 and call the integer version
+		int32_t mixNorm_Q16 = static_cast<int32_t>(mixNorm * 65536.0f);
+		return processInt32Q16(input, driveGain_Q30, mixNorm_Q16);
 	}
 
 	/// Reset ADAA state (call when starting a new audio stream)
@@ -395,7 +457,8 @@ private:
 
 		// Compute effective parameters
 		// Drive affects steepness (k) and threshold reduction
-		float k = 1.0f + params_.drive * 9.0f;                       // Steepness: 1 to 10
+		float drive = params_.drive;
+		float k = 1.0f + drive * 9.0f;                               // Steepness: 1 to 10
 		float T = params_.threshold * (1.0f - params_.drive * 0.8f); // Threshold shrinks with drive
 		T = std::fmax(T, 0.05f);                                     // Never fully zero
 
@@ -412,8 +475,9 @@ private:
 		float invWeightSum = (weightSum > 0.001f) ? (1.0f / weightSum) : 1.0f;
 		bool hasWeights = (weightSum >= 0.001f);
 
-		// Generate tables - track peak for normalization
-		float peakValue = 0.0f;
+		// Generate tables - track positive and negative peaks separately for asymmetric normalization
+		float peakPos = 0.0f; // Maximum positive value
+		float peakNeg = 0.0f; // Maximum negative value (stored as positive for easy comparison)
 		float dx = 2.0f / static_cast<float>(kTableSize);
 
 		for (size_t i = 0; i <= kTableSize; ++i) {
@@ -450,7 +514,7 @@ private:
 				// Classic tube-like saturation, pure odd harmonics
 				// Overdrive creates harder saturation
 				// =========================================================
-				float tanh_out = fastTanh(kEff * overdriven) * invTanhNorm;
+				float tanh_out = fastTanh(overdriven * kEff) * invTanhNorm;
 
 				// =========================================================
 				// BASIS 2: Polynomial soft clip (bright, edgy)
@@ -491,8 +555,8 @@ private:
 				// tanh(x/a)*sin(b*x)/y + tanh(x) with multiple folds
 				// Higher frequency sine for richer harmonics
 				// =========================================================
-				constexpr float kSineFoldA = 0.4f;                             // Tanh envelope softness
-				float sineFoldB = 3.14159265f * (1.0f + params_.drive * 1.0f); // 1-2 folds
+				constexpr float kSineFoldA = 0.4f;                     // Tanh envelope softness
+				float sineFoldB = 3.14159265f * (1.0f + drive * 1.0f); // 1-2 folds
 				float sineFold_raw =
 				    fastTanh(overdriven / kSineFoldA) * std::sin(sineFoldB * overdriven) + fastTanh(overdriven) * 0.3f;
 				float sineFold_out = std::fabs(sineFold_raw);
@@ -502,7 +566,7 @@ private:
 				// BASIS 6: Rectifier (diode) - asymmetric, even harmonics
 				// Full-wave rectifier with variable bias for rich even harmonics
 				// =========================================================
-				float bias = 0.2f * params_.drive; // Adds DC offset for even harmonics
+				float bias = 0.2f * drive; // Adds DC offset for even harmonics
 				float rect_raw = std::fabs(overdriven + bias) - bias;
 				float rect_out = fastTanh(rect_raw * 2.0f); // Soft limit
 
@@ -524,16 +588,18 @@ private:
 				// At drive=1: output = basis_out (full nonlinear character)
 				// This unifies X-axis control across all basis functions
 				// ==========================================================
-				basis_out = norm + (basis_out - norm) * params_.drive;
+				basis_out = norm + (basis_out - norm) * drive;
 
 				// Map back to output range
 				f_val = sign * (T + (1.0f - T) * std::fabs(basis_out));
 			}
 
-			// Track peak for normalization
-			float absVal = std::fabs(f_val);
-			if (absVal > peakValue) {
-				peakValue = absVal;
+			// Track positive and negative peaks separately for asymmetric normalization
+			if (f_val > peakPos) {
+				peakPos = f_val;
+			}
+			else if (f_val < 0.0f && -f_val > peakNeg) {
+				peakNeg = -f_val;
 			}
 
 			// Store to appropriate tables based on configuration
@@ -557,21 +623,25 @@ private:
 			fTableInt_[i] = static_cast<int16_t>(std::clamp(f_val * 32767.0f, -32767.0f, 32767.0f));
 		}
 
-		// Compute peak normalization gain
-		// This ensures output peak matches input peak regardless of basis/parameter settings
-		normalizationGain_ = (peakValue > 0.01f) ? (1.0f / peakValue) : 1.0f;
+		// Compute asymmetric normalization gains
+		// This maps positive values to [0, 1] and negative values to [-1, 0] independently
+		// Ensures full dynamic range utilization for asymmetric wavefunctions (e.g., rectifier)
+		float normGainPos = (peakPos > 0.01f) ? (1.0f / peakPos) : 1.0f;
+		float normGainNeg = (peakNeg > 0.01f) ? (1.0f / peakNeg) : 1.0f;
+
+		// For backward compatibility, normalizationGain_ uses the smaller gain (larger peak)
+		normalizationGain_ = std::fmin(normGainPos, normGainNeg);
 
 		// Integer normalization: Q15 format (32767 = 1.0)
 		normalizationGainInt_ = static_cast<int32_t>(normalizationGain_ * 32767.0f);
 
-		// Apply normalization to integer table
-		// The table was populated with unnormalized values; now rescale by peak
-		if (peakValue > 0.01f) {
-			// Rescale existing int16 values by normalization factor
-			// Since we stored f_val * 32767, we need to multiply by (1/peakValue)
-			// which is equivalent to dividing each entry by peakValue
+		// Apply asymmetric normalization to integer table
+		// Positive values scaled by normGainPos, negative by normGainNeg
+		bool needsNormalization = (peakPos > 0.01f || peakNeg > 0.01f);
+		if (needsNormalization) {
 			for (size_t i = 0; i <= kTableSize; ++i) {
-				float normalized = static_cast<float>(fTableInt_[i]) * normalizationGain_;
+				float val = static_cast<float>(fTableInt_[i]);
+				float normalized = (val >= 0.0f) ? (val * normGainPos) : (val * normGainNeg);
 				fTableInt_[i] = static_cast<int16_t>(std::clamp(normalized, -32767.0f, 32767.0f));
 			}
 		}
@@ -750,6 +820,39 @@ private:
 	float prevX_{0.0f};
 	float normalizationGain_{1.0f};       // Peak normalization (float)
 	int32_t normalizationGainInt_{32767}; // Peak normalization (fixed-point, Q15 format)
+
+	// Expected peak level for int32 path (set at table generation time)
+	// Used to normalize input/output so the table "expects" signals at this level
+	// FM at max LOCAL_VOLUME + max OSC_VOLUME = 2^26 (~67M)
+	// Calculation: sine(2^31) * sourceAmplitude(2^27) / 2^32 = 2^26
+	// FM signal calibration (empirically determined):
+	// - Theoretical max: 2^26 = 67M (sine * sourceAmplitude / 2^32, sourceAmplitude capped at 2^27)
+	// - inputScale=128 (2^7) puts saturation onset near center drive for FM at max velocity
+	// - At lower velocities: need positive drive to reach saturation (natural velocity response)
+	// - Output = lookup / inputScale (unity gain: boost in, attenuate out)
+	int32_t expectedPeak_{1 << 26}; // 67,108,864 - theoretical FM max (reference only)
+	float inputScale_{128.0f};      // Calibrated: FM v=127 saturates near drive=0 (2^7 for bit-shift efficiency)
+	int inputScaleShift_{7};        // log2(inputScale_) for bit-shift output scaling (128 = 2^7)
+	float outputScale_{static_cast<float>(1 << 26) / (32767.0f * 65536.0f)}; // Float path only (deprecated)
+
+public:
+	/// Set the expected peak level for int32 processing
+	/// Call this when synth mode changes (FM vs subtractive)
+	void setExpectedPeak(int32_t peak) {
+		expectedPeak_ = peak;
+		// Input scale: maps expectedPeak to INT32_MAX (fills table proportionally)
+		constexpr float kInt32Max = 2147483647.0f;
+		inputScale_ = kInt32Max / static_cast<float>(peak);
+		// Compute shift for bit-shift output scaling (assumes inputScale_ is ~power of 2)
+		inputScaleShift_ = static_cast<int>(std::log2(inputScale_) + 0.5f);
+		// Output scale for unity gain: peak / (32767 * 65536)
+		// Lookup returns Q16.15 (table_int16 * 65536), this converts back to input level
+		constexpr float kLookupFullScale = 32767.0f * 65536.0f;
+		outputScale_ = static_cast<float>(peak) / kLookupFullScale;
+	}
+
+	[[nodiscard]] int32_t getExpectedPeak() const { return expectedPeak_; }
+	[[nodiscard]] float getInputScale() const { return inputScale_; }
 };
 
 /**
@@ -764,7 +867,8 @@ private:
  *   gaps where only a subset of the 6 bases are active (sparse combinations)
  * - Accelerating frequency: oscillations are slow at Y=0 (easy to find sweet spots)
  *   and fast at Y=1023 (chaotic exploration with more gaps)
- * - Irrational period ratios: ensure the pattern never exactly repeats
+ * - φ-power frequency ratios: using powers of the golden ratio ensures frequencies
+ *   never align, producing quasi-periodic patterns with no exact repetition
  *
  * Result: distinct character zones at low Y, fragmented/chaotic at high Y
  */
@@ -792,18 +896,18 @@ struct TableShaperXYMapper {
 		constexpr float kAccelFactor = 3.0f;
 		float freqMult = 1.0f + yNorm * yNorm * kAccelFactor;
 
-		// 6 Basis weights with irrational period ratios for dense coverage
-		p.tanhWeight = 0.2f + triangleSimpleUnipolar(yNorm * 3.0f * freqMult, kPhaseWidth) * 0.8f;
-		p.polyWeight = triangleSimpleUnipolar(yNorm * 2.718f * freqMult + 0.167f, kPhaseWidth);
-		p.hardKneeWeight = triangleSimpleUnipolar(yNorm * 2.236f * freqMult + 0.333f, kPhaseWidth);
-		p.chebyWeight = triangleSimpleUnipolar(yNorm * 3.14159f * freqMult + 0.5f, kPhaseWidth);
-		p.sineFoldWeight = triangleSimpleUnipolar(yNorm * 2.618f * freqMult + 0.667f, kPhaseWidth);
-		p.rectifierWeight = triangleSimpleUnipolar(yNorm * 1.732f * freqMult + 0.833f, kPhaseWidth);
+		// 6 Basis weights with φ-power frequency ratios for quasi-periodic coverage
+		p.tanhWeight = 0.2f + triangleSimpleUnipolar(yNorm * phi::kPhi225 * freqMult, kPhaseWidth) * 0.8f;
+		p.polyWeight = triangleSimpleUnipolar(yNorm * phi::kPhi200 * freqMult + 0.167f, kPhaseWidth);
+		p.hardKneeWeight = triangleSimpleUnipolar(yNorm * phi::kPhi175 * freqMult + 0.333f, kPhaseWidth);
+		p.chebyWeight = triangleSimpleUnipolar(yNorm * phi::kPhi250 * freqMult + 0.5f, kPhaseWidth);
+		p.sineFoldWeight = triangleSimpleUnipolar(yNorm * phi::kPhi150 * freqMult + 0.667f, kPhaseWidth);
+		p.rectifierWeight = triangleSimpleUnipolar(yNorm * phi::kPhi125 * freqMult + 0.833f, kPhaseWidth);
 
-		p.threshold = triangleSimpleUnipolar(yNorm * 2.5f * freqMult + 0.25f, kPhaseWidth);
+		p.threshold = triangleSimpleUnipolar(yNorm * phi::kPhi275 * freqMult + 0.25f, kPhaseWidth);
 
 		float asymFreqMult = 1.0f + yNorm * yNorm * (kAccelFactor * 0.5f);
-		p.asymmetry = 0.3f + triangleSimpleUnipolar(yNorm * 1.618f * asymFreqMult, kPhaseWidth) * 0.4f;
+		p.asymmetry = 0.3f + triangleSimpleUnipolar(yNorm * phi::kPhi100 * asymFreqMult, kPhaseWidth) * 0.4f;
 
 		return p;
 	}
@@ -846,29 +950,35 @@ struct TableShaperXYMapper {
 		float freqMult = 1.0f + yNorm * yNorm * kAccelFactor;
 
 		// Use double precision to preserve phase accuracy at large phaseOffset values (< 10^15 ok)
-		// Wrap each frequency*phase product individually before converting to float
+		// Pre-wrap phase offsets at different φ frequencies (like disperser/sine_shaper/multiband)
 		double ph = static_cast<double>(phaseOffset);
-		auto wrapPhase = [yNorm, freqMult, periodScale](double phOff, float freq, float phMult) {
-			double base = static_cast<double>(yNorm) * freq * freqMult * periodScale;
-			double offset = phOff * phMult;
-			return static_cast<float>(std::fmod(base + offset, 1.0));
+		float ph225 = phi::wrapPhase(ph * phi::kPhi225);
+		float ph200 = phi::wrapPhase(ph * phi::kPhi200);
+		float ph175 = phi::wrapPhase(ph * phi::kPhi175);
+		float ph250 = phi::wrapPhase(ph * phi::kPhi250);
+		float ph150 = phi::wrapPhase(ph * phi::kPhi150);
+		float ph125 = phi::wrapPhase(ph * phi::kPhi125);
+		float ph275 = phi::wrapPhase(ph * phi::kPhi275);
+		float ph100 = phi::wrapPhase(ph * phi::kPhi100);
+
+		// Apply phase offsets and period scaling for interference patterns (φ-power frequencies)
+		// Each parameter rotates at its own irrational rate - no alignments possible
+		auto base = [yNorm, freqMult, periodScale](float freq) {
+			return static_cast<float>(static_cast<double>(yNorm) * freq * freqMult * periodScale);
 		};
 
-		// Apply phase offsets and period scaling for interference patterns
-		p.tanhWeight = 0.2f + triangleSimpleUnipolar(wrapPhase(ph, 3.0f, 0.0f), kPhaseWidth) * 0.8f;
-		p.polyWeight = triangleSimpleUnipolar(wrapPhase(ph, 2.718f, 0.167f), kPhaseWidth);
-		p.hardKneeWeight = triangleSimpleUnipolar(wrapPhase(ph, 2.236f, 0.333f), kPhaseWidth);
-		p.chebyWeight = triangleSimpleUnipolar(wrapPhase(ph, 3.14159f, 0.5f), kPhaseWidth);
-		p.sineFoldWeight = triangleSimpleUnipolar(wrapPhase(ph, 2.618f, 0.667f), kPhaseWidth);
-		p.rectifierWeight = triangleSimpleUnipolar(wrapPhase(ph, 1.732f, 0.833f), kPhaseWidth);
+		p.tanhWeight = 0.2f + triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi225) + ph225), kPhaseWidth) * 0.8f;
+		p.polyWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi200) + ph200), kPhaseWidth);
+		p.hardKneeWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi175) + ph175), kPhaseWidth);
+		p.chebyWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi250) + ph250), kPhaseWidth);
+		p.sineFoldWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi150) + ph150), kPhaseWidth);
+		p.rectifierWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi125) + ph125), kPhaseWidth);
 
-		p.threshold = triangleSimpleUnipolar(wrapPhase(ph, 2.5f, 0.25f), kPhaseWidth);
+		p.threshold = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi275) + ph275), kPhaseWidth);
 
 		float asymFreqMult = 1.0f + yNorm * yNorm * (kAccelFactor * 0.5f);
-		double asymBase = static_cast<double>(yNorm) * 1.618 * asymFreqMult * periodScale;
-		p.asymmetry =
-		    0.3f
-		    + triangleSimpleUnipolar(static_cast<float>(std::fmod(asymBase + ph * 0.618, 1.0)), kPhaseWidth) * 0.4f;
+		float asymBase = static_cast<float>(static_cast<double>(yNorm) * phi::kPhi100 * asymFreqMult * periodScale);
+		p.asymmetry = 0.3f + triangleSimpleUnipolar(phi::wrapPhase(asymBase + ph100), kPhaseWidth) * 0.4f;
 
 		return p;
 	}

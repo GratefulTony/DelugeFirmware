@@ -43,7 +43,7 @@ class DisperserFreq final : public Integer {
 public:
 	using Integer::Integer;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->disperserFreq); }
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->disperser.freq); }
 	bool usesAffectEntire() override { return true; }
 	void writeCurrentValue() override {
 		int32_t current_value = this->getValue();
@@ -53,14 +53,15 @@ public:
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->disperserFreq = current_value;
+					soundDrum->disperser.freq = current_value;
 				}
 			}
 		}
 		else {
-			soundEditor.currentModControllable->disperserFreq = current_value;
+			soundEditor.currentModControllable->disperser.freq = current_value;
 		}
 	}
+
 	[[nodiscard]] int32_t getMinValue() const override { return 0; }
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
@@ -69,11 +70,12 @@ public:
 // Disperser Stages: Number of active allpass stages (0-8 or 0-32 with HiCPU enabled)
 // CPU cost scales roughly linearly: s8 ≈ 2x reverb, s16 ≈ 4x, s24 ≈ 8x, s32 ≈ 10x+
 // Higher stage counts (9-32) require DisperserHiCPU community feature to be enabled
+// Secret menu: Push+twist encoder to adjust gammaPhase (offsets both topo and twist meta zones by 100*gamma)
 class DisperserStages final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->disperserStages); }
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->disperser.stages); }
 	bool usesAffectEntire() override { return true; }
 
 	// Show CPU indicator in notification when HiCPU mode is enabled
@@ -109,13 +111,37 @@ public:
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->disperserStages = current_value;
+					soundDrum->disperser.stages = current_value;
 				}
 			}
 		}
 		else {
-			soundEditor.currentModControllable->disperserStages = current_value;
+			soundEditor.currentModControllable->disperser.stages = current_value;
 		}
+	}
+
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust gammaPhase (adds 100*gamma to both topo and twist meta zones)
+			Buttons::selectButtonPressUsedUp = true;
+			float& gamma = soundEditor.currentModControllable->disperser.phases.gammaPhase;
+			gamma += static_cast<float>(offset) * 0.1f;
+			char buffer[12];
+			intToString(static_cast<int32_t>(gamma * 10.0f), buffer);
+			display->displayPopup(buffer);
+			suppressNotification_ = true;
+		}
+		else {
+			IntegerWithOff::selectEncoderAction(offset);
+		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
 	}
 
 	// Max stages: 8 normally, 32 with HiCPU community feature enabled
@@ -134,6 +160,9 @@ public:
 		}
 		IntegerWithOff::renderInHorizontalMenu(slot);
 	}
+
+private:
+	mutable bool suppressNotification_ = false;
 };
 
 /**
@@ -143,7 +172,7 @@ public:
  * Zone 1: Ping-Pong - stages alternate L/R processing
  * Zone 2: Bimodal - stages cluster into two frequency groups (formant-like)
  * Zone 3: Cross-Coupled - L↔R feedback mixing between stages
- * Zone 4: Pitch Track - frequencies follow note pitch
+ * Zone 4: Parallel - two cascades in parallel for thick chorus character
  * Zone 5: Nested - Schroeder-style nested allpass structure
  * Zone 6: Diffuse - randomized per-stage coefficient variation
  * Zone 7: Spring - chirp/spring reverb character
@@ -151,9 +180,15 @@ public:
  * Secret menu: Push+twist encoder to adjust metaPhaseTopo
  * Press encoder (no twist): Opens mod matrix source selection
  */
-class DisperserTopo final : public ZoneBasedUnpatchedParam<params::UNPATCHED_DISPERSER_TOPO, 8> {
+class DisperserTopo final : public ZoneBasedPatchedParam<params::GLOBAL_DISPERSER_TOPO> {
 public:
-	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
+	using ZoneBasedPatchedParam::ZoneBasedPatchedParam;
+
+	// Field accessors for ZoneBasedPatchedParam (sync with disperser.topo)
+	[[nodiscard]] q31_t getFieldValue() const override {
+		return soundEditor.currentModControllable->disperser.topo.value;
+	}
+	void setFieldValue(q31_t value) override { soundEditor.currentModControllable->disperser.topo.value = value; }
 
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
@@ -166,7 +201,7 @@ public:
 		case 3:
 			return "Cross";
 		case 4:
-			return "Pitch";
+			return "Parallel";
 		case 5:
 			return "Nested";
 		case 6:
@@ -189,7 +224,7 @@ public:
 		case 3:
 			return "CR";
 		case 4:
-			return "PT";
+			return "PA";
 		case 5:
 			return "NE";
 		case 6:
@@ -213,7 +248,7 @@ public:
 			suppressNotification_ = true;
 		}
 		else {
-			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
+			ZoneBasedPatchedParam::selectEncoderAction(offset);
 		}
 	}
 
@@ -244,9 +279,15 @@ private:
  * Secret menu: Push+twist encoder to adjust metaPhase
  * Press encoder (no twist): Opens mod matrix source selection
  */
-class DisperserTwist final : public ZoneBasedUnpatchedParam<params::UNPATCHED_DISPERSER_TWIST, 8> {
+class DisperserTwist final : public ZoneBasedPatchedParam<params::GLOBAL_DISPERSER_TWIST> {
 public:
-	using ZoneBasedUnpatchedParam::ZoneBasedUnpatchedParam;
+	using ZoneBasedPatchedParam::ZoneBasedPatchedParam;
+
+	// Field accessors for ZoneBasedPatchedParam (sync with disperser.twist)
+	[[nodiscard]] q31_t getFieldValue() const override {
+		return soundEditor.currentModControllable->disperser.twist.value;
+	}
+	void setFieldValue(q31_t value) override { soundEditor.currentModControllable->disperser.twist.value = value; }
 
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
@@ -298,7 +339,7 @@ public:
 			suppressNotification_ = true;
 		}
 		else {
-			ZoneBasedUnpatchedParam::selectEncoderAction(offset);
+			ZoneBasedPatchedParam::selectEncoderAction(offset);
 		}
 	}
 

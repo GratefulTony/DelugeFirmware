@@ -24,11 +24,75 @@
 #include "deluge/dsp/table_shaper.h"
 #include "deluge/util/fixedpoint.h"
 #include "dsp_ng/core/types.hpp"
+#include "storage/field_serialization.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 namespace deluge::dsp {
+
+/**
+ * User-facing parameters and DSP state for the table shaper
+ *
+ * Consolidates all shaper-related fields that were scattered in ModControllableAudio.
+ * The TableShaper class handles the actual DSP processing with lookup tables.
+ */
+struct ShaperState {
+	// User-facing knob values
+	uint8_t drive{0};   // Input gain / saturation amount (0-127)
+	uint8_t shapeX{0};  // Soft→Hard axis (0-127, "Knee")
+	uint16_t shapeY{0}; // Clean→Weird axis (0-1023, high-res multi-zone, "Color")
+	uint8_t mix{0};     // Wet/dry blend (0 = bypass)
+	bool aa{false};     // Anti-aliasing enabled (default off, reserved for future use)
+	float phase{0.0f};  // Phase offset for triangle modulation (secret knob)
+
+	// DSP smoothing/filter state
+	q31_t driveLast{0};           // Previous drive value for smoothing
+	int32_t mixNormLast_Q16{0};   // Previous mixNorm value for smoothing (Q16.16 format)
+	q31_t filterL{0};             // Post-saturation lowpass state L
+	q31_t filterR{0};             // Post-saturation lowpass state R
+	float prevXL{0.0f};           // ADAA state L (previous input sample)
+	float prevXR{0.0f};           // ADAA state R (previous input sample)
+	float smoothedNormGain{1.0f}; // Smoothed normalization gain (tracks table's normalizationGain_)
+
+	/// Check if effect is enabled (non-zero X and mix)
+	[[nodiscard]] bool isEnabled() const { return shapeX > 0 && mix > 0; }
+
+	/// Reset DSP state (call when starting new audio stream)
+	void resetDspState() {
+		driveLast = 0;
+		mixNormLast_Q16 = 0;
+		filterL = 0;
+		filterR = 0;
+		prevXL = 0.0f;
+		prevXR = 0.0f;
+	}
+
+	/// Write shaper state to file (only non-default values)
+	void writeToFile(Serializer& writer) const {
+		WRITE_FIELD(writer, shapeX, "shaperShapeX");
+		WRITE_FIELD(writer, shapeY, "shaperShapeY");
+		WRITE_FIELD(writer, mix, "shaperMix");
+		if (aa) {
+			storage::writeAttributeInt(writer, "shaperAA", 1);
+		}
+		WRITE_FLOAT(writer, phase, "shaperPhase", 10.0f);
+	}
+
+	/// Read a tag into shaper state, returns true if tag was handled
+	bool readTag(Deserializer& reader, const char* tagName) {
+		READ_FIELD(reader, tagName, shapeX, "shaperShapeX");
+		READ_FIELD(reader, tagName, shapeY, "shaperShapeY");
+		READ_FIELD(reader, tagName, mix, "shaperMix");
+		if (std::strcmp(tagName, "shaperAA") == 0) {
+			aa = storage::readAndExitTag(reader, "shaperAA") != 0;
+			return true;
+		}
+		READ_FLOAT(reader, tagName, phase, "shaperPhase", 10.0f);
+		return false;
+	}
+};
 
 /**
  * Table Shaper using table-based waveshaping with XY control
@@ -84,6 +148,7 @@ public:
 		}
 	}
 
+	// TODO: Remove float process() - not used, processInt32 is the intended signal path
 	/**
 	 * Process a single sample through the shaper (optimized, no divisions)
 	 * @param input Sample to process (q31)
@@ -100,19 +165,37 @@ public:
 
 	/**
 	 * Process a single sample using integer-only path (like builtin, no floats)
-	 * @param input Sample to process (q31)
+	 * @param input Sample to process (q31) - should be at FM operating level
+	 *              For subtractive mode, caller should pre-boost input and post-attenuate output
 	 * @param drive Input gain (q31 from hybrid-type patched param)
+	 * @param mix Volume param output (0 = full dry, INT32_MAX = full wet)
 	 * @return Shaped sample (q31)
+	 *
+	 * Table is normalized for FM signal levels (~23M peak). Subtractive signals
+	 * should be boosted before processing to ensure full table utilization.
 	 */
-	[[gnu::always_inline]] inline q31_t processInt32(q31_t input, q31_t drive) {
-		// Asymmetric drive: 0.0625x at min, 1.0x at center, 2.0x at max
-		constexpr int32_t kOne_Q30 = 1 << 30;
-		int32_t driveGain_Q30 = (drive < 0) ? kOne_Q30 + drive - (drive >> 4) : kOne_Q30 + drive;
+	/// Convert volume param output to mixNorm - call once per buffer, not per sample
+	/// Returns Q16.16 fixed-point: 65536 = 1.0, max ~131072 for mixNorm=2
+	[[gnu::always_inline]] static inline int32_t mixParamToNormQ16(int32_t mix) {
+		if (mix <= 0) {
+			return 0;
+		}
+		// pow(x, 0.7) = exp(0.7 * log(x)) using fast math
+		float normalized = static_cast<float>(mix) / static_cast<float>(1 << 30);
+		float mixNorm = fastExp(0.7f * fastLog(normalized)) * 2.0f;
+		return static_cast<int32_t>(mixNorm * 65536.0f);
+	}
 
-		int32_t afterDrive = multiply_32x32_rshift32(input, driveGain_Q30) << 2;
-		int32_t scaledInput = lshiftAndSaturate<8>(afterDrive);
-		uint32_t tableInput = static_cast<uint32_t>(scaledInput) + 2147483648u;
-		return tableSat_.processNoAAInt32(tableInput) >> 8;
+	/// Process with integer mixNorm (Q16.16 format: 65536 = 1.0)
+	[[gnu::always_inline]] inline q31_t processInt32(q31_t input, q31_t drive, int32_t mixNorm_Q16 = 131072) {
+		// Symmetric drive: 0.25x at min, 1.0x at center, 1.75x at max
+		// drive range [-2^30, 2^30] maps to gain [0.25x, 1.75x]
+		// Scale factor: 0.75 = 3/4 = 1/2 + 1/4
+		constexpr int32_t kOne_Q30 = 1 << 30;
+		int32_t scaledDrive = (drive >> 1) + (drive >> 2);
+		int32_t driveGain_Q30 = kOne_Q30 + scaledDrive;
+
+		return tableSat_.processInt32Q16(input, driveGain_Q30, mixNorm_Q16);
 	}
 
 	/// Check if effect is transparent (zero drive in waveshaper)

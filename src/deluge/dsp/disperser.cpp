@@ -20,10 +20,31 @@
  */
 
 #include "dsp/disperser.h"
+#include "dsp/util.hpp"
 
 namespace deluge::dsp {
 
 using namespace phi;
+
+namespace {
+// Frequency modulation: non-monotonic triangle oscillator
+[[gnu::always_inline]] inline float freqMod(float pos, double phRaw, float phiFreq, float range = 0.5f,
+                                            float duty = 0.8f) {
+	return 1.0f + triangleSimpleUnipolar(wrapPhase((pos + phRaw) * phiFreq), duty) * range;
+}
+
+// Phi triangle (unipolar 0-1)
+[[gnu::always_inline]] inline float phiTri(float pos, double phRaw, float phiFreq, float fm, float offset,
+                                           float duty = 0.8f) {
+	return triangleSimpleUnipolar(wrapPhase((pos + phRaw + offset) * phiFreq * fm), duty);
+}
+
+// Phi triangle (bipolar -1 to +1)
+[[gnu::always_inline]] inline float phiTriBi(float pos, double phRaw, float phiFreq, float fm, float offset,
+                                             float duty = 0.5f) {
+	return triangleFloat(wrapPhase((pos + phRaw + offset) * phiFreq * fm), duty);
+}
+} // namespace
 
 /**
  * Topology Zone Descriptions:
@@ -33,7 +54,7 @@ using namespace phi;
  * Zone 1: Ping-Pong - stages alternate L/R processing
  * Zone 2: Stereo Spread - L/R get different frequency offsets
  * Zone 3: Cross-Coupled - L↔R feedback mixing between stages
- * Zone 4: Pitch Track - frequencies follow note pitch (when available)
+ * Zone 4: Parallel - two parallel cascades for thick, chorus-like character
  * Zone 5: Nested - Schroeder-style nested allpass structure
  * Zone 6: Diffuse - randomized per-stage coefficient variation
  * Zone 7: Spring - chirp/spring reverb character
@@ -41,172 +62,162 @@ using namespace phi;
 
 DisperserTopoParams computeDisperserTopoParams(q31_t smoothedTopo, const DisperserParams* params,
                                                float twistPhaseOffset) {
-	constexpr q31_t kZoneWidth = ONE_Q31 / kDisperserNumZones;
+	auto zoneInfo = computeZoneQ31(smoothedTopo, kDisperserNumZones);
 
 	DisperserTopoParams result;
-	result.zone =
-	    std::clamp(static_cast<int32_t>(smoothedTopo / kZoneWidth), int32_t{0}, int32_t{kDisperserNumZones - 1});
+	result.zone = zoneInfo.index;
 
 	// Position within current zone (0-1)
-	q31_t zoneStart = result.zone * kZoneWidth;
-	float pos = static_cast<float>(smoothedTopo - zoneStart) / static_cast<float>(kZoneWidth);
-	pos = std::clamp(pos, 0.0f, 1.0f);
+	float pos = std::clamp(zoneInfo.position, 0.0f, 1.0f);
 
-	// Get phase offset from secret knob (metaPhaseTopo)
+	// Get phase offset from secret knob (metaPhaseTopo) - keep double precision
 	double phRaw = params ? params->phases.effectiveTopo() : 0.0;
-
-	// Compute wrapped phases for each φ-power frequency
-	WrappedPhases wp = WrappedPhases::fromRaw(phRaw);
 
 	// For detuning/harmonicBlend: add twist meta position to phase
 	// This allows twist to "rotate" through topo's parameter evolution
 	double phRawDet = phRaw + static_cast<double>(twistPhaseOffset);
-	WrappedPhases wpDet = WrappedPhases::fromRaw(phRawDet);
 
-	// Per-param frequency modulation (position-dependent speedup)
-	float fm0 = freqMod(pos, wp.ph025);
-	float fm1 = freqMod(pos, wp.ph050);
-	float fm2 = freqMod(pos, wp.ph075);
+	// Per-param frequency modulation using phi triangles (non-monotonic)
+	float fm0 = freqMod(pos, phRaw, kPhi025);
+	float fm1 = freqMod(pos, phRaw, kPhi050);
+	float fm2 = freqMod(pos, phRaw, kPhi075);
 
-	// Frequency modulation for detuning/harmonicBlend/emphasis uses wpDet phases
-	// (fm slope also shifts with twist position)
-	float fmDet = freqMod(pos, wpDet.ph033);
-	float fmHarm = freqMod(pos, wpDet.ph067);
-	float fmEmph = freqMod(pos, wpDet.ph100);
+	// Frequency modulation for detuning/harmonicBlend/emphasis uses phRawDet
+	float fmDet = freqMod(pos, phRawDet, kPhi033);
+	float fmHarm = freqMod(pos, phRawDet, kPhi067);
+	float fmEmph = freqMod(pos, phRawDet, kPhi100);
+
+	// Q phi triangle - shared across ALL topos
+	// At phRaw=0: Q goes 0.5→20.0 monotonically (like cascade)
+	// As phRaw increases: phase shifts (diverges from baseline)
+	constexpr float kPhiN150 = 1.0f / kPhi150; // φ^-1.5 ≈ 0.486
+	float qTriangle = triangleSimpleUnipolar(wrapPhase((pos + phRaw) * kPhiN150), 1.0f);
+	result.q = 0.5f * std::pow(40.0f, qTriangle); // 0.5 to 20.0 range
 
 	// Each zone uses these triangles differently
 	// The param meanings vary by topology - DSP dispatch interprets them
 	switch (result.zone) {
-	case 0: // Cascade: position → Q (Pinch), classic kHz Disperser behavior
-		// Q maps from 0.5 (broad, subtle) to 20.0 (sharp, resonant)
-		// Exponential curve for musical response: pos 0→0.5, 0.5→3.2, 1.0→20.0
-		result.q = 0.5f * std::pow(40.0f, pos);
+	case 0: // Cascade: classic kHz Disperser behavior
 		// param0/1 can still evolve with phi-triangles for subtle modulation
-		result.param0 = phiTriangleUnipolar(pos, kPhi025, fm0, wp.ph025, 0.1f);
-		result.param1 = phiTriangleUnipolar(pos, kPhi050, fm1, wp.ph050, 0.3f);
+		result.param0 = phiTri(pos, phRaw, kPhi025, fm0, 0.1f);
+		result.param1 = phiTri(pos, phRaw, kPhi050, fm1, 0.3f);
 		result.param2 = 0.0f; // spread=0 for classic cascade (all stages same freq)
 		result.lrOffset = 0.0f;
 		// Cascade: subtle detuning at low Q (shimmer), less at high Q (focus)
-		// Uses wpDet so twist meta position can rotate through the pattern
+		// Uses phRawDet so twist meta position can rotate through the pattern
 		// Duty 0.63 for smooth shimmer at low Q
-		result.detuning = phiTriangleUnipolar(pos, kPhi033, fmDet, wpDet.ph033, 0.2f, 0.63f) * (1.0f - pos * 0.7f);
+		result.detuning = phiTri(pos, phRawDet, kPhi033 * 0.5f, fmDet, 0.2f, 0.63f) * (1.0f - pos * 0.7f);
 		// Harmonics increase with Q (sharper = more overtone emphasis)
-		result.harmonicBlend = phiTriangleUnipolar(pos, kPhi067, fmHarm, wpDet.ph067, 0.4f) * pos;
+		result.harmonicBlend = phiTri(pos, phRawDet, kPhi067, fmHarm, 0.4f) * pos;
 		// Cascade: subtle emphasis that increases with Q (sharper = more spectral contrast)
 		// Duty 0.35: quick rise, slow fall - more time with negative (low freq) emphasis
-		result.emphasis = phiTriangleBipolar(pos, kPhi100, fmEmph, wpDet.ph100, 0.55f, 0.35f) * pos * 0.6f;
+		result.emphasis = phiTriBi(pos, phRawDet, kPhi100, fmEmph, 0.55f, 0.35f) * pos * 0.6f;
 		break;
 
-	case 1:               // Ping-Pong: alternation depth, L/R phase, freq split
-		result.q = 20.0f; // Max Q for non-cascade topologies
-		result.param0 = phiTriangleUnipolar(pos, kPhi025, fm0, wp.ph025, 0.1f, 0.8f);
-		result.param1 = phiTriangleUnipolar(pos, kPhi050, fm1, wp.ph050, 0.3f, 0.7f);
-		result.param2 = phiTriangleUnipolar(pos, kPhi075, fm2, wp.ph075, 0.6f, 0.6f);
+	case 1: // Ping-Pong: alternation depth, L/R phase, freq split
+		result.param0 = phiTri(pos, phRaw, kPhi025, fm0, 0.1f, 0.8f);
+		result.param1 = phiTri(pos, phRaw, kPhi050, fm1, 0.3f, 0.7f);
+		result.param2 = phiTri(pos, phRaw, kPhi075, fm2, 0.6f, 0.6f);
 		result.lrOffset = result.param1 * 0.5f; // L/R phase difference
-		// Ping-pong: moderate detuning for stereo shimmer (uses wpDet)
-		result.detuning = phiTriangleUnipolar(pos, kPhi050, fmDet, wpDet.ph050, 0.3f, 0.54f);
+		// Ping-pong: moderate detuning for stereo shimmer
+		result.detuning = phiTri(pos, phRawDet, kPhi050 * 0.5f, fmDet, 0.3f, 0.54f);
 		// Balanced harmonics evolving with alternation
-		result.harmonicBlend = phiTriangleUnipolar(pos, kPhi033, fmHarm, wpDet.ph033, 0.5f, 0.5f);
+		result.harmonicBlend = phiTri(pos, phRawDet, kPhi033, fmHarm, 0.5f, 0.5f);
 		// Ping-pong: emphasis alternates for stereo spectral interest
 		// Duty 0.6: slower rise, quicker fall - more time with positive (high freq) emphasis
-		result.emphasis = phiTriangleBipolar(pos, kPhi075, fmEmph, wpDet.ph075, 0.4f, 0.6f) * 0.5f;
+		result.emphasis = phiTriBi(pos, phRawDet, kPhi075, fmEmph, 0.4f, 0.6f) * 0.5f;
 		break;
 
 	case 2: // Bimodal (Formant) - stages cluster into two frequency groups
-		result.q = 20.0f;
 		// Position controls separation between modes (0=together, 1=5 octaves apart)
 		// Safe because modes reach toward each other, keeping stages bounded
 		result.param0 = pos * 5.0f; // 0-5 octave separation
 		// param1 evolves balance between modes via phi-triangle
-		result.param1 = phiTriangleUnipolar(pos, kPhi075, fm1, wp.ph075, 0.5f, 0.6f);
+		result.param1 = phiTri(pos, phRaw, kPhi075, fm1, 0.5f, 0.6f);
 		result.lrOffset = pos * 0.4f; // L/R get opposite modes at high separation
-		// Bimodal: detuning increases with separation (formant shimmer, uses wpDet)
+		// Bimodal: detuning increases with separation (formant shimmer)
 		// Duty 0.59 for smooth formant transitions
-		result.detuning = phiTriangleUnipolar(pos, kPhi025, fmDet, wpDet.ph025, 0.15f, 0.59f) * (0.3f + pos * 0.7f);
-		// Harmonics follow mode balance (shifting timbral emphasis, uses wpDet)
-		result.harmonicBlend = phiTriangleUnipolar(pos, kPhi075, fmHarm, wpDet.ph075, 0.5f, 0.6f);
+		result.detuning = phiTri(pos, phRawDet, kPhi025 * 0.5f, fmDet, 0.15f, 0.59f) * (0.3f + pos * 0.7f);
+		// Harmonics follow mode balance (shifting timbral emphasis)
+		result.harmonicBlend = phiTri(pos, phRawDet, kPhi075, fmHarm, 0.5f, 0.6f);
 		// Bimodal: emphasis follows mode separation (more contrast at wider separation)
 		// Duty 0.45: near-symmetric with slight low-freq bias
-		result.emphasis = phiTriangleBipolar(pos, kPhi050, fmEmph, wpDet.ph050, 0.3f, 0.45f) * (0.2f + pos * 0.6f);
+		result.emphasis = phiTriBi(pos, phRawDet, kPhi050, fmEmph, 0.3f, 0.45f) * (0.2f + pos * 0.6f);
 		break;
 
 	case 3: // Cross-Coupled: cross amount, asymmetry, damping
-		result.q = 20.0f;
-		result.param0 = phiTriangleUnipolar(pos, kPhi050, fm0, wp.ph050, 0.2f);
-		result.param1 = phiTriangleBipolar(pos, kPhi075, fm1, wp.ph075, 0.5f) * 0.5f + 0.5f;
-		result.param2 = phiTriangleUnipolar(pos, kPhi025, fm2, wp.ph025, 0.8f);
+		result.param0 = phiTri(pos, phRaw, kPhi050, fm0, 0.2f);
+		result.param1 = phiTriBi(pos, phRaw, kPhi075, fm1, 0.5f) * 0.5f + 0.5f;
+		result.param2 = phiTri(pos, phRaw, kPhi025, fm2, 0.8f);
 		result.lrOffset = (result.param1 - 0.5f) * 0.3f; // Asymmetry creates offset
-		// Cross: detuning from asymmetry (swirling stereo, uses wpDet)
+		// Cross: detuning from asymmetry (swirling stereo)
 		// Duty 0.5 for more percussive swirl character
-		result.detuning =
-		    std::abs(result.param1 - 0.5f) * phiTriangleUnipolar(pos, kPhi067, fmDet, wpDet.ph067, 0.4f, 0.5f);
-		// Harmonics from cross amount (more coupling = richer harmonics, uses wpDet)
-		result.harmonicBlend = phiTriangleUnipolar(pos, kPhi050, fmHarm, wpDet.ph050, 0.2f) * 0.8f;
+		result.detuning = std::abs(result.param1 - 0.5f) * phiTri(pos, phRawDet, kPhi067 * 0.5f, fmDet, 0.4f, 0.5f);
+		// Harmonics from cross amount (more coupling = richer harmonics)
+		result.harmonicBlend = phiTri(pos, phRawDet, kPhi050, fmHarm, 0.2f) * 0.8f;
 		// Cross: emphasis from asymmetry for swirling spectral contrast
 		// Duty 0.7: slow rise, fast fall - extended high-freq dwell for swirl character
-		result.emphasis =
-		    (result.param1 - 0.5f) * phiTriangleBipolar(pos, kPhi033, fmEmph, wpDet.ph033, 0.6f, 0.7f) * 0.7f;
+		result.emphasis = (result.param1 - 0.5f) * phiTriBi(pos, phRawDet, kPhi033, fmEmph, 0.6f, 0.7f) * 0.7f;
 		break;
 
-	case 4: // Pitch Track: tracking tightness, harmonic blend, octave
-		result.q = 20.0f;
-		result.param0 = phiTriangleUnipolar(pos, kPhi025, fm0, wp.ph025, 0.1f);
-		result.param1 = phiTriangleUnipolar(pos, kPhi067, fm1, wp.ph067, 0.35f);
-		result.param2 = phiTriangleUnipolar(pos, kPhi100, fm2, wp.ph100, 0.6f);
-		result.lrOffset = 0.0f; // Mono pitch tracking
-		// Pitch track: minimal detuning to preserve pitch accuracy (uses wpDet)
-		// Duty 0.77 for very smooth tracking, minimal shimmer disruption
-		result.detuning = phiTriangleUnipolar(pos, kPhi033, fmDet, wpDet.ph033, 0.1f, 0.77f) * 0.2f;
-		// Harmonics evolve for timbral richness while tracking pitch (uses wpDet)
-		result.harmonicBlend = phiTriangleUnipolar(pos, kPhi050, fmHarm, wpDet.ph050, 0.4f, 0.7f);
-		// Pitch track: minimal emphasis to preserve pitch clarity
-		// Duty 0.55: near-symmetric, gentle high-freq bias
-		result.emphasis = phiTriangleBipolar(pos, kPhi025, fmEmph, wpDet.ph025, 0.2f, 0.55f) * 0.15f;
+	case 4: // Parallel: two cascades in parallel for thick chorus-like character
+		// param0: spread between paths (path A centered lower, path B centered higher)
+		result.param0 = phiTri(pos, phRaw, kPhi050, fm0, 0.3f, 0.6f);
+		// param1: balance evolution between paths
+		result.param1 = phiTri(pos, phRaw, kPhi075, fm1, 0.5f, 0.5f);
+		result.param2 = phiTri(pos, phRaw, kPhi025, fm2, 0.4f, 0.7f);
+		// L/R offset creates stereo width between parallel paths
+		result.lrOffset = pos * 0.5f;
+		// Parallel: strong detuning for thick chorus effect
+		// The parallel structure + detuning creates ensemble-like thickness
+		result.detuning = phiTri(pos, phRawDet, kPhi067 * 0.5f, fmDet, 0.5f, 0.55f);
+		// Harmonics evolve with path spread
+		result.harmonicBlend = phiTri(pos, phRawDet, kPhi033, fmHarm, 0.4f, 0.6f);
+		// Parallel: moderate emphasis for timbral contrast between paths
+		// Duty 0.5: symmetric for balanced parallel blend
+		result.emphasis = phiTriBi(pos, phRawDet, kPhi050, fmEmph, 0.4f, 0.5f) * 0.5f;
 		break;
 
 	case 5: // Nested: nesting depth, inner/outer balance
-		result.q = 20.0f;
-		result.param0 = phiTriangleUnipolar(pos, kPhi033, fm0, wp.ph033, 0.2f);
-		result.param1 = phiTriangleUnipolar(pos, kPhi075, fm1, wp.ph075, 0.45f);
-		result.param2 = phiTriangleUnipolar(pos, kPhi050, fm2, wp.ph050, 0.7f);
+		result.param0 = phiTri(pos, phRaw, kPhi033, fm0, 0.2f);
+		result.param1 = phiTri(pos, phRaw, kPhi075, fm1, 0.45f);
+		result.param2 = phiTri(pos, phRaw, kPhi050, fm2, 0.7f);
 		result.lrOffset = result.param2 * 0.2f;
-		// Nested: detuning for Schroeder diffusion shimmer (uses wpDet)
-		result.detuning = phiTriangleUnipolar(pos, kPhi033, fmDet, wpDet.ph033, 0.3f, 0.54f);
+		// Nested: detuning for Schroeder diffusion shimmer
+		result.detuning = phiTri(pos, phRawDet, kPhi033 * 0.5f, fmDet, 0.3f, 0.54f);
 		// Harmonics evolve with nesting depth
-		result.harmonicBlend = phiTriangleUnipolar(pos, kPhi067, fmHarm, wpDet.ph067, 0.45f, 0.5f);
+		result.harmonicBlend = phiTri(pos, phRawDet, kPhi067, fmHarm, 0.45f, 0.5f);
 		// Nested: emphasis for Schroeder spectral contrast
 		// Duty 0.4: quick rise, extended fall - low-freq warmth for diffusion
-		result.emphasis = phiTriangleBipolar(pos, kPhi100, fmEmph, wpDet.ph100, 0.5f, 0.4f) * 0.55f;
+		result.emphasis = phiTriBi(pos, phRawDet, kPhi100, fmEmph, 0.5f, 0.4f) * 0.55f;
 		break;
 
 	case 6: // Diffuse: randomness, correlation, drift
-		result.q = 20.0f;
-		result.param0 = phiTriangleUnipolar(pos, kPhi050, fm0, wp.ph050, 0.15f);
-		result.param1 = phiTriangleUnipolar(pos, kPhi033, fm1, wp.ph033, 0.4f);
-		result.param2 = phiTriangleUnipolar(pos, kPhi075, fm2, wp.ph075, 0.65f);
+		result.param0 = phiTri(pos, phRaw, kPhi050, fm0, 0.15f);
+		result.param1 = phiTri(pos, phRaw, kPhi033, fm1, 0.4f);
+		result.param2 = phiTri(pos, phRaw, kPhi075, fm2, 0.65f);
 		result.lrOffset = result.param0 * 0.4f; // Decorrelation
-		// Diffuse: high detuning for maximum shimmer (uses wpDet)
-		result.detuning = phiTriangleUnipolar(pos, kPhi050, fmDet, wpDet.ph050, 0.4f, 0.63f);
+		// Diffuse: high detuning for maximum shimmer
+		result.detuning = phiTri(pos, phRawDet, kPhi050 * 0.5f, fmDet, 0.4f, 0.63f);
 		// Harmonics follow randomness
-		result.harmonicBlend = phiTriangleUnipolar(pos, kPhi025, fmHarm, wpDet.ph025, 0.5f, 0.6f);
+		result.harmonicBlend = phiTri(pos, phRawDet, kPhi025, fmHarm, 0.5f, 0.6f);
 		// Diffuse: strong emphasis for maximum spectral variety
 		// Duty 0.65: high-freq bias for bright diffusion character
-		result.emphasis = phiTriangleBipolar(pos, kPhi067, fmEmph, wpDet.ph067, 0.35f, 0.65f) * 0.7f;
+		result.emphasis = phiTriBi(pos, phRawDet, kPhi067, fmEmph, 0.35f, 0.65f) * 0.7f;
 		break;
 
 	case 7: // Spring: chirp character, decay, density
-		result.q = 20.0f;
-		result.param0 = phiTriangleUnipolar(pos, kPhi025, fm0, wp.ph025, 0.1f);
-		result.param1 = phiTriangleUnipolar(pos, kPhi050, fm1, wp.ph050, 0.3f);
-		result.param2 = phiTriangleUnipolar(pos, kPhi075, fm2, wp.ph075, 0.55f);
+		result.param0 = phiTri(pos, phRaw, kPhi025, fm0, 0.1f);
+		result.param1 = phiTri(pos, phRaw, kPhi050, fm1, 0.3f);
+		result.param2 = phiTri(pos, phRaw, kPhi075, fm2, 0.55f);
 		result.lrOffset = result.param2 * 0.15f;
-		// Spring: moderate detuning for spring reverb character (uses wpDet)
-		result.detuning = phiTriangleUnipolar(pos, kPhi075, fmDet, wpDet.ph075, 0.25f, 0.45f);
+		// Spring: moderate detuning for spring reverb character
+		result.detuning = phiTri(pos, phRawDet, kPhi075 * 0.5f, fmDet, 0.25f, 0.45f);
 		// Harmonics evolve for spring timbre
-		result.harmonicBlend = phiTriangleUnipolar(pos, kPhi033, fmHarm, wpDet.ph033, 0.35f, 0.6f);
+		result.harmonicBlend = phiTri(pos, phRawDet, kPhi033, fmHarm, 0.35f, 0.6f);
 		// Spring: moderate emphasis for spring timbral character
 		// Duty 0.5: symmetric for balanced spring response
-		result.emphasis = phiTriangleBipolar(pos, kPhi050, fmEmph, wpDet.ph050, 0.45f, 0.5f) * 0.45f;
+		result.emphasis = phiTriBi(pos, phRawDet, kPhi050, fmEmph, 0.45f, 0.5f) * 0.45f;
 		break;
 
 	default:
@@ -230,21 +241,16 @@ DisperserTopoParams computeDisperserTopoParams(q31_t smoothedTopo, const Dispers
  */
 
 DisperserTwistParams computeDisperserTwistParams(q31_t smoothedTwist, const DisperserParams* params) {
-	constexpr q31_t kZoneWidth = ONE_Q31 / kDisperserNumZones;
-	constexpr q31_t kZone5 = kZoneWidth * 5; // Start of meta zone
+	auto zoneInfo = computeZoneQ31(smoothedTwist, kDisperserNumZones);
+	constexpr q31_t kZone5Start = getZoneStart(5, kDisperserNumZones);
 
 	DisperserTwistParams result;
 
-	int32_t zone =
-	    std::clamp(static_cast<int32_t>(smoothedTwist / kZoneWidth), int32_t{0}, int32_t{kDisperserNumZones - 1});
-
-	if (zone < 5) {
+	if (zoneInfo.index < 5) {
 		// Zones 0-4: Individual effects
-		q31_t zoneStart = zone * kZoneWidth;
-		float pos = static_cast<float>(smoothedTwist - zoneStart) / static_cast<float>(kZoneWidth);
-		pos = std::clamp(pos, 0.0f, 1.0f);
+		float pos = std::clamp(zoneInfo.position, 0.0f, 1.0f);
 
-		switch (zone) {
+		switch (zoneInfo.index) {
 		case 0: // Width - stereo spread only
 			result.width = pos;
 			break;
@@ -281,40 +287,40 @@ DisperserTwistParams computeDisperserTwistParams(q31_t smoothedTwist, const Disp
 	}
 	else {
 		// Zones 5-7: Meta - all effects with φ-triangle evolution
-		float pos = static_cast<float>(smoothedTwist - kZone5) / static_cast<float>(ONE_Q31 - kZone5);
+		float pos = static_cast<float>(smoothedTwist - kZone5Start) / static_cast<float>(ONE_Q31 - kZone5Start);
 		pos = std::clamp(pos, 0.0f, 1.0f);
 
 		// Get combined phase offset (metaPhase + 100*gammaPhase)
 		double phRaw = params ? params->phases.effectiveMeta() : 0.0;
-		WrappedPhases wp = WrappedPhases::fromRaw(phRaw);
 
-		// Per-effect frequency modulation
-		float fmW = freqMod(pos, wp.ph025);
-		float fmP = freqMod(pos, wp.ph033);
-		float fmC = freqMod(pos, wp.ph050);
-		float fmQ = freqMod(pos, wp.ph067);
-		float fmD = freqMod(pos, wp.ph075);
+		// Per-effect frequency modulation using phi triangles (non-monotonic)
+		float fmW = freqMod(pos, phRaw, kPhi025);
+		float fmP = freqMod(pos, phRaw, kPhi033);
+		float fmC = freqMod(pos, phRaw, kPhi050);
+		float fmQ = freqMod(pos, phRaw, kPhi067);
+		float fmD = freqMod(pos, phRaw, kPhi075);
 
 		// Width: scale * param pattern
-		float wS = std::min(phiTriangleUnipolar(pos, kPhi025, fmW, wp.ph025, 0.166f, 0.8f) * 2.0f, 1.0f);
-		float wP = phiTriangleUnipolar(pos, kPhi050, fmW, wp.ph050, 0.984f, 0.7f);
+		float wS = std::min(phiTri(pos, phRaw, kPhi025, fmW, 0.166f, 0.8f) * 2.0f, 1.0f);
+		float wP = phiTri(pos, phRaw, kPhi050, fmW, 0.984f, 0.7f);
 		result.width = wS * wP;
 
 		// Punch evolves - more punch during certain phases
-		result.punch = phiTriangleUnipolar(pos, kPhi033, fmP, wp.ph033, 0.3f, 0.7f);
+		result.punch = phiTri(pos, phRaw, kPhi033, fmP, 0.3f, 0.7f);
 
 		// Curve sweeps bipolar
-		float curveRaw = phiTriangleBipolar(pos, kPhi050, fmC, wp.ph050, 0.5f);
+		float curveRaw = phiTriBi(pos, phRaw, kPhi050, fmC, 0.5f);
 		result.spreadCurve = 0.5f + curveRaw * 0.5f; // Map to 0-1
 
 		// Chirp feedback evolves (delay time from freq knob)
-		result.chirpAmount = phiTriangleUnipolar(pos, kPhi067, fmD, wp.ph067, 0.4f, 0.6f);
+		result.chirpAmount = phiTri(pos, phRaw, kPhi067, fmD, 0.4f, 0.6f);
 
 		// Q tilt sweeps bipolar
-		result.qTilt = phiTriangleBipolar(pos, kPhiN025, fmQ, wp.phN025, 0.7f) * 0.8f;
+		result.qTilt = phiTriBi(pos, phRaw, kPhiN025, fmQ, 0.7f) * 0.8f;
 
-		// Note: detuning/harmonicBlend now handled via topo zones + twistPhaseOffset
-		// Twist meta position adds to topo's raw phase, rotating through topo's patterns
+		// Phase offset for topo: twist meta position rotates through topo's phi triangle patterns
+		// 5 cycles per full meta sweep (like sine shaper)
+		result.phaseOffset = pos * 5.0f;
 	}
 
 	return result;

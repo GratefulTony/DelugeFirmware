@@ -20,7 +20,6 @@
 #include "gui/l10n/l10n.h"
 #include "gui/l10n/strings.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
-#include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "util/container/enum_to_string_map.hpp"
 #include <cstring>
@@ -35,40 +34,6 @@ bool isParamBipolar(Kind kind, int32_t paramID) {
 bool isParamHybridDrive(Kind kind, int32_t paramID) {
 	// Hybrid drive params: bipolar where 0 = unity, negative = attenuation, positive = boost
 	return (kind == Kind::PATCHED && (paramID == LOCAL_SHAPER_DRIVE || paramID == LOCAL_SINE_SHAPER_DRIVE));
-}
-
-int32_t getParamZoneCount(Kind kind, int32_t paramID) {
-	// Zone-based params: full bipolar modulation spans 1 zone (1/N of range where N = zone count)
-	// Returns 0 for non-zone params, zone count otherwise
-	if (kind == Kind::PATCHED) {
-		// Use range check - zone params are between FIRST_LOCAL_ZONE and FIRST_LOCAL_EXP
-		if (paramID >= FIRST_LOCAL_ZONE && paramID < FIRST_LOCAL_EXP) {
-			return 8;
-		}
-	}
-	else if (kind == Kind::UNPATCHED_SOUND) {
-		// Unpatched params don't have a contiguous range, check individually
-		if (paramID == UNPATCHED_SINE_SHAPER_TWIST || paramID == UNPATCHED_SINE_SHAPER_HARMONIC) {
-			return 8;
-		}
-	}
-	return 0;
-}
-
-bool shouldClipModToZoneBoundary(Kind kind, int32_t paramID) {
-	// Zone params that should clip modulation to zone boundaries instead of crossing zones
-	// Useful when different zones have fundamentally different algorithms
-	if (kind == Kind::PATCHED) {
-		if (paramID == LOCAL_SINE_SHAPER_HARMONIC) {
-			return true; // Different algorithm per zone - don't cross
-		}
-	}
-	else if (kind == Kind::UNPATCHED_SOUND || kind == Kind::UNPATCHED_GLOBAL) {
-		if (paramID == UNPATCHED_DISPERSER_TOPO) {
-			return true; // Different algorithm per zone - don't cross
-		}
-	}
-	return false;
 }
 
 bool isParamPan(Kind kind, int32_t paramID) {
@@ -109,43 +74,6 @@ bool isParamQuantizedStutter(Kind kind, int32_t paramID, ModControllableAudio* m
 	       && (modControllableAudio->stutterConfig.useSongStutter
 	               ? currentSong->globalEffectable.stutterConfig.quantized
 	               : modControllableAudio->stutterConfig.quantized);
-}
-
-int32_t getGoldKnobZoneCount(Kind kind, int32_t paramID) {
-	if (kind == Kind::UNPATCHED_SOUND || kind == Kind::UNPATCHED_GLOBAL) {
-		switch (static_cast<UnpatchedShared>(paramID)) {
-		case UNPATCHED_MB_COMPRESSOR_CHARACTER:
-			if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsFineGoldKnobCharacter)) {
-				return 8;
-			}
-			break;
-		case UNPATCHED_MB_COMPRESSOR_VIBE:
-			if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsFineGoldKnobVibe)) {
-				return 8;
-			}
-			break;
-		case UNPATCHED_SINE_SHAPER_HARMONIC:
-		case UNPATCHED_SINE_SHAPER_TWIST:
-		case UNPATCHED_DISPERSER_TOPO:
-		case UNPATCHED_DISPERSER_TWIST:
-			// Always 8 zones for zone-based params
-			return 8;
-		default:
-			break;
-		}
-	}
-	else if (kind == Kind::PATCHED) {
-		// Check LOCAL zone params
-		switch (static_cast<Local>(paramID)) {
-		case LOCAL_SINE_SHAPER_HARMONIC:
-		case LOCAL_SINE_SHAPER_TWIST:
-			// Always 8 zones for zone-based params
-			return 8;
-		default:
-			break;
-		}
-	}
-	return 1;
 }
 
 bool isVibratoPatchCableShortcut(int32_t xDisplay, int32_t yDisplay) {
@@ -196,6 +124,7 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [LOCAL_MODULATOR_0_VOLUME]       = "Mod1 level",
 	    [LOCAL_MODULATOR_1_VOLUME]       = "Mod2 level",
 	    [LOCAL_FOLD]                     = "Wavefold",
+	    [LOCAL_SHAPER_MIX]               = "Sat. mix",
 	    [LOCAL_MODULATOR_0_FEEDBACK]     = "Mod1 feed",
 	    [LOCAL_MODULATOR_1_FEEDBACK]     = "Mod2 feed",
 	    [LOCAL_CARRIER_0_FEEDBACK]       = "Osc1 feed",
@@ -243,6 +172,8 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [GLOBAL_REVERB_AMOUNT]           = "Reverb amt",
 	    [GLOBAL_MOD_FX_DEPTH]            = "ModFXdepth",
 	    [GLOBAL_DELAY_FEEDBACK]          = "Delay feed",
+	    [GLOBAL_DISPERSER_TOPO]          = "Disp topo",
+	    [GLOBAL_DISPERSER_TWIST]         = "Disp twist",
 	    [GLOBAL_DELAY_RATE]              = "Delay rate",
 	    [GLOBAL_MOD_FX_RATE]             = "ModFX rate",
 	    [GLOBAL_LFO_FREQ_1]                = "LFO1 rate",
@@ -271,6 +202,7 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [LOCAL_MODULATOR_0_VOLUME] = STRING_FOR_PARAM_LOCAL_MODULATOR_0_VOLUME,
 	    [LOCAL_MODULATOR_1_VOLUME] = STRING_FOR_PARAM_LOCAL_MODULATOR_1_VOLUME,
 	    [LOCAL_FOLD] = STRING_FOR_WAVEFOLDER,
+	    [LOCAL_SHAPER_MIX] = STRING_FOR_PARAM_LOCAL_SHAPER_MIX,
 	    [LOCAL_MODULATOR_0_FEEDBACK] = STRING_FOR_PARAM_LOCAL_MODULATOR_0_FEEDBACK,
 	    [LOCAL_MODULATOR_1_FEEDBACK] = STRING_FOR_PARAM_LOCAL_MODULATOR_1_FEEDBACK,
 	    [LOCAL_CARRIER_0_FEEDBACK] = STRING_FOR_PARAM_LOCAL_CARRIER_0_FEEDBACK,
@@ -318,6 +250,8 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [GLOBAL_REVERB_AMOUNT] = STRING_FOR_PARAM_GLOBAL_REVERB_AMOUNT,
 	    [GLOBAL_MOD_FX_DEPTH] = STRING_FOR_PARAM_GLOBAL_MOD_FX_DEPTH,
 	    [GLOBAL_DELAY_FEEDBACK] = STRING_FOR_PARAM_GLOBAL_DELAY_FEEDBACK,
+	    [GLOBAL_DISPERSER_TOPO] = STRING_FOR_DISPERSER_TOPO,
+	    [GLOBAL_DISPERSER_TWIST] = STRING_FOR_DISPERSER_TWIST,
 	    [GLOBAL_DELAY_RATE] = STRING_FOR_PARAM_GLOBAL_DELAY_RATE,
 	    [GLOBAL_MOD_FX_RATE] = STRING_FOR_PARAM_GLOBAL_MOD_FX_RATE,
 	    [GLOBAL_LFO_FREQ_1] = STRING_FOR_PARAM_GLOBAL_LFO_FREQ_1,
@@ -687,6 +621,12 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 		case GLOBAL_DELAY_FEEDBACK:
 			return "delayFeedback";
 
+		case GLOBAL_DISPERSER_TOPO:
+			return "globalDisperserTopo";
+
+		case GLOBAL_DISPERSER_TWIST:
+			return "globalDisperserTwist";
+
 		case GLOBAL_REVERB_AMOUNT:
 			return "reverbAmount";
 
@@ -832,6 +772,9 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 
 		case LOCAL_SHAPER_DRIVE:
 			return "shaperDrive";
+
+		case LOCAL_SHAPER_MIX:
+			return "shaperMix";
 
 		case LOCAL_SINE_SHAPER_DRIVE:
 			return "sineShaperDrive";

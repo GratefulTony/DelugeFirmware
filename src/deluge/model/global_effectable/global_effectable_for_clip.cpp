@@ -125,34 +125,19 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 
 	// Shapers run before filters (matching voice processing order)
 	// Sine Shaper (for audio clips, uses sineShaper struct)
-	if (sineShaper.mix > 0) {
-		q31_t sineDrive = static_cast<q31_t>(sineShaper.drive) << 24;
-		// Combine field + modulation (combineWithMod handles scaling: full mod = 1 zone)
-		q31_t sineHarmonic =
-		    sineShaper.harmonic.combineWithMod(unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC));
-		q31_t sineTwist =
-		    sineShaper.twist.combineWithMod(unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_TWIST));
-		q31_t sineMix = static_cast<q31_t>(sineShaper.mix) << 24;
-
-		// Smooth Twist at source - derived values inherit smoothness
-		// Harmonic not smoothed: per-sample weight smoothing handles Zone 1/2, zone boundaries allowed to click
-		q31_t smoothedTwist = deluge::dsp::smoothParam(&sineShaper.smoothedTwist, sineTwist);
-
-		auto twistParams = deluge::dsp::computeSineShaperTwistParams(smoothedTwist, &sineShaper);
-
-		// Benchmarking happens inside sineShapeBuffer with zone tags and sub-aggregations
-		deluge::dsp::sineShapeBuffer(global_effectable_audio, sineDrive, &sineShaper.smoothedDrive, &sineShaperState,
-		                             sineHarmonic, sineMix, twistParams, &sineShaper);
+	if (sineShaper.isEnabled()) {
+		deluge::dsp::processSineShaper(global_effectable_audio, &sineShaper, &sineShaperState,
+		                               unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC),
+		                               unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_TWIST));
 	}
 
 	// Table Shaper (for audio clips)
 	// Benchmarking happens inside shapeBuffer
-	if (shaperMix > 0) {
-		q31_t satDrive = static_cast<q31_t>(shaperDrive) << 24;
-		q31_t satMix = static_cast<q31_t>(shaperMix) << 24;
-		// ADAA enabled - uses per-clip state for anti-aliasing
-		deluge::dsp::shapeBuffer(global_effectable_audio, shaper, satDrive, &shaperDriveLast, satMix, &shaperPrevXL,
-		                         &shaperPrevXR);
+	if (shaper.isEnabled()) {
+		q31_t satDrive = static_cast<q31_t>(shaper.drive) << 24;
+		q31_t satMix = static_cast<q31_t>(shaper.mix) << 24;
+		// ADAA disabled (kGenerateADAA = false), use non-ADAA float path
+		deluge::dsp::shapeBuffer(global_effectable_audio, shaperDsp, satDrive, &shaper.driveLast, satMix);
 	}
 
 	// Render saturation (builtin shaper using getTanHAntialiased)
