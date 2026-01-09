@@ -94,7 +94,7 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	hpfMode = other->hpfMode;
 	clippingAmount = other->clippingAmount;
 	// Copy sine shaper params (DSP state will be reset)
-	sineShaper.drive = other->sineShaper.drive;
+	// Note: Drive is now a patched param (LOCAL_SINE_SHAPER_DRIVE), copied via paramManager
 	sineShaper.symmetry = other->sineShaper.symmetry;
 	sineShaper.mix = other->sineShaper.mix;
 	sineShaper.harmonic = other->sineShaper.harmonic;

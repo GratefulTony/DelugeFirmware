@@ -37,13 +37,17 @@ namespace deluge::dsp {
  *
  * Consolidates all shaper-related fields that were scattered in ModControllableAudio.
  * The TableShaper class handles the actual DSP processing with lookup tables.
+ *
+ * Design note: shapeX and shapeY are intentionally NOT patched/unpatched params.
+ * Unlike sine shaper zones, changing X/Y triggers expensive table regeneration
+ * (recomputing all 6 basis function lookup tables). This makes them unsuitable
+ * for real-time modulation or automation. Drive and mix ARE patched params since
+ * they only affect per-sample gain, not the lookup tables.
  */
-struct ShaperState {
-	// User-facing knob values
-	uint8_t drive{0};   // Input gain / saturation amount (0-127)
+struct TableShaperState {
+	// User-facing knob values (NOT params - changes trigger expensive table regeneration)
 	uint8_t shapeX{0};  // Soft→Hard axis (0-127, "Knee")
 	uint16_t shapeY{0}; // Clean→Weird axis (0-1023, high-res multi-zone, "Color")
-	uint8_t mix{0};     // Wet/dry blend (0 = bypass)
 	bool aa{false};     // Anti-aliasing enabled (default off, reserved for future use)
 	float phase{0.0f};  // Phase offset for triangle modulation (secret knob)
 
@@ -54,8 +58,9 @@ struct ShaperState {
 	float prevXR{0.0f};           // ADAA state R (previous input sample)
 	float smoothedNormGain{1.0f}; // Smoothed normalization gain (tracks table's normalizationGain_)
 
-	/// Check if effect is enabled (non-zero X and mix)
-	[[nodiscard]] bool isEnabled() const { return shapeX > 0 && mix > 0; }
+	/// Check if effect is enabled (non-zero X)
+	/// Note: mix is now a patched param (LOCAL_TABLE_SHAPER_MIX), checked separately at render time
+	[[nodiscard]] bool isEnabled() const { return shapeX > 0; }
 
 	/// Reset DSP state (call when starting new audio stream)
 	void resetDspState() {
@@ -67,25 +72,23 @@ struct ShaperState {
 
 	/// Write shaper state to file (only non-default values)
 	void writeToFile(Serializer& writer) const {
-		WRITE_FIELD(writer, shapeX, "shaperShapeX");
-		WRITE_FIELD(writer, shapeY, "shaperShapeY");
-		WRITE_FIELD(writer, mix, "shaperMix");
+		WRITE_FIELD(writer, shapeX, "tableShaperShapeX");
+		WRITE_FIELD(writer, shapeY, "tableShaperShapeY");
 		if (aa) {
-			storage::writeAttributeInt(writer, "shaperAA", 1);
+			storage::writeAttributeInt(writer, "tableShaperAA", 1);
 		}
-		WRITE_FLOAT(writer, phase, "shaperPhase", 10.0f);
+		WRITE_FLOAT(writer, phase, "tableShaperPhase", 10.0f);
 	}
 
 	/// Read a tag into shaper state, returns true if tag was handled
 	bool readTag(Deserializer& reader, const char* tagName) {
-		READ_FIELD(reader, tagName, shapeX, "shaperShapeX");
-		READ_FIELD(reader, tagName, shapeY, "shaperShapeY");
-		READ_FIELD(reader, tagName, mix, "shaperMix");
-		if (std::strcmp(tagName, "shaperAA") == 0) {
-			aa = storage::readAndExitTag(reader, "shaperAA") != 0;
+		READ_FIELD(reader, tagName, shapeX, "tableShaperShapeX");
+		READ_FIELD(reader, tagName, shapeY, "tableShaperShapeY");
+		if (std::strcmp(tagName, "tableShaperAA") == 0) {
+			aa = storage::readAndExitTag(reader, "tableShaperAA") != 0;
 			return true;
 		}
-		READ_FLOAT(reader, tagName, phase, "shaperPhase", 10.0f);
+		READ_FLOAT(reader, tagName, phase, "tableShaperPhase", 10.0f);
 		return false;
 	}
 };

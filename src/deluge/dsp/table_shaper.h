@@ -339,10 +339,13 @@ public:
 	/// @param mixNorm_Q16 Normalized mix in Q16.16 (65536 = 1.0, 131072 = 2.0 full wet)
 	/// @return Output sample at same level as input (unity gain when undriven)
 	[[gnu::always_inline]] int32_t processInt32Q16(int32_t input, int32_t driveGain_Q30, int32_t mixNorm_Q16 = 131072) {
-		// d⁴ curve: 0.5x at center (matches original), 8x at max (extended range)
-		int32_t d2 = multiply_32x32_rshift32(driveGain_Q30, driveGain_Q30) << 2;
-		int32_t d4 = multiply_32x32_rshift32(d2, d2) << 2;
-		int32_t afterDrive = lshiftAndSaturate<5>(multiply_32x32_rshift32(input, d4));
+		// Original behavior preserved, then multiplied by boost factor
+		int32_t baseDrive = multiply_32x32_rshift32(input, driveGain_Q30);
+		// d² boost: 1x at center, 8x at max
+		int64_t d2 = (static_cast<int64_t>(driveGain_Q30) * driveGain_Q30) >> 30;
+		int64_t factor_Q30 = 1073741824LL + d2 * 7; // [1.0, 8.0] in Q30
+		int64_t boosted = (static_cast<int64_t>(baseDrive) * factor_Q30) >> 30;
+		int32_t afterDrive = static_cast<int32_t>(std::clamp(boosted, (int64_t)INT32_MIN, (int64_t)INT32_MAX));
 
 		// Fast path: bypass when linear (tables may be deallocated)
 		if (isLinear_) {
@@ -1019,7 +1022,7 @@ private:
 	// - At lower velocities: need positive drive to reach saturation (natural velocity response)
 	// - Output = lookup / inputScale (unity gain: boost in, attenuate out)
 	int32_t expectedPeak_{1 << 26}; // 67,108,864 - theoretical FM max (reference only)
-	float inputScale_{128.0f};      // Calibrated: FM v=127 saturates near drive=0 (2^7 for bit-shift efficiency)
+	float inputScale_{64.0f};       // Calibrated: FM v=127 saturates near drive=0
 	float outputScale_{static_cast<float>(1 << 26) / (32767.0f * 65536.0f)}; // Float path only (deprecated)
 
 public:

@@ -628,11 +628,11 @@ HorizontalMenu sineShaperSubMenu{
 
 // Shaper - Table Shaper with XY control and lookup table
 // Uses TableShaperDrive to toggle AA on gold knob press
-fx::TableShaperDrive shaperDriveMenu{STRING_FOR_SHAPER_DRIVE, STRING_FOR_SHAPER_DRIVE, params::LOCAL_SHAPER_DRIVE,
+fx::TableShaperDrive shaperDriveMenu{STRING_FOR_SHAPER_DRIVE, STRING_FOR_SHAPER_DRIVE, params::LOCAL_TABLE_SHAPER_DRIVE,
                                      RenderingStyle::BAR};
 fx::TableShaperShapeX shaperShapeXMenu{STRING_FOR_SHAPER_SHAPE_X};
 fx::TableShaperShapeY shaperShapeYMenu{STRING_FOR_SHAPER_SHAPE_Y};
-fx::TableShaperMix shaperMixMenu{STRING_FOR_SHAPER_MIX, STRING_FOR_SHAPER_MIX, params::LOCAL_SHAPER_MIX,
+fx::TableShaperMix shaperMixMenu{STRING_FOR_SHAPER_MIX, STRING_FOR_SHAPER_MIX, params::LOCAL_TABLE_SHAPER_MIX,
                                  RenderingStyle::BAR};
 
 HorizontalMenu tableShaperSubMenu{

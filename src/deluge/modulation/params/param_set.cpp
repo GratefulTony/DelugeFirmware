@@ -597,7 +597,7 @@ bool PatchedParamSet::shouldParamIndicateMiddleValue(ModelStackWithParamId const
 	case params::LOCAL_MODULATOR_1_PITCH_ADJUST:
 	case params::GLOBAL_DELAY_FEEDBACK:
 	case params::GLOBAL_DELAY_RATE:
-	case params::LOCAL_SHAPER_DRIVE:
+	case params::LOCAL_TABLE_SHAPER_DRIVE:
 	case params::LOCAL_SINE_SHAPER_DRIVE:
 		return true;
 	default:

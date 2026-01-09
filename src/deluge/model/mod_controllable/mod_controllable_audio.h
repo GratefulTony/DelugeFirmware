@@ -124,8 +124,8 @@ public:
 	deluge::dsp::SineTableShaperParams sineShaper;
 
 	// Table Shaper with X/Y shape control
-	deluge::dsp::TableShaper shaperDsp; // DSP processor with lookup table
-	deluge::dsp::ShaperState shaper;    // All shaper state (knob values, smoothing, ADAA)
+	deluge::dsp::TableShaper shaperDsp;   // DSP processor with lookup table
+	deluge::dsp::TableShaperState shaper; // All shaper state (knob values, smoothing, ADAA)
 
 	// Disperser (allpass cascade with feedback)
 	deluge::dsp::Disperser disperserDsp;    // DSP processor

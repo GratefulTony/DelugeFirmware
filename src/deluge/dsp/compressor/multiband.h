@@ -1912,6 +1912,9 @@ public:
 			deluge::storage::writeAttributeInt(writer, "mbEnabled", 1);
 		}
 		WRITE_FIELD_DEFAULT(writer, crossoverType_, "mbCrossoverType", 2);
+		if (!softClipEnabled_) { // Default is true, only write when disabled
+			deluge::storage::writeAttributeInt(writer, "mbSoftClip", 0);
+		}
 		WRITE_FLOAT(writer, vibeTwistPhase_, "mbVibeTwistPhase", 10.0f);
 		WRITE_FLOAT(writer, feelMetaPhase_, "mbFeelMetaPhase", 10.0f);
 
@@ -1942,6 +1945,10 @@ public:
 		if (std::strcmp(tagName, "mbEnabled") == 0) {
 			int32_t enabled = deluge::storage::readAndExitTag(reader, tagName);
 			setEnabledZone(enabled ? ONE_Q31 : 0);
+			return true;
+		}
+		if (std::strcmp(tagName, "mbSoftClip") == 0) {
+			softClipEnabled_ = deluge::storage::readAndExitTag(reader, tagName) != 0;
 			return true;
 		}
 		READ_FIELD(reader, tagName, crossoverType_, "mbCrossoverType");

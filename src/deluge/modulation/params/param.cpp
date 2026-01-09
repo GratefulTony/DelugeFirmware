@@ -33,7 +33,7 @@ bool isParamBipolar(Kind kind, int32_t paramID) {
 
 bool isParamHybridDrive(Kind kind, int32_t paramID) {
 	// Hybrid drive params: bipolar where 0 = unity, negative = attenuation, positive = boost
-	return (kind == Kind::PATCHED && (paramID == LOCAL_SHAPER_DRIVE || paramID == LOCAL_SINE_SHAPER_DRIVE));
+	return (kind == Kind::PATCHED && (paramID == LOCAL_TABLE_SHAPER_DRIVE || paramID == LOCAL_SINE_SHAPER_DRIVE));
 }
 
 bool isParamPan(Kind kind, int32_t paramID) {
@@ -141,9 +141,9 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [LOCAL_OSC_A_WAVE_INDEX]         = "Osc1 wave",
 	    [LOCAL_OSC_B_WAVE_INDEX]         = "Osc2 wave",
 	    [LOCAL_PAN]                      = "Pan",
-	    [LOCAL_SHAPER_DRIVE]          = "Sat. drive",
+	    [LOCAL_TABLE_SHAPER_DRIVE]          = "Sat. drive",
 	    [LOCAL_SINE_SHAPER_DRIVE]        = "Sine drive",
-	    [LOCAL_SHAPER_MIX]               = "Sat. mix",
+	    [LOCAL_TABLE_SHAPER_MIX]               = "Sat. mix",
 	    [LOCAL_SINE_SHAPER_TWIST]        = "Sine twist",
 	    [LOCAL_SINE_SHAPER_HARMONIC]     = "Sine harm",
 	    [LOCAL_LPF_FREQ]                 = "LPf freq",
@@ -219,9 +219,9 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [LOCAL_OSC_A_WAVE_INDEX] = STRING_FOR_PARAM_LOCAL_OSC_A_WAVE_INDEX,
 	    [LOCAL_OSC_B_WAVE_INDEX] = STRING_FOR_PARAM_LOCAL_OSC_B_WAVE_INDEX,
 	    [LOCAL_PAN] = STRING_FOR_PARAM_LOCAL_PAN,
-	    [LOCAL_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_SHAPER_DRIVE,
+	    [LOCAL_TABLE_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_TABLE_SHAPER_DRIVE,
 	    [LOCAL_SINE_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_SINE_SHAPER_DRIVE,
-	    [LOCAL_SHAPER_MIX] = STRING_FOR_PARAM_LOCAL_SHAPER_MIX,
+	    [LOCAL_TABLE_SHAPER_MIX] = STRING_FOR_PARAM_LOCAL_TABLE_SHAPER_MIX,
 	    [LOCAL_SINE_SHAPER_TWIST] = STRING_FOR_SINE_SHAPER_SYMMETRY, // Reuse existing twist/symmetry string
 	    [LOCAL_SINE_SHAPER_HARMONIC] = STRING_FOR_SINE_SHAPER_HARMONIC,
 	    [LOCAL_LPF_FREQ] = STRING_FOR_PARAM_LOCAL_LPF_FREQ,
@@ -770,20 +770,20 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 		case LOCAL_FOLD:
 			return "waveFold";
 
-		case LOCAL_SHAPER_DRIVE:
-			return "shaperDrive";
+		case LOCAL_TABLE_SHAPER_DRIVE:
+			return "tableShaperDrive";
 
-		case LOCAL_SHAPER_MIX:
-			return "shaperMix";
+		case LOCAL_TABLE_SHAPER_MIX:
+			return "tableShaperMix";
 
 		case LOCAL_SINE_SHAPER_DRIVE:
 			return "sineShaperDrive";
 
 		case LOCAL_SINE_SHAPER_TWIST:
-			return "localSineShaperTwist";
+			return "sineShaperTwist";
 
 		case LOCAL_SINE_SHAPER_HARMONIC:
-			return "localSineShaperHarmonic";
+			return "patchedSineShaperHarmonic";
 
 		case LOCAL_LAST:
 		    // Intentionally not handled

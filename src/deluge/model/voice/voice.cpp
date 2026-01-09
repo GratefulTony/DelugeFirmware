@@ -1519,7 +1519,9 @@ skipUnisonPart: {}
 
 		// Subtractive synths have oscillators scaled by >> 4 or filterGain (both ~quiet),
 		// so boost input to match FM operating levels, then attenuate output
-		bool boostSubtractive = (synthMode == SynthMode::SUBTRACTIVE);
+		// For subtractive, pass filterGain to compute dynamic boost; for FM, pass 0
+		bool isSubtractive = (synthMode == SynthMode::SUBTRACTIVE);
+		q31_t shaperFilterGain = isSubtractive ? filterGain : 0;
 
 		// Sine Shaper (per-voice, mod-matrix routable drive, harmonic, and twist)
 		if (sound.sineShaper.isEnabled()) {
@@ -1528,17 +1530,15 @@ skipUnisonPart: {}
 			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_HARMONIC),
 			                       paramFinalValues[params::LOCAL_SINE_SHAPER_HARMONIC],
 			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_TWIST),
-			                       paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST], boostSubtractive);
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST], shaperFilterGain,
+			                       sound.hasFilters());
 		}
 
 		// Table Shaper (per-voice, mod-matrix routable drive and mix)
 		// Benchmarking happens inside shapeBuffer with "table" tag
 		if (sound.shaper.shapeX > 0) {
-			q31_t satDrive = paramFinalValues[params::LOCAL_SHAPER_DRIVE];
-			q31_t satMix = paramFinalValues[params::LOCAL_SHAPER_MIX];
-			// For subtractive, pass filterGain to compute dynamic boost
-			// For FM, pass 0 (no boost needed)
-			q31_t shaperFilterGain = boostSubtractive ? filterGain : 0;
+			q31_t satDrive = paramFinalValues[params::LOCAL_TABLE_SHAPER_DRIVE];
+			q31_t satMix = paramFinalValues[params::LOCAL_TABLE_SHAPER_MIX];
 			dsp::shapeBufferInt32(stereo_osc_buffer, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
 			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters());
 		}
@@ -1633,7 +1633,9 @@ skipUnisonPart: {}
 
 		// Subtractive synths have oscillators scaled by >> 4 or filterGain (both ~quiet),
 		// so boost input to match FM operating levels, then attenuate output
-		bool boostSubtractive = (synthMode == SynthMode::SUBTRACTIVE);
+		// For subtractive, pass filterGain to compute dynamic boost; for FM, pass 0
+		bool isSubtractive = (synthMode == SynthMode::SUBTRACTIVE);
+		q31_t shaperFilterGain = isSubtractive ? filterGain : 0;
 
 		// Sine Shaper (per-voice, mod-matrix routable drive, harmonic, and twist) - mono path
 		if (sound.sineShaper.isEnabled()) {
@@ -1642,17 +1644,15 @@ skipUnisonPart: {}
 			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_HARMONIC),
 			                       paramFinalValues[params::LOCAL_SINE_SHAPER_HARMONIC],
 			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_TWIST),
-			                       paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST], boostSubtractive);
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST], shaperFilterGain,
+			                       sound.hasFilters());
 		}
 
 		// Table Shaper (per-voice, mod-matrix routable drive) - mono path
 		// Benchmarking happens inside shapeBuffer with "table" tag
 		if (sound.shaper.shapeX > 0) {
-			q31_t satDrive = paramFinalValues[params::LOCAL_SHAPER_DRIVE];
-			q31_t satMix = paramFinalValues[params::LOCAL_SHAPER_MIX];
-			// For subtractive, pass filterGain to compute dynamic boost
-			// For FM, pass 0 (no boost needed)
-			q31_t shaperFilterGain = boostSubtractive ? filterGain : 0;
+			q31_t satDrive = paramFinalValues[params::LOCAL_TABLE_SHAPER_DRIVE];
+			q31_t satMix = paramFinalValues[params::LOCAL_TABLE_SHAPER_MIX];
 			dsp::shapeBufferInt32(std::span{oscBuffer, n}, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
 			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters());
 		}

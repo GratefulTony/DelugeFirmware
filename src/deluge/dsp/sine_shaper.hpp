@@ -125,9 +125,9 @@ struct ShaperWeights;
 /// (patched params with mod matrix routing). Clips use UNPATCHED variants.
 struct SineTableShaperParams {
 	// User-facing parameters (0-127, converted to q31_t for DSP)
-	uint8_t drive{0};     // Input gain / saturation amount
+	// Note: Drive is now a patched param (LOCAL_SINE_SHAPER_DRIVE), not stored here
 	uint8_t symmetry{64}; // DEPRECATED: kept for XML backwards compat, use Twist param instead
-	uint8_t mix{0};       // Wet/dry blend (0 = bypass)
+	uint8_t mix{0};       // Wet/dry blend (0 = bypass). Not a patched param to reduce LOC overhead.
 	// Zone base values with behavior: harmonic clips to zones, twist allows cross-zone
 	ZoneBasedParam<kNumHarmonicZones, true> harmonic; // Clips to zone boundaries
 	ZoneBasedParam<kNumHarmonicZones, false> twist;   // Allows cross-zone modulation
@@ -169,12 +169,9 @@ struct SineTableShaperParams {
 	/// Get mix as q31_t
 	[[nodiscard]] q31_t getMixQ31() const { return static_cast<q31_t>(mix) << 24; }
 
-	/// Get drive as q31_t (for clip path where drive is stored locally)
-	[[nodiscard]] q31_t getDriveQ31() const { return static_cast<q31_t>(drive) << 24; }
-
 	/// Write sine shaper params to file (only non-default values)
+	/// Note: Drive is now a patched param (LOCAL_SINE_SHAPER_DRIVE), serialized separately
 	void writeToFile(Serializer& writer) const {
-		WRITE_FIELD(writer, drive, "sineShaperDrive");
 		WRITE_FIELD(writer, mix, "sineShaperMix");
 		WRITE_ZONE(writer, harmonic.value, "sineShaperHarmonicBase");
 		WRITE_ZONE(writer, twist.value, "sineShaperTwistBase");
@@ -184,8 +181,8 @@ struct SineTableShaperParams {
 	}
 
 	/// Read a tag into sine shaper params, returns true if tag was handled
+	/// Note: Drive is now a patched param (LOCAL_SINE_SHAPER_DRIVE), read separately
 	bool readTag(Deserializer& reader, const char* tagName) {
-		READ_FIELD(reader, tagName, drive, "sineShaperDrive");
 		READ_FIELD(reader, tagName, mix, "sineShaperMix");
 		READ_ZONE(reader, tagName, harmonic.value, "sineShaperHarmonicBase");
 		READ_ZONE(reader, tagName, twist.value, "sineShaperTwistBase");
@@ -215,11 +212,11 @@ struct SineShaperVoiceState {
 /// Feedback taps post-HPF so inherits the filtering
 constexpr q31_t kOutputHpfAlpha = static_cast<q31_t>(0.01425 * ONE_Q31);
 
-/// Subtractive mode boost amount (bits)
-/// Subtractive runs at >> 4 attenuation vs FM's << 3 boost (7 bits difference)
-/// Start with 4 bits (~24dB) as conservative estimate, tune empirically
-/// Pre-boost input, post-attenuate wet to normalize waveshaper operating point
-constexpr int32_t kSubtractiveBoostBits = 4;
+/// Neutral filterGain value for subtractive mode gain compensation
+/// Matches kShaperNeutralFilterGainInt from shaper_buffer.h
+/// At this level: boostGain = 1.0 (no adjustment needed)
+/// High resonance (low filterGain) → boost; low resonance (high filterGain) → attenuate
+constexpr int32_t kSineShaperNeutralFilterGain = 1 << 28;
 
 // Zone 1 "357" Chebyshev Harmonic Extraction
 // See docs/dev/sine_shaper_chebyshev.md for detailed design rationale
@@ -1147,13 +1144,15 @@ sineShapeCoreStereo(q31_t inputL, q31_t inputR, float driveGainL, float driveGai
  * @param twist Twist parameters (evens, rect, feedback, phaseHarmonic)
  * @param params Pointer to SineTableShaperParams for coefficient smoothing
  * @param wasBypassed Pointer to bypass state flag (updated in place)
- * @param boostSubtractive If true, pre-boost input and post-attenuate wet to normalize
- *                         subtractive mode signal levels to match FM mode operating point
+ * @param filterGain For subtractive mode: pass the filterGain from filter config.
+ *                   For FM mode or subtractive without filters: pass 0.
+ *                   When >0 with hasFilters, dynamically adjusts gain to normalize levels.
+ * @param hasFilters For subtractive mode: true if filters are active
  */
 inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothedDrive,
                             SineShaperVoiceState* voiceState, q31_t harmonic, q31_t mix,
                             const SineShaperTwistParams& twist, SineTableShaperParams* params,
-                            bool* wasBypassed = nullptr, bool boostSubtractive = false) {
+                            bool* wasBypassed = nullptr, q31_t filterGain = 0, bool hasFilters = false) {
 	// Early out - if mix is 0, do nothing (important CPU optimization)
 	if (mix <= 0 || buffer.empty()) {
 		if (wasBypassed) {
@@ -1260,6 +1259,22 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 	fbScale *= (1.0f - 0.1f * driveNorm);
 	q31_t fbAmount = static_cast<q31_t>(twist.feedbackAmount * fbScale * static_cast<float>(ONE_Q31));
 
+	// Compute gain adjustment for subtractive mode (matches table shaper pattern)
+	// filterGain=0 means FM mode (no adjustment needed)
+	// filterGain>0 means subtractive: compensate for resonance-induced level changes
+	// At neutral filterGain (2^28), boostGain = 1.0 (no adjustment)
+	// High resonance (low filterGain) → boost; low resonance (high filterGain) → attenuate
+	bool needsGainAdjust = (filterGain > 0) && hasFilters;
+	float boostGain = 1.0f;
+	float attenGain = 1.0f;
+
+	if (needsGainAdjust) {
+		boostGain = static_cast<float>(kSineShaperNeutralFilterGain) / static_cast<float>(filterGain);
+		attenGain = 1.0f / boostGain;
+		// Skip per-sample multiply if effectively unity
+		needsGainAdjust = (filterGain != kSineShaperNeutralFilterGain);
+	}
+
 #if ENABLE_FX_BENCHMARK
 	if (doBench) {
 		benchSetup.stop();
@@ -1274,7 +1289,12 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 	for (auto& sample : buffer) {
 		// Apply feedback to input (before shaping)
 		// Pre-boost for subtractive mode to normalize operating point with FM
-		q31_t inputWithFb = boostSubtractive ? lshiftAndSaturate<kSubtractiveBoostBits>(sample) : sample;
+		q31_t inputWithFb = sample;
+		if (needsGainAdjust) {
+			// Clamp to prevent overflow when boostGain > 1 and sample is near INT32_MAX
+			inputWithFb =
+			    static_cast<q31_t>(std::clamp(static_cast<float>(sample) * boostGain, -2147483648.0f, 2147483647.0f));
+		}
 		if (fbAmount > 0) {
 			// Apply feedback directly (HPF on tap prevents fundamental buildup)
 			q31_t fb = signed_saturate<22>(multiply_32x32_rshift32(fbState, fbAmount) << 1);
@@ -1315,8 +1335,8 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 		// Post-attenuate wet signal for subtractive mode (inverse of pre-boost)
 		// This normalizes the waveshaper operating point without changing output level
 		// Applied AFTER feedback tap so feedback operates at internal waveshaper level
-		if (boostSubtractive) {
-			hpfWet >>= kSubtractiveBoostBits;
+		if (needsGainAdjust) {
+			hpfWet = static_cast<q31_t>(static_cast<float>(hpfWet) * attenGain);
 		}
 
 		q31_t mixed;
@@ -1376,13 +1396,15 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
  * @param twist Twist parameters (stereo, evens, rect, feedback, phaseHarmonic)
  * @param params Pointer to SineTableShaperParams for coefficient smoothing (required)
  * @param wasBypassed Pointer to bypass state flag (updated in place)
- * @param boostSubtractive If true, pre-boost input and post-attenuate wet to normalize
- *                         subtractive mode signal levels to match FM mode operating point
+ * @param filterGain For subtractive mode: pass the filterGain from filter config.
+ *                   For FM mode or subtractive without filters: pass 0.
+ *                   When >0 with hasFilters, dynamically adjusts gain to normalize levels.
+ * @param hasFilters For subtractive mode: true if filters are active
  */
 inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoothedDrive,
                             SineShaperVoiceState* voiceState, q31_t harmonic, q31_t mix,
                             const SineShaperTwistParams& twist, SineTableShaperParams* params,
-                            bool* wasBypassed = nullptr, bool boostSubtractive = false) {
+                            bool* wasBypassed = nullptr, q31_t filterGain = 0, bool hasFilters = false) {
 	// Early out - if mix is 0, do nothing (important CPU optimization)
 	if (mix <= 0 || buffer.empty()) {
 		if (wasBypassed) {
@@ -1593,6 +1615,22 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	fbScale *= (1.0f - 0.1f * driveNorm);
 	q31_t fbAmount = static_cast<q31_t>(twist.feedbackAmount * fbScale * static_cast<float>(ONE_Q31));
 
+	// Compute gain adjustment for subtractive mode (matches table shaper pattern)
+	// filterGain=0 means FM mode (no adjustment needed)
+	// filterGain>0 means subtractive: compensate for resonance-induced level changes
+	// At neutral filterGain (2^28), boostGain = 1.0 (no adjustment)
+	// High resonance (low filterGain) → boost; low resonance (high filterGain) → attenuate
+	bool needsGainAdjust = (filterGain > 0) && hasFilters;
+	float boostGain = 1.0f;
+	float attenGain = 1.0f;
+
+	if (needsGainAdjust) {
+		boostGain = static_cast<float>(kSineShaperNeutralFilterGain) / static_cast<float>(filterGain);
+		attenGain = 1.0f / boostGain;
+		// Skip per-sample multiply if effectively unity
+		needsGainAdjust = (filterGain != kSineShaperNeutralFilterGain);
+	}
+
 #if ENABLE_FX_BENCHMARK
 	if (doBench) {
 		benchSetup.stop();
@@ -1617,8 +1655,15 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 
 		// Apply feedback to input (before shaping)
 		// Pre-boost for subtractive mode to normalize operating point with FM
-		q31_t inputL = boostSubtractive ? lshiftAndSaturate<kSubtractiveBoostBits>(sample.l) : sample.l;
-		q31_t inputR = boostSubtractive ? lshiftAndSaturate<kSubtractiveBoostBits>(sample.r) : sample.r;
+		q31_t inputL = sample.l;
+		q31_t inputR = sample.r;
+		if (needsGainAdjust) {
+			// Clamp to prevent overflow when boostGain > 1 and sample is near INT32_MAX
+			inputL =
+			    static_cast<q31_t>(std::clamp(static_cast<float>(sample.l) * boostGain, -2147483648.0f, 2147483647.0f));
+			inputR =
+			    static_cast<q31_t>(std::clamp(static_cast<float>(sample.r) * boostGain, -2147483648.0f, 2147483647.0f));
+		}
 		if (fbAmount > 0) {
 			// Apply feedback directly (HPF on tap prevents fundamental buildup)
 			q31_t fbL = signed_saturate<22>(multiply_32x32_rshift32(fbStateL, fbAmount) << 1);
@@ -1672,9 +1717,9 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 		// Post-attenuate wet signal for subtractive mode (inverse of pre-boost)
 		// This normalizes the waveshaper operating point without changing output level
 		// Applied AFTER feedback tap so feedback operates at internal waveshaper level
-		if (boostSubtractive) {
-			hpfWetL >>= kSubtractiveBoostBits;
-			hpfWetR >>= kSubtractiveBoostBits;
+		if (needsGainAdjust) {
+			hpfWetL = static_cast<q31_t>(static_cast<float>(hpfWetL) * attenGain);
+			hpfWetR = static_cast<q31_t>(static_cast<float>(hpfWetR) * attenGain);
 		}
 
 		q31_t mixedL, mixedR;
@@ -1747,11 +1792,12 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
  * @param harmonicCables Harmonic cables from patcher (paramFinalValues[LOCAL_SINE_SHAPER_HARMONIC])
  * @param twistPreset Twist preset from param set
  * @param twistCables Twist cables from patcher (paramFinalValues[LOCAL_SINE_SHAPER_TWIST])
- * @param boostSubtractive True for subtractive mode without filters
+ * @param filterGain For subtractive mode: pass the filterGain from filter config. For FM: pass 0.
+ * @param hasFilters For subtractive mode: true if filters are active
  */
 inline void processSineShaper(StereoBuffer<q31_t> buffer, SineTableShaperParams* params, SineShaperVoiceState* state,
                               q31_t driveFinal, q31_t harmonicPreset, q31_t harmonicCables, q31_t twistPreset,
-                              q31_t twistCables, bool boostSubtractive = false) {
+                              q31_t twistCables, q31_t filterGain = 0, bool hasFilters = false) {
 	// Combine preset + cables using zone-aware scaling
 	q31_t sineHarmonic = params->harmonic.combinePresetAndCables(harmonicPreset, harmonicCables);
 	q31_t sineTwist = params->twist.combinePresetAndCables(twistPreset, twistCables);
@@ -1764,36 +1810,7 @@ inline void processSineShaper(StereoBuffer<q31_t> buffer, SineTableShaperParams*
 
 	// Process buffer
 	sineShapeBuffer(buffer, driveFinal, &params->smoothedDrive, state, sineHarmonic, params->getMixQ31(), twistParams,
-	                params, nullptr, boostSubtractive);
-}
-
-/**
- * Process sine shaper for clip path (unpatched params, no mod matrix)
- *
- * Encapsulates: param combination, twist smoothing, twist param computation, buffer processing.
- * Call when sineShaper.isEnabled() returns true.
- *
- * @param buffer Stereo audio buffer to process in-place
- * @param params Sine shaper params (modified: smoothedTwist, smoothedDrive updated)
- * @param state Per-clip state (modified: DC blocker, feedback, LFO phase)
- * @param harmonicMod Harmonic modulation from unpatched params
- * @param twistMod Twist modulation from unpatched params
- */
-inline void processSineShaper(StereoBuffer<q31_t> buffer, SineTableShaperParams* params, SineShaperVoiceState* state,
-                              q31_t harmonicMod, q31_t twistMod) {
-	// Combine field + modulation using zone-aware scaling
-	q31_t sineHarmonic = params->harmonic.combineWithMod(harmonicMod);
-	q31_t sineTwist = params->twist.combineWithMod(twistMod);
-
-	// Smooth twist at source - derived values inherit smoothness
-	q31_t smoothedTwist = smoothParam(&params->smoothedTwist, sineTwist);
-
-	// Compute twist-derived params
-	auto twistParams = computeSineShaperTwistParams(smoothedTwist, params);
-
-	// Process buffer (drive from local field, no subtractive boost for clips)
-	sineShapeBuffer(buffer, params->getDriveQ31(), &params->smoothedDrive, state, sineHarmonic, params->getMixQ31(),
-	                twistParams, params);
+	                params, nullptr, filterGain, hasFilters);
 }
 
 /**
@@ -1801,13 +1818,13 @@ inline void processSineShaper(StereoBuffer<q31_t> buffer, SineTableShaperParams*
  */
 inline void processSineShaper(std::span<q31_t> buffer, SineTableShaperParams* params, SineShaperVoiceState* state,
                               q31_t driveFinal, q31_t harmonicPreset, q31_t harmonicCables, q31_t twistPreset,
-                              q31_t twistCables, bool boostSubtractive = false) {
+                              q31_t twistCables, q31_t filterGain = 0, bool hasFilters = false) {
 	q31_t sineHarmonic = params->harmonic.combinePresetAndCables(harmonicPreset, harmonicCables);
 	q31_t sineTwist = params->twist.combinePresetAndCables(twistPreset, twistCables);
 	q31_t smoothedTwist = smoothParam(&params->smoothedTwist, sineTwist);
 	auto twistParams = computeSineShaperTwistParams(smoothedTwist, params);
 	sineShapeBuffer(buffer, driveFinal, &params->smoothedDrive, state, sineHarmonic, params->getMixQ31(), twistParams,
-	                params, nullptr, boostSubtractive);
+	                params, nullptr, filterGain, hasFilters);
 }
 
 } // namespace deluge::dsp

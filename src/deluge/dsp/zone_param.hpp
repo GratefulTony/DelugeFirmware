@@ -27,6 +27,34 @@
 namespace deluge::dsp {
 
 // ============================================================================
+// Zone-based Parameter Storage Design
+// ============================================================================
+//
+// Zone parameters have TWO storage locations that work together:
+//
+// 1. PATCHED PARAM PRESET (PatchedParamSet[LOCAL_* or GLOBAL_*])
+//    - Stored in: ParamManager's PatchedParamSet
+//    - Serialized as: Explicit handlers in sound.cpp (e.g., "patchedSineShaperHarmonic")
+//    - Purpose: Base value for DSP, set by menu via ZoneBasedPatchedParam
+//    - Used by: combinePresetAndCables(preset, cables) - preset IS the base
+//    - Features: Mod matrix routing (LFO, envelope, etc.), automation, gold knob recording
+//
+// 2. UNPATCHED PARAM (UnpatchedParamSet[UNPATCHED_*])
+//    - Stored in: ParamManager's UnpatchedParamSet
+//    - Serialized as: Standard unpatched param serialization
+//    - Purpose: Additional modulation on top of preset (for clips without mod matrix)
+//    - Used by: combinePresetAndCables(preset, unpatchedMod) - as "cables" parameter
+//    - Features: CC learning, simple modulation (no mod matrix routing)
+//
+// DSP Combination via combinePresetAndCables():
+// - Voice path: preset (patched param) + cables (mod matrix output)
+// - Clip path:  preset (patched param) + cables (unpatched param)
+//
+// Note: ZoneBasedParam.value field is vestigial - serialized for backwards
+// compatibility but not used by DSP. Menu writes to patched param.
+// ============================================================================
+
+// ============================================================================
 // Zone computation helpers (work on any q31_t value)
 // ============================================================================
 
@@ -74,13 +102,13 @@ struct ZoneInfo {
  * Zone-based parameter with configurable behavior
  *
  * Encapsulates a q31 field value with zone semantics. Knows how to combine
- * with modulation according to its configuration (zone count, clipping).
+ * preset + cables according to its configuration (zone count, clipping).
  *
  * Used by SineTableShaperParams and other zone-based effect parameters.
- * Menu items wrap these params for UI, DSP calls combineWithMod directly.
+ * DSP calls combinePresetAndCables() to merge patched param + modulation.
  *
  * @tparam NUM_ZONES Number of zones (e.g., 8)
- * @tparam CLIP_TO_ZONE If true, modulation clips to zone boundaries
+ * @tparam CLIP_TO_ZONE If true, cable modulation clips to zone boundaries
  */
 template <int32_t NUM_ZONES = 8, bool CLIP_TO_ZONE = false>
 struct ZoneBasedParam {
@@ -105,49 +133,6 @@ struct ZoneBasedParam {
 	/// Check if value is in or past a specific zone
 	[[nodiscard]] bool isInZoneOrLater(int32_t zoneIndex) const {
 		return dsp::isInZoneOrLater(value, zoneIndex, NUM_ZONES);
-	}
-
-	/// Combine field value with scaled modulation
-	/// @param modulation Raw modulation value (full bipolar range)
-	/// @param scaleZones Divide modulation by this (default = kNumZones, so full mod = 1 zone)
-	///                   Use 1 to disable scaling (full mod = full range)
-	[[nodiscard]] q31_t combineWithMod(q31_t modulation, int32_t scaleZones = kNumZones) const {
-		q31_t scaledMod = (scaleZones > 1) ? (modulation / scaleZones) : modulation;
-		if constexpr (CLIP_TO_ZONE) {
-			int32_t baseZone = getZoneIndex();
-			q31_t zoneLower = baseZone * kZoneWidth;
-			q31_t zoneUpper = (baseZone == NUM_ZONES - 1) ? ONE_Q31 : (baseZone + 1) * kZoneWidth - 1;
-			return std::clamp(value + scaledMod, zoneLower, zoneUpper);
-		}
-		else {
-			return std::clamp(value + scaledMod, static_cast<q31_t>(0), ONE_Q31);
-		}
-	}
-
-	/// Combine field with preset (gold knob) and cable modulation separately
-	/// Preset is scaled but never clipped to zone boundaries (allows automation to cross zones)
-	/// Cables are scaled and clipped if CLIP_TO_ZONE is true (prevents LFO glitches)
-	/// @param preset Gold knob automation value (scaled, not clipped)
-	/// @param cables Mod matrix cable combination (scaled, clipped if CLIP_TO_ZONE)
-	/// @param scaleZones Divide both by this (default = kNumZones)
-	[[nodiscard]] q31_t combineWithModSeparate(q31_t preset, q31_t cables, int32_t scaleZones = kNumZones) const {
-		q31_t scaledPreset = (scaleZones > 1) ? (preset / scaleZones) : preset;
-		q31_t scaledCables = (scaleZones > 1) ? (cables / scaleZones) : cables;
-
-		// Base = field + preset (preset can cross zones freely)
-		q31_t base = std::clamp(value + scaledPreset, static_cast<q31_t>(0), ONE_Q31);
-
-		if constexpr (CLIP_TO_ZONE) {
-			// Clip cables to zone boundaries of the new base position
-			int32_t baseZone = std::clamp(static_cast<int32_t>(base / kZoneWidth), static_cast<int32_t>(0),
-			                              static_cast<int32_t>(NUM_ZONES - 1));
-			q31_t zoneLower = baseZone * kZoneWidth;
-			q31_t zoneUpper = (baseZone == NUM_ZONES - 1) ? ONE_Q31 : (baseZone + 1) * kZoneWidth - 1;
-			return std::clamp(base + scaledCables, zoneLower, zoneUpper);
-		}
-		else {
-			return std::clamp(base + scaledCables, static_cast<q31_t>(0), ONE_Q31);
-		}
 	}
 
 	/// Combine preset (base position) with modulation cables
