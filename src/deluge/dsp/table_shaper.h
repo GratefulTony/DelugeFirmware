@@ -339,22 +339,26 @@ public:
 	/// @param mixNorm_Q16 Normalized mix in Q16.16 (65536 = 1.0, 131072 = 2.0 full wet)
 	/// @return Output sample at same level as input (unity gain when undriven)
 	[[gnu::always_inline]] int32_t processInt32Q16(int32_t input, int32_t driveGain_Q30, int32_t mixNorm_Q16 = 131072) {
-		// Original behavior preserved, then multiplied by boost factor
-		int32_t baseDrive = multiply_32x32_rshift32(input, driveGain_Q30);
-		// d² boost: 1x at center, 8x at max
-		int64_t d2 = (static_cast<int64_t>(driveGain_Q30) * driveGain_Q30) >> 30;
-		int64_t factor_Q30 = 1073741824LL + d2 * 7; // [1.0, 8.0] in Q30
-		int64_t boosted = (static_cast<int64_t>(baseDrive) * factor_Q30) >> 30;
-		int32_t afterDrive = static_cast<int32_t>(std::clamp(boosted, (int64_t)INT32_MIN, (int64_t)INT32_MAX));
+		// Linear drive with saturation
+		// Range: ~0.25x at min drive to ~4x at max drive
+		int32_t afterDrive = multiply_32x32_rshift32(input, driveGain_Q30) << 2;
 
 		// Fast path: bypass when linear (tables may be deallocated)
 		if (isLinear_) {
 			return afterDrive; // Return driven signal (consistent with dry path)
 		}
 
-		// Scale to fill table range using float multiply (inputScale_ is typically 128)
-		int32_t scaledInput = static_cast<int32_t>(
-		    std::clamp(static_cast<float>(afterDrive) * inputScale_, -2147483648.0f, 2147483647.0f));
+		// Scale to fill table range using bit shift (Fix 1: restored from float multiply)
+		// Uses floor(log2(inputScale_)) for conservative boost
+		int32_t scaledInput;
+		if (afterDrive >= 0) {
+			int32_t maxBeforeOverflow = INT32_MAX >> inputScaleShift_;
+			scaledInput = (afterDrive > maxBeforeOverflow) ? INT32_MAX : (afterDrive << inputScaleShift_);
+		}
+		else {
+			int32_t minBeforeOverflow = INT32_MIN >> inputScaleShift_;
+			scaledInput = (afterDrive < minBeforeOverflow) ? INT32_MIN : (afterDrive << inputScaleShift_);
+		}
 
 		// Amplitude-dependent blend: threshold determines which amplitudes get wet
 		// absInput is in [0, INT32_MAX] after scaling
@@ -423,12 +427,12 @@ public:
 		int32_t wetPart = multiply_32x32_rshift32(lookup, blend_Q30) << 2;
 		int32_t blended = dryPart + wetPart;
 
-		// Scale back to original level
-		return static_cast<int32_t>(static_cast<float>(blended) / inputScale_);
+		// Scale back to original level using bit shift (Fix 1: restored from float divide)
+		return blended >> inputScaleShift_;
 	}
 
 	/// Process a single sample using integer-only path (legacy float interface)
-	/// Uses stored inputScale_/outputScale_ set via setExpectedPeak()
+	/// Uses stored inputScaleShift_ set via setExpectedPeak()
 	/// @param input Input sample in raw signal format (e.g., ~23M for FM, ~1.4M for subtractive)
 	/// @param driveGain_Q30 Pre-computed drive gain in Q30 format
 	/// @param mixNorm Normalized mix (0 = full dry, 2 = full wet), for amplitude-dependent blend
@@ -1020,10 +1024,11 @@ private:
 	// - Theoretical max: 2^26 = 67M (sine * sourceAmplitude / 2^32, sourceAmplitude capped at 2^27)
 	// - inputScale=128 (2^7) puts saturation onset near center drive for FM at max velocity
 	// - At lower velocities: need positive drive to reach saturation (natural velocity response)
-	// - Output = lookup / inputScale (unity gain: boost in, attenuate out)
-	int32_t expectedPeak_{1 << 26}; // 67,108,864 - theoretical FM max (reference only)
-	float inputScale_{64.0f};       // Calibrated: FM v=127 saturates near drive=0
-	float outputScale_{static_cast<float>(1 << 26) / (32767.0f * 65536.0f)}; // Float path only (deprecated)
+	// - Output = lookup >> inputScaleShift_ (unity gain: boost in, attenuate out)
+	int32_t expectedPeak_{1 << 26};      // 67,108,864 - theoretical FM max (reference only)
+	float inputScale_{128.0f};           // Calibrated: FM v=127 saturates near center drive
+	int32_t inputScaleShift_{7};         // floor(log2(inputScale_)) for bit-shift scaling (128 = 2^7)
+	float invInputScale_{1.0f / 128.0f}; // Precomputed reciprocal for non-power-of-2 fallback
 
 public:
 	/// Set the expected peak level for int32 processing
@@ -1033,10 +1038,11 @@ public:
 		// Input scale: maps expectedPeak to INT32_MAX (fills table proportionally)
 		constexpr float kInt32Max = 2147483647.0f;
 		inputScale_ = kInt32Max / static_cast<float>(peak);
-		// Output scale for unity gain: peak / (32767 * 65536)
-		// Lookup returns Q16.15 (table_int16 * 65536), this converts back to input level
-		constexpr float kLookupFullScale = 32767.0f * 65536.0f;
-		outputScale_ = static_cast<float>(peak) / kLookupFullScale;
+		// Compute shift for bit-shift scaling - floor() for less boost (safer)
+		int32_t shift = static_cast<int32_t>(std::floor(std::log2(inputScale_)));
+		inputScaleShift_ = (shift < 0) ? 0 : ((shift > 31) ? 31 : shift); // Safety bounds
+		// Precompute reciprocal for fallback (multiply faster than divide)
+		invInputScale_ = 1.0f / inputScale_;
 	}
 
 	[[nodiscard]] int32_t getExpectedPeak() const { return expectedPeak_; }
