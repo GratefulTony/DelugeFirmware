@@ -77,13 +77,13 @@ struct ShaperSmoothingContextQ16 {
  * Table operates at FM signal levels. For subtractive synths, pass filterGain to
  * dynamically compute the boost needed to match FM operating levels.
  *
- * Note: No DC blocking here - table normalization handles transfer function DC,
- * and downstream processing provides DC blocking at the output stage.
+ * Note: The p^5 drive curve is computed once per buffer (hoisted), then the resulting
+ * Q26 gain is smoothed per-sample. This is more efficient than computing p^5 per sample.
  *
  * @param buffer Audio buffer to process in-place
  * @param shaper The Shaper instance (with pre-generated table)
  * @param drive Patched drive parameter (q31)
- * @param smoothedDrive Previous drive value for smoothing (updated)
+ * @param smoothedDriveGain Previous driveGain_Q26 value for smoothing (updated, stores Q26 gain not raw drive)
  * @param mix Wet/dry blend (q31, 0 = bypass)
  * @param smoothedMixNorm_Q16 Previous mixNorm value for smoothing (Q16.16 format, updated)
  * @param filterGain For subtractive mode: pass the filterGain from filter config.
@@ -91,18 +91,19 @@ struct ShaperSmoothingContextQ16 {
  *                   When 0, no boost is applied (FM mode) or fixed boost for no-filter case.
  * @param hasFilters For subtractive mode: true if filters are active
  */
-inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDrive, q31_t mix,
-                             int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters) {
-	// Hybrid param range: [-1073741824, +1073741824], bypass at minimum
-	constexpr q31_t kHybridMin = -1073741824;
-	if (mix <= kHybridMin || buffer.empty()) {
+inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDriveGain,
+                             q31_t mix, int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters) {
+	if (buffer.empty()) {
 		return;
 	}
 
 	FX_BENCH_DECLARE(bench, "shaper_table");
 	FX_BENCH_SCOPE(bench);
 
-	auto ctx = prepareShaperSmoothing(*smoothedDrive, drive);
+	// Compute target driveGain ONCE (hoisted p^5 calculation)
+	int32_t targetGain_Q26 = TableShaper::driveToGainQ26(drive);
+	// Smooth driveGain_Q26 (not raw drive) - stored value is Q26 gain
+	auto gainCtx = prepareShaperSmoothing(*smoothedDriveGain, targetGain_Q26);
 
 	// Compute gain adjustment for subtractive mode
 	// filterGain=0 means FM mode (no adjustment needed)
@@ -125,7 +126,7 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 	auto mixCtx = prepareShaperSmoothingQ16(*smoothedMixNorm_Q16, targetMixNorm_Q16);
 
 	for (auto& sample : buffer) {
-		ctx.current += multiply_32x32_rshift32(ctx.target - ctx.current, ctx.alpha) * 2;
+		gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
 		// Q16 IIR smoothing: current += (target - current) * alpha >> 16
 		mixCtx.current += ((mixCtx.target - mixCtx.current) * mixCtx.alpha) >> 16;
 
@@ -136,8 +137,8 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 			    static_cast<q31_t>(std::clamp(static_cast<float>(sample) * boostGain, -2147483648.0f, 2147483647.0f));
 		}
 
-		// processInt32 handles: drive gain, table lookup, and amplitude-dependent blend
-		q31_t out = shaper.processInt32(input, ctx.current, mixCtx.current);
+		// processWithGain: table lookup with pre-computed driveGain (p^5 hoisted)
+		q31_t out = shaper.processWithGain(input, gainCtx.current, mixCtx.current);
 
 		if (needsGainAdjust) {
 			out = static_cast<q31_t>(static_cast<float>(out) * attenGain);
@@ -146,7 +147,7 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 		sample = out;
 	}
 
-	*smoothedDrive = ctx.current;
+	*smoothedDriveGain = gainCtx.current;
 	*smoothedMixNorm_Q16 = mixCtx.current;
 }
 
@@ -156,31 +157,32 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
  * Table operates at FM signal levels. For subtractive synths, pass filterGain to
  * dynamically compute the boost needed to match FM operating levels.
  *
- * Note: No DC blocking here - table normalization handles transfer function DC,
- * and downstream processing provides DC blocking at the output stage.
+ * Note: The p^5 drive curve is computed once per buffer (hoisted), then the resulting
+ * Q26 gain is smoothed per-sample. This is more efficient than computing p^5 per sample.
  *
  * @param buffer Stereo audio buffer to process in-place
  * @param shaper The Shaper instance (with pre-generated table)
  * @param drive Patched drive parameter (q31)
- * @param smoothedDrive Previous drive value for smoothing (updated)
+ * @param smoothedDriveGain Previous driveGain_Q26 value for smoothing (updated, stores Q26 gain not raw drive)
  * @param mix Wet/dry blend (q31, 0 = bypass)
  * @param smoothedMixNorm_Q16 Previous mixNorm value for smoothing (Q16.16 format, updated)
  * @param filterGain For subtractive mode: pass the filterGain from filter config.
  *                   For FM mode: pass 0 (no boost needed).
  * @param hasFilters For subtractive mode: true if filters are active
  */
-inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDrive,
+inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDriveGain,
                              q31_t mix, int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters) {
-	// Hybrid param range: [-1073741824, +1073741824], bypass at minimum
-	constexpr q31_t kHybridMin = -1073741824;
-	if (mix <= kHybridMin || buffer.empty()) {
+	if (buffer.empty()) {
 		return;
 	}
 
 	FX_BENCH_DECLARE(bench, "shaper_table");
 	FX_BENCH_SCOPE(bench);
 
-	auto ctx = prepareShaperSmoothing(*smoothedDrive, drive);
+	// Compute target driveGain ONCE (hoisted p^5 calculation)
+	int32_t targetGain_Q26 = TableShaper::driveToGainQ26(drive);
+	// Smooth driveGain_Q26 (not raw drive) - stored value is Q26 gain
+	auto gainCtx = prepareShaperSmoothing(*smoothedDriveGain, targetGain_Q26);
 
 	// Compute gain adjustment for subtractive mode
 	// filterGain=0 means FM mode (no adjustment needed)
@@ -203,7 +205,7 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 	auto mixCtx = prepareShaperSmoothingQ16(*smoothedMixNorm_Q16, targetMixNorm_Q16);
 
 	for (auto& sample : buffer) {
-		ctx.current += multiply_32x32_rshift32(ctx.target - ctx.current, ctx.alpha) * 2;
+		gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
 		// Q16 IIR smoothing: current += (target - current) * alpha >> 16
 		mixCtx.current += ((mixCtx.target - mixCtx.current) * mixCtx.alpha) >> 16;
 
@@ -217,9 +219,9 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 			    static_cast<q31_t>(std::clamp(static_cast<float>(sample.r) * boostGain, -2147483648.0f, 2147483647.0f));
 		}
 
-		// processInt32 handles: drive gain, table lookup, and amplitude-dependent blend
-		q31_t outL = shaper.processInt32(inputL, ctx.current, mixCtx.current);
-		q31_t outR = shaper.processInt32(inputR, ctx.current, mixCtx.current);
+		// processWithGain: table lookup with pre-computed driveGain (p^5 hoisted)
+		q31_t outL = shaper.processWithGain(inputL, gainCtx.current, mixCtx.current);
+		q31_t outR = shaper.processWithGain(inputR, gainCtx.current, mixCtx.current);
 
 		if (needsGainAdjust) {
 			outL = static_cast<q31_t>(static_cast<float>(outL) * attenGain);
@@ -230,7 +232,7 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 		sample.r = outR;
 	}
 
-	*smoothedDrive = ctx.current;
+	*smoothedDriveGain = gainCtx.current;
 	*smoothedMixNorm_Q16 = mixCtx.current;
 }
 

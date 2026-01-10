@@ -16,6 +16,7 @@
  */
 #pragma once
 
+#include "OSLikeStuff/scheduler_api.h"
 #include "gui/l10n/l10n.h"
 #include "gui/menu_item/fx/sine_shaper.h"
 #include "gui/menu_item/integer.h"
@@ -31,6 +32,30 @@
 #include "processing/sound/sound_drum.h"
 
 namespace deluge::gui::menu_item::fx {
+
+// Deferred shaper regeneration - avoids blocking audio thread
+namespace shaper_regen {
+inline ModControllableAudio* pending{nullptr};
+inline TaskID taskId{-1};
+
+inline void regenerateCallback() {
+	if (pending) {
+		pending->shaperDsp.regenerateIfDirty();
+		pending = nullptr;
+	}
+	taskId = -1;
+}
+
+inline void scheduleRegeneration(ModControllableAudio* mca) {
+	// Pre-allocate buffers NOW on UI thread (safe time) - never allocate during deferred task
+	mca->shaperDsp.ensureBuffersAllocated();
+	pending = mca;
+	if (taskId < 0) {
+		// Priority 40 = idle time only, won't preempt other tasks
+		taskId = addOnceTask(regenerateCallback, 40, 0.1, "shaper_regen", RESOURCE_NONE);
+	}
+}
+} // namespace shaper_regen
 
 // Drive: Bipolar patched param for shaper input gain
 // Gold knob press toggles AA via Sound::modEncoderButtonAction
@@ -59,12 +84,14 @@ public:
 					soundDrum->shaper.shapeX = current_value;
 					soundDrum->shaperDsp.regenerateTable(current_value, soundDrum->shaper.shapeY,
 					                                     soundDrum->shaper.phase);
+					soundDrum->shaperDsp.regenerateIfDirty(); // Direct for bulk kit operation
 				}
 			}
 		}
 		else {
 			mca->shaper.shapeX = current_value;
 			mca->shaperDsp.regenerateTable(current_value, mca->shaper.shapeY, mca->shaper.phase);
+			shaper_regen::scheduleRegeneration(mca);
 		}
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
@@ -109,12 +136,14 @@ public:
 					soundDrum->shaper.shapeY = current_value;
 					soundDrum->shaperDsp.regenerateTable(soundDrum->shaper.shapeX, current_value,
 					                                     soundDrum->shaper.phase);
+					soundDrum->shaperDsp.regenerateIfDirty(); // Direct for bulk kit operation
 				}
 			}
 		}
 		else {
 			mca->shaper.shapeY = current_value;
 			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, current_value, mca->shaper.phase);
+			shaper_regen::scheduleRegeneration(mca);
 		}
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return kShaperHighResSteps - 1; } // 0-1023
@@ -129,6 +158,7 @@ public:
 			// Regenerate table with new phase
 			auto* mca = soundEditor.currentModControllable;
 			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, phase);
+			shaper_regen::scheduleRegeneration(mca);
 			// Show current value on display
 			char buffer[12];
 			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
@@ -200,10 +230,12 @@ public:
 		if (mca->shaper.shapeX == 0 && offset > 0) {
 			mca->shaper.shapeX = 1;
 			mca->shaperDsp.regenerateTable(1, mca->shaper.shapeY, mca->shaper.phase);
+			shaper_regen::scheduleRegeneration(mca);
 		}
 		// Regenerate tables when mix goes from 0 to non-zero (may have been skipped at load)
 		else if (wasZero && offset > 0 && mca->shaper.shapeX > 0) {
 			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, mca->shaper.phase);
+			shaper_regen::scheduleRegeneration(mca);
 		}
 
 		int32_t newValue = this->getValue() + offset;

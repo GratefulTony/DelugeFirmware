@@ -27,6 +27,8 @@
 #include "util/fixedpoint.h"
 #include "util/functions.h"
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -84,57 +86,58 @@ struct TableShaperParams {
 };
 
 /**
- * Table-based Parametric Shaper with ADAA (Antiderivative Antialiasing)
+ * Table-based Parametric Shaper
  *
  * Features:
  * - 6 basis functions for rich harmonic exploration
  * - Drive parameter where 0 = linear bypass (transparent)
  * - Separate weights for each basis function
- * - Cached f(x) and F(x) tables for fast lookup
- * - First-order ADAA using cached antiderivative table
+ * - Double-buffered lookup tables with IIR crossfade for click-free updates
  */
 class TableShaperCore {
 public:
 	// =============================================================================
-	// A/B TEST CONFIGURATION - Change these for testing different modes
+	// TABLE REGENERATION CONFIGURATION
 	// =============================================================================
-	// Table size: 128 (smallest, ~1KB), 256 (~2KB), 512 (~4KB), 2048 (~16KB)
+	// Table size vs click tradeoff:
+	// - 2048: Best quality for wavefolders, but regeneration may cause minor clicks
+	// - 1024: Click-free regeneration, minimal quality difference for most curves
+	// - 512/256/128: Faster regeneration, noticeable smoothing on sharp features
+	// Linear interpolation adds 16-bit fractional precision between entries.
 	static constexpr size_t kTableSize = 2048;
-
-	// Interpolation mode for function f(x) lookup:
-	// false = linear (fast, ~10 ops)
-	// true = cubic Catmull-Rom (slow, ~25 ops, smoother waveshaping)
-	static constexpr bool kUseCubicFunction = false;
-
-	// Interpolation mode for antiderivative F(x) lookup:
-	// false = linear (fast, ~10 ops)
-	// true = cubic Catmull-Rom (slow, ~25 ops, smoother ADAA)
-	static constexpr bool kUseCubicAntiderivative = true;
-
-	// Generate ADAA tables (float F(x) antiderivative):
-	// false = int32 path only, saves ~16KB and speeds up regeneration
-	// true = enables float ADAA path (process() with prevX state)
-	static constexpr bool kGenerateADAA = false;
-
-	// Energy-balanced phase compression:
-	// false = midpoint centering only (full amplitude, DC handled downstream)
-	// true = compress dominant-energy half to balance mean while keeping full amplitude
-	// This warps the x-axis, subtly changing harmonic content but achieving both goals
-	static constexpr bool kEnergyBalancedPhase = true;
 	// =============================================================================
 
-	static constexpr size_t kTableMask = kTableSize - 1;
 	static constexpr float kTableScale = static_cast<float>(kTableSize) / 2.0f;
 
 	TableShaperCore() = default; // Tables start empty, allocated on first non-linear use
 
-	/// Set all parameters at once using struct
-	/// Regenerates tables immediately (not deferred to audio thread)
+	/// Set all parameters - deferred regeneration (call regenerateIfDirty from non-audio context)
 	void setParameters(const TableShaperParams& p) {
 		TableShaperParams clamped = p;
 		clamped.clamp();
 		if (clamped != params_) {
 			params_ = clamped;
+			tablesDirty_ = true;
+		}
+	}
+
+	/// Pre-allocate buffers (call from UI thread before scheduling regeneration)
+	/// This ensures no allocation happens during the deferred regeneration task
+	void ensureBuffersAllocated() {
+		if (fTables_[0].size() != kTableSize + 1) {
+			fTables_[0].resize(kTableSize + 1);
+		}
+		if (fTables_[1].size() != kTableSize + 1) {
+			fTables_[1].resize(kTableSize + 1);
+		}
+		if (fTableTempFloat_.size() != kTableSize + 1) {
+			fTableTempFloat_.resize(kTableSize + 1);
+		}
+	}
+
+	/// Call from non-audio context (UI routine, etc) to regenerate tables
+	void regenerateIfDirty() {
+		if (tablesDirty_) {
 			regenerateTables();
 		}
 	}
@@ -142,209 +145,24 @@ public:
 	/// Get current parameters
 	[[nodiscard]] const TableShaperParams& getParameters() const { return params_; }
 
-	/// Check if effect is effectively bypassed (transparent)
+	/// Check if effect is effectively bypassed (transparent) based on current params
 	/// Only checks drive (X axis) - threshold shouldn't cause bypass since user explicitly set X > 0
+	/// Note: This checks params_, NOT the isLinear_ flag (which is for audio thread sync)
 	[[nodiscard]] bool isLinear() const { return params_.drive < 0.001f; }
-
-	// TODO: Remove float ADAA path - not used, int32 path is the intended signal path
-	/// Process a single sample with ADAA (uses internal state)
-	/// @param x Input sample in range [-1, 1]
-	/// @return Processed sample (peak-normalized)
-	[[gnu::always_inline]] float process(float x) { return process(x, &prevX_); }
-
-	/// ADAA state: stores both previous X and cached F(prevX) to avoid redundant lookup
-	struct AdaaState {
-		float prevX{0.0f};
-		float prevF{0.0f}; // Cached F(prevX) - saves one table lookup per sample
-	};
-
-	/// Process a single sample with ADAA using external state
-	/// This allows one TableShaper (one set of tables) to serve multiple channels
-	/// @param x Input sample in range [-1, 1]
-	/// @param prevXState Pointer to previous sample state (updated in place)
-	/// @return Processed sample (peak-normalized)
-	[[gnu::always_inline]] float process(float x, float* prevXState) {
-		// Headroom: normalizationGain_ already handles peak limiting, minimal extra needed
-		constexpr float kHeadroom = 0.8f;
-
-		// Fast path: bypass when linear
-		if (isLinear_) {
-			*prevXState = x;
-			return x * kHeadroom;
-		}
-
-		// First-order ADAA: output = (F(x) - F(x_prev)) / (x - x_prev)
-		// Where F(x) is the antiderivative of f(x)
-		float F_curr = lookupAntiderivative(x);
-		float F_prev = lookupAntiderivative(*prevXState);
-
-		float dx = x - *prevXState;
-		float absDx = std::fabs(dx);
-		float output;
-
-		// Threshold for numerical stability - below this, blend with direct lookup
-		// At 44.1kHz, a 1kHz full-scale sine changes by ~0.14 per sample
-		constexpr float kMinDx = 0.01f;
-		constexpr float kInvMinDx = 1.0f / kMinDx; // Precomputed reciprocal
-		// Maximum dx for ADAA - above this, the antiderivative lookup becomes unreliable
-		constexpr float kMaxDx = 0.5f;
-
-		if (absDx < 1e-7f || absDx > kMaxDx) {
-			// Essentially static OR large jump - use direct lookup
-			output = lookupFunction(x);
-		}
-		else {
-			// Fast reciprocal using NEON vrecpe + Newton-Raphson (~5 cycles vs ~15 for division)
-			float invDx = fastReciprocal(dx);
-			float adaaOutput = (F_curr - F_prev) * invDx;
-
-			if (absDx >= kMinDx) {
-				// Normal ADAA range - use ADAA output directly
-				output = adaaOutput;
-			}
-			else {
-				// Transition zone - smoothstep blend between ADAA and direct
-				float directOutput = lookupFunction(x);
-
-				// Smoothstep: t² * (3 - 2t) gives smooth S-curve from 0 to 1
-				float t = absDx * kInvMinDx; // Multiply by precomputed reciprocal
-				float blend = t * t * (3.0f - 2.0f * t);
-
-				output = adaaOutput * blend + directOutput * (1.0f - blend);
-			}
-		}
-
-		*prevXState = x;
-
-		// Apply combined normalization and headroom
-		float result = output * (normalizationGain_ * kHeadroom);
-
-		// Safety clamp - prevent any extreme values that could cause clicks
-		return std::clamp(result, -1.0f, 1.0f);
-	}
-
-	/// Process a single sample with ADAA using cached state (optimized - one lookup per sample)
-	/// @param x Input sample in range [-1, 1]
-	/// @param state Pointer to ADAA state (prevX and cached F(prevX))
-	/// @return Processed sample (peak-normalized)
-	[[gnu::always_inline]] float processWithCache(float x, AdaaState* state) {
-		constexpr float kHeadroom = 0.8f;
-
-		if (isLinear_) {
-			state->prevX = x;
-			state->prevF = x * x * 0.5f; // F(x) = x²/2 for linear
-			return x * kHeadroom;
-		}
-
-		// Only one lookup - use cached F(prevX)
-		float F_curr = lookupAntiderivative(x);
-		float F_prev = state->prevF;
-
-		float dx = x - state->prevX;
-		float absDx = std::fabs(dx);
-		float output;
-
-		constexpr float kMinDx = 0.01f;
-		constexpr float kInvMinDx = 1.0f / kMinDx;
-		constexpr float kMaxDx = 0.5f;
-
-		if (absDx < 1e-7f || absDx > kMaxDx) {
-			output = lookupFunction(x);
-		}
-		else {
-			float invDx = fastReciprocal(dx);
-			float adaaOutput = (F_curr - F_prev) * invDx;
-
-			if (absDx >= kMinDx) {
-				output = adaaOutput;
-			}
-			else {
-				float directOutput = lookupFunction(x);
-				float t = absDx * kInvMinDx;
-				float blend = t * t * (3.0f - 2.0f * t);
-				output = adaaOutput * blend + directOutput * (1.0f - blend);
-			}
-		}
-
-		// Update state with cached F for next sample
-		state->prevX = x;
-		state->prevF = F_curr;
-
-		float result = output * (normalizationGain_ * kHeadroom);
-		return std::clamp(result, -1.0f, 1.0f);
-	}
-
-	/// Process with ADAA using cubic interpolation (smoother, more expensive)
-	[[gnu::always_inline]] float processCubic(float x, float* prevXState) {
-		constexpr float kHeadroom = 0.8f;
-
-		if (isLinear_) {
-			*prevXState = x;
-			return x * kHeadroom;
-		}
-
-		float F_curr = lookupAntiderivativeCubic(x);
-		float F_prev = lookupAntiderivativeCubic(*prevXState);
-
-		float dx = x - *prevXState;
-		float absDx = std::fabs(dx);
-		float output;
-
-		constexpr float kMinDx = 0.01f;
-		constexpr float kInvMinDx = 1.0f / kMinDx; // Precomputed reciprocal
-		constexpr float kMaxDx = 0.5f;
-
-		if (absDx < 1e-7f || absDx > kMaxDx) {
-			output = lookupFunction(x);
-		}
-		else {
-			// Fast reciprocal using NEON vrecpe + Newton-Raphson
-			float invDx = fastReciprocal(dx);
-			float adaaOutput = (F_curr - F_prev) * invDx;
-
-			if (absDx >= kMinDx) {
-				output = adaaOutput;
-			}
-			else {
-				float directOutput = lookupFunction(x);
-				float t = absDx * kInvMinDx; // Multiply by precomputed reciprocal
-				float blend = t * t * (3.0f - 2.0f * t);
-				output = adaaOutput * blend + directOutput * (1.0f - blend);
-			}
-		}
-
-		*prevXState = x;
-		float result = output * (normalizationGain_ * kHeadroom);
-		return std::clamp(result, -1.0f, 1.0f);
-	}
-
-	// TODO: Remove float processNoAA - not used, int32 path is the intended signal path
-	/// Process a single sample (direct table lookup, no ADAA)
-	/// Note: Uses same headroom as process() for consistent levels when toggling AA
-	[[gnu::always_inline]] float processNoAA(float x) {
-		// Headroom: must match process() for level consistency
-		constexpr float kHeadroom = 0.8f;
-
-		if (isLinear_) {
-			return x * kHeadroom;
-		}
-
-		// Apply peak normalization and headroom so levels match process() with ADAA
-		return lookupFunction(x) * normalizationGain_ * kHeadroom;
-	}
 
 	/// Process a single sample using integer-only path with Q16 mix parameter
 	/// @param input Input sample in raw signal format (e.g., ~23M for FM, ~1.4M for subtractive)
-	/// @param driveGain_Q30 Pre-computed drive gain in Q30 format
+	/// @param driveGain_Q26 Pre-computed drive gain in Q26 format (allows up to 32x)
 	/// @param mixNorm_Q16 Normalized mix in Q16.16 (65536 = 1.0, 131072 = 2.0 full wet)
 	/// @return Output sample at same level as input (unity gain when undriven)
-	[[gnu::always_inline]] int32_t processInt32Q16(int32_t input, int32_t driveGain_Q30, int32_t mixNorm_Q16 = 131072) {
-		// Linear drive with saturation
-		// Range: ~0.25x at min drive to ~4x at max drive
-		int32_t afterDrive = multiply_32x32_rshift32(input, driveGain_Q30) << 2;
+	[[gnu::always_inline]] int32_t processInt32Q16(int32_t input, int32_t driveGain_Q26, int32_t mixNorm_Q16 = 131072) {
+		// Linear drive with Q26 gain (<<6 recovers from Q26 multiply)
+		// Range: 0x at min drive to 4x at max drive (Q26 allows up to 32x)
+		int32_t afterDrive = multiply_32x32_rshift32(input, driveGain_Q26) << 6;
 
 		// Fast path: bypass when linear (tables may be deallocated)
-		if (isLinear_) {
+		// acquire ordering ensures we see all table writes if isLinear_ is false
+		if (isLinear_.load(std::memory_order_acquire)) {
 			return afterDrive; // Return driven signal (consistent with dry path)
 		}
 
@@ -379,6 +197,18 @@ public:
 		// Then scaled by blendAggressionMult_Q8_ (from X): [0.5x, 2.0x]
 		constexpr int32_t kBaseSlope = 256;
 		constexpr int32_t kSlopeShift = 20;
+
+		// Smooth blendAggression toward target (~6ms time constant at 44.1kHz)
+		int32_t aggDiff = blendAggressionTarget_Q8_ - blendAggressionMult_Q8_;
+		if (aggDiff != 0) {
+			// IIR smoothing: change by at least 1 per sample to ensure convergence
+			int32_t aggDelta = aggDiff >> 8;
+			if (aggDelta == 0) {
+				aggDelta = (aggDiff > 0) ? 1 : -1;
+			}
+			blendAggressionMult_Q8_ += aggDelta;
+		}
+
 		int64_t mixSquared = static_cast<int64_t>(mixNorm_Q16) * mixNorm_Q16;
 		int32_t baseSlope = kBaseSlope + static_cast<int32_t>(mixSquared >> kSlopeShift);
 		int32_t blendSlope_Q8 = (baseSlope * blendAggressionMult_Q8_) >> 8;
@@ -417,7 +247,34 @@ public:
 
 		// Table lookup (both scaledInput and lookup are clipped to INT32_MAX)
 		uint32_t tableInput = static_cast<uint32_t>(scaledInput) + 2147483648u;
-		int32_t lookup = lookupFunctionInt(tableInput);
+
+		// Target-chasing crossfade: smoothly interpolate toward target table
+		int8_t target = targetTableIndex_.load(std::memory_order_acquire);
+
+		// IIR chase: blend moves toward target (0 = table 0, 32768 = table 1)
+		int32_t targetBlend_Q15 = target ? 32768 : 0;
+		int32_t blendDiff = targetBlend_Q15 - currentBlend_Q15_;
+		if (blendDiff != 0) {
+			int32_t delta = (blendDiff * kBlendAlpha_Q15) >> 15;
+			if (delta == 0) {
+				delta = (blendDiff > 0) ? 1 : -1;
+			}
+			currentBlend_Q15_ += delta;
+		}
+
+		// Table lookup with crossfade (short-circuit when settled)
+		int32_t lookup;
+		if (currentBlend_Q15_ == 0) {
+			lookup = lookupFunctionIntDirect(tableInput, 0);
+		}
+		else if (currentBlend_Q15_ == 32768) {
+			lookup = lookupFunctionIntDirect(tableInput, 1);
+		}
+		else {
+			int32_t val0 = lookupFunctionIntDirect(tableInput, 0);
+			int32_t val1 = lookupFunctionIntDirect(tableInput, 1);
+			lookup = val0 + (((val1 - val0) * currentBlend_Q15_) >> 15);
+		}
 
 		// Blend at scaled level (both signals clipped to same peak)
 		int32_t blend_Q30 = blend_Q16 << 14;
@@ -443,30 +300,17 @@ public:
 		return processInt32Q16(input, driveGain_Q30, mixNorm_Q16);
 	}
 
-	/// Reset ADAA state (call when starting a new audio stream)
-	void reset() {
-		prevX_ = 0.0f;
-		// Tables don't need regeneration - params haven't changed
-	}
-
-	[[nodiscard]] float getNormalizationGain() const { return normalizationGain_; }
-
-	/// Deallocate tables to free memory
-	/// ~4KB when kGenerateADAA=false (int16 only), ~20KB when true (+ float tables)
+	/// Deallocate tables to free memory (~4KB)
 	/// Called automatically when X=0 (linear bypass)
 	void deallocateTables() {
-		fTableInt_.clear();
-		fTableInt_.shrink_to_fit();
-		if constexpr (kGenerateADAA) {
-			fTable_.clear();
-			fTable_.shrink_to_fit();
-			FTable_.clear();
-			FTable_.shrink_to_fit();
-		}
+		fTables_[0].clear();
+		fTables_[0].shrink_to_fit();
+		fTables_[1].clear();
+		fTables_[1].shrink_to_fit();
 	}
 
 	/// Check if tables are currently allocated
-	[[nodiscard]] bool hasAllocatedTables() const { return !fTableInt_.empty(); }
+	[[nodiscard]] bool hasAllocatedTables() const { return !fTables_[0].empty(); }
 
 private:
 	/// Regenerate both f(x) and F(x) tables based on current parameters
@@ -478,36 +322,39 @@ private:
 		tablesDirty_ = false;
 		bool willBeLinear = isLinear(); // Check params, but don't set isLinear_ yet
 
-		// Compute blend aggression from drive (X axis)
+		// Compute blend aggression from drive (X axis) - defer writing until after table swap
 		// Quadratic curve: very gentle at low X, snappy at high X
 		// Range: [0.1, 2.0] → 20x dynamic range
 		// At X=0: slope so gentle that full mix range is needed for full blend
 		// At X=127: snappy onset, wet kicks in quickly
 		float driveSquared = params_.drive * params_.drive;
 		float aggression = 0.1f + driveSquared * 1.9f; // [0.1, 2.0]
-		blendAggressionMult_Q8_ = static_cast<int32_t>(aggression * 256.0f);
+		int32_t newBlendAggression = static_cast<int32_t>(aggression * 256.0f);
 
 		if (willBeLinear) {
-			// Linear bypass: deallocate tables to save memory
-			// Process functions have isLinear_ fast-path that doesn't use tables
-			deallocateTables();
-			normalizationGain_ = 1.0f;
-			normalizationGainInt_ = 32767;
-			isLinear_ = true; // Safe to set - no tables to read
+			// Set linear flag FIRST - audio thread will bypass table access
+			// Tables are NOT deallocated here to avoid race with audio thread
+			// (deallocation happens lazily when regenerating tables for non-linear)
+			// No need to touch targetTableIndex_ - audio will bypass tables when linear
+			blendAggressionTarget_Q8_ = newBlendAggression;
+			blendAggressionMult_Q8_ = newBlendAggression;     // Snap (no smoothing needed when linear)
+			isLinear_.store(true, std::memory_order_release); // Release LAST
 			return;
 		}
 
 		// Keep isLinear_ = true until tables are FULLY populated
 		// This prevents audio thread from reading partial data
 
-		// Allocate tables if needed (first non-linear use or after deallocation)
-		if (fTableInt_.size() != kTableSize + 1) {
-			fTableInt_.resize(kTableSize + 1);
-			if constexpr (kGenerateADAA) {
-				fTable_.resize(kTableSize + 1);
-				FTable_.resize(kTableSize + 1);
-			}
-		}
+		// Determine which buffer to write to (the one NOT currently being used)
+		int8_t currentTarget = targetTableIndex_.load(std::memory_order_relaxed);
+		int8_t writeToIdx = 1 - currentTarget;
+
+		// CRITICAL: Snap blend to current target BEFORE writing to inactive buffer
+		// With slow IIR crossfade, blend may not have converged yet, meaning audio
+		// is still reading from both tables. If we write to the "inactive" buffer
+		// while audio is blending from it, we get clicks from partially-written data.
+		// Snapping ensures audio reads 100% from current target, leaving writeToIdx safe.
+		currentBlend_Q15_ = currentTarget ? 32768 : 0;
 
 		// Compute effective parameters
 		// Drive affects steepness (k) and threshold reduction
@@ -630,178 +477,15 @@ private:
 			return f_val;
 		};
 
-		// Temporary float table for processing
-		std::vector<float> tempFloat(kTableSize + 1);
+		// fTableTempFloat_ must be pre-allocated via ensureBuffersAllocated()
 
-		// 128-bucket phase warp: find quiet zone and balance opposite pairs
-		constexpr int kNumBuckets = 128;
-		constexpr size_t kBucketSize = (kTableSize + 1) / kNumBuckets;
-		float bucketSum[kNumBuckets] = {0};    // Signed sum (for energy balance)
-		float bucketAbsSum[kNumBuckets] = {0}; // Absolute sum (for quiet zone)
-
-		// Pass 1a: Generate raw transfer function, find min/max for centering
-		float rawMax = -1e30f;
-		float rawMin = 1e30f;
+		// Generate transfer function table, find min/max for centering
+		float fMax = -1e30f;
+		float fMin = 1e30f;
 		for (size_t i = 0; i <= kTableSize; ++i) {
 			float x = (static_cast<float>(i) / kTableScale) - 1.0f;
 			float val = evaluateTransfer(x);
-			tempFloat[i] = val;
-			if (val > rawMax)
-				rawMax = val;
-			if (val < rawMin)
-				rawMin = val;
-		}
-
-		// Compute midpoint for centering BEFORE bucket analysis
-		float rawMidpoint = (rawMax + rawMin) * 0.5f;
-
-		// Pass 1b: Collect bucket stats on CENTERED values
-		if constexpr (kEnergyBalancedPhase) {
-			for (size_t i = 0; i <= kTableSize; ++i) {
-				float centeredVal = tempFloat[i] - rawMidpoint;
-				int b = std::min(static_cast<int>(i / kBucketSize), kNumBuckets - 1);
-				bucketSum[b] += centeredVal;
-				bucketAbsSum[b] += std::fabs(centeredVal);
-			}
-		}
-
-		// Compute warp parameters from bucket analysis
-		float quietZoneX = 0.0f;
-		float warpBoundaries[kNumBuckets + 1]; // Warped x positions for each bucket boundary
-		bool applyPhaseWarp = false;
-
-		if constexpr (kEnergyBalancedPhase) {
-			// Find quiet zone using weighted absolute amplitude
-			// For each proposed center, weight buckets by proximity (closer = higher weight)
-			constexpr float kBucketWidth = 2.0f / kNumBuckets;
-
-			int bestBoundary = kNumBuckets / 2;
-			float minWeightedAbs = 1e30f;
-
-			for (int center = 1; center < kNumBuckets; ++center) {
-				float weightedAbs = 0.0f;
-				float totalWeight = 0.0f;
-
-				for (int b = 0; b < kNumBuckets; ++b) {
-					// Distance from this bucket to proposed center (in bucket units)
-					float dist = std::fabs(static_cast<float>(b) + 0.5f - static_cast<float>(center));
-
-					// Weight: inverse square decay (inner buckets matter more)
-					float weight = 1.0f / (1.0f + dist * dist);
-
-					weightedAbs += weight * bucketAbsSum[b];
-					totalWeight += weight;
-				}
-
-				weightedAbs /= totalWeight; // Normalize by total weight
-
-				if (weightedAbs < minWeightedAbs) {
-					minWeightedAbs = weightedAbs;
-					bestBoundary = center;
-				}
-			}
-
-			int minPairStart = std::clamp(bestBoundary - 1, 0, kNumBuckets - 2);
-
-			// Origin at the detected boundary
-			quietZoneX = (minPairStart + 1) * kBucketWidth - 1.0f;
-
-			// Build cumulative energy from inner (adjacent to origin) to outer
-			// Left side: buckets minPairStart, minPairStart-1, ... going outward
-			// Right side: buckets minPairStart+1, minPairStart+2, ... going outward
-			int numLeftBuckets = minPairStart + 1;
-			int numRightBuckets = kNumBuckets - minPairStart - 1;
-			int numPairs = std::min(numLeftBuckets, numRightBuckets);
-
-			float cumLeft[kNumBuckets / 2] = {0};
-			float cumRight[kNumBuckets / 2] = {0};
-
-			for (int p = 0; p < numPairs; ++p) {
-				int leftIdx = minPairStart - p;
-				int rightIdx = minPairStart + 1 + p;
-				cumLeft[p] = (p > 0 ? cumLeft[p - 1] : 0.0f) + (leftIdx >= 0 ? bucketSum[leftIdx] : 0.0f);
-				cumRight[p] = (p > 0 ? cumRight[p - 1] : 0.0f) + (rightIdx < kNumBuckets ? bucketSum[rightIdx] : 0.0f);
-			}
-
-			// Initialize warp boundaries to unwarped positions (relative to quietZoneX as origin)
-			for (int b = 0; b <= kNumBuckets; ++b) {
-				warpBoundaries[b] = b * kBucketWidth - 1.0f;
-			}
-
-			// Compute warped boundaries to balance opposite pairs
-			// For each pair level, shift boundary to equalize cumulative energy
-			for (int p = 0; p < numPairs; ++p) {
-				float imbalance = cumLeft[p] + cumRight[p]; // Should be ~0 for balance
-				float totalMag = std::fabs(cumLeft[p]) + std::fabs(cumRight[p]);
-
-				if (totalMag > 0.01f) {
-					// Shift proportional to imbalance: positive imbalance means right is heavier
-					float shiftFraction = imbalance / totalMag * 0.5f;
-					// Limit shift to avoid extreme warping
-					shiftFraction = std::clamp(shiftFraction, -0.4f, 0.4f);
-
-					// Apply shift to boundaries at this level (from origin)
-					int leftBoundaryIdx = minPairStart - p;      // Left boundary moving outward
-					int rightBoundaryIdx = minPairStart + 2 + p; // Right boundary moving outward
-
-					if (leftBoundaryIdx >= 0 && leftBoundaryIdx <= kNumBuckets) {
-						warpBoundaries[leftBoundaryIdx] -= shiftFraction * kBucketWidth;
-					}
-					if (rightBoundaryIdx >= 0 && rightBoundaryIdx <= kNumBuckets) {
-						warpBoundaries[rightBoundaryIdx] -= shiftFraction * kBucketWidth;
-					}
-
-					applyPhaseWarp = true;
-				}
-			}
-
-			// Also apply if quiet zone is significantly off-center
-			if (std::fabs(quietZoneX) > 0.1f) {
-				applyPhaseWarp = true;
-			}
-		}
-
-		// Lambda to apply piecewise linear warp
-		constexpr float kBucketWidthWarp = 2.0f / kNumBuckets;
-		auto applyWarp = [&](float x) -> float {
-			if (!applyPhaseWarp) {
-				return x;
-			}
-
-			// First apply quiet-zone centering (shift so quietZoneX → 0)
-			float xCentered = x + quietZoneX;
-
-			// Then apply piecewise linear warp based on bucket boundaries
-			// Find which bucket segment x falls into and interpolate
-			float xNorm = (xCentered + 1.0f) / kBucketWidthWarp; // [0, kNumBuckets]
-			int segment = static_cast<int>(std::floor(xNorm));
-			segment = std::clamp(segment, 0, kNumBuckets - 1);
-
-			float segFrac = xNorm - segment;
-
-			// Interpolate between warped boundaries
-			float warpedX = warpBoundaries[segment] + segFrac * (warpBoundaries[segment + 1] - warpBoundaries[segment]);
-
-			return std::clamp(warpedX, -1.0f, 1.0f);
-		};
-
-		// Pass 2: Generate final table with phase warp (analytical - no resampling artifacts)
-		float fMax = -1e30f;
-		float fMin = 1e30f;
-
-		for (size_t i = 0; i <= kTableSize; ++i) {
-			float x = (static_cast<float>(i) / kTableScale) - 1.0f;
-
-			float val;
-			if (applyPhaseWarp) {
-				float xWarped = applyWarp(x);
-				val = evaluateTransfer(xWarped);
-			}
-			else {
-				val = tempFloat[i]; // Use pre-computed value
-			}
-
-			tempFloat[i] = val;
+			fTableTempFloat_[i] = val;
 			if (val > fMax)
 				fMax = val;
 			if (val < fMin)
@@ -811,130 +495,38 @@ private:
 		// Midpoint centering in float
 		float midpoint = (fMax + fMin) * 0.5f;
 		float peakToPeak = fMax - fMin;
-		normalizationGain_ = (peakToPeak > 0.001f) ? (2.0f / peakToPeak) : 1.0f;
-		normalizationGainInt_ = static_cast<int32_t>(normalizationGain_);
+		float normalizationGain = (peakToPeak > 0.001f) ? (2.0f / peakToPeak) : 1.0f;
 
 		// Final pass: center, normalize, and convert to int16
-		float dx = 2.0f / static_cast<float>(kTableSize);
-
 		for (size_t i = 0; i <= kTableSize; ++i) {
-			float val = (tempFloat[i] - midpoint) * normalizationGain_;
-
-			// Store to ADAA tables if enabled
-			if constexpr (kGenerateADAA) {
-				fTable_[i] = val;
-
-				if (i == 0) {
-					FTable_[i] = 0.0f;
-				}
-				else {
-					FTable_[i] = FTable_[i - 1] + (fTable_[i] + fTable_[i - 1]) * dx * 0.5f;
-				}
-			}
-
-			// Convert to int16
-			fTableInt_[i] = static_cast<int16_t>(std::clamp(val * 32767.0f, -32767.0f, 32767.0f));
+			float val = (fTableTempFloat_[i] - midpoint) * normalizationGain;
+			fTables_[writeToIdx][i] = static_cast<int16_t>(std::clamp(val * 32767.0f, -32767.0f, 32767.0f));
 		}
 
-		// NOW safe to tell audio thread tables are ready
-		// Must be AFTER all table data is written
-		isLinear_ = false;
+		// Install new table: flip target, audio will chase it with IIR
+		// We snapped blend to currentTarget above, so now we're safe to flip
+		// Audio will smoothly interpolate from old table (100%) to new table
+		targetTableIndex_.store(writeToIdx, std::memory_order_release);
+
+		// Set target for smoothing - audio thread will interpolate current toward this
+		blendAggressionTarget_Q8_ = newBlendAggression;
+		// Release store: ensures ALL writes (tables, params) are visible before audio sees isLinear_=false
+		isLinear_.store(false, std::memory_order_release);
 	}
 
-	/// Lookup f(x) from cached table with linear or cubic interpolation
-	[[gnu::always_inline]] float lookupFunction(float x) const {
-		// Map x from [-1, 1] to [0, kTableSize]
-		float idx = (x + 1.0f) * kTableScale;
-		idx = std::clamp(idx, 0.0f, static_cast<float>(kTableSize));
-
-		size_t i0 = static_cast<size_t>(idx);
-		float frac = idx - static_cast<float>(i0);
-
-		if constexpr (kUseCubicFunction) {
-			// Cubic Catmull-Rom: smoother, better for small tables
-			if (i0 == 0 || i0 >= kTableSize - 1) {
-				// Fall back to linear at boundaries
-				size_t i1 = std::min(i0 + 1, kTableSize);
-				return fTable_[i0] + (fTable_[i1] - fTable_[i0]) * frac;
-			}
-
-			size_t im1 = i0 - 1;
-			size_t i1 = i0 + 1;
-			size_t i2 = std::min(i0 + 2, kTableSize);
-
-			float y0 = fTable_[im1];
-			float y1 = fTable_[i0];
-			float y2 = fTable_[i1];
-			float y3 = fTable_[i2];
-
-			float a0 = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
-			float a1 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
-			float a2 = -0.5f * y0 + 0.5f * y2;
-			float a3 = y1;
-
-			return ((a0 * frac + a1) * frac + a2) * frac + a3;
-		}
-		else {
-			// Linear interpolation: faster, may have artifacts with small tables
-			size_t i1 = std::min(i0 + 1, kTableSize);
-			return fTable_[i0] + (fTable_[i1] - fTable_[i0]) * frac;
-		}
-	}
-
-	/// Lookup F(x) with linear interpolation (fast)
-	[[gnu::always_inline]] float lookupAntiderivativeLinear(float x) const {
-		float idx = (x + 1.0f) * kTableScale;
-		idx = std::clamp(idx, 0.0f, static_cast<float>(kTableSize));
-		size_t i0 = static_cast<size_t>(idx);
-		size_t i1 = std::min(i0 + 1, kTableSize);
-		float frac = idx - static_cast<float>(i0);
-		return FTable_[i0] + (FTable_[i1] - FTable_[i0]) * frac;
-	}
-
-	/// Lookup F(x) with cubic interpolation (smooth, for better ADAA)
-	[[gnu::always_inline]] float lookupAntiderivativeCubic(float x) const {
-		float idx = (x + 1.0f) * kTableScale;
-		idx = std::clamp(idx, 0.0f, static_cast<float>(kTableSize));
-		size_t i0 = static_cast<size_t>(idx);
-		float frac = idx - static_cast<float>(i0);
-
-		// For proper boundary handling, we need indices that don't clamp
-		// Use linear interpolation at boundaries where we don't have enough neighbors
-		if (i0 == 0 || i0 >= kTableSize - 1) {
-			// Fall back to linear at boundaries
-			size_t i1 = std::min(i0 + 1, kTableSize);
-			return FTable_[i0] + (FTable_[i1] - FTable_[i0]) * frac;
-		}
-
-		size_t im1 = i0 - 1;
-		size_t i1 = i0 + 1;
-		size_t i2 = std::min(i0 + 2, kTableSize);
-
-		float y0 = FTable_[im1];
-		float y1 = FTable_[i0];
-		float y2 = FTable_[i1];
-		float y3 = FTable_[i2];
-
-		float a0 = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
-		float a1 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
-		float a2 = -0.5f * y0 + 0.5f * y2;
-		float a3 = y1;
-
-		return ((a0 * frac + a1) * frac + a2) * frac + a3;
-	}
-
-	/// Integer table lookup - matches builtin interpolateTableSigned style
-	/// Input: uint32_t in [0, 2^32) where 0 = -1.0, 2^32-1 = +1.0
-	/// Output: int32_t scaled by 65536 (Q16.15 format, like builtin)
-	/// Uses linear interpolation for speed
-	[[gnu::always_inline]] int32_t lookupFunctionInt(uint32_t input) const {
-		// Compute log2(kTableSize) at compile time
+	/// Integer table lookup - direct access to specified table buffer
+	/// @param input Table input position (uint32 where 0 = -1.0, UINT32_MAX = +1.0)
+	/// @param tableIdx Which table buffer to read from (0 or 1)
+	/// @return Lookup value scaled by 65536 (Q16.15 format)
+	[[gnu::always_inline]] int32_t lookupFunctionIntDirect(uint32_t input, int8_t tableIdx) const {
 		constexpr int32_t kTableBits = (kTableSize == 128)    ? 7
 		                               : (kTableSize == 256)  ? 8
 		                               : (kTableSize == 512)  ? 9
 		                               : (kTableSize == 1024) ? 10
 		                               : (kTableSize == 2048) ? 11
 		                                                      : 8; // default
+
+		const int16_t* table = fTables_[tableIdx].data();
 
 		// Extract table index (upper kTableBits bits of input)
 		int32_t whichValue = input >> (32 - kTableBits);
@@ -947,74 +539,39 @@ private:
 
 		// Linear interpolation with int16 table entries
 		// Result is scaled by 65536 (Q16.15)
-		return static_cast<int32_t>(fTableInt_[whichValue]) * strength1
-		       + static_cast<int32_t>(fTableInt_[whichValue + 1]) * strength2;
+		return static_cast<int32_t>(table[whichValue]) * strength1
+		       + static_cast<int32_t>(table[whichValue + 1]) * strength2;
 	}
 
-	/// Lookup F(x) (antiderivative) from cached table
-	/// Uses linear or cubic interpolation based on kUseCubicAntiderivative flag
-	[[gnu::always_inline]] float lookupAntiderivative(float x) const {
-		// Map x from [-1, 1] to [0, kTableSize]
-		float idx = (x + 1.0f) * kTableScale;
-		idx = std::clamp(idx, 0.0f, static_cast<float>(kTableSize));
-
-		size_t i0 = static_cast<size_t>(idx);
-		float frac = idx - static_cast<float>(i0);
-
-		if constexpr (kUseCubicAntiderivative) {
-			// Use linear at boundaries where we don't have enough neighbors
-			if (i0 == 0 || i0 >= kTableSize - 1) {
-				size_t i1 = std::min(i0 + 1, kTableSize);
-				return FTable_[i0] + (FTable_[i1] - FTable_[i0]) * frac;
-			}
-
-			// Cubic Catmull-Rom: smoother derivatives, better for ADAA
-			size_t im1 = i0 - 1;
-			size_t i1 = i0 + 1;
-			size_t i2 = std::min(i0 + 2, kTableSize);
-
-			float y0 = FTable_[im1];
-			float y1 = FTable_[i0];
-			float y2 = FTable_[i1];
-			float y3 = FTable_[i2];
-
-			float a0 = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
-			float a1 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
-			float a2 = -0.5f * y0 + 0.5f * y2;
-			float a3 = y1;
-
-			return ((a0 * frac + a1) * frac + a2) * frac + a3;
-		}
-		else {
-			// Linear interpolation: faster, may have more artifacts
-			size_t i1 = std::min(i0 + 1, kTableSize);
-			return FTable_[i0] + (FTable_[i1] - FTable_[i0]) * frac;
-		}
-	}
-
-	// Cached tables (regenerated when parameters change)
-	// Uses vectors for dynamic allocation - deallocated when X=0 to save ~20KB per instance
-	std::vector<float> fTable_; // f(x) values (float)
-	std::vector<float> FTable_; // F(x) antiderivative values (float)
-
-	// Integer tables for fast integer-only processing (like builtin)
+	// Integer tables for fast integer-only processing
 	// Scale: float [-1,1] → int16_t [-32767,32767]
-	std::vector<int16_t> fTableInt_; // f(x) values (int16)
+	// Double-buffer: regeneration writes to inactive buffer, then flips targetTableIndex_
+	std::vector<int16_t> fTables_[2];    // Two table buffers for lock-free crossfade
+	std::vector<float> fTableTempFloat_; // Temp float buffer for regeneration (avoids allocation)
+
+	// Target-chasing crossfade: audio smoothly interpolates toward targetTableIndex_
+	// This eliminates all races - we only atomically store ONE value, audio chases it
+	// blend_Q15: 0 = 100% table 0, 32768 = 100% table 1
+	std::atomic<int8_t> targetTableIndex_{0}; // Which table we're fading toward (0 or 1)
+	mutable int32_t currentBlend_Q15_{0};     // Current blend position (Q15: 0-32768)
+	// IIR alpha: α_Q15 = 4 → 99% in ~500ms at 44.1kHz (n = 4.6/α = 4.6*32768/4 = 37683 samples ≈ 854ms)
+	static constexpr int32_t kBlendAlpha_Q15 = 4;
 
 	// Parameters (consolidated struct)
 	TableShaperParams params_;
 
 	// State
 	bool tablesDirty_{true};
-	bool isLinear_{true};
-	float prevX_{0.0f};
-	float normalizationGain_{1.0f};       // Peak normalization (float)
-	int32_t normalizationGainInt_{32767}; // Peak normalization (fixed-point, Q15 format)
+	// Linear flag: controls whether audio thread accesses tables
+	// release/acquire ordering ensures tables are visible before isLinear_ becomes false
+	std::atomic<bool> isLinear_{true};
 
 	// Blend aggression: derived from X (drive), affects mix curve sharpness
 	// Q8 format: 256 = 1.0x, range [128, 512] for [0.5x, 2.0x]
 	// Low X = gentle transitions, high X = snappy onset
-	int32_t blendAggressionMult_Q8_{256};
+	// Smoothed: target set during regeneration, current interpolates toward target
+	int32_t blendAggressionMult_Q8_{256};   // Current (smoothed) value used by audio
+	int32_t blendAggressionTarget_Q8_{256}; // Target value from latest regeneration
 
 	// Expected peak level for int32 path (set at table generation time)
 	// Used to normalize input/output so the table "expects" signals at this level
@@ -1022,31 +579,24 @@ private:
 	// Calculation: sine(2^31) * sourceAmplitude(2^27) / 2^32 = 2^26
 	// FM signal calibration (empirically determined):
 	// - Theoretical max: 2^26 = 67M (sine * sourceAmplitude / 2^32, sourceAmplitude capped at 2^27)
-	// - inputScale=128 (2^7) puts saturation onset near center drive for FM at max velocity
+	// - inputScale=256 (2^8) puts saturation onset near center drive for FM at max velocity
 	// - At lower velocities: need positive drive to reach saturation (natural velocity response)
 	// - Output = lookup >> inputScaleShift_ (unity gain: boost in, attenuate out)
-	int32_t expectedPeak_{1 << 26};      // 67,108,864 - theoretical FM max (reference only)
-	float inputScale_{128.0f};           // Calibrated: FM v=127 saturates near center drive
-	int32_t inputScaleShift_{7};         // floor(log2(inputScale_)) for bit-shift scaling (128 = 2^7)
-	float invInputScale_{1.0f / 128.0f}; // Precomputed reciprocal for non-power-of-2 fallback
+	int32_t expectedPeak_{1 << 26}; // 67,108,864 - theoretical FM max (reference only)
+	int32_t inputScaleShift_{7};    // Bit shift for input scaling (7 is slightly too much, 6 slightly too little)
 
 public:
-	/// Set the expected peak level for int32 processing
+	/// Set the expected peak level for int32 processing (integer-only, no floats)
 	/// Call this when synth mode changes (FM vs subtractive)
 	void setExpectedPeak(int32_t peak) {
 		expectedPeak_ = peak;
-		// Input scale: maps expectedPeak to INT32_MAX (fills table proportionally)
-		constexpr float kInt32Max = 2147483647.0f;
-		inputScale_ = kInt32Max / static_cast<float>(peak);
-		// Compute shift for bit-shift scaling - floor() for less boost (safer)
-		int32_t shift = static_cast<int32_t>(std::floor(std::log2(inputScale_)));
-		inputScaleShift_ = (shift < 0) ? 0 : ((shift > 31) ? 31 : shift); // Safety bounds
-		// Precompute reciprocal for fallback (multiply faster than divide)
-		invInputScale_ = 1.0f / inputScale_;
+		// Compute shift using CLZ + 2: extra headroom for better saturation response
+		// For peak = 2^26: CLZ = 5, shift = 7 (tuned empirically)
+		inputScaleShift_ = (peak > 0) ? __builtin_clz(static_cast<uint32_t>(peak)) + 2 : 7;
 	}
 
 	[[nodiscard]] int32_t getExpectedPeak() const { return expectedPeak_; }
-	[[nodiscard]] float getInputScale() const { return inputScale_; }
+	[[nodiscard]] int32_t getInputScaleShift() const { return inputScaleShift_; }
 };
 
 /**

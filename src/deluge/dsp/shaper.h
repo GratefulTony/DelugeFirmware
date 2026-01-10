@@ -52,11 +52,8 @@ struct TableShaperState {
 	float phase{0.0f};  // Phase offset for triangle modulation (secret knob)
 
 	// DSP smoothing state
-	q31_t driveLast{0};           // Previous drive value for smoothing
-	int32_t mixNormLast_Q16{0};   // Previous mixNorm value for smoothing (Q16.16 format)
-	float prevXL{0.0f};           // ADAA state L (previous input sample)
-	float prevXR{0.0f};           // ADAA state R (previous input sample)
-	float smoothedNormGain{1.0f}; // Smoothed normalization gain (tracks table's normalizationGain_)
+	q31_t driveLast{0};         // Previous drive value for smoothing
+	int32_t mixNormLast_Q16{0}; // Previous mixNorm value for smoothing (Q16.16 format)
 
 	/// Check if effect is enabled (non-zero X)
 	/// Note: mix is now a patched param (LOCAL_TABLE_SHAPER_MIX), checked separately at render time
@@ -66,8 +63,6 @@ struct TableShaperState {
 	void resetDspState() {
 		driveLast = 0;
 		mixNormLast_Q16 = 0;
-		prevXL = 0.0f;
-		prevXR = 0.0f;
 	}
 
 	/// Write shaper state to file (only non-default values)
@@ -98,35 +93,14 @@ struct TableShaperState {
  *
  * Features:
  * - X/Y shape control for creative distortion curves
- * - Table-based parametric shaper with optional ADAA
- * - Gain-compensated drive for predictable unity at 12 o'clock
+ * - Integer-only processing path for efficiency
+ * - Double-buffered tables with IIR crossfade for click-free updates
  *
  * Shape X (0-127): Soft→hard clipping curve (UI: "Knee")
  * Shape Y (0-1023): Saturation character/color (UI: "Color")
  */
 class TableShaper {
 public:
-	// Precomputed constants - eliminates per-sample divisions
-	// EFFECTIVE_0DBFS_Q31 is ~23.7 million - the expected signal level
-	static constexpr float kEffective0dBFS = 23726566.0f;
-	static constexpr float kInv0dBFS = 1.0f / kEffective0dBFS;
-
-	// Pre-gain to push signal into saturation range earlier (+9dB = 2 * sqrt(2))
-	static constexpr float kPreGain = 2.0f * 1.41421356f;
-	// Post-gain: compensate for pre-gain and add 2x for LPF removal (-3dB = 1 / sqrt(2))
-	static constexpr float kPostGain = 0.70710678f;
-
-	// Drive: hybrid param output range is [-1073741824, 1073741823] (half of INT32)
-	// Linear mapping: min → 0 (silence), center (0) → 1 (unity), max → 2 (+6dB)
-	// driveGain = (drive + kHybridParamMax) / (2 * kHybridParamMax) * 2
-	//           = drive / kHybridParamMax + 1.0
-	static constexpr float kHybridParamMax = 1073741824.0f;
-	static constexpr float kInvHybridParamMax = 1.0f / kHybridParamMax;
-
-	// Combined scales for efficient per-sample processing
-	static constexpr float kInputScale = kInv0dBFS * kPreGain;         // Input: q31 → normalized with pre-gain
-	static constexpr float kOutputScale = kPostGain * kEffective0dBFS; // Output: normalized → q31
-
 	TableShaper() { regenerateTable(0, 0); }
 
 	/**
@@ -137,8 +111,6 @@ public:
 	 * @param phaseOffset Phase offset for triangle modulation (from secret knob)
 	 */
 	void regenerateTable(uint8_t shapeX, uint16_t shapeY, float phaseOffset = 0.0f) {
-		shapeX_ = shapeX;
-		shapeY_ = shapeY;
 		if (phaseOffset != 0.0f) {
 			tableSat_.setParameters(TableShaperXYMapper::deriveParametersWithPhase(shapeX, shapeY, phaseOffset, 1.0f));
 		}
@@ -147,20 +119,11 @@ public:
 		}
 	}
 
-	// TODO: Remove float process() - not used, processInt32 is the intended signal path
-	/**
-	 * Process a single sample through the shaper (optimized, no divisions)
-	 * @param input Sample to process (q31)
-	 * @param drive Input gain (q31 from hybrid-type patched param, bipolar additive modulation)
-	 * @param prevX Pointer to ADAA state (previous input sample), nullptr if AA disabled
-	 * @return Shaped sample (q31)
-	 */
-	[[gnu::always_inline]] inline q31_t process(q31_t input, q31_t drive, float* prevX = nullptr) {
-		float driveGain = static_cast<float>(drive) * kInvHybridParamMax + 1.0f;
-		float inputF = std::clamp(static_cast<float>(input) * kInputScale * driveGain, -1.0f, 1.0f);
-		float outputF = prevX ? tableSat_.process(inputF, prevX) : tableSat_.processNoAA(inputF);
-		return static_cast<q31_t>(outputF * kOutputScale);
-	}
+	/// Call from non-audio context to regenerate tables if params changed
+	void regenerateIfDirty() { tableSat_.regenerateIfDirty(); }
+
+	/// Pre-allocate buffers from UI thread (call before scheduling deferred regeneration)
+	void ensureBuffersAllocated() { tableSat_.ensureBuffersAllocated(); }
 
 	/**
 	 * Process a single sample using integer-only path (like builtin, no floats)
@@ -198,16 +161,32 @@ public:
 		return mixNorm_Q16;
 	}
 
-	/// Process with integer mixNorm (Q16.16 format: 65536 = 1.0)
-	[[gnu::always_inline]] inline q31_t processInt32(q31_t input, q31_t drive, int32_t mixNorm_Q16 = 131072) {
-		// Symmetric drive: 0.25x at min, 1.0x at center, 1.75x at max
-		// drive range [-2^30, 2^30] maps to gain [0.25x, 1.75x]
-		// Scale factor: 0.75 = 3/4 = 1/2 + 1/4
-		constexpr int32_t kOne_Q30 = 1 << 30;
-		int32_t scaledDrive = (drive >> 1) + (drive >> 2);
-		int32_t driveGain_Q30 = kOne_Q30 + scaledDrive;
+	/// Convert drive parameter to Q26 gain using power curve (call once per buffer, not per sample)
+	/// Power curve: gain = 32 * p^5 where p = normalized drive position [0, 1]
+	/// - min (-2^30): 0x (silence)
+	/// - center (0): 1.0x (unity)
+	/// - max (+2^30): 32x (full Q26 range)
+	[[gnu::always_inline]] static inline int32_t driveToGainQ26(q31_t drive) {
+		// Convert bipolar drive to unipolar p ∈ [0, 2^30] (Q30)
+		uint32_t p_Q30 = static_cast<uint32_t>((drive >> 1) + (1 << 29));
+		// Compute p^5 using repeated squaring (all intermediate values in Q30)
+		uint64_t p2 = (static_cast<uint64_t>(p_Q30) * p_Q30) >> 30;
+		uint64_t p4 = (p2 * p2) >> 30;
+		uint64_t p5 = (p4 * p_Q30) >> 30;
+		// gain = 32 * p^5 in Q26 (clamp to INT32_MAX at exactly p=1)
+		return (p5 >= (1ULL << 30)) ? INT32_MAX : static_cast<int32_t>(p5 << 1);
+	}
 
-		return tableSat_.processInt32Q16(input, driveGain_Q30, mixNorm_Q16);
+	/// Process with pre-computed driveGain (preferred - hoist gain calculation out of sample loop)
+	[[gnu::always_inline]] inline q31_t processWithGain(q31_t input, int32_t driveGain_Q26,
+	                                                    int32_t mixNorm_Q16 = 131072) {
+		return tableSat_.processInt32Q16(input, driveGain_Q26, mixNorm_Q16);
+	}
+
+	/// Process with integer mixNorm (Q16.16 format: 65536 = 1.0)
+	/// Note: Prefer processWithGain() and driveToGainQ26() for buffer processing
+	[[gnu::always_inline]] inline q31_t processInt32(q31_t input, q31_t drive, int32_t mixNorm_Q16 = 131072) {
+		return tableSat_.processInt32Q16(input, driveToGainQ26(drive), mixNorm_Q16);
 	}
 
 	/// Check if effect is transparent (zero drive in waveshaper)
@@ -217,16 +196,7 @@ public:
 	[[nodiscard]] TableShaperCore& getTableShaperCore() { return tableSat_; }
 	[[nodiscard]] const TableShaperCore& getTableShaperCore() const { return tableSat_; }
 
-	/// Reset table shaper state (call when shape parameters change)
-	void resetTableState() { tableSat_.reset(); }
-
-	[[nodiscard]] uint8_t getShapeX() const { return shapeX_; }
-	[[nodiscard]] uint16_t getShapeY() const { return shapeY_; }
-
 private:
-	uint8_t shapeX_{0};
-	uint16_t shapeY_{0};
-
 	// Table-based shaper with cached waveshaping (shared for L/R)
 	TableShaperCore tableSat_;
 };
