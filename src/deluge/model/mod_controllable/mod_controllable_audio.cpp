@@ -113,7 +113,7 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	// Shaper (all user params in shaper struct)
 	shaper = other->shaper;
 	if (shaper.isEnabled()) {
-		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.phase);
+		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.phaseOffset);
 	}
 	// Disperser (freq, stages, zones all inside disperser struct)
 	disperser = other->disperser;
@@ -995,7 +995,7 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 	}
 	else if (shaper.readTag(reader, tagName)) {
 		// Regenerate table after any shaper param change
-		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.phase);
+		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.phaseOffset);
 	}
 	else if (disperser.readTag(reader, tagName)) {
 		// Tag handled by disperser

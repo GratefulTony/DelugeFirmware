@@ -1539,8 +1539,14 @@ skipUnisonPart: {}
 		if (sound.shaper.shapeX > 0) {
 			q31_t satDrive = paramFinalValues[params::LOCAL_TABLE_SHAPER_DRIVE];
 			q31_t satMix = paramFinalValues[params::LOCAL_TABLE_SHAPER_MIX];
-			dsp::shapeBufferInt32(stereo_osc_buffer, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
-			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters());
+			dsp::shapeBufferInt32(
+			    stereo_osc_buffer, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
+			    &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), &sound.shaper.prevScaledInputL,
+			    &sound.shaper.prevScaledInputR, &sound.shaper.driftSlopeL_Q16, &sound.shaper.driftSlopeR_Q16,
+			    &sound.shaper.driftAccumL, &sound.shaper.driftAccumR, &sound.shaper.driftLfsr,
+			    &sound.shaper.prevSampleL, &sound.shaper.prevSampleR, &sound.shaper.zcCountL, &sound.shaper.zcCountR,
+			    &sound.shaper.subSignL, &sound.shaper.subSignR, sound.shaper.subEnabled, sound.shaper.phaseOffset,
+			    &sound.shaper.slewedL, &sound.shaper.slewedR);
 		}
 
 		// Filters
@@ -1654,7 +1660,11 @@ skipUnisonPart: {}
 			q31_t satDrive = paramFinalValues[params::LOCAL_TABLE_SHAPER_DRIVE];
 			q31_t satMix = paramFinalValues[params::LOCAL_TABLE_SHAPER_MIX];
 			dsp::shapeBufferInt32(std::span{oscBuffer, n}, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
-			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters());
+			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(),
+			                      &sound.shaper.prevScaledInputL, &sound.shaper.driftSlopeL_Q16,
+			                      &sound.shaper.driftAccumL, &sound.shaper.driftLfsr, &sound.shaper.prevSampleL,
+			                      &sound.shaper.zcCountL, &sound.shaper.subSignL, sound.shaper.subEnabled,
+			                      sound.shaper.phaseOffset, &sound.shaper.slewedL);
 		}
 
 		filterSet.renderLong(std::span{oscBuffer, n});

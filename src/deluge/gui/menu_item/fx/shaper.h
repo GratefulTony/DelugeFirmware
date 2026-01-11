@@ -83,19 +83,28 @@ public:
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
 					soundDrum->shaper.shapeX = current_value;
 					soundDrum->shaperDsp.regenerateTable(current_value, soundDrum->shaper.shapeY,
-					                                     soundDrum->shaper.phase);
+					                                     soundDrum->shaper.phaseOffset);
 					soundDrum->shaperDsp.regenerateIfDirty(); // Direct for bulk kit operation
 				}
 			}
 		}
 		else {
 			mca->shaper.shapeX = current_value;
-			mca->shaperDsp.regenerateTable(current_value, mca->shaper.shapeY, mca->shaper.phase);
+			mca->shaperDsp.regenerateTable(current_value, mca->shaper.shapeY, mca->shaper.phaseOffset);
 			shaper_regen::scheduleRegeneration(mca);
 		}
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
+
+	/// Click encoder to toggle subharmonic effect (octave-down modulation)
+	/// Drift is always on when phaseOffset != 0; this toggles the sub-octave effect
+	MenuItem* selectButtonPress() override {
+		auto* mca = soundEditor.currentModControllable;
+		mca->shaper.subEnabled = !mca->shaper.subEnabled;
+		display->displayPopup(mca->shaper.subEnabled ? "SUB" : "OFF");
+		return NO_NAVIGATION;
+	}
 
 	void selectEncoderAction(int32_t offset) override {
 		IntegerWithOff::selectEncoderAction(offset);
@@ -117,7 +126,7 @@ public:
 };
 
 // Shape Y (UI: "Color"): Sweeps through saturation characters
-// Secret menu: Push+twist to adjust shaper.phase
+// Secret menu: Push+twist to adjust shaper.phaseOffset
 class TableShaperShapeY final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
@@ -135,14 +144,14 @@ public:
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
 					soundDrum->shaper.shapeY = current_value;
 					soundDrum->shaperDsp.regenerateTable(soundDrum->shaper.shapeX, current_value,
-					                                     soundDrum->shaper.phase);
+					                                     soundDrum->shaper.phaseOffset);
 					soundDrum->shaperDsp.regenerateIfDirty(); // Direct for bulk kit operation
 				}
 			}
 		}
 		else {
 			mca->shaper.shapeY = current_value;
-			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, current_value, mca->shaper.phase);
+			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, current_value, mca->shaper.phaseOffset);
 			shaper_regen::scheduleRegeneration(mca);
 		}
 	}
@@ -151,17 +160,17 @@ public:
 
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret: push+twist adjusts shaper.phase
+			// Secret: push+twist adjusts shaper.phaseOffset
 			Buttons::selectButtonPressUsedUp = true;
-			float& phase = soundEditor.currentModControllable->shaper.phase;
-			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
-			// Regenerate table with new phase
+			float& phaseOffset = soundEditor.currentModControllable->shaper.phaseOffset;
+			phaseOffset += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			// Regenerate table with new phaseOffset
 			auto* mca = soundEditor.currentModControllable;
-			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, phase);
+			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, phaseOffset);
 			shaper_regen::scheduleRegeneration(mca);
 			// Show current value on display
 			char buffer[12];
-			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
+			intToString(static_cast<int32_t>(phaseOffset * 10.0f), buffer);
 			display->displayPopup(buffer);
 			suppressNotification_ = true;
 		}
@@ -229,12 +238,12 @@ public:
 		// Auto-enable X when turning up mix from 0
 		if (mca->shaper.shapeX == 0 && offset > 0) {
 			mca->shaper.shapeX = 1;
-			mca->shaperDsp.regenerateTable(1, mca->shaper.shapeY, mca->shaper.phase);
+			mca->shaperDsp.regenerateTable(1, mca->shaper.shapeY, mca->shaper.phaseOffset);
 			shaper_regen::scheduleRegeneration(mca);
 		}
 		// Regenerate tables when mix goes from 0 to non-zero (may have been skipped at load)
 		else if (wasZero && offset > 0 && mca->shaper.shapeX > 0) {
-			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, mca->shaper.phase);
+			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, mca->shaper.phaseOffset);
 			shaper_regen::scheduleRegeneration(mca);
 		}
 
@@ -256,10 +265,6 @@ public:
 		}
 		else {
 			drawValue();
-		}
-
-		if (newValue == 0) {
-			display->displayPopup("DRY");
 		}
 	}
 

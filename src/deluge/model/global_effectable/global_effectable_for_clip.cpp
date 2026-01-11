@@ -147,8 +147,12 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 		q31_t satDrive = patchedParams->getValue(params::LOCAL_TABLE_SHAPER_DRIVE);
 		q31_t satMix = patchedParams->getValue(params::LOCAL_TABLE_SHAPER_MIX);
 		// Audio clips: no voice filters (filterGain=0)
-		deluge::dsp::shapeBufferInt32(global_effectable_audio, shaperDsp, satDrive, &shaper.driveLast, satMix,
-		                              &shaper.mixNormLast_Q16, 0, false);
+		deluge::dsp::shapeBufferInt32(
+		    global_effectable_audio, shaperDsp, satDrive, &shaper.driveLast, satMix, &shaper.mixNormLast_Q16, 0, false,
+		    &shaper.prevScaledInputL, &shaper.prevScaledInputR, &shaper.driftSlopeL_Q16, &shaper.driftSlopeR_Q16,
+		    &shaper.driftAccumL, &shaper.driftAccumR, &shaper.driftLfsr, &shaper.prevSampleL, &shaper.prevSampleR,
+		    &shaper.zcCountL, &shaper.zcCountR, &shaper.subSignL, &shaper.subSignR, shaper.subEnabled,
+		    shaper.phaseOffset, &shaper.slewedL, &shaper.slewedR);
 	}
 
 	// Render saturation (builtin shaper using getTanHAntialiased)
