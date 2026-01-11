@@ -177,26 +177,28 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 	FX_BENCH_DECLARE(bench, "shaper_table");
 	FX_BENCH_SCOPE(bench);
 
-	// Compute target driveGain ONCE (hoisted p^5 calculation)
-	int32_t targetGain_Q26 = TableShaper::driveToGainQ26(drive);
-	// Smooth driveGain_Q26 (not raw drive) - stored value is Q26 gain
-	auto gainCtx = prepareShaperSmoothing(*smoothedDriveGain, targetGain_Q26);
-
 	// Compute gain adjustment for subtractive mode (fixed-point, computed once per buffer)
 	// filterGain=0 means FM mode (no adjustment needed)
 	// filterGain>0 means subtractive: compensate for resonance-induced level changes
 	// At neutral filterGain (2^28), gains = 1.0 (no adjustment)
 	// High resonance (low filterGain) → boost; low resonance (high filterGain) → attenuate
 	bool needsGainAdjust = (filterGain > 0) && hasFilters && (filterGain != kShaperNeutralFilterGainInt);
-	int32_t boostGain_Q16 = 65536; // 1.0 in Q16
 	int32_t attenGain_Q16 = 65536; // 1.0 in Q16
 
+	// Compute target driveGain ONCE (hoisted p^5 calculation)
+	// Fold boost into drive target to save one multiply per sample
+	int32_t targetGain_Q26 = TableShaper::driveToGainQ26(drive);
 	if (needsGainAdjust) {
-		// One float divide per buffer, then convert to Q16 for per-sample integer math
+		// One float divide per buffer for attenuation
 		float ratio = static_cast<float>(kShaperNeutralFilterGainInt) / static_cast<float>(filterGain);
-		boostGain_Q16 = static_cast<int32_t>(ratio * 65536.0f);
 		attenGain_Q16 = static_cast<int32_t>((1.0f / ratio) * 65536.0f);
+		// Fold boost into drive: (boost_Q16 × drive_Q26) >> 16 → Q26
+		// Uses 64-bit intermediate to handle large boost × drive products
+		int64_t boosted64 = static_cast<int64_t>(ratio * 65536.0f) * targetGain_Q26;
+		targetGain_Q26 = static_cast<int32_t>(std::min(boosted64 >> 16, static_cast<int64_t>(INT32_MAX)));
 	}
+	// Smooth driveGain_Q26 (includes boost if subtractive) - stored value is Q26 gain
+	auto gainCtx = prepareShaperSmoothing(*smoothedDriveGain, targetGain_Q26);
 
 	// Convert mix param to Q16 normalized value and setup smoothing (fastmath called once)
 	int32_t targetMixNorm_Q16 = TableShaper::mixParamToNormQ16(mix);
@@ -332,13 +334,8 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 			}
 		}
 
-		if (needsGainAdjust) {
-			// Saturating Q16 multiply using SSAT with LSL (single ARM instruction)
-			input = shift_left_saturate<16, 32>(multiply_32x32_rshift32(input, boostGain_Q16));
-		}
-
-		// Apply drive ONCE before splitting wet/dry paths
-		// This saves one SMMUL+saturate per sample vs applying inside shaper
+		// Apply drive ONCE before splitting wet/dry paths (boost folded into drive target)
+		// This saves two multiplies vs separate boost + drive
 		q31_t drivenInput = shift_left_saturate<6, 32>(multiply_32x32_rshift32(input, gainCtx.current));
 
 		// === Build wet path: all modifiers applied to driven signal ===
@@ -353,15 +350,29 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 			wetInput = *slewed;
 		}
 
-		// 2. Multiplicative drift: amplitude sag/boost (capacitor/power supply effects)
-		if (driftGain_Q16 != 65536 && driftGain_Q16 != 0) {
-			wetInput = static_cast<q31_t>((static_cast<int64_t>(wetInput) * driftGain_Q16) >> 16);
-		}
+		// 2-3. Combined multiplicative modifiers: drift sag/boost + subharmonic
+		// Combine into single multiply when both active to save one 64-bit multiply
+		{
+			int32_t wetModGain_Q16 = 65536; // unity
+			bool hasDrift = (driftGain_Q16 != 65536 && driftGain_Q16 != 0);
+			bool hasSub = (subBoost_Q16 != 0);
 
-		// 3. Subharmonic: octave-down gain modulation
-		if (subBoost_Q16 != 0) {
-			int32_t subGain_Q16 = 65536 - (*subSign) * subBoost_Q16;
-			wetInput = static_cast<q31_t>((static_cast<int64_t>(wetInput) * subGain_Q16) >> 16);
+			if (hasDrift) {
+				wetModGain_Q16 = driftGain_Q16;
+			}
+			if (hasSub) {
+				int32_t subGain_Q16 = 65536 - (*subSign) * subBoost_Q16;
+				if (hasDrift) {
+					// Combine: (drift_Q16 × sub_Q16) >> 16 → Q16
+					wetModGain_Q16 = static_cast<int32_t>((static_cast<int64_t>(wetModGain_Q16) * subGain_Q16) >> 16);
+				}
+				else {
+					wetModGain_Q16 = subGain_Q16;
+				}
+			}
+			if (hasDrift || hasSub) {
+				wetInput = static_cast<q31_t>((static_cast<int64_t>(wetInput) * wetModGain_Q16) >> 16);
+			}
 		}
 
 		// 4. Additive drift: DC offset determines operating point on transfer curve
@@ -438,26 +449,28 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 	FX_BENCH_DECLARE(bench, "shaper_table");
 	FX_BENCH_SCOPE(bench);
 
-	// Compute target driveGain ONCE (hoisted p^5 calculation)
-	int32_t targetGain_Q26 = TableShaper::driveToGainQ26(drive);
-	// Smooth driveGain_Q26 (not raw drive) - stored value is Q26 gain
-	auto gainCtx = prepareShaperSmoothing(*smoothedDriveGain, targetGain_Q26);
-
 	// Compute gain adjustment for subtractive mode (fixed-point, computed once per buffer)
 	// filterGain=0 means FM mode (no adjustment needed)
 	// filterGain>0 means subtractive: compensate for resonance-induced level changes
 	// At neutral filterGain (2^28), gains = 1.0 (no adjustment)
 	// High resonance (low filterGain) → boost; low resonance (high filterGain) → attenuate
 	bool needsGainAdjust = (filterGain > 0) && hasFilters && (filterGain != kShaperNeutralFilterGainInt);
-	int32_t boostGain_Q16 = 65536; // 1.0 in Q16
 	int32_t attenGain_Q16 = 65536; // 1.0 in Q16
 
+	// Compute target driveGain ONCE (hoisted p^5 calculation)
+	// Fold boost into drive target to save one multiply per sample
+	int32_t targetGain_Q26 = TableShaper::driveToGainQ26(drive);
 	if (needsGainAdjust) {
-		// One float divide per buffer, then convert to Q16 for per-sample integer math
+		// One float divide per buffer for attenuation
 		float ratio = static_cast<float>(kShaperNeutralFilterGainInt) / static_cast<float>(filterGain);
-		boostGain_Q16 = static_cast<int32_t>(ratio * 65536.0f);
 		attenGain_Q16 = static_cast<int32_t>((1.0f / ratio) * 65536.0f);
+		// Fold boost into drive: (boost_Q16 × drive_Q26) >> 16 → Q26
+		// Uses 64-bit intermediate to handle large boost × drive products
+		int64_t boosted64 = static_cast<int64_t>(ratio * 65536.0f) * targetGain_Q26;
+		targetGain_Q26 = static_cast<int32_t>(std::min(boosted64 >> 16, static_cast<int64_t>(INT32_MAX)));
 	}
+	// Smooth driveGain_Q26 (includes boost if subtractive) - stored value is Q26 gain
+	auto gainCtx = prepareShaperSmoothing(*smoothedDriveGain, targetGain_Q26);
 
 	// Convert mix param to Q16 normalized value and setup smoothing (fastmath called once)
 	int32_t targetMixNorm_Q16 = TableShaper::mixParamToNormQ16(mix);
@@ -633,14 +646,8 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 			}
 		}
 
-		if (needsGainAdjust) {
-			// Saturating Q16 multiply using SSAT with LSL (single ARM instruction)
-			inputL = shift_left_saturate<16, 32>(multiply_32x32_rshift32(inputL, boostGain_Q16));
-			inputR = shift_left_saturate<16, 32>(multiply_32x32_rshift32(inputR, boostGain_Q16));
-		}
-
-		// Apply drive ONCE before splitting wet/dry paths
-		// This saves two SMMUL+saturate per stereo sample vs applying inside shaper
+		// Apply drive ONCE before splitting wet/dry paths (boost folded into drive target)
+		// This saves four multiplies vs separate boost + drive per channel
 		q31_t drivenInputL = shift_left_saturate<6, 32>(multiply_32x32_rshift32(inputL, gainCtx.current));
 		q31_t drivenInputR = shift_left_saturate<6, 32>(multiply_32x32_rshift32(inputR, gainCtx.current));
 
@@ -661,20 +668,30 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 			wetInputR = *slewedR;
 		}
 
-		// 2. Multiplicative drift: amplitude sag/boost (capacitor/power supply effects)
-		if (driftGainL_Q16 != 65536 && driftGainL_Q16 != 0) {
-			wetInputL = static_cast<q31_t>((static_cast<int64_t>(wetInputL) * driftGainL_Q16) >> 16);
-		}
-		if (driftGainR_Q16 != 65536 && driftGainR_Q16 != 0) {
-			wetInputR = static_cast<q31_t>((static_cast<int64_t>(wetInputR) * driftGainR_Q16) >> 16);
-		}
+		// 2-3. Combined multiplicative modifiers: drift sag/boost + subharmonic (per channel)
+		// Combine into single multiply when both active to save two 64-bit multiplies
+		{
+			bool hasDriftL = (driftGainL_Q16 != 65536 && driftGainL_Q16 != 0);
+			bool hasDriftR = (driftGainR_Q16 != 65536 && driftGainR_Q16 != 0);
+			bool hasSub = (subBoost_Q16 != 0);
 
-		// 3. Subharmonic: octave-down gain modulation
-		if (subBoost_Q16 != 0) {
-			int32_t subGainL_Q16 = 65536 - (*subSignL) * subBoost_Q16;
-			int32_t subGainR_Q16 = 65536 - (*subSignR) * subBoost_Q16;
-			wetInputL = static_cast<q31_t>((static_cast<int64_t>(wetInputL) * subGainL_Q16) >> 16);
-			wetInputR = static_cast<q31_t>((static_cast<int64_t>(wetInputR) * subGainR_Q16) >> 16);
+			if (hasDriftL || hasDriftR || hasSub) {
+				int32_t wetModGainL_Q16 = hasDriftL ? driftGainL_Q16 : 65536;
+				int32_t wetModGainR_Q16 = hasDriftR ? driftGainR_Q16 : 65536;
+
+				if (hasSub) {
+					int32_t subGainL_Q16 = 65536 - (*subSignL) * subBoost_Q16;
+					int32_t subGainR_Q16 = 65536 - (*subSignR) * subBoost_Q16;
+					// Combine: (drift_Q16 × sub_Q16) >> 16 → Q16
+					wetModGainL_Q16 =
+					    static_cast<int32_t>((static_cast<int64_t>(wetModGainL_Q16) * subGainL_Q16) >> 16);
+					wetModGainR_Q16 =
+					    static_cast<int32_t>((static_cast<int64_t>(wetModGainR_Q16) * subGainR_Q16) >> 16);
+				}
+
+				wetInputL = static_cast<q31_t>((static_cast<int64_t>(wetInputL) * wetModGainL_Q16) >> 16);
+				wetInputR = static_cast<q31_t>((static_cast<int64_t>(wetInputR) * wetModGainR_Q16) >> 16);
+			}
 		}
 
 		// 4. Additive drift: DC offset determines operating point on transfer curve
