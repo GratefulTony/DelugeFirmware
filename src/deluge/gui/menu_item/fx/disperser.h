@@ -180,9 +180,9 @@ private:
  * Secret menu: Push+twist encoder to adjust metaPhaseTopo
  * Press encoder (no twist): Opens mod matrix source selection
  */
-class DisperserTopo final : public ZoneBasedPatchedParam<params::GLOBAL_DISPERSER_TOPO> {
+class DisperserTopo final : public ZoneBasedDualParam<params::GLOBAL_DISPERSER_TOPO> {
 public:
-	using ZoneBasedPatchedParam::ZoneBasedPatchedParam;
+	using ZoneBasedDualParam::ZoneBasedDualParam;
 
 	// Field accessors for ZoneBasedPatchedParam (sync with disperser.topo)
 	[[nodiscard]] q31_t getFieldValue() const override {
@@ -248,7 +248,7 @@ public:
 			suppressNotification_ = true;
 		}
 		else {
-			ZoneBasedPatchedParam::selectEncoderAction(offset);
+			ZoneBasedDualParam::selectEncoderAction(offset);
 		}
 	}
 
@@ -279,9 +279,9 @@ private:
  * Secret menu: Push+twist encoder to adjust metaPhase
  * Press encoder (no twist): Opens mod matrix source selection
  */
-class DisperserTwist final : public ZoneBasedPatchedParam<params::GLOBAL_DISPERSER_TWIST> {
+class DisperserTwist final : public ZoneBasedDualParam<params::GLOBAL_DISPERSER_TWIST> {
 public:
-	using ZoneBasedPatchedParam::ZoneBasedPatchedParam;
+	using ZoneBasedDualParam::ZoneBasedDualParam;
 
 	// Field accessors for ZoneBasedPatchedParam (sync with disperser.twist)
 	[[nodiscard]] q31_t getFieldValue() const override {
@@ -339,7 +339,7 @@ public:
 			suppressNotification_ = true;
 		}
 		else {
-			ZoneBasedPatchedParam::selectEncoderAction(offset);
+			ZoneBasedDualParam::selectEncoderAction(offset);
 		}
 	}
 

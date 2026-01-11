@@ -489,25 +489,14 @@ void ModControllableAudio::processSRRAndBitcrushing(deluge::dsp::StereoBuffer<q3
 
 void ModControllableAudio::processDisperser(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager,
                                             q31_t topoCables, q31_t twistCables) {
-	using namespace deluge::dsp;
 	using namespace deluge::modulation::params;
-
 	if (!disperser.isEnabled()) {
 		return;
 	}
 
-	// Get preset values from patched param set (for mod matrix support)
-	q31_t topoPreset = 0;
-	q31_t twistPreset = 0;
-	if (paramManager != nullptr && paramManager->containsAnyParamCollectionsIncludingExpression()) {
-		PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
-		if (patchedParams != nullptr) {
-			topoPreset = patchedParams->getValue(GLOBAL_DISPERSER_TOPO);
-			twistPreset = patchedParams->getValue(GLOBAL_DISPERSER_TWIST);
-		}
-	}
+	q31_t topoPreset = paramManager ? paramManager->getValueWithFallback(GLOBAL_DISPERSER_TOPO) : 0;
+	q31_t twistPreset = paramManager ? paramManager->getValueWithFallback(GLOBAL_DISPERSER_TWIST) : 0;
 
-	// Call encapsulated processing (handles param combination, smoothing, topology dispatch)
 	dsp::processDisperser(buffer, disperserDsp, disperser, topoPreset, topoCables, twistPreset, twistCables,
 	                      getLastNoteCode());
 }

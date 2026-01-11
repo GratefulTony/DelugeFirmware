@@ -214,9 +214,12 @@ enum UnpatchedShared : ParamType {
 	UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN,
 	UNPATCHED_MB_COMPRESSOR_VIBE,
 	UNPATCHED_MB_COMPRESSOR_BLEND,
-	// Sine shaper zone controls (high-res like DOTT vibe)
+	// Shaper controls for GlobalEffectables (Kit/AudioClip at clip level)
+	UNPATCHED_SINE_SHAPER_DRIVE,
 	UNPATCHED_SINE_SHAPER_HARMONIC,
 	UNPATCHED_SINE_SHAPER_TWIST,
+	UNPATCHED_TABLE_SHAPER_DRIVE,
+	UNPATCHED_TABLE_SHAPER_MIX,
 	// Disperser zone controls
 	UNPATCHED_DISPERSER_TOPO,
 	UNPATCHED_DISPERSER_TWIST,
@@ -347,6 +350,29 @@ inline ZoneParamInfo getZoneParamInfo(Kind kind, int32_t paramID) {
 		return getZoneParamInfo(static_cast<ParamType>(paramID));
 	}
 	return {1, 128};
+}
+
+/// Get the unpatched fallback param for a patched param (for GlobalEffectable contexts)
+/// Returns the corresponding UNPATCHED_* param ID, or -1 if no fallback exists
+constexpr int32_t getUnpatchedFallback(int32_t patchedParam) {
+	switch (patchedParam) {
+	case LOCAL_TABLE_SHAPER_DRIVE:
+		return UNPATCHED_TABLE_SHAPER_DRIVE;
+	case LOCAL_TABLE_SHAPER_MIX:
+		return UNPATCHED_TABLE_SHAPER_MIX;
+	case LOCAL_SINE_SHAPER_DRIVE:
+		return UNPATCHED_SINE_SHAPER_DRIVE;
+	case LOCAL_SINE_SHAPER_HARMONIC:
+		return UNPATCHED_SINE_SHAPER_HARMONIC;
+	case LOCAL_SINE_SHAPER_TWIST:
+		return UNPATCHED_SINE_SHAPER_TWIST;
+	case GLOBAL_DISPERSER_TOPO:
+		return UNPATCHED_DISPERSER_TOPO;
+	case GLOBAL_DISPERSER_TWIST:
+		return UNPATCHED_DISPERSER_TWIST;
+	default:
+		return -1;
+	}
 }
 
 bool isParamBipolar(Kind kind, int32_t paramID);

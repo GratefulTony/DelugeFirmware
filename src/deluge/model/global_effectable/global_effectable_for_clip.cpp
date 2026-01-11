@@ -125,28 +125,19 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	    shouldLimitDelayFeedback, isClipActive, pitchAdjust, 134217728, 134217728);
 
 	// Shapers run before filters (matching voice processing order)
-	PatchedParamSet* patchedParams = paramManagerForClip->getPatchedParamSet();
-
-	// Sine Shaper (for audio clips)
-	// Uses LOCAL patched params for base (preset), UNPATCHED for additional modulation
+	// Sine Shaper (uses getValueWithFallback for patched→unpatched mapping)
 	if (sineShaper.isEnabled()) {
-		q31_t sineDrive = patchedParams->getValue(params::LOCAL_SINE_SHAPER_DRIVE);
-		q31_t harmonicPreset = patchedParams->getValue(params::LOCAL_SINE_SHAPER_HARMONIC);
-		q31_t twistPreset = patchedParams->getValue(params::LOCAL_SINE_SHAPER_TWIST);
-		// Audio clips: no voice filters (filterGain=0, hasFilters=false)
-		deluge::dsp::processSineShaper(global_effectable_audio, &sineShaper, &sineShaperState, sineDrive,
-		                               harmonicPreset,
-		                               unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC), twistPreset,
-		                               unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_TWIST), 0, false);
+		q31_t sineDrive = paramManagerForClip->getValueWithFallback(params::LOCAL_SINE_SHAPER_DRIVE);
+		q31_t harmonic = paramManagerForClip->getValueWithFallback(params::LOCAL_SINE_SHAPER_HARMONIC);
+		q31_t twist = paramManagerForClip->getValueWithFallback(params::LOCAL_SINE_SHAPER_TWIST);
+		deluge::dsp::processSineShaper(global_effectable_audio, &sineShaper, &sineShaperState, sineDrive, harmonic,
+		                               harmonic, twist, twist, 0, false);
 	}
 
-	// Table Shaper (for audio clips)
-	// Uses same patched params as voices (LOCAL_TABLE_SHAPER_DRIVE/MIX)
-	// Benchmarking happens inside shapeBufferInt32
+	// Table Shaper (uses getValueWithFallback for patched→unpatched mapping)
 	if (shaper.isEnabled()) {
-		q31_t satDrive = patchedParams->getValue(params::LOCAL_TABLE_SHAPER_DRIVE);
-		q31_t satMix = patchedParams->getValue(params::LOCAL_TABLE_SHAPER_MIX);
-		// Audio clips: no voice filters (filterGain=0)
+		q31_t satDrive = paramManagerForClip->getValueWithFallback(params::LOCAL_TABLE_SHAPER_DRIVE);
+		q31_t satMix = paramManagerForClip->getValueWithFallback(params::LOCAL_TABLE_SHAPER_MIX);
 		deluge::dsp::shapeBufferInt32(
 		    global_effectable_audio, shaperDsp, satDrive, &shaper.driveLast, satMix, &shaper.mixNormLast_Q16, 0, false,
 		    &shaper.prevScaledInputL, &shaper.prevScaledInputR, &shaper.driftSlopeL_Q16, &shaper.driftSlopeR_Q16,

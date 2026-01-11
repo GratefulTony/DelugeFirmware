@@ -350,4 +350,93 @@ protected:
 	mutable VelocityEncoder velocity_;
 };
 
+/**
+ * Zone-based menu item with automatic patched/unpatched fallback support
+ *
+ * Extends ZoneBasedPatchedParam to work in both Sound contexts (using patched params)
+ * and GlobalEffectable contexts like Kit clips and AudioClips (using unpatched params).
+ * If an unpatched fallback exists (via getUnpatchedFallback()), it's used automatically.
+ * If no fallback exists, behaves like ZoneBasedPatchedParam (patched only).
+ *
+ * @tparam PATCHED_ID The patched param ID (LOCAL or GLOBAL) for Sound contexts
+ * @tparam NUM_ZONES Number of zones (derived from PATCHED_ID via getZoneParamInfo)
+ * @tparam RESOLUTION Encoder steps (derived from PATCHED_ID via getZoneParamInfo)
+ */
+template <params::ParamType PATCHED_ID, int32_t NUM_ZONES = params::getZoneParamInfo(PATCHED_ID).zoneCount,
+          int32_t RESOLUTION = params::getZoneParamInfo(PATCHED_ID).resolution>
+class ZoneBasedDualParam : public ZoneBasedPatchedParam<PATCHED_ID, NUM_ZONES, RESOLUTION> {
+	static constexpr int32_t UNPATCHED_ID = params::getUnpatchedFallback(PATCHED_ID);
+	static constexpr bool HAS_FALLBACK = (UNPATCHED_ID >= 0);
+
+public:
+	using ZoneBasedPatchedParam<PATCHED_ID, NUM_ZONES, RESOLUTION>::ZoneBasedPatchedParam;
+
+	void readCurrentValue() override {
+		q31_t value;
+		if constexpr (HAS_FALLBACK) {
+			value = soundEditor.currentParamManager->getValueWithFallback(PATCHED_ID);
+		}
+		else {
+			value = soundEditor.currentParamManager->getPatchedParamSet()->getValue(PATCHED_ID);
+		}
+		this->setValue(paramToMenuValue<RESOLUTION>(value));
+	}
+
+	ModelStackWithAutoParam* getModelStackWithParam(void* memory) override {
+		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(memory);
+		if constexpr (HAS_FALLBACK) {
+			if (!soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+				return modelStack->getUnpatchedAutoParamFromId(UNPATCHED_ID);
+			}
+		}
+		return modelStack->getPatchedAutoParamFromId(PATCHED_ID);
+	}
+
+	void writeCurrentValue() override {
+		q31_t value = menuValueToParam<RESOLUTION>(this->getValue());
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithAutoParam* modelStackWithParam = getModelStackWithParam(modelStackMemory);
+		modelStackWithParam->autoParam->setCurrentValueInResponseToUserInput(value, modelStackWithParam);
+	}
+
+	// MIDI learning support - use appropriate param based on context
+	ParamDescriptor getLearningThing() override {
+		ParamDescriptor paramDescriptor;
+		if constexpr (HAS_FALLBACK) {
+			if (!soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+				paramDescriptor.setToHaveParamOnly(UNPATCHED_ID + params::UNPATCHED_START);
+				return paramDescriptor;
+			}
+		}
+		paramDescriptor.setToHaveParamOnly(PATCHED_ID);
+		return paramDescriptor;
+	}
+
+	[[nodiscard]] deluge::modulation::params::Kind getParamKind() override {
+		if constexpr (HAS_FALLBACK) {
+			if (!soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+				return deluge::modulation::params::Kind::UNPATCHED_SOUND;
+			}
+		}
+		return deluge::modulation::params::Kind::PATCHED;
+	}
+
+	// Override to skip mod matrix source selection in unpatched contexts (no PatchCableSet)
+	MenuItem* selectButtonPress() override {
+		// If shift held down, user wants to delete automation
+		if (Buttons::isShiftButtonPressed()) {
+			return DecimalWithoutScrolling::selectButtonPress();
+		}
+		if constexpr (HAS_FALLBACK) {
+			// In unpatched context (GlobalEffectable), no mod matrix available
+			if (!soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+				return nullptr;
+			}
+		}
+		// In patched context (Sound), open mod matrix source selection
+		soundEditor.patchingParamSelected = PATCHED_ID;
+		return &source_selection::regularMenu;
+	}
+};
+
 } // namespace deluge::gui::menu_item

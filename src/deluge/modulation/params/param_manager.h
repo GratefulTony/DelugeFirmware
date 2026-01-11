@@ -52,6 +52,9 @@ public:
 
 	inline bool containsAnyParamCollectionsIncludingExpression() { return summaries[0].paramCollection; }
 
+	/// Check if this ParamManager has a PatchedParamSet (i.e., was set up with setupWithPatching)
+	inline bool containsPatchedParamSetCollection() { return summaries[1].paramCollection != nullptr; }
+
 	Error setupWithPatching();
 	Error setupUnpatched();
 	Error setupMIDI();
@@ -153,6 +156,13 @@ public:
 	inline PatchCableSet* getPatchCableSetAllowJibberish() { // Don't ask.
 		return (PatchCableSet*)summaries[2].paramCollection;
 	}
+
+	/// Get param value with automatic patched→unpatched fallback for GlobalEffectable contexts.
+	/// If this ParamManager has patched params, returns the patched value.
+	/// Otherwise returns the corresponding unpatched fallback value.
+	/// @param patchedParam The patched param ID (e.g., GLOBAL_DISPERSER_TOPO)
+	/// @return The param value from the appropriate param set
+	int32_t getValueWithFallback(int32_t patchedParam);
 
 	void notifyParamModifiedInSomeWay(ModelStackWithAutoParam const* modelStack, int32_t currentValueChanged,
 	                                  bool automationChanged, bool paramAutomatedNow);

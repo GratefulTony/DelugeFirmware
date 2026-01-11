@@ -22,6 +22,7 @@
 #include "gui/ui/sound_editor.h"
 #include "model/instrument/kit.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
+#include "model/model_stack.h"
 #include "model/song/song.h"
 #include "modulation/params/param.h"
 #include "processing/sound/sound.h"
@@ -36,6 +37,23 @@
 namespace params = deluge::modulation::params;
 
 namespace deluge::gui::menu_item::fx {
+
+// Helpers for dual patched/unpatched param access (Sound vs GlobalEffectable contexts)
+inline q31_t getShapingParamValue(params::ParamType patched, params::ParamType unpatched) {
+	if (soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+		return soundEditor.currentParamManager->getPatchedParamSet()->getValue(patched);
+	}
+	return soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(unpatched);
+}
+
+inline ModelStackWithAutoParam* getShapingModelStack(void* memory, params::ParamType patched,
+                                                     params::ParamType unpatched) {
+	ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(memory);
+	if (soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+		return modelStack->getPatchedAutoParamFromId(patched);
+	}
+	return modelStack->getUnpatchedAutoParamFromId(unpatched);
+}
 
 /// UnpatchedParam for learnable drive parameters in the shaping submenu.
 /// Used in menus.cpp for sineShaperDriveMenu and shaperDriveMenu.
@@ -85,12 +103,15 @@ protected:
 	[[nodiscard]] int32_t getMinValue() const override { return -kDriveMenuHalfRange; }
 	[[nodiscard]] int32_t getMaxValue() const override { return kDriveMenuHalfRange; }
 
-	void readCurrentValue() override {
-		// Scale q31 (-2^31 to 2^31-1) to menu range (-128 to +128)
-		// q31 0 = menu 0 (unity), q31 INT32_MIN = menu -128 (-inf)
-		int32_t q31Value = soundEditor.currentParamManager->getPatchedParamSet()->getValue(getP());
-		// Shift right by 24 bits to get -128 to +127 range
-		this->setValue(q31Value >> 24);
+	params::ParamType getUnpatchedP() {
+		return (getP() == params::LOCAL_SINE_SHAPER_DRIVE) ? params::UNPATCHED_SINE_SHAPER_DRIVE
+		                                                   : params::UNPATCHED_TABLE_SHAPER_DRIVE;
+	}
+
+	void readCurrentValue() override { this->setValue(getShapingParamValue(getP(), getUnpatchedP()) >> 24); }
+
+	ModelStackWithAutoParam* getModelStack(void* memory) override {
+		return getShapingModelStack(memory, getP(), getUnpatchedP());
 	}
 
 	int32_t getFinalValue() override {
@@ -119,9 +140,9 @@ protected:
 /// Zone 7: Poly - Cascaded polynomial waveshaping
 /// Secret menu: Push+twist encoder to adjust metaPhaseHarmonic (per-patch phase offset)
 /// Press encoder (no twist): Opens mod matrix source selection
-class SineShaperHarmonic final : public ZoneBasedPatchedParam<params::LOCAL_SINE_SHAPER_HARMONIC> {
+class SineShaperHarmonic final : public ZoneBasedDualParam<params::LOCAL_SINE_SHAPER_HARMONIC> {
 public:
-	using ZoneBasedPatchedParam::ZoneBasedPatchedParam;
+	using ZoneBasedDualParam::ZoneBasedDualParam;
 
 	[[nodiscard]] q31_t getFieldValue() const override {
 		return soundEditor.currentModControllable->sineShaper.harmonic;
@@ -165,7 +186,7 @@ public:
 			suppressNotification_ = true; // Prevent horizontal menu from overwriting popup
 		}
 		else {
-			ZoneBasedPatchedParam::selectEncoderAction(offset);
+			ZoneBasedDualParam::selectEncoderAction(offset);
 		}
 	}
 
@@ -189,9 +210,9 @@ private:
 /// Zones 4-7: Meta - Combined modifiers with φ-ratio triangle modulation
 /// Secret menu: Push+twist encoder to adjust metaPhase (per-patch phase offset for meta zone)
 /// Press encoder (no twist): Opens mod matrix source selection
-class SineShaperTwist final : public ZoneBasedPatchedParam<params::LOCAL_SINE_SHAPER_TWIST> {
+class SineShaperTwist final : public ZoneBasedDualParam<params::LOCAL_SINE_SHAPER_TWIST> {
 public:
-	using ZoneBasedPatchedParam::ZoneBasedPatchedParam;
+	using ZoneBasedDualParam::ZoneBasedDualParam;
 
 	[[nodiscard]] q31_t getFieldValue() const override { return soundEditor.currentModControllable->sineShaper.twist; }
 
@@ -230,7 +251,7 @@ public:
 			suppressNotification_ = true; // Prevent horizontal menu from overwriting popup
 		}
 		else {
-			ZoneBasedPatchedParam::selectEncoderAction(offset);
+			ZoneBasedDualParam::selectEncoderAction(offset);
 		}
 	}
 
