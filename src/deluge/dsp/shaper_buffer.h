@@ -337,13 +337,17 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 			input = shift_left_saturate<16, 32>(multiply_32x32_rshift32(input, boostGain_Q16));
 		}
 
-		// === Build wet path: all modifiers applied externally ===
+		// Apply drive ONCE before splitting wet/dry paths
+		// This saves one SMMUL+saturate per sample vs applying inside shaper
+		q31_t drivenInput = shift_left_saturate<6, 32>(multiply_32x32_rshift32(input, gainCtx.current));
+
+		// === Build wet path: all modifiers applied to driven signal ===
 		// Order: slew → mult → sub → additive (additive last = pure DC offset to transfer curve)
-		q31_t wetInput = input;
+		q31_t wetInput = drivenInput;
 
 		// 1. Slew: input conditioning, soften transients
 		if (slewActive) {
-			int32_t delta = input - *slewed;
+			int32_t delta = drivenInput - *slewed;
 			delta = std::clamp(delta, -maxSlew, maxSlew);
 			*slewed += delta;
 			wetInput = *slewed;
@@ -360,15 +364,16 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 			wetInput = static_cast<q31_t>((static_cast<int64_t>(wetInput) * subGain_Q16) >> 16);
 		}
 
-		// 4. Additive drift: DC offset determines operating point on transfer curve (last = unscaled)
+		// 4. Additive drift: DC offset determines operating point on transfer curve
+		// Applied last so offset is drive-independent (fixed curve shift regardless of drive level)
 		if (driftOffset_Q16 != 0) {
 			int32_t offset = -driftOffset_Q16 << 8;
 			wetInput = add_saturate(wetInput, offset);
 		}
 
-		// Shaper: wet path through table, dry path for blending
-		q31_t out = shaper.processWithGainHoisted(wetInput, input, gainCtx.current, blendSlope_Q8, threshold64,
-		                                          tableIdx, hystOffset, prevScaledInput);
+		// Shaper: both paths already driven, shaper only does table scaling
+		q31_t out = shaper.processWithGainHoisted(wetInput, drivenInput, blendSlope_Q8, threshold64, tableIdx,
+		                                          hystOffset, prevScaledInput);
 
 		if (needsGainAdjust) {
 			// Q16 multiply for attenuation (no overflow possible since attenGain <= 1 when boost >= 1)
@@ -634,15 +639,20 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 			inputR = shift_left_saturate<16, 32>(multiply_32x32_rshift32(inputR, boostGain_Q16));
 		}
 
-		// === Build wet paths: all modifiers applied externally ===
+		// Apply drive ONCE before splitting wet/dry paths
+		// This saves two SMMUL+saturate per stereo sample vs applying inside shaper
+		q31_t drivenInputL = shift_left_saturate<6, 32>(multiply_32x32_rshift32(inputL, gainCtx.current));
+		q31_t drivenInputR = shift_left_saturate<6, 32>(multiply_32x32_rshift32(inputR, gainCtx.current));
+
+		// === Build wet paths: all modifiers applied to driven signals ===
 		// Order: slew → mult → sub → additive (additive last = pure DC offset to transfer curve)
-		q31_t wetInputL = inputL;
-		q31_t wetInputR = inputR;
+		q31_t wetInputL = drivenInputL;
+		q31_t wetInputR = drivenInputR;
 
 		// 1. Slew: input conditioning, soften transients
 		if (slewActive) {
-			int32_t deltaL = inputL - *slewedL;
-			int32_t deltaR = inputR - *slewedR;
+			int32_t deltaL = drivenInputL - *slewedL;
+			int32_t deltaR = drivenInputR - *slewedR;
 			deltaL = std::clamp(deltaL, -maxSlew, maxSlew);
 			deltaR = std::clamp(deltaR, -maxSlew, maxSlew);
 			*slewedL += deltaL;
@@ -667,7 +677,8 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 			wetInputR = static_cast<q31_t>((static_cast<int64_t>(wetInputR) * subGainR_Q16) >> 16);
 		}
 
-		// 4. Additive drift: DC offset determines operating point on transfer curve (last = unscaled)
+		// 4. Additive drift: DC offset determines operating point on transfer curve
+		// Applied last so offset is drive-independent (fixed curve shift regardless of drive level)
 		if (driftOffsetL_Q16 != 0 || driftOffsetR_Q16 != 0) {
 			int32_t offsetL = -driftOffsetL_Q16 << 8;
 			int32_t offsetR = -driftOffsetR_Q16 << 8;
@@ -675,11 +686,11 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 			wetInputR = add_saturate(wetInputR, offsetR);
 		}
 
-		// Shaper: wet paths through table, dry paths for blending
-		q31_t outL = shaper.processWithGainHoisted(wetInputL, inputL, gainCtx.current, blendSlope_Q8, threshold64,
-		                                           tableIdx, hystOffset, prevScaledInputL);
-		q31_t outR = shaper.processWithGainHoisted(wetInputR, inputR, gainCtx.current, blendSlope_Q8, threshold64,
-		                                           tableIdx, hystOffset, prevScaledInputR);
+		// Shaper: both paths already driven, shaper only does table scaling
+		q31_t outL = shaper.processWithGainHoisted(wetInputL, drivenInputL, blendSlope_Q8, threshold64, tableIdx,
+		                                           hystOffset, prevScaledInputL);
+		q31_t outR = shaper.processWithGainHoisted(wetInputR, drivenInputR, blendSlope_Q8, threshold64, tableIdx,
+		                                           hystOffset, prevScaledInputR);
 
 		if (needsGainAdjust) {
 			// Q16 multiply for attenuation (no overflow possible since attenGain <= 1 when boost >= 1)

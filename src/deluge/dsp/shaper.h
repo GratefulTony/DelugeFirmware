@@ -245,20 +245,20 @@ public:
 	/// Process with pre-computed mix-dependent values (maximum performance)
 	/// Use computeBlendSlope_Q8(), computeThreshold64(), getTargetTableIndex() to pre-compute once per buffer.
 	/// Call getIsLinear() first and skip shaper entirely if true.
-	/// @param wetInput Wet path input (pre-processed with slew, drift, sub externally)
-	/// @param dryInput Dry path input (original signal for blending)
-	/// @param driveGain_Q26 Pre-computed drive gain in Q26 format
+	/// Drive is applied by caller before splitting wet/dry paths.
+	/// @param wetInput Wet path input (pre-driven, then slew/drift/sub applied externally)
+	/// @param dryInput Dry path input (pre-driven, original signal for blending)
 	/// @param blendSlope_Q8 Pre-computed from computeBlendSlope_Q8(baseSlope)
 	/// @param threshold64 Pre-computed from computeThreshold64(mixNorm_Q16)
 	/// @param tableIdx Pre-computed from getTargetTableIndex()
 	/// @param hystOffset Hysteresis offset (0 = disabled, from getHystOffset())
 	/// @param prevScaledInput Pointer to previous scaled input for slope detection (updated)
-	[[gnu::always_inline]] inline q31_t processWithGainHoisted(q31_t wetInput, q31_t dryInput, int32_t driveGain_Q26,
-	                                                           int32_t blendSlope_Q8, int64_t threshold64,
-	                                                           int8_t tableIdx, int32_t hystOffset = 0,
+	[[gnu::always_inline]] inline q31_t processWithGainHoisted(q31_t wetInput, q31_t dryInput, int32_t blendSlope_Q8,
+	                                                           int64_t threshold64, int8_t tableIdx,
+	                                                           int32_t hystOffset = 0,
 	                                                           int32_t* prevScaledInput = nullptr) {
-		return tableSat_.processInt32Q16Hoisted(wetInput, dryInput, driveGain_Q26, blendSlope_Q8, threshold64, tableIdx,
-		                                        hystOffset, prevScaledInput);
+		return tableSat_.processInt32Q16Hoisted(wetInput, dryInput, blendSlope_Q8, threshold64, tableIdx, hystOffset,
+		                                        prevScaledInput);
 	}
 
 	/// Get hysteresis offset (call once per buffer for hoisting)

@@ -294,23 +294,21 @@ public:
 
 	/// Process sample with pre-computed values (hoisted out of sample loop)
 	/// All parameters computed once per buffer for maximum performance.
-	/// @param wetInput Wet path input (pre-processed with slew, drift, sub externally)
-	/// @param dryInput Dry path input (original signal for blending)
-	/// @param driveGain_Q26 Pre-computed drive gain in Q26 format
+	/// Drive is applied by caller before splitting wet/dry paths - this function only scales for table.
+	/// @param wetInput Wet path input (pre-driven, then slew/drift/sub applied externally)
+	/// @param dryInput Dry path input (pre-driven, original signal for blending)
 	/// @param blendSlope_Q8 Pre-computed from computeBlendSlope_Q8(baseSlope)
 	/// @param threshold64 Pre-computed from computeThreshold64(mixNorm_Q16)
 	/// @param tableIdx Pre-computed from getTargetTableIndex()
 	/// @param hystOffset Hysteresis offset (0 = disabled, hoisted from getHystOffset())
 	/// @param prevScaledInput Pointer to previous scaled input for slope detection (updated)
-	/// @return Output sample at same level as input
-	[[gnu::always_inline]] int32_t processInt32Q16Hoisted(int32_t wetInput, int32_t dryInput, int32_t driveGain_Q26,
-	                                                      int32_t blendSlope_Q8, int64_t threshold64, int8_t tableIdx,
-	                                                      int32_t hystOffset = 0, int32_t* prevScaledInput = nullptr) {
-		// Apply drive and scale to both paths
-		int32_t afterDriveWet = shift_left_saturate<6, 32>(multiply_32x32_rshift32(wetInput, driveGain_Q26));
-		int32_t afterDriveDry = shift_left_saturate<6, 32>(multiply_32x32_rshift32(dryInput, driveGain_Q26));
-		int32_t scaledWet = lshiftAndSaturateUnknown(afterDriveWet, inputScaleShift_);
-		int32_t scaledDry = lshiftAndSaturateUnknown(afterDriveDry, inputScaleShift_);
+	/// @return Output sample at same level as input (driven level)
+	[[gnu::always_inline]] int32_t processInt32Q16Hoisted(int32_t wetInput, int32_t dryInput, int32_t blendSlope_Q8,
+	                                                      int64_t threshold64, int8_t tableIdx, int32_t hystOffset = 0,
+	                                                      int32_t* prevScaledInput = nullptr) {
+		// Scale for table resolution (drive already applied by caller)
+		int32_t scaledWet = lshiftAndSaturateUnknown(wetInput, inputScaleShift_);
+		int32_t scaledDry = lshiftAndSaturateUnknown(dryInput, inputScaleShift_);
 
 		// Amplitude-dependent blend based on DRY signal (branchless abs)
 		int32_t clampedDry = std::max(scaledDry, static_cast<int32_t>(-2147483647));
@@ -324,8 +322,8 @@ public:
 			if (prevScaledInput) {
 				*prevScaledInput = scaledDry;
 			}
-			// Return dry signal when below threshold
-			return afterDriveDry;
+			// Return dry signal when below threshold (already at driven level)
+			return dryInput;
 		}
 
 		// Convert diff to Q16 for blend calculation
