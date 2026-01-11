@@ -17,12 +17,14 @@
 #pragma once
 
 #include "gui/menu_item/submenu.h"
+#include "gui/ui/sound_editor.h"
 #include "model/settings/runtime_feature_settings.h"
 
 namespace deluge::gui::menu_item::submenu {
 
 /// Shaping Submenu containing Sine Shaper, Table Shaper, and Disperser effects.
 /// Hidden when DynamicsSoundDesign community feature is disabled.
+/// Also hidden for GlobalEffectable contexts (Song, Kit clip, AudioClip) which lack patched params.
 class Shaping final : public Submenu {
 public:
 	using Submenu::Submenu;

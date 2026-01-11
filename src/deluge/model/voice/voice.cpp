@@ -53,6 +53,7 @@
 #include "gui/menu_item/zone_based.h"
 #include "io/debug/fx_benchmark.h"
 #include "util/misc.h"
+#include <cmath>
 #include <cstring>
 #include <new>
 
@@ -1539,6 +1540,25 @@ skipUnisonPart: {}
 		if (sound.shaper.shapeX > 0) {
 			q31_t satDrive = paramFinalValues[params::LOCAL_TABLE_SHAPER_DRIVE];
 			q31_t satMix = paramFinalValues[params::LOCAL_TABLE_SHAPER_MIX];
+			// Compute note frequency for LPF cutoff scaling
+			// FM always tracks pitch; subtractive only if a source is tracking
+			bool hasPitchTracking =
+			    (synthMode == SynthMode::FM) || sound.sources[0].isTracking || sound.sources[1].isTracking;
+			float noteFreqHz =
+			    hasPitchTracking ? 440.0f * powf(2.0f, (noteCodeAfterArpeggiation - 69) / 12.0f) : dsp::kLpfRefFreq;
+
+			// Compute oscillator harmonic weight for LPF duty cycle
+			// FM uses sine carriers (low harmonics), subtractive uses actual osc types
+			float oscHarmonic =
+			    (synthMode == SynthMode::FM)
+			        ? 0.0f // FM carriers are sine
+			        : std::max(dsp::TableShaperState::oscTypeToHarmonicWeight(sound.sources[0].oscType),
+			                   dsp::TableShaperState::oscTypeToHarmonicWeight(sound.sources[1].oscType));
+			// Update stored harmonic weight if changed (triggers table regen on next menu access)
+			if (sound.shaper.oscHarmonicWeight != oscHarmonic) {
+				sound.shaper.oscHarmonicWeight = oscHarmonic;
+			}
+
 			dsp::shapeBufferInt32(
 			    stereo_osc_buffer, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
 			    &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), &sound.shaper.prevScaledInputL,
@@ -1546,7 +1566,7 @@ skipUnisonPart: {}
 			    &sound.shaper.driftAccumL, &sound.shaper.driftAccumR, &sound.shaper.driftLfsr,
 			    &sound.shaper.prevSampleL, &sound.shaper.prevSampleR, &sound.shaper.zcCountL, &sound.shaper.zcCountR,
 			    &sound.shaper.subSignL, &sound.shaper.subSignR, sound.shaper.subEnabled, sound.shaper.phaseOffset,
-			    &sound.shaper.slewedL, &sound.shaper.slewedR);
+			    &sound.shaper.slewedL, &sound.shaper.slewedR, noteFreqHz);
 		}
 
 		// Filters
@@ -1659,12 +1679,36 @@ skipUnisonPart: {}
 		if (sound.shaper.shapeX > 0) {
 			q31_t satDrive = paramFinalValues[params::LOCAL_TABLE_SHAPER_DRIVE];
 			q31_t satMix = paramFinalValues[params::LOCAL_TABLE_SHAPER_MIX];
+			// Compute note frequency for LPF cutoff scaling
+			// FM always tracks pitch; subtractive only if a source is tracking
+			bool hasPitchTracking =
+			    (synthMode == SynthMode::FM) || sound.sources[0].isTracking || sound.sources[1].isTracking;
+			float noteFreqHz =
+			    hasPitchTracking ? 440.0f * powf(2.0f, (noteCodeAfterArpeggiation - 69) / 12.0f) : dsp::kLpfRefFreq;
+
+			// Compute oscillator harmonic weight for LPF duty cycle
+			float oscHarmonic =
+			    (synthMode == SynthMode::FM)
+			        ? 0.0f
+			        : std::max(dsp::TableShaperState::oscTypeToHarmonicWeight(sound.sources[0].oscType),
+			                   dsp::TableShaperState::oscTypeToHarmonicWeight(sound.sources[1].oscType));
+			if (sound.shaper.oscHarmonicWeight != oscHarmonic) {
+				sound.shaper.oscHarmonicWeight = oscHarmonic;
+			}
+
+			dsp::ShaperModState monoState{
+			    .driftSlope = &sound.shaper.driftSlopeL_Q16,
+			    .driftAccum = &sound.shaper.driftAccumL,
+			    .prevSample = &sound.shaper.prevSampleL,
+			    .slewed = &sound.shaper.slewedL,
+			    .prevScaledInput = &sound.shaper.prevScaledInputL,
+			    .zcCount = &sound.shaper.zcCountL,
+			    .subSign = &sound.shaper.subSignL,
+			};
 			dsp::shapeBufferInt32(std::span{oscBuffer, n}, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
-			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(),
-			                      &sound.shaper.prevScaledInputL, &sound.shaper.driftSlopeL_Q16,
-			                      &sound.shaper.driftAccumL, &sound.shaper.driftLfsr, &sound.shaper.prevSampleL,
-			                      &sound.shaper.zcCountL, &sound.shaper.subSignL, sound.shaper.subEnabled,
-			                      sound.shaper.phaseOffset, &sound.shaper.slewedL);
+			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), monoState,
+			                      &sound.shaper.driftLfsr, sound.shaper.subEnabled, sound.shaper.phaseOffset,
+			                      noteFreqHz);
 		}
 
 		filterSet.renderLong(std::span{oscBuffer, n});

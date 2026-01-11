@@ -302,8 +302,11 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 		    [UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN] = STRING_FOR_COMPRESSOR_OUTPUT_GAIN,
 		    [UNPATCHED_MB_COMPRESSOR_VIBE] = STRING_FOR_COMPRESSOR_VIBE,
 		    [UNPATCHED_MB_COMPRESSOR_BLEND] = STRING_FOR_BLEND,
+		    [UNPATCHED_SINE_SHAPER_DRIVE] = STRING_FOR_SINE_SHAPER_DRIVE,
 		    [UNPATCHED_SINE_SHAPER_HARMONIC] = STRING_FOR_SINE_SHAPER_HARMONIC,
 		    [UNPATCHED_SINE_SHAPER_TWIST] = STRING_FOR_SINE_SHAPER_SYMMETRY,
+		    [UNPATCHED_TABLE_SHAPER_DRIVE] = STRING_FOR_SHAPER_DRIVE,
+		    [UNPATCHED_TABLE_SHAPER_MIX] = STRING_FOR_SHAPER_MIX,
 		    [UNPATCHED_DISPERSER_TOPO] = STRING_FOR_DISPERSER_TOPO,
 		    [UNPATCHED_DISPERSER_TWIST] = STRING_FOR_DISPERSER_TWIST,
 		    [UNPATCHED_ARP_GATE] = STRING_FOR_ARP_GATE_MENU_TITLE,
@@ -537,11 +540,17 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 		case UNPATCHED_MB_COMPRESSOR_BLEND:
 			return "mbCompressorBlend";
 
-		// Sine shaper
+		// Shapers (prefixed to avoid conflicts with LOCAL_* patched versions)
+		case UNPATCHED_SINE_SHAPER_DRIVE:
+			return "clipSineShaperDrive";
 		case UNPATCHED_SINE_SHAPER_HARMONIC:
-			return "sineShaperHarmonic";
+			return "clipSineShaperHarmonic";
 		case UNPATCHED_SINE_SHAPER_TWIST:
-			return "sineShaperSymmetry";
+			return "clipSineShaperSymmetry";
+		case UNPATCHED_TABLE_SHAPER_DRIVE:
+			return "clipTableShaperDrive";
+		case UNPATCHED_TABLE_SHAPER_MIX:
+			return "clipTableShaperMix";
 
 		// Disperser
 		case UNPATCHED_DISPERSER_TOPO:

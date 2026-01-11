@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include "definitions_cxx.hpp"
 #include "deluge/dsp/table_shaper.h"
 #include "deluge/util/fixedpoint.h"
 #include "dsp_ng/core/types.hpp"
@@ -46,10 +47,11 @@ namespace deluge::dsp {
  */
 struct TableShaperState {
 	// User-facing knob values (NOT params - changes trigger expensive table regeneration)
-	uint8_t shapeX{0};       // Soft→Hard axis (0-127, "Knee")
-	uint16_t shapeY{0};      // Clean→Weird axis (0-1023, high-res multi-zone, "Color")
-	bool aa{false};          // Anti-aliasing enabled (default off, reserved for future use)
-	float phaseOffset{0.0f}; // Phase offset for phi triangles (secret knob, 0 = drift disabled)
+	uint8_t shapeX{0};             // Soft→Hard axis (0-127, "Knee")
+	uint16_t shapeY{0};            // Clean→Weird axis (0-1023, high-res multi-zone, "Color")
+	bool aa{false};                // Anti-aliasing enabled (default off, reserved for future use)
+	float phaseOffset{0.0f};       // Phase offset for phi triangles (secret knob, 0 = drift disabled)
+	float oscHarmonicWeight{0.5f}; // Oscillator harmonic content [0-1]: 0=sine, 0.5=saw, 1=square
 
 	// DSP smoothing state
 	q31_t driveLast{0};         // Previous drive value for smoothing
@@ -84,6 +86,25 @@ struct TableShaperState {
 	/// Check if effect is enabled (non-zero X)
 	/// Note: mix is now a patched param (LOCAL_TABLE_SHAPER_MIX), checked separately at render time
 	[[nodiscard]] bool isEnabled() const { return shapeX > 0; }
+
+	/// Convert oscillator type to harmonic weight for LPF duty cycle scaling
+	/// @return 0.0 (sine, pure tone) to 1.0 (square, sharp edges)
+	[[nodiscard]] static float oscTypeToHarmonicWeight(OscType type) {
+		switch (type) {
+		case OscType::SINE:
+			return 0.0f; // Pure tone, no harmonics
+		case OscType::TRIANGLE:
+		case OscType::TRIANGLE_PW:
+			return 0.3f; // Odd harmonics, fast rolloff
+		case OscType::SAW:
+			return 0.5f; // All harmonics, 1/n rolloff
+		case OscType::SQUARE:
+		case OscType::ANALOG_SQUARE:
+			return 1.0f; // Sharp edges, lots of harmonics
+		default:
+			return 0.5f; // Samples, wavetables, inputs - moderate default
+		}
+	}
 
 	/// Reset DSP state (call when starting new audio stream)
 	void resetDspState() {
@@ -150,10 +171,13 @@ public:
 	 * @param shapeX Controls waveshaping intensity (0-127)
 	 * @param shapeY Sweeps through combinatoric blend (0-1023, high-res)
 	 * @param phaseOffset Phase offset for triangle modulation (from secret knob)
+	 * @param oscHarmonicWeight Oscillator harmonic content [0-1]: 0=sine, 0.5=saw, 1=square
 	 */
-	void regenerateTable(uint8_t shapeX, uint16_t shapeY, float phaseOffset = 0.0f) {
-		if (phaseOffset != 0.0f) {
-			tableSat_.setParameters(TableShaperXYMapper::deriveParametersWithPhase(shapeX, shapeY, phaseOffset, 1.0f));
+	void regenerateTable(uint8_t shapeX, uint16_t shapeY, float phaseOffset = 0.0f, float oscHarmonicWeight = 0.5f) {
+		// Use phase-aware derivation when phaseOffset is set OR for square waves (need LPF always)
+		if (phaseOffset != 0.0f || oscHarmonicWeight >= 0.8f) {
+			tableSat_.setParameters(
+			    TableShaperXYMapper::deriveParametersWithPhase(shapeX, shapeY, phaseOffset, 1.0f, oscHarmonicWeight));
 		}
 		else {
 			tableSat_.setParameters(TableShaperXYMapper::deriveParameters(shapeX, shapeY));

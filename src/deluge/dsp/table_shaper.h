@@ -41,8 +41,8 @@ namespace deluge::dsp {
  *
  * All parameters are normalized 0-1 range:
  * - drive: Overall intensity (0 = bypass)
- * - tanhWeight: Tanh basis weight (warm, smooth)
- * - polyWeight: Polynomial basis weight (bright, edgy)
+ * - inflatorWeight: Inflator basis weight (punchy, expand-compress)
+ * - polyWeight: Polynomial basis weight (soft saturation, tanh-like)
  * - hardKneeWeight: Hard knee basis weight (crisp, aggressive)
  * - chebyWeight: Chebyshev T5 basis weight (fold, synthy)
  * - sineFoldWeight: Sine folder basis weight (harmonic-rich)
@@ -52,7 +52,7 @@ namespace deluge::dsp {
  */
 struct TableShaperParams {
 	float drive{0.0f};
-	float tanhWeight{1.0f};
+	float inflatorWeight{1.0f};
 	float polyWeight{0.0f};
 	float hardKneeWeight{0.0f};
 	float chebyWeight{0.0f};
@@ -71,11 +71,12 @@ struct TableShaperParams {
 	float driftStereoOffset{0.0f};  // Stereo decorrelation: R channel slope multiplier offset [-1,1]
 	float subIntensity{0.0f};       // Subharmonic gain boost intensity from phi triangle [0,1]
 	float slewIntensity{0.0f};      // Slew rate limiting intensity [0,1] (0=disabled, 1=extreme)
+	float preExpandAmount{0.0f};    // Pre-expansion intensity [0,1] (0=linear, 1=50% boost at zero crossing)
 
 	/// Clamp all parameters to valid ranges
 	void clamp() {
 		drive = std::clamp(drive, 0.0f, 1.0f);
-		tanhWeight = std::clamp(tanhWeight, 0.0f, 1.0f);
+		inflatorWeight = std::clamp(inflatorWeight, 0.0f, 1.0f);
 		polyWeight = std::clamp(polyWeight, 0.0f, 1.0f);
 		hardKneeWeight = std::clamp(hardKneeWeight, 0.0f, 1.0f);
 		chebyWeight = std::clamp(chebyWeight, 0.0f, 1.0f);
@@ -92,17 +93,18 @@ struct TableShaperParams {
 		driftStereoOffset = std::clamp(driftStereoOffset, -1.0f, 1.0f);
 		subIntensity = std::clamp(subIntensity, 0.0f, 1.0f);
 		slewIntensity = std::clamp(slewIntensity, 0.0f, 1.0f);
+		preExpandAmount = std::clamp(preExpandAmount, 0.0f, 1.0f);
 	}
 
 	bool operator!=(const TableShaperParams& o) const {
-		return drive != o.drive || tanhWeight != o.tanhWeight || polyWeight != o.polyWeight
+		return drive != o.drive || inflatorWeight != o.inflatorWeight || polyWeight != o.polyWeight
 		       || hardKneeWeight != o.hardKneeWeight || chebyWeight != o.chebyWeight
 		       || sineFoldWeight != o.sineFoldWeight || rectifierWeight != o.rectifierWeight || threshold != o.threshold
 		       || asymmetry != o.asymmetry || deadzoneWidth != o.deadzoneWidth || deadzonePhase != o.deadzonePhase
 		       || hysteresis != o.hysteresis || hystMixInfluence != o.hystMixInfluence
 		       || driftMultIntensity != o.driftMultIntensity || driftAddIntensity != o.driftAddIntensity
 		       || driftStereoOffset != o.driftStereoOffset || subIntensity != o.subIntensity
-		       || slewIntensity != o.slewIntensity;
+		       || slewIntensity != o.slewIntensity || preExpandAmount != o.preExpandAmount;
 	}
 };
 
@@ -337,16 +339,17 @@ public:
 		}
 
 		// Hysteresis: direction-dependent table offset (based on dry signal)
-		int32_t hystTableOffset = 0;
-		if (hystOffset != 0 && prevScaledInput) {
+		// Note: prevScaledInput is null when hystOffset is 0 (optimization in shaper_buffer.h)
+		int32_t offsetWet = scaledWet;
+		if (prevScaledInput) {
 			int32_t slope = scaledDry - *prevScaledInput;
 			int32_t signMask = slope >> 31;
-			hystTableOffset = (hystOffset ^ signMask) - signMask;
+			int32_t hystTableOffset = (hystOffset ^ signMask) - signMask;
 			*prevScaledInput = scaledDry;
+			offsetWet = add_saturate(scaledWet, hystTableOffset);
 		}
 
-		// Table lookup on wet path with hysteresis offset
-		int32_t offsetWet = add_saturate(scaledWet, hystTableOffset);
+		// Table lookup on wet path (with hysteresis offset if enabled)
 		uint32_t tableInput = static_cast<uint32_t>(offsetWet) + 2147483648u;
 		int32_t lookup = lookupFunctionIntDirect(tableInput, tableIdx);
 
@@ -432,7 +435,7 @@ private:
 		float invTanhNormNeg = 1.0f / std::fmax(0.01f, fastTanh(k * (2.0f - asymRatio)));
 
 		// Precompute weight normalization for all 6 basis functions
-		float weightSum = params_.tanhWeight + params_.polyWeight + params_.hardKneeWeight + params_.chebyWeight
+		float weightSum = params_.inflatorWeight + params_.polyWeight + params_.hardKneeWeight + params_.chebyWeight
 		                  + params_.sineFoldWeight + params_.rectifierWeight;
 		float invWeightSum = (weightSum > 0.001f) ? (1.0f / weightSum) : 1.0f;
 		bool hasWeights = (weightSum >= 0.001f);
@@ -459,25 +462,40 @@ private:
 				float intensity = 1.0f + params_.drive * 1.0f;
 				float overdriven = norm * intensity;
 
+				// PRE-EXPANSION: Universal pre-stage that all bases see (Oxford Inflator-style)
+				// Expands quiet signals, unity at loud - baked into table, zero runtime cost
+				// preExpandAmount: 0 = linear passthrough, 1 = 50% boost at zero crossing
+				float preExpanded = overdriven;
+				if (params_.preExpandAmount > 0.001f) {
+					float absOd = std::fabs(overdriven);
+					float expandFactor = 1.0f + params_.preExpandAmount * 0.5f * (1.0f - absOd * absOd);
+					preExpanded = overdriven * expandFactor;
+				}
+
 				// Asymmetric k for positive/negative
 				float kEff = k * ((x >= 0.0f) ? asymRatio : (2.0f - asymRatio));
 				float invTanhNorm = (x >= 0.0f) ? invTanhNormPos : invTanhNormNeg;
 
-				// BASIS 1: Tanh (warm, smooth)
-				float tanh_out = fastTanh(overdriven * kEff) * invTanhNorm;
+				// BASIS 1: Inflator (expand quiet, compress loud - punchy)
+				// Applies its own expansion on top of preExpanded for layered effect
+				// At |x|=0: gain = 1.5 (expansion), at |x|=1: gain = 1.0 (unity → tanh compresses)
+				float absPreExp = std::fabs(preExpanded);
+				float expandFactor = 1.0f + 0.5f * (1.0f - absPreExp * absPreExp);
+				float inflator_out = fastTanh(preExpanded * expandFactor * kEff) * invTanhNorm;
 
-				// BASIS 2: Polynomial soft clip (bright, edgy)
-				float od2 = overdriven * overdriven;
-				float od3 = od2 * overdriven;
-				float od5 = od3 * od2;
-				float poly_out = overdriven - od3 * 0.333333f + od5 * 0.2f;
-				poly_out = fastTanh(poly_out);
+				// BASIS 2: Polynomial (soft saturation, Taylor series of tanh)
+				// x - x³/3 + x⁵/5 approaches tanh for small x, softer knee than tanh
+				float pe2 = preExpanded * preExpanded;
+				float pe3 = pe2 * preExpanded;
+				float pe5 = pe3 * pe2;
+				float poly_raw = preExpanded - pe3 / 3.0f + pe5 / 5.0f;
+				float poly_out = fastTanh(poly_raw * kEff) * invTanhNorm;
 
 				// BASIS 3: Hard clip (crisp, aggressive)
-				float hardClip_out = std::fmin(std::fmax(overdriven, -1.0f), 1.0f);
+				float hardClip_out = std::fmin(std::fmax(preExpanded, -1.0f), 1.0f);
 
 				// BASIS 4: Chebyshev T5 wavefolder (fold, synthy)
-				float cheby_in = overdriven * 1.2f;
+				float cheby_in = preExpanded * 1.2f;
 				float cheby_in2 = cheby_in * cheby_in;
 				float cheby_in3 = cheby_in2 * cheby_in;
 				float cheby_in5 = cheby_in3 * cheby_in2;
@@ -491,14 +509,14 @@ private:
 				// BASIS 5: Sine folder (Gold)
 				constexpr float kSineFoldA = 0.4f;
 				float sineFoldB = 3.14159265f * (1.0f + drive * 1.0f);
-				float sineFold_raw =
-				    fastTanh(overdriven / kSineFoldA) * std::sin(sineFoldB * overdriven) + fastTanh(overdriven) * 0.3f;
+				float sineFold_raw = fastTanh(preExpanded / kSineFoldA) * std::sin(sineFoldB * preExpanded)
+				                     + fastTanh(preExpanded) * 0.3f;
 				float sineFold_out = std::fabs(sineFold_raw);
 				sineFold_out = std::fmin(sineFold_out, 1.0f);
 
 				// BASIS 6: Rectifier (diode)
 				float bias = 0.2f * drive;
-				float rect_raw = std::fabs(overdriven + bias) - bias;
+				float rect_raw = std::fabs(preExpanded + bias) - bias;
 				float rect_out = fastTanh(rect_raw * 2.0f);
 
 				// Blend using weights
@@ -507,7 +525,7 @@ private:
 					basis_out = norm;
 				}
 				else {
-					basis_out = (tanh_out * params_.tanhWeight + poly_out * params_.polyWeight
+					basis_out = (inflator_out * params_.inflatorWeight + poly_out * params_.polyWeight
 					             + hardClip_out * params_.hardKneeWeight + cheby_out * params_.chebyWeight
 					             + sineFold_out * params_.sineFoldWeight + rect_out * params_.rectifierWeight)
 					            * invWeightSum;
@@ -756,7 +774,7 @@ struct TableShaperXYMapper {
 		float freqMult = 1.0f + yNorm * yNorm * kAccelFactor;
 
 		// 6 Basis weights with φ-power frequency ratios for quasi-periodic coverage
-		p.tanhWeight = 0.2f + triangleSimpleUnipolar(yNorm * phi::kPhi225 * freqMult, kPhaseWidth) * 0.8f;
+		p.inflatorWeight = triangleSimpleUnipolar(yNorm * phi::kPhi225 * freqMult, kPhaseWidth);
 		p.polyWeight = triangleSimpleUnipolar(yNorm * phi::kPhi200 * freqMult + 0.167f, kPhaseWidth);
 		p.hardKneeWeight = triangleSimpleUnipolar(yNorm * phi::kPhi175 * freqMult + 0.333f, kPhaseWidth);
 		p.chebyWeight = triangleSimpleUnipolar(yNorm * phi::kPhi250 * freqMult + 0.5f, kPhaseWidth);
@@ -767,6 +785,27 @@ struct TableShaperXYMapper {
 
 		float asymFreqMult = 1.0f + yNorm * yNorm * (kAccelFactor * 0.5f);
 		p.asymmetry = 0.3f + triangleSimpleUnipolar(yNorm * phi::kPhi100 * asymFreqMult, kPhaseWidth) * 0.4f;
+
+		// Pre-expansion: X controls intensity, Y sweeps character
+		// At X=0: pure limiter (no expansion), X=max: full expansion range
+		// Y sweeps from limiter (Y=0) to expander (Y~512) to limiter (Y=1023)
+		p.preExpandAmount = p.drive * triangleSimpleUnipolar(yNorm * 2.0f, 1.0f);
+
+		// SPECIAL CASE: Zone 6 "Blend" (Y=768-895) → Oxford-style inflator
+		// Pure inflator + soft clip (poly/tanh), X controls expansion, symmetric
+		// X=0: pure limiter, X=max: full inflator expansion
+		constexpr float kZone6Start = 768.0f / 1023.0f; // ~0.751
+		constexpr float kZone6End = 896.0f / 1023.0f;   // ~0.876
+		if (yNorm >= kZone6Start && yNorm < kZone6End) {
+			p.inflatorWeight = 1.0f;
+			p.polyWeight = 0.5f; // Soft tanh-like clipping
+			p.hardKneeWeight = 0.0f;
+			p.chebyWeight = 0.0f;
+			p.sineFoldWeight = 0.0f;
+			p.rectifierWeight = 0.0f;
+			p.preExpandAmount = p.drive; // X controls expansion: 0=limiter, 1=full inflator
+			p.asymmetry = 0.5f;          // Symmetric (Oxford-style)
+		}
 
 		return p;
 	}
@@ -787,7 +826,7 @@ struct TableShaperXYMapper {
 	///   2. Internal algorithm parameters (how each basis behaves)
 	///      - threshold (phMult: 0.25), asymmetry (phMult: 0.618)
 	///
-	/// Note: tanhWeight has phMult=0 so it serves as an anchor (always present)
+	/// Note: inflatorWeight has phMult=0 so it serves as an anchor (always present)
 	///
 	/// ALTERNATIVE: Only rotate internal parameters
 	/// If zone names should remain semantically stable (Y=0 always "Warm", Y=512 always "Fold"),
@@ -799,7 +838,8 @@ struct TableShaperXYMapper {
 	/// continuous exploration where zone names are approximate guides rather than
 	/// fixed definitions. This is more "sound design-y" but less predictable.
 	///
-	static TableShaperParams deriveParametersWithPhase(uint8_t x, uint16_t y, float phaseOffset, float periodScale) {
+	static TableShaperParams deriveParametersWithPhase(uint8_t x, uint16_t y, float phaseOffset, float periodScale,
+	                                                   float oscHarmonicWeight = 0.5f) {
 		TableShaperParams p;
 		p.drive = static_cast<float>(x) / 127.0f;
 
@@ -833,7 +873,7 @@ struct TableShaperXYMapper {
 
 		// Fixed phase offsets (0.167, 0.333, etc.) spread basis functions across Y axis
 		// These match deriveParameters() so phaseOffset=0 produces identical results
-		p.tanhWeight = 0.2f + triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi225) + ph225), kPhaseWidth) * 0.8f;
+		p.inflatorWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi225) + ph225), kPhaseWidth);
 		p.polyWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi200) + ph200 + 0.167f), kPhaseWidth);
 		p.hardKneeWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi175) + ph175 + 0.333f), kPhaseWidth);
 		p.chebyWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi250) + ph250 + 0.5f), kPhaseWidth);
@@ -910,14 +950,45 @@ struct TableShaperXYMapper {
 		float subTri = triangleSimpleUnipolar(phi::wrapPhase(subBase + phSub), kSubDuty);
 		p.subIntensity = dzEnable * subTri; // Linear response, gated by phase offset
 
-		// Slew rate limiting: softens transients before waveshaping
-		// 40% duty for moderate activation, φ^1.75 frequency (uncorrelated with others)
-		// Creates trapezoid from square, softens FM harshness
-		constexpr float kSlewDuty = 0.4f;
+		// Slew rate limiting (now LPF): softens transients before waveshaping
+		// Duty cycle scales with oscillator harmonic content:
+		// - sine (0.0) → 20% duty (minimal LPF activation, already smooth)
+		// - saw (0.5) → 50% duty (moderate LPF)
+		// - square (1.0) → 80% duty (lots of LPF activation, sharp edges need softening)
+		// φ^1.75 frequency (uncorrelated with others)
+		// Enable for phaseOffset > 0 OR high harmonic content (square waves need LPF always)
+		float slewEnable = (phaseOffset != 0.0f || oscHarmonicWeight >= 0.8f) ? 1.0f : 0.0f;
+		float slewDuty = 0.2f + 0.6f * oscHarmonicWeight; // Range [0.2, 0.8]
 		float phSlew = phi::wrapPhase(ph * phi::kPhi175);
 		float slewBase = static_cast<float>(static_cast<double>(yNorm) * phi::kPhi175 * freqMult * periodScale);
-		float slewTri = triangleSimpleUnipolar(phi::wrapPhase(slewBase + phSlew), kSlewDuty);
-		p.slewIntensity = dzEnable * slewTri; // Linear response, gated by phase offset
+		float slewTri = triangleSimpleUnipolar(phi::wrapPhase(slewBase + phSlew), slewDuty);
+		p.slewIntensity = slewEnable * slewTri; // Linear response, enabled for phase or square waves
+
+		// Pre-expansion: X controls intensity, Y+phase sweep character
+		// NOT gated by dzEnable - works at phaseOffset=0 for vanilla expander/limiter zone
+		// At X=0: pure limiter (no expansion), X=max: full expansion range
+		// Y+phase sweeps expansion position within X-controlled intensity
+		float phPreExp = phi::wrapPhase(ph * phi::kPhi050);
+		float preExpBase = static_cast<float>(static_cast<double>(yNorm) * 2.0f * periodScale); // 2 cycles across Y
+		p.preExpandAmount = p.drive * triangleSimpleUnipolar(phi::wrapPhase(preExpBase + phPreExp), 1.0f);
+
+		// SPECIAL CASE: Zone 6 "Blend" at phaseOffset=0 → Oxford-style inflator
+		// Only applies when secret knob is at zero (vanilla mode)
+		// Pure inflator + soft clip, X controls expansion, symmetric
+		if (phaseOffset == 0.0f) {
+			constexpr float kZone6Start = 768.0f / 1023.0f;
+			constexpr float kZone6End = 896.0f / 1023.0f;
+			if (yNorm >= kZone6Start && yNorm < kZone6End) {
+				p.inflatorWeight = 1.0f;
+				p.polyWeight = 0.5f;
+				p.hardKneeWeight = 0.0f;
+				p.chebyWeight = 0.0f;
+				p.sineFoldWeight = 0.0f;
+				p.rectifierWeight = 0.0f;
+				p.preExpandAmount = p.drive; // X controls expansion: 0=limiter, 1=full inflator
+				p.asymmetry = 0.5f;
+			}
+		}
 
 		return p;
 	}

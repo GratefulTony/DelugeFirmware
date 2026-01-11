@@ -51,13 +51,28 @@ GlobalEffectable::GlobalEffectable() {
 
 	editingComp = false;
 	currentCompParam = CompParam::RATIO;
+
+	// Initialize all modKnobs to null - they'll be set when learned
+	for (int32_t k = 0; k < kNumModButtons; k++) {
+		for (int32_t w = 0; w < kNumPhysicalModKnobs; w++) {
+			modKnobs[k][w].paramDescriptor.setToNull();
+		}
+	}
 }
 
 void GlobalEffectable::cloneFrom(ModControllableAudio* other) {
 	ModControllableAudio::cloneFrom(other);
 
-	currentModFXParam = ((GlobalEffectable*)other)->currentModFXParam;
-	currentFilterType = ((GlobalEffectable*)other)->currentFilterType;
+	GlobalEffectable* otherGlobal = (GlobalEffectable*)other;
+	currentModFXParam = otherGlobal->currentModFXParam;
+	currentFilterType = otherGlobal->currentFilterType;
+
+	// Copy learned mod knobs
+	for (int32_t k = 0; k < kNumModButtons; k++) {
+		for (int32_t w = 0; w < kNumPhysicalModKnobs; w++) {
+			modKnobs[k][w] = otherGlobal->modKnobs[k][w];
+		}
+	}
 }
 
 void GlobalEffectable::initParams(ParamManager* paramManager) {
@@ -96,6 +111,22 @@ void GlobalEffectable::initParams(ParamManager* paramManager) {
 void GlobalEffectable::initParamsForAudioClip(ParamManagerForTimeline* paramManager) {
 	initParams(paramManager);
 	paramManager->getUnpatchedParamSet()->params[params::UNPATCHED_VOLUME].setCurrentValueBasicForSetup(-536870912);
+}
+
+// whichKnob is either which physical mod knob, or which MIDI CC code.
+// For mod knobs, supply midiChannel as 255
+// Returns false if fail due to insufficient RAM.
+bool GlobalEffectable::learnKnob(MIDICable* cable, ParamDescriptor paramDescriptor, uint8_t whichKnob,
+                                 uint8_t modKnobMode, uint8_t midiChannel, Song* song) {
+
+	// If a mod knob
+	if (midiChannel >= 16) {
+		modKnobs[modKnobMode][whichKnob].paramDescriptor = paramDescriptor;
+		return true;
+	}
+
+	// If a MIDI knob
+	return ModControllableAudio::learnKnob(cable, paramDescriptor, whichKnob, modKnobMode, midiChannel, song);
 }
 
 void GlobalEffectable::modButtonAction(uint8_t whichModButton, bool on, ParamManagerForTimeline* paramManager) {
@@ -706,6 +737,29 @@ int32_t GlobalEffectable::getParameterFromKnob(int32_t whichModEncoder) {
 ModelStackWithAutoParam* GlobalEffectable::getParamFromModEncoder(int32_t whichModEncoder,
                                                                   ModelStackWithThreeMainThings* modelStack,
                                                                   bool allowCreation) {
+	int32_t modKnobMode = *getModKnobMode();
+	ModKnob* knob = &modKnobs[modKnobMode][whichModEncoder];
+
+	// If this mod knob has been explicitly learned to a param, use that
+	if (!knob->paramDescriptor.isNull()) {
+		ParamCollectionSummary* summary = modelStack->paramManager->getUnpatchedParamSetSummary();
+		int32_t p = knob->paramDescriptor.getJustTheParam();
+		int32_t paramId;
+
+		// Handle the UNPATCHED_START offset for unpatched params
+		if (p >= params::UNPATCHED_START) {
+			paramId = p - params::UNPATCHED_START;
+		}
+		else {
+			paramId = p;
+		}
+
+		ModelStackWithParamId* newModelStack1 =
+		    modelStack->addParamCollectionAndId(summary->paramCollection, summary, paramId);
+		return newModelStack1->paramCollection->getAutoParamFromId(newModelStack1, allowCreation);
+	}
+
+	// Otherwise, use the default hardcoded parameter mapping
 	ParamCollectionSummary* summary = modelStack->paramManager->getUnpatchedParamSetSummary();
 	ParamCollection* paramCollection = summary->paramCollection;
 	int32_t paramId;
@@ -807,6 +861,34 @@ void GlobalEffectable::writeTagsToFile(Serializer& writer, ParamManager* paramMa
 		writer.writeOpeningTagEnd();
 		GlobalEffectable::writeParamTagsToFile(writer, paramManager, writeAutomation);
 		writer.writeClosingTag("defaultParams");
+	}
+
+	// Write learned mod knobs (only if any have been learned)
+	bool hasLearnedKnobs = false;
+	for (int32_t k = 0; k < kNumModButtons && !hasLearnedKnobs; k++) {
+		for (int32_t w = 0; w < kNumPhysicalModKnobs; w++) {
+			if (!modKnobs[k][w].paramDescriptor.isNull()) {
+				hasLearnedKnobs = true;
+				break;
+			}
+		}
+	}
+	if (hasLearnedKnobs) {
+		writer.writeArrayStart("modKnobs");
+		for (int32_t k = 0; k < kNumModButtons; k++) {
+			for (int32_t w = 0; w < kNumPhysicalModKnobs; w++) {
+				ModKnob* knob = &modKnobs[k][w];
+				writer.writeOpeningTagBeginning("modKnob", true);
+				if (!knob->paramDescriptor.isNull()) {
+					writer.writeAttribute("controlsParam",
+					                      params::paramNameForFile(params::Kind::UNPATCHED_GLOBAL,
+					                                               knob->paramDescriptor.getJustTheParam()),
+					                      false);
+				}
+				writer.closeTag(true);
+			}
+		}
+		writer.writeArrayEnding("modKnobs");
 	}
 
 	ModControllableAudio::writeTagsToFile(writer);
@@ -1077,6 +1159,43 @@ Error GlobalEffectable::readTagFromFile(Deserializer& reader, char const* tagNam
 	else if (!strcmp(tagName, "currentFilterType")) {
 		currentFilterType = stringToFilterType(reader.readTagOrAttributeValue());
 		reader.exitTag("currentFilterType");
+	}
+
+	else if (!strcmp(tagName, "modKnobs")) {
+		// Read learned mod knobs array
+		int32_t k = 0;
+		int32_t w = 0;
+		reader.match('[');
+		while (reader.match('{') && *(tagName = reader.readNextTagOrAttributeName())) {
+			if (!strcmp(tagName, "modKnob")) {
+				reader.match('{');
+				uint8_t p = params::GLOBAL_NONE;
+
+				while (*(tagName = reader.readNextTagOrAttributeName())) {
+					if (!strcmp(tagName, "controlsParam")) {
+						p = params::fileStringToParam(params::Kind::UNPATCHED_GLOBAL, reader.readTagOrAttributeValue(),
+						                              true);
+					}
+					reader.exitTag(tagName);
+				}
+				reader.match('}'); // exit modKnobs value field
+
+				if (k < kNumModButtons) {
+					if (p != params::GLOBAL_NONE && p != params::PLACEHOLDER_RANGE) {
+						modKnobs[k][w].paramDescriptor.setToHaveParamOnly(p);
+					}
+				}
+
+				w++;
+				if (w == kNumPhysicalModKnobs) {
+					w = 0;
+					k++;
+				}
+			}
+			reader.exitTag(NULL, true); // Exit modKnob proper
+		}
+		reader.exitTag("modKnobs");
+		reader.match(']');
 	}
 
 	else {

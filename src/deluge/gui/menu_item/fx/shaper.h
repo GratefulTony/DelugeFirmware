@@ -16,6 +16,8 @@
  */
 #pragma once
 
+#include <cstdio>
+
 #include "OSLikeStuff/scheduler_api.h"
 #include "gui/l10n/l10n.h"
 #include "gui/menu_item/fx/sine_shaper.h"
@@ -27,9 +29,12 @@
 #include "hid/display/oled.h"
 #include "model/instrument/kit.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
+#include "model/model_stack.h"
 #include "model/song/song.h"
 #include "processing/sound/sound.h"
 #include "processing/sound/sound_drum.h"
+
+namespace params = deluge::modulation::params;
 
 namespace deluge::gui::menu_item::fx {
 
@@ -83,26 +88,28 @@ public:
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
 					soundDrum->shaper.shapeX = current_value;
 					soundDrum->shaperDsp.regenerateTable(current_value, soundDrum->shaper.shapeY,
-					                                     soundDrum->shaper.phaseOffset);
+					                                     soundDrum->shaper.phaseOffset,
+					                                     soundDrum->shaper.oscHarmonicWeight);
 					soundDrum->shaperDsp.regenerateIfDirty(); // Direct for bulk kit operation
 				}
 			}
 		}
 		else {
 			mca->shaper.shapeX = current_value;
-			mca->shaperDsp.regenerateTable(current_value, mca->shaper.shapeY, mca->shaper.phaseOffset);
+			mca->shaperDsp.regenerateTable(current_value, mca->shaper.shapeY, mca->shaper.phaseOffset,
+			                               mca->shaper.oscHarmonicWeight);
 			shaper_regen::scheduleRegeneration(mca);
 		}
 	}
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
 
-	/// Click encoder to toggle subharmonic effect (octave-down modulation)
-	/// Drift is always on when phaseOffset != 0; this toggles the sub-octave effect
+	/// Click encoder to toggle extras (drift + sub effects)
+	/// Slew and hysteresis are always on when phaseOffset != 0
 	MenuItem* selectButtonPress() override {
 		auto* mca = soundEditor.currentModControllable;
 		mca->shaper.subEnabled = !mca->shaper.subEnabled;
-		display->displayPopup(mca->shaper.subEnabled ? "SUB" : "OFF");
+		display->displayPopup(mca->shaper.subEnabled ? "EXTRAS ON" : "EXTRAS OFF");
 		return NO_NAVIGATION;
 	}
 
@@ -144,14 +151,16 @@ public:
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
 					soundDrum->shaper.shapeY = current_value;
 					soundDrum->shaperDsp.regenerateTable(soundDrum->shaper.shapeX, current_value,
-					                                     soundDrum->shaper.phaseOffset);
+					                                     soundDrum->shaper.phaseOffset,
+					                                     soundDrum->shaper.oscHarmonicWeight);
 					soundDrum->shaperDsp.regenerateIfDirty(); // Direct for bulk kit operation
 				}
 			}
 		}
 		else {
 			mca->shaper.shapeY = current_value;
-			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, current_value, mca->shaper.phaseOffset);
+			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, current_value, mca->shaper.phaseOffset,
+			                               mca->shaper.oscHarmonicWeight);
 			shaper_regen::scheduleRegeneration(mca);
 		}
 	}
@@ -161,12 +170,14 @@ public:
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
 			// Secret: push+twist adjusts shaper.phaseOffset
+			// Each increment = 1 full Y range (1024 steps) worth of phase rotation
 			Buttons::selectButtonPressUsedUp = true;
 			float& phaseOffset = soundEditor.currentModControllable->shaper.phaseOffset;
-			phaseOffset += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			phaseOffset += static_cast<float>(velocity_.getScaledOffset(offset)) * 1.0f;
 			// Regenerate table with new phaseOffset
 			auto* mca = soundEditor.currentModControllable;
-			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, phaseOffset);
+			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, phaseOffset,
+			                               mca->shaper.oscHarmonicWeight);
 			shaper_regen::scheduleRegeneration(mca);
 			// Show current value on display
 			char buffer[12];
@@ -188,17 +199,44 @@ public:
 	}
 
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
-		renderZoneInHorizontalMenu(slot, this->getValue(), kShaperHighResSteps, kShaperNumZones, getZoneName);
+		float phaseOffset = soundEditor.currentModControllable->shaper.phaseOffset;
+		if (phaseOffset != 0.0f) {
+			// When secret knob is engaged, show "~N" with zone visual indicator
+			cacheTwistNum(phaseOffset, this->getValue());
+			renderZoneInHorizontalMenu(slot, this->getValue(), kShaperHighResSteps, kShaperNumZones, getTwistName);
+		}
+		else {
+			renderZoneInHorizontalMenu(slot, this->getValue(), kShaperHighResSteps, kShaperNumZones, getZoneName);
+		}
 	}
 
 protected:
 	void drawPixelsForOled() override {
-		drawZoneForOled(this->getValue(), kShaperHighResSteps, kShaperNumZones, getZoneName);
+		float phaseOffset = soundEditor.currentModControllable->shaper.phaseOffset;
+		if (phaseOffset != 0.0f) {
+			// When secret knob is engaged, show "~N" with zone visual indicator
+			cacheTwistNum(phaseOffset, this->getValue());
+			drawZoneForOled(this->getValue(), kShaperHighResSteps, kShaperNumZones, getTwistName);
+		}
+		else {
+			drawZoneForOled(this->getValue(), kShaperHighResSteps, kShaperNumZones, getZoneName);
+		}
 	}
 
 private:
 	mutable VelocityEncoder velocity_;
 	mutable bool suppressNotification_ = false;
+
+	// Static storage for twist display (used by getTwistName callback)
+	static inline char twistBuffer_[12] = {};
+	static void cacheTwistNum(float phaseOffset, int32_t value) {
+		// Format: "P:Y" where P=phaseOffset (int), Y=zone index (0-7)
+		// 128 encoder clicks = 1 zone, so Y increments once per zone traversal
+		int32_t p = static_cast<int32_t>(phaseOffset);
+		int32_t y = value >> 7; // 0-1023 → 0-7 (zone index)
+		snprintf(twistBuffer_, sizeof(twistBuffer_), "%d:%d", p, y);
+	}
+	static const char* getTwistName([[maybe_unused]] int32_t zoneIndex) { return twistBuffer_; }
 
 	static const char* getZoneName(int32_t zoneIndex) {
 		switch (zoneIndex) {
@@ -215,7 +253,7 @@ private:
 		case 5:
 			return "Diode"; // Rectifier, asymmetric/even harmonics
 		case 6:
-			return "Blend"; // Mixed basis functions
+			return "Inflate"; // Oxford-style inflator (special case at phaseOffset=0)
 		case 7:
 			return "Morph"; // Complex combinations
 		default:
@@ -238,12 +276,14 @@ public:
 		// Auto-enable X when turning up mix from 0
 		if (mca->shaper.shapeX == 0 && offset > 0) {
 			mca->shaper.shapeX = 1;
-			mca->shaperDsp.regenerateTable(1, mca->shaper.shapeY, mca->shaper.phaseOffset);
+			mca->shaperDsp.regenerateTable(1, mca->shaper.shapeY, mca->shaper.phaseOffset,
+			                               mca->shaper.oscHarmonicWeight);
 			shaper_regen::scheduleRegeneration(mca);
 		}
 		// Regenerate tables when mix goes from 0 to non-zero (may have been skipped at load)
 		else if (wasZero && offset > 0 && mca->shaper.shapeX > 0) {
-			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, mca->shaper.phaseOffset);
+			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, mca->shaper.phaseOffset,
+			                               mca->shaper.oscHarmonicWeight);
 			shaper_regen::scheduleRegeneration(mca);
 		}
 
@@ -273,11 +313,13 @@ protected:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMixMenuRange; }
 
 	void readCurrentValue() override {
-		// Scale bipolar param (INT32_MIN to INT32_MAX) to menu range (0 to 128)
-		int32_t paramValue = soundEditor.currentParamManager->getPatchedParamSet()->getValue(getP());
-		// Same formula as computeCurrentValueForStandardMenuItem but with 128 range
+		int32_t paramValue = getShapingParamValue(getP(), params::UNPATCHED_TABLE_SHAPER_MIX);
 		int32_t menuValue = (((int64_t)paramValue + 2147483648) * kMixMenuRange + 2147483648) >> 32;
 		this->setValue(menuValue);
+	}
+
+	ModelStackWithAutoParam* getModelStack(void* memory) override {
+		return getShapingModelStack(memory, getP(), params::UNPATCHED_TABLE_SHAPER_MIX);
 	}
 
 	int32_t getFinalValue() override {
