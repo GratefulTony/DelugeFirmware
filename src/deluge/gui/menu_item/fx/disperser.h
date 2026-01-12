@@ -169,7 +169,7 @@ private:
  * Disperser Topology zone control - 8 zones with discrete signal routings
  *
  * Zone 0: Cascade - stages in series (current default)
- * Zone 1: Ping-Pong - stages alternate L/R processing
+ * Zone 1: Ladder - progressive cross-coupling through cascade
  * Zone 2: Bimodal - stages cluster into two frequency groups (formant-like)
  * Zone 3: Cross-Coupled - L↔R feedback mixing between stages
  * Zone 4: Parallel - two cascades in parallel for thick chorus character
@@ -195,7 +195,7 @@ public:
 		case 0:
 			return "Cascade";
 		case 1:
-			return "PingPong";
+			return "Ladder";
 		case 2:
 			return "Bimodal";
 		case 3:
@@ -218,7 +218,7 @@ public:
 		case 0:
 			return "CA";
 		case 1:
-			return "PP";
+			return "LA";
 		case 2:
 			return "BI";
 		case 3:

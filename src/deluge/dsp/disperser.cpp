@@ -28,21 +28,28 @@ using namespace phi;
 
 namespace {
 // Frequency modulation: non-monotonic triangle oscillator
+// fm is not used here - this generates the fm values for other triangles
 [[gnu::always_inline]] inline float freqMod(float pos, double phRaw, float phiFreq, float range = 0.5f,
                                             float duty = 0.8f) {
 	return 1.0f + triangleSimpleUnipolar(wrapPhase((pos + phRaw) * phiFreq), duty) * range;
 }
 
 // Phi triangle (unipolar 0-1)
+// fm modulates the position traversal rate, NOT the phase offset
+// This prevents chaotic jumps at high gamma when fm changes slightly
 [[gnu::always_inline]] inline float phiTri(float pos, double phRaw, float phiFreq, float fm, float offset,
                                            float duty = 0.8f) {
-	return triangleSimpleUnipolar(wrapPhase((pos + phRaw + offset) * phiFreq * fm), duty);
+	// Separate: fm scales position traversal, phRaw shifts uniformly
+	double phase = static_cast<double>(pos) * phiFreq * fm + (phRaw + offset) * phiFreq;
+	return triangleSimpleUnipolar(wrapPhase(phase), duty);
 }
 
 // Phi triangle (bipolar -1 to +1)
+// fm modulates the position traversal rate, NOT the phase offset
 [[gnu::always_inline]] inline float phiTriBi(float pos, double phRaw, float phiFreq, float fm, float offset,
                                              float duty = 0.5f) {
-	return triangleFloat(wrapPhase((pos + phRaw + offset) * phiFreq * fm), duty);
+	double phase = static_cast<double>(pos) * phiFreq * fm + (phRaw + offset) * phiFreq;
+	return triangleFloat(wrapPhase(phase), duty);
 }
 } // namespace
 
@@ -51,7 +58,7 @@ namespace {
  *
  * Zone 0: Cascade - classic disperser with position→Q (Pinch) mapping
  *         Low position = low Q (broad, subtle), high = high Q (sharp, resonant)
- * Zone 1: Ping-Pong - stages alternate L/R processing
+ * Zone 1: Ladder - progressive cross-coupling through cascade
  * Zone 2: Stereo Spread - L/R get different frequency offsets
  * Zone 3: Cross-Coupled - L↔R feedback mixing between stages
  * Zone 4: Parallel - two parallel cascades for thick, chorus-like character
@@ -322,6 +329,10 @@ DisperserTwistParams computeDisperserTwistParams(q31_t smoothedTwist, const Disp
 		// Phase offset for topo: twist meta position rotates through topo's phi triangle patterns
 		// 5 cycles per full meta sweep (like sine shaper)
 		result.phaseOffset = pos * 5.0f;
+
+		// LFO rate scale: 0.25×–2× with 70% duty (30% deadzone at minimum rate)
+		float fmLfo = freqMod(pos, phRaw, kPhi100);
+		result.lfoRateScale = 0.25f + phiTri(pos, phRaw, kPhi150, fmLfo, 0.6f, 0.70f) * 1.75f;
 	}
 
 	return result;

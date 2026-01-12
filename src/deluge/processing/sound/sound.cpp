@@ -2157,6 +2157,7 @@ void Sound::reassessRenderSkippingStatus(ModelStackWithSoundFlags* modelStack, b
 
 	bool skippingStatusNow =
 	    (voices_.empty() && (delay.repeatsUntilAbandon == 0u) && !stutterer.isStuttering(this)
+	     && !disperser.delay.hasEnergy()
 	     && ((arpSettings == nullptr) || !getArp()->hasAnyInputNotesActive() || arpSettings->mode == ArpMode::OFF));
 
 	if (skippingStatusNow != skippingRendering) {
