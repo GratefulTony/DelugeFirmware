@@ -2547,8 +2547,7 @@ void ArrangerView::navigateThroughPresets(int32_t offset) {
 
 	view.setActiveModControllableTimelineCounter(output->getActiveClip());
 
-	// Sean: replace routineWithClusterLoading call, just yield to run a single thing (probably audio)
-	yield([]() { return true; });
+	AudioEngine::routineWithClusterLoading();
 
 	beginAudition(output);
 }
@@ -3065,27 +3064,7 @@ static const uint32_t autoScrollUIModes[] = {UI_MODE_HOLDING_HORIZONTAL_ENCODER_
 void ArrangerView::graphicsRoutine() {
 	UI* ui = getCurrentUI();
 
-	static int counter = 0;
-	if (currentUIMode == UI_MODE_NONE) {
-		int32_t modKnobMode = -1;
-		bool editingComp = false;
-		if (view.activeModControllableModelStack.modControllable) {
-			uint8_t* modKnobModePointer = view.activeModControllableModelStack.modControllable->getModKnobMode();
-			if (modKnobModePointer) {
-				modKnobMode = *modKnobModePointer;
-				editingComp = view.activeModControllableModelStack.modControllable->isEditingComp();
-			}
-		}
-		if (modKnobMode == 4 && editingComp) { // upper
-			counter = (counter + 1) % 5;
-			if (counter == 0) {
-				uint8_t gr = currentSong->globalEffectable.compressor.gainReduction;
-				// uint8_t mv = int(6 * AudioEngine::mastercompressor.meanVolume);
-				indicator_leds::setKnobIndicatorLevel(1, gr); // Gain Reduction LED
-				// indicator_leds::setKnobIndicatorLevel(0, mv); //Input level LED
-			}
-		}
-	}
+	sessionView.potentiallyUpdateCompressorLEDs();
 
 	if (view.potentiallyRenderVUMeter(PadLEDs::image)) {
 		PadLEDs::sendOutSidebarColours();
