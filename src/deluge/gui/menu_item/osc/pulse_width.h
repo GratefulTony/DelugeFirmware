@@ -62,7 +62,7 @@ public:
 		       && oscType != OscType::INPUT_STEREO;
 	}
 
-	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
 		oled_canvas::Canvas& image = OLED::main;
 
 		const float norm = getValue() / 50.0f;
@@ -73,7 +73,7 @@ public:
 		int32_t start_x = slot.start_x + x_padding;
 		int32_t end_x = start_x + width - 1;
 		int32_t start_y = slot.start_y + kHorizontalMenuSlotYOffset;
-		int32_t end_y = slot.start_y + slot.height - 5;
+		int32_t end_y = slot.start_y + slot.height - 6;
 
 		if (isTrianglePW()) {
 			// TRIANGLE_PW: Render actual waveform using triangleWithDeadzoneBipolar
