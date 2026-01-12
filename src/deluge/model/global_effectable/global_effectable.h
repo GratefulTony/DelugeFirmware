@@ -21,6 +21,7 @@
 #include "dsp/filter/filter_set.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
 #include "modulation/arpeggiator.h"
+#include "modulation/knob.h"
 using namespace deluge;
 class Serializer;
 
@@ -60,11 +61,15 @@ public:
 	int32_t getKnobPosForNonExistentParam(int32_t whichModEncoder, ModelStackWithAutoParam* modelStack) override;
 	ActionResult modEncoderActionForNonExistentParam(int32_t offset, int32_t whichModEncoder,
 	                                                 ModelStackWithAutoParam* modelStack) override;
+	bool learnKnob(MIDICable* cable, ParamDescriptor paramDescriptor, uint8_t whichKnob, uint8_t modKnobMode,
+	               uint8_t midiChannel, Song* song) override;
+
 	dsp::filter::FilterSet filterSet;
 	ModFXParam currentModFXParam;
 	FilterType currentFilterType;
 	bool editingComp;
 	CompParam currentCompParam;
+	ModKnob modKnobs[kNumModButtons][kNumPhysicalModKnobs];
 
 	ModFXType getModFXType() override;
 

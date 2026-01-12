@@ -7,6 +7,7 @@ top_level_menus = (
     [
         dmenus.filter.sound_filters,
         dmenus.compressor.menu,
+        dmenus.compressor.dott_menu,
         dmenus.unison.menu,
     ]
     + dmenus.oscillator.menus

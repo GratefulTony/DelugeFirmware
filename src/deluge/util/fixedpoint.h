@@ -127,7 +127,7 @@ public:
 	[[gnu::always_inline]] static constexpr FixedPoint from_float(float value) noexcept {
 #if __ARM_ARCH_7A__ && !defined(__clang__)
 		if !consteval {
-			asm("vcvt.s32.f32 %0, %1, %2" : "=t"(value) : "t"(value), "I"(fractional_bits));
+			asm("vcvt.s32.f32 %0, %0, %1" : "+t"(value) : "I"(fractional_bits));
 			return FixedPoint::from_raw(std::bit_cast<int32_t>(value)); // NOLINT
 		}
 #endif
@@ -159,7 +159,7 @@ public:
 #if __ARM_ARCH_7A__ && !defined(__clang__)
 		if !consteval {
 			int32_t output = value_;
-			asm("vcvt.f32.s32 %0, %1, %2" : "=t"(output) : "t"(output), "I"(fractional_bits));
+			asm("vcvt.f32.s32 %0, %0, %1" : "+t"(output) : "I"(fractional_bits));
 			return std::bit_cast<float>(output);
 		}
 #endif
@@ -173,7 +173,7 @@ public:
 #if __ARM_ARCH_7A__ && !defined(__clang__)
 		if !consteval {
 			auto output = std::bit_cast<int64_t>(value);
-			asm("vcvt.s32.f64 %0, %1, %2" : "=w"(output) : "w"(output), "I"(fractional_bits));
+			asm("vcvt.s32.f64 %0, %0, %1" : "+w"(output) : "I"(fractional_bits));
 			return FixedPoint::from_raw(static_cast<BaseType>(output));
 		}
 #endif
@@ -196,7 +196,7 @@ public:
 #if __ARM_ARCH_7A__ && !defined(__clang__)
 		if !consteval {
 			auto output = std::bit_cast<double>((int64_t)value_);
-			asm("vcvt.f64.s32 %0, %1, %2" : "=w"(output) : "w"(output), "I"(fractional_bits));
+			asm("vcvt.f64.s32 %0, %0, %1" : "+w"(output) : "I"(fractional_bits));
 			return output;
 		}
 #endif
@@ -546,3 +546,8 @@ static_assert(ONE_Q31f == 1.0f * std::numeric_limits<int32_t>::max());
 static_assert(ONE_Q16 == std::numeric_limits<uint16_t>::max());
 static_assert(NEGATIVE_ONE_Q31 == std::numeric_limits<int32_t>::min());
 static_assert(ONE_OVER_SQRT2_Q31 == 1518500249);
+
+/// Effective 0dBFS for peak metering - empirically calibrated to DAC clipping point
+/// ONE_Q31 / 128 = 2^24 ≈ 16.7 million
+constexpr int32_t EFFECTIVE_0DBFS_Q31 = ONE_Q31 / 128; // 2^24 = 16,777,216
+constexpr float EFFECTIVE_0DBFS_Q31f = static_cast<float>(EFFECTIVE_0DBFS_Q31);

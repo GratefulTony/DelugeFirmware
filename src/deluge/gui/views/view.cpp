@@ -65,6 +65,7 @@
 #include "model/instrument/kit.h"
 #include "model/instrument/melodic_instrument.h"
 #include "model/instrument/midi_instrument.h"
+#include "model/mod_controllable/mod_controllable_audio.h"
 #include "model/model_stack.h"
 #include "model/note/note_row.h"
 #include "model/settings/runtime_feature_settings.h"
@@ -840,6 +841,12 @@ void View::modEncoderAction_nonExistentParam(int32_t whichModEncoder, int32_t of
 	}
 }
 
+// Zone-based gold knob scaling state
+// Accumulates fractional movements so 8 clicks = 1 step for 8-zone params
+static float zoneScaleAccumulator = 0.0f;
+static int32_t lastZoneScaleParamId = -1;
+static params::Kind lastZoneScaleParamKind = params::Kind::NONE;
+
 void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offset,
                                           ModelStackWithAutoParam* modelStackWithParam, bool noteTailsAllowedBefore) {
 	char modelStackTempMemory[MODEL_STACK_MAX_SIZE];
@@ -848,18 +855,56 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 
 	params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
 
+	// Apply zone-based scaling for fine control within zones
+	int32_t numZones = params::getZoneParamInfo(kind, modelStackWithParam->paramId).zoneCount;
+	int32_t scaledOffset = offset;
 	int32_t value = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
-	int32_t knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(value, modelStackWithParam);
-	int32_t lowerLimit;
+	int32_t knobPos;
+	int32_t newKnobPos;
 
-	if (kind == params::Kind::PATCH_CABLE) {
-		lowerLimit = std::min(-192_i32, knobPos);
+	if (numZones > 1) {
+		// High-resolution zone-based params: directly modify param value
+		// Reset accumulator if switching to a different param
+		if (modelStackWithParam->paramId != lastZoneScaleParamId || kind != lastZoneScaleParamKind) {
+			zoneScaleAccumulator = 0.0f;
+			lastZoneScaleParamId = modelStackWithParam->paramId;
+			lastZoneScaleParamKind = kind;
+		}
+
+		// Resolution from ZoneParamInfo (e.g., 1024 = 128 steps × 8 zones)
+		// Full range is 0 to INT32_MAX for unipolar params
+		int32_t resolution = params::getZoneParamInfo(kind, modelStackWithParam->paramId).resolution;
+		int32_t stepSize = 2147483647 / resolution;
+
+		// Accumulate and apply integer steps
+		zoneScaleAccumulator += static_cast<float>(offset);
+		int32_t steps = static_cast<int32_t>(zoneScaleAccumulator);
+		zoneScaleAccumulator -= steps;
+
+		int32_t newValue = value + steps * stepSize;
+		newValue = std::clamp(newValue, 0_i32, INT32_MAX);
+
+		// Convert to knobPos for display purposes
+		knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(value, modelStackWithParam);
+		newKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(newValue, modelStackWithParam);
+
+		// Store the new value directly (bypass knobPos conversion at the end)
+		value = newValue;
 	}
 	else {
-		lowerLimit = std::min(-64_i32, knobPos);
+		// Standard params: use knobPos-based movement
+		knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(value, modelStackWithParam);
+		int32_t lowerLimit;
+
+		if (kind == params::Kind::PATCH_CABLE) {
+			lowerLimit = std::min(-192_i32, knobPos);
+		}
+		else {
+			lowerLimit = std::min(-64_i32, knobPos);
+		}
+		newKnobPos = knobPos + scaledOffset;
+		newKnobPos = std::clamp(newKnobPos, lowerLimit, 64_i32);
 	}
-	int32_t newKnobPos = knobPos + offset;
-	newKnobPos = std::clamp(newKnobPos, lowerLimit, 64_i32);
 
 	// ignore modEncoderTurn for Midi CC if current or new knobPos exceeds 127
 	// if current knobPos exceeds 127, e.g. it's 128, then it needs to drop to 126 before a value change
@@ -914,8 +959,24 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 		displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos, source1, source2);
 	}
 
-	if (newKnobPos == knobPos) {
-		return;
+	// For zone-based params, we already computed the new value directly
+	// For standard params, we need to check if knobPos changed
+	int32_t newValue;
+	if (numZones > 1) {
+		// Zone-based: use the value we already computed with fine resolution
+		newValue = value;
+		// Still skip if no actual change (handles fractional accumulation not reaching a step)
+		int32_t originalValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
+		if (newValue == originalValue) {
+			return;
+		}
+	}
+	else {
+		// Standard: check knobPos and convert
+		if (newKnobPos == knobPos) {
+			return;
+		}
+		newValue = modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
 	}
 
 	// midi follow and midi feedback enabled
@@ -932,9 +993,7 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 		modelStackWithParam->setTimelineCounter(nullptr);
 	}
 
-	int32_t newValue = modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
-
-	// Perform the actual change
+	// Perform the actual change - modify the autoParam (patched param preset)
 	modelStackWithParam->autoParam->setValuePossiblyForRegion(newValue, modelStackWithParam, modPos, modLength);
 
 	if (activeModControllableModelStack.timelineCounterIsSet()) {

@@ -18,6 +18,7 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
+#include "dsp/sine_shaper.hpp"
 #include "dsp_ng/core/types.hpp"
 #include "model/global_effectable/global_effectable.h"
 #include "model/sample/sample_recorder.h"
@@ -54,6 +55,9 @@ public:
 	}
 
 	std::array<uint32_t, 2> lastSaturationTanHWorkingValue = {2147483648u, 2147483648u};
+
+	// Per-clip sine shaper state (DC blocker, feedback, feedback LPF, stereo LFO)
+	deluge::dsp::SineShaperVoiceState sineShaperState;
 
 protected:
 	int32_t getParameterFromKnob(int32_t whichModEncoder) final;

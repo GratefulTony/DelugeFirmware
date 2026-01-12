@@ -16,7 +16,15 @@
 namespace deluge::gui::menu_item::audio_compressor {
 
 class CompressorValue : public DecimalWithoutScrolling {
+public:
 	using DecimalWithoutScrolling::DecimalWithoutScrolling;
+
+	// Only show in single-band mode
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::SINGLE;
+	}
+
+private:
 	void readCurrentValue() final {
 		uint64_t value = getCompressorValue();
 		this->setValue(value >> 24);

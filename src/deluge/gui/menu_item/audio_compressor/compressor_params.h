@@ -19,6 +19,7 @@
 #include "gui/menu_item/unpatched_param.h"
 #include "gui/menu_item/value_scaling.h"
 #include "gui/ui/sound_editor.h"
+#include "model/mod_controllable/mod_controllable_audio.h"
 #include "modulation/params/param_set.h"
 
 namespace deluge::gui::menu_item::audio_compressor {
@@ -31,6 +32,11 @@ public:
 		    soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(getP())));
 	}
 	int32_t getFinalValue() override { return computeFinalValueForHalfPrecisionMenuItem(this->getValue()); }
+
+	// Only show in single-band mode
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		return modControllable->compressorMode == CompressorMode::SINGLE;
+	}
 };
 
 } // namespace deluge::gui::menu_item::audio_compressor

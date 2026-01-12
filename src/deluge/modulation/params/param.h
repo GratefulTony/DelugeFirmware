@@ -97,6 +97,14 @@ enum Local : ParamType {
 	LOCAL_OSC_A_WAVE_INDEX,
 	LOCAL_OSC_B_WAVE_INDEX,
 	LOCAL_PAN,
+	LOCAL_TABLE_SHAPER_DRIVE, // Table shaper drive (additive mod: base + mod)
+	LOCAL_SINE_SHAPER_DRIVE,  // Sine shaper drive (additive mod: base + mod)
+	LOCAL_TABLE_SHAPER_MIX,   // Table shaper wet/dry mix (additive mod: base + mod)
+
+	// Local zone params begin (pure modulation pass-through, scaling handled by ZoneBasedParam)
+	FIRST_LOCAL_ZONE,
+	LOCAL_SINE_SHAPER_TWIST = FIRST_LOCAL_ZONE, // Sine shaper twist/modifier
+	LOCAL_SINE_SHAPER_HARMONIC,                 // Sine shaper harmonic zone
 
 	// Local exp params begin
 	FIRST_LOCAL_EXP,
@@ -142,12 +150,17 @@ enum Global : ParamType {
 
 	// Global hybrid params begin
 
-	// There are no global hybrid params, so FIRST_GLOBAL_EXP is set to the same value. If you add a GLOBAL_HYBRID
+	// There are no global hybrid params, so FIRST_GLOBAL_ZONE is set to the same value. If you add a GLOBAL_HYBRID
 	// param, make sure you undo that!
 	FIRST_GLOBAL_HYBRID,
 
+	// Global zone params begin (pure modulation pass-through, scaling handled by ZoneBasedParam)
+	FIRST_GLOBAL_ZONE = FIRST_GLOBAL_HYBRID,
+	GLOBAL_DISPERSER_TOPO = FIRST_GLOBAL_ZONE, // Disperser topology zone (clips to boundaries)
+	GLOBAL_DISPERSER_TWIST,                    // Disperser character zone (allows cross-zone)
+
 	// Global exp params begin
-	FIRST_GLOBAL_EXP = FIRST_GLOBAL_HYBRID,
+	FIRST_GLOBAL_EXP,
 	GLOBAL_DELAY_RATE = FIRST_GLOBAL_EXP,
 	GLOBAL_MOD_FX_RATE,
 	GLOBAL_LFO_FREQ_1,
@@ -186,6 +199,30 @@ enum UnpatchedShared : ParamType {
 	UNPATCHED_MOD_FX_FEEDBACK,
 	UNPATCHED_SIDECHAIN_SHAPE,
 	UNPATCHED_COMPRESSOR_THRESHOLD,
+	// Multiband compressor params
+	UNPATCHED_MB_COMPRESSOR_CHARACTER,
+	UNPATCHED_MB_COMPRESSOR_LOW_CROSSOVER,
+	UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER,
+	UNPATCHED_MB_COMPRESSOR_THRESHOLD,
+	UNPATCHED_MB_COMPRESSOR_RATIO,
+	UNPATCHED_MB_COMPRESSOR_ATTACK,
+	UNPATCHED_MB_COMPRESSOR_RELEASE,
+	UNPATCHED_MB_COMPRESSOR_SKEW,
+	UNPATCHED_MB_COMPRESSOR_LOW_LEVEL,
+	UNPATCHED_MB_COMPRESSOR_MID_LEVEL,
+	UNPATCHED_MB_COMPRESSOR_HIGH_LEVEL,
+	UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN,
+	UNPATCHED_MB_COMPRESSOR_VIBE,
+	UNPATCHED_MB_COMPRESSOR_BLEND,
+	// Shaper controls for GlobalEffectables (Kit/AudioClip at clip level)
+	UNPATCHED_SINE_SHAPER_DRIVE,
+	UNPATCHED_SINE_SHAPER_HARMONIC,
+	UNPATCHED_SINE_SHAPER_TWIST,
+	UNPATCHED_TABLE_SHAPER_DRIVE,
+	UNPATCHED_TABLE_SHAPER_MIX,
+	// Disperser zone controls
+	UNPATCHED_DISPERSER_TOPO,
+	UNPATCHED_DISPERSER_TWIST,
 	// Arp
 	UNPATCHED_FIRST_ARP_PARAM,
 	UNPATCHED_ARP_GATE = UNPATCHED_FIRST_ARP_PARAM,
@@ -261,10 +298,88 @@ constexpr ParamType kUnpatchedAndPatchedMaximum = kMaxNumUnpatchedParams + UNPAT
 
 static_assert(kMaxNumUnpatchedParams < STATIC_START, "Error: Too many UNPATCHED parameters, (collision with STATIC)");
 
+// ============================================================================
+// Zone-based parameter configuration
+// ============================================================================
+
+/// Configuration for zone-based parameters
+struct ZoneParamInfo {
+	int32_t zoneCount;
+	int32_t resolution; // Encoder steps: 1024 for zone params, 128 standard
+};
+
+/// Default configuration for zone-based params
+constexpr ZoneParamInfo kZoneParamDefault{8, 1024};
+/// Default configuration for non-zone params
+constexpr ZoneParamInfo kStandardParamDefault{1, 128};
+
+/// Get zone configuration for a patched param (constexpr for compile-time use in templates)
+constexpr ZoneParamInfo getZoneParamInfo(ParamType param) {
+	switch (param) {
+	case LOCAL_SINE_SHAPER_HARMONIC:
+	case LOCAL_SINE_SHAPER_TWIST:
+	case GLOBAL_DISPERSER_TOPO:
+	case GLOBAL_DISPERSER_TWIST:
+		return kZoneParamDefault;
+	default:
+		return kStandardParamDefault;
+	}
+}
+
+/// Get zone configuration for an unpatched param
+constexpr ZoneParamInfo getZoneParamInfo(UnpatchedShared param) {
+	switch (param) {
+	case UNPATCHED_SINE_SHAPER_HARMONIC:
+	case UNPATCHED_SINE_SHAPER_TWIST:
+	case UNPATCHED_DISPERSER_TOPO:
+	case UNPATCHED_DISPERSER_TWIST:
+	case UNPATCHED_MB_COMPRESSOR_CHARACTER:
+	case UNPATCHED_MB_COMPRESSOR_VIBE:
+		return kZoneParamDefault;
+	default:
+		return kStandardParamDefault;
+	}
+}
+
+/// Get zone configuration by Kind + paramID (for runtime dispatch)
+inline ZoneParamInfo getZoneParamInfo(Kind kind, int32_t paramID) {
+	if (kind == Kind::UNPATCHED_SOUND || kind == Kind::UNPATCHED_GLOBAL) {
+		return getZoneParamInfo(static_cast<UnpatchedShared>(paramID));
+	}
+	if (kind == Kind::PATCHED) {
+		return getZoneParamInfo(static_cast<ParamType>(paramID));
+	}
+	return {1, 128};
+}
+
+/// Get the unpatched fallback param for a patched param (for GlobalEffectable contexts)
+/// Returns the corresponding UNPATCHED_* param ID, or -1 if no fallback exists
+constexpr int32_t getUnpatchedFallback(int32_t patchedParam) {
+	switch (patchedParam) {
+	case LOCAL_TABLE_SHAPER_DRIVE:
+		return UNPATCHED_TABLE_SHAPER_DRIVE;
+	case LOCAL_TABLE_SHAPER_MIX:
+		return UNPATCHED_TABLE_SHAPER_MIX;
+	case LOCAL_SINE_SHAPER_DRIVE:
+		return UNPATCHED_SINE_SHAPER_DRIVE;
+	case LOCAL_SINE_SHAPER_HARMONIC:
+		return UNPATCHED_SINE_SHAPER_HARMONIC;
+	case LOCAL_SINE_SHAPER_TWIST:
+		return UNPATCHED_SINE_SHAPER_TWIST;
+	case GLOBAL_DISPERSER_TOPO:
+		return UNPATCHED_DISPERSER_TOPO;
+	case GLOBAL_DISPERSER_TWIST:
+		return UNPATCHED_DISPERSER_TWIST;
+	default:
+		return -1;
+	}
+}
+
 bool isParamBipolar(Kind kind, int32_t paramID);
 bool isParamPan(Kind kind, int32_t paramID);
 bool isParamPitch(Kind kind, int32_t paramID);
 bool isParamPitchBend(Kind kind, int32_t paramID);
+bool isParamHybridDrive(Kind kind, int32_t paramID);
 bool isParamArpRhythm(Kind kind, int32_t paramID);
 bool isParamStutter(Kind kind, int32_t paramID);
 bool isParamQuantizedStutter(Kind kind, int32_t paramID, ModControllableAudio* modControllableAudio);

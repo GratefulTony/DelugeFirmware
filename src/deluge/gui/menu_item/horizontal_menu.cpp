@@ -572,6 +572,14 @@ Submenu::RenderingStyle HorizontalMenu::renderingStyle() const {
 	return VERTICAL;
 }
 
+deluge::modulation::params::Kind HorizontalMenu::getParamKind() {
+	// Always delegate to current item for learning support, regardless of rendering style
+	if (current_item_ != items.end()) {
+		return (*current_item_)->getParamKind();
+	}
+	return MenuItem::getParamKind();
+}
+
 void HorizontalMenu::renderColumnLabel(MenuItem* menuItem, int32_t labelY, int32_t slotStartX, int32_t slotWidth,
                                        bool isSelected) {
 	oled_canvas::Canvas& image = OLED::main;

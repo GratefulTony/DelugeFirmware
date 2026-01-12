@@ -77,6 +77,7 @@ constexpr Patcher::Config kPatcherConfigForSound = {
     .firstParam = params::FIRST_GLOBAL,
     .firstNonVolumeParam = params::FIRST_GLOBAL_NON_VOLUME,
     .firstHybridParam = params::FIRST_GLOBAL_HYBRID,
+    .firstZoneParam = params::FIRST_GLOBAL_ZONE,
     .firstExpParam = params::FIRST_GLOBAL_EXP,
     .endParams = params::kNumParams,
     .globality = GLOBALITY_GLOBAL,
@@ -145,6 +146,9 @@ void Sound::initParams(ParamManager* paramManager) {
 	    getParamFromUserValue(params::GLOBAL_VOLUME_POST_FX, 40));
 	patchedParams->params[params::GLOBAL_VOLUME_POST_REVERB_SEND].setCurrentValueBasicForSetup(0);
 	patchedParams->params[params::LOCAL_FOLD].setCurrentValueBasicForSetup(-2147483648);
+	patchedParams->params[params::LOCAL_TABLE_SHAPER_DRIVE].setCurrentValueBasicForSetup(0); // Unity gain at 12 o'clock
+	patchedParams->params[params::LOCAL_TABLE_SHAPER_MIX].setCurrentValueBasicForSetup(-2147483648); // No mix (bypass)
+	patchedParams->params[params::LOCAL_SINE_SHAPER_DRIVE].setCurrentValueBasicForSetup(0); // Unity gain at 12 o'clock
 	patchedParams->params[params::LOCAL_HPF_RESONANCE].setCurrentValueBasicForSetup(-2147483648);
 	patchedParams->params[params::LOCAL_HPF_FREQ].setCurrentValueBasicForSetup(-2147483648);
 	patchedParams->params[params::LOCAL_HPF_MORPH].setCurrentValueBasicForSetup(-2147483648);
@@ -2162,6 +2166,7 @@ void Sound::reassessRenderSkippingStatus(ModelStackWithSoundFlags* modelStack, b
 
 	bool skippingStatusNow =
 	    (voices_.empty() && (delay.repeatsUntilAbandon == 0u) && !stutterer.isStuttering(this)
+	     && !disperser.delay.hasEnergy()
 	     && ((arpSettings == nullptr) || !getArp()->hasAnyInputNotesActive() || arpSettings->mode == ArpMode::OFF));
 
 	if (skippingStatusNow != skippingRendering) {
@@ -2583,27 +2588,52 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, deluge::dsp::Stere
 
 	int32_t modFXDepth = paramFinalValues[params::GLOBAL_MOD_FX_DEPTH - params::FIRST_GLOBAL];
 	int32_t modFXRate = paramFinalValues[params::GLOBAL_MOD_FX_RATE - params::FIRST_GLOBAL];
+	// Disperser modulation cables (for mod matrix support)
+	q31_t topoCables = paramFinalValues[params::GLOBAL_DISPERSER_TOPO - params::FIRST_GLOBAL];
+	q31_t twistCables = paramFinalValues[params::GLOBAL_DISPERSER_TWIST - params::FIRST_GLOBAL];
 
 	processSRRAndBitcrushing(sound_stereo, &postFXVolume, paramManager);
-	processFX(sound_stereo, modFXType_, modFXRate, modFXDepth, delayWorkingState, &postFXVolume, paramManager,
-	          !voices_.empty(), reverbSendAmount >> 1);
+	processDisperser(sound_stereo, paramManager, topoCables, twistCables);
+
+	// Check if ModFX should run after DOTT and stutter
+	bool modFXPostDOTT =
+	    runtimeFeatureSettings.get(RuntimeFeatureSettingType::ModFXPostDOTT) == RuntimeFeatureStateToggle::On;
+	bool dynamicsFeatureEnabled =
+	    runtimeFeatureSettings.get(RuntimeFeatureSettingType::DynamicsSoundDesign) == RuntimeFeatureStateToggle::On;
+	bool dottEnabled = dynamicsFeatureEnabled && multibandCompressor.isEnabled();
+
+	// Default order: ModFX → Stutter → DOTT → Reverb
+	// With ModFXPostDOTT: Stutter → DOTT → ModFX → Reverb
+	if (!modFXPostDOTT) {
+		processFX(sound_stereo, modFXType_, modFXRate, modFXDepth, delayWorkingState, &postFXVolume, paramManager,
+		          !voices_.empty(), reverbSendAmount >> 1);
+	}
+
 	processStutter(sound_stereo, paramManager);
+
+	// DOTT (multiband compressor) - runs after stutter
+	if (dottEnabled) {
+		applyMultibandCompressorParams(paramManager);
+		multibandCompressor.setMeteringEnabled(runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DOTTAnalyzer));
+		multibandCompressor.render(sound_stereo);
+	}
+
+	// ModFX after DOTT when setting is ON
+	if (modFXPostDOTT) {
+		processFX(sound_stereo, modFXType_, modFXRate, modFXDepth, delayWorkingState, &postFXVolume, paramManager,
+		          !voices_.empty(), reverbSendAmount >> 1);
+	}
 
 	processReverbSendAndVolume(sound_stereo, reverbBuffer, postFXVolume, postReverbVolume, reverbSendAmount, 0, true);
 
+	// Original single-band compressor (independent of DOTT)
 	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
 	compressor.setThreshold(compThreshold);
 	if (compThreshold > 0) {
-		if (compressorMode == CompressorMode::MULTIBAND) {
-			multibandCompressor.render(sound_stereo, postFXVolume);
-		}
-		else {
-			compressor.renderVolNeutral(sound_stereo, postFXVolume);
-		}
+		compressor.renderVolNeutral(sound_stereo, postFXVolume);
 	}
 	else {
 		compressor.reset();
-		multibandCompressor.reset();
 	}
 
 	if (recorder && recorder->status < RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
@@ -3753,6 +3783,78 @@ bool Sound::readParamTagFromFile(Deserializer& reader, char const* tagName, Para
 		reader.exitTag("compressorShape");
 	}
 
+	// Multiband compressor params
+	else if (!strcmp(tagName, "mbCompCharacter")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_CHARACTER,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompCharacter");
+	}
+	else if (!strcmp(tagName, "mbCompLowXover")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_LOW_CROSSOVER,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompLowXover");
+	}
+	else if (!strcmp(tagName, "mbCompHighXover")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompHighXover");
+	}
+	else if (!strcmp(tagName, "mbCompThreshold")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_THRESHOLD,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompThreshold");
+	}
+	else if (!strcmp(tagName, "mbCompRatio")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_RATIO,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompRatio");
+	}
+	else if (!strcmp(tagName, "mbCompAttack")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_ATTACK,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompAttack");
+	}
+	else if (!strcmp(tagName, "mbCompRelease")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_RELEASE,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompRelease");
+	}
+	else if (!strcmp(tagName, "mbCompSkew")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_SKEW,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompSkew");
+	}
+	else if (!strcmp(tagName, "mbCompLowLevel")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_LOW_LEVEL,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompLowLevel");
+	}
+	else if (!strcmp(tagName, "mbCompMidLevel")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_MID_LEVEL,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompMidLevel");
+	}
+	else if (!strcmp(tagName, "mbCompHighLevel")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_HIGH_LEVEL,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompHighLevel");
+	}
+	else if (!strcmp(tagName, "mbCompOutputGain")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompOutputGain");
+	}
+	else if (!strcmp(tagName, "mbCompVibe")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_VIBE,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompVibe");
+	}
+	else if (!strcmp(tagName, "mbCompBlend")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_BLEND,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompBlend");
+	}
+
 	else if (!strcmp(tagName, "noiseVolume")) {
 		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_NOISE_VOLUME, readAutomationUpToPos);
 		reader.exitTag("noiseVolume");
@@ -3816,6 +3918,49 @@ bool Sound::readParamTagFromFile(Deserializer& reader, char const* tagName, Para
 	else if (!strcmp(tagName, "waveFold")) {
 		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_FOLD, readAutomationUpToPos);
 		reader.exitTag("waveFold");
+	}
+
+	// Table shaper params
+	else if (!strcmp(tagName, "tableShaperDrive")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_TABLE_SHAPER_DRIVE, readAutomationUpToPos);
+		reader.exitTag("tableShaperDrive");
+	}
+	else if (!strcmp(tagName, "tableShaperMix")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_TABLE_SHAPER_MIX, readAutomationUpToPos);
+		reader.exitTag("tableShaperMix");
+	}
+	// Backwards compatibility for old table shaper param names
+	else if (!strcmp(tagName, "shaperDrive")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_TABLE_SHAPER_DRIVE, readAutomationUpToPos);
+		reader.exitTag("shaperDrive");
+	}
+	else if (!strcmp(tagName, "shaperMix")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_TABLE_SHAPER_MIX, readAutomationUpToPos);
+		reader.exitTag("shaperMix");
+	}
+	// Sine shaper params
+	else if (!strcmp(tagName, "sineShaperDrive")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_SINE_SHAPER_DRIVE, readAutomationUpToPos);
+		reader.exitTag("sineShaperDrive");
+	}
+	else if (!strcmp(tagName, "sineShaperTwist")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_SINE_SHAPER_TWIST, readAutomationUpToPos);
+		reader.exitTag("sineShaperTwist");
+	}
+	else if (!strcmp(tagName, "patchedSineShaperHarmonic")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_SINE_SHAPER_HARMONIC,
+		                         readAutomationUpToPos);
+		reader.exitTag("patchedSineShaperHarmonic");
+	}
+	// Backwards compatibility for old sine shaper param names
+	else if (!strcmp(tagName, "localSineShaperTwist")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_SINE_SHAPER_TWIST, readAutomationUpToPos);
+		reader.exitTag("localSineShaperTwist");
+	}
+	else if (!strcmp(tagName, "localSineShaperHarmonic")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_SINE_SHAPER_HARMONIC,
+		                         readAutomationUpToPos);
+		reader.exitTag("localSineShaperHarmonic");
 	}
 
 	else if (!strcmp(tagName, "envelope1")) {
@@ -4002,6 +4147,15 @@ bool Sound::readParamTagFromFile(Deserializer& reader, char const* tagName, Para
 		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_DELAY_FEEDBACK, readAutomationUpToPos);
 		reader.exitTag("delayFeedback");
 	}
+	// Disperser params
+	else if (!strcmp(tagName, "globalDisperserTopo")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_DISPERSER_TOPO, readAutomationUpToPos);
+		reader.exitTag("globalDisperserTopo");
+	}
+	else if (!strcmp(tagName, "globalDisperserTwist")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_DISPERSER_TWIST, readAutomationUpToPos);
+		reader.exitTag("globalDisperserTwist");
+	}
 	else if (!strcmp(tagName, "reverbAmount")) {
 		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_REVERB_AMOUNT, readAutomationUpToPos);
 		reader.exitTag("reverbAmount");
@@ -4030,6 +4184,34 @@ void Sound::writeParamsToFile(Serializer& writer, ParamManager* paramManager, bo
 
 	unpatchedParams->writeParamAsAttribute(writer, "portamento", params::UNPATCHED_PORTAMENTO, writeAutomation);
 	unpatchedParams->writeParamAsAttribute(writer, "compressorShape", params::UNPATCHED_SIDECHAIN_SHAPE,
+	                                       writeAutomation);
+
+	// Multiband compressor params
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompCharacter", params::UNPATCHED_MB_COMPRESSOR_CHARACTER,
+	                                       writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompLowXover", params::UNPATCHED_MB_COMPRESSOR_LOW_CROSSOVER,
+	                                       writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompHighXover", params::UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER,
+	                                       writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompThreshold", params::UNPATCHED_MB_COMPRESSOR_THRESHOLD,
+	                                       writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompRatio", params::UNPATCHED_MB_COMPRESSOR_RATIO,
+	                                       writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompAttack", params::UNPATCHED_MB_COMPRESSOR_ATTACK,
+	                                       writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompRelease", params::UNPATCHED_MB_COMPRESSOR_RELEASE,
+	                                       writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompSkew", params::UNPATCHED_MB_COMPRESSOR_SKEW, writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompLowLevel", params::UNPATCHED_MB_COMPRESSOR_LOW_LEVEL,
+	                                       writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompMidLevel", params::UNPATCHED_MB_COMPRESSOR_MID_LEVEL,
+	                                       writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompHighLevel", params::UNPATCHED_MB_COMPRESSOR_HIGH_LEVEL,
+	                                       writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompOutputGain", params::UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN,
+	                                       writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompVibe", params::UNPATCHED_MB_COMPRESSOR_VIBE, writeAutomation);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompBlend", params::UNPATCHED_MB_COMPRESSOR_BLEND,
 	                                       writeAutomation);
 
 	patchedParams->writeParamAsAttribute(writer, "oscAVolume", params::LOCAL_OSC_A_VOLUME, writeAutomation);
@@ -4082,6 +4264,11 @@ void Sound::writeParamsToFile(Serializer& writer, ParamManager* paramManager, bo
 	patchedParams->writeParamAsAttribute(writer, "delayRate", params::GLOBAL_DELAY_RATE, writeAutomation);
 	patchedParams->writeParamAsAttribute(writer, "delayFeedback", params::GLOBAL_DELAY_FEEDBACK, writeAutomation);
 
+	// Disperser params
+	patchedParams->writeParamAsAttribute(writer, "globalDisperserTopo", params::GLOBAL_DISPERSER_TOPO, writeAutomation);
+	patchedParams->writeParamAsAttribute(writer, "globalDisperserTwist", params::GLOBAL_DISPERSER_TWIST,
+	                                     writeAutomation);
+
 	patchedParams->writeParamAsAttribute(writer, "reverbAmount", params::GLOBAL_REVERB_AMOUNT, writeAutomation);
 
 	patchedParams->writeParamAsAttribute(writer, "arpeggiatorRate", params::GLOBAL_ARP_RATE, writeAutomation);
@@ -4094,6 +4281,15 @@ void Sound::writeParamsToFile(Serializer& writer, ParamManager* paramManager, bo
 	patchedParams->writeParamAsAttribute(writer, "hpfMorph", params::LOCAL_HPF_MORPH, writeAutomation);
 
 	patchedParams->writeParamAsAttribute(writer, "waveFold", params::LOCAL_FOLD, writeAutomation);
+
+	// Table shaper params
+	patchedParams->writeParamAsAttribute(writer, "tableShaperDrive", params::LOCAL_TABLE_SHAPER_DRIVE, writeAutomation);
+	patchedParams->writeParamAsAttribute(writer, "tableShaperMix", params::LOCAL_TABLE_SHAPER_MIX, writeAutomation);
+	// Sine shaper params
+	patchedParams->writeParamAsAttribute(writer, "sineShaperDrive", params::LOCAL_SINE_SHAPER_DRIVE, writeAutomation);
+	patchedParams->writeParamAsAttribute(writer, "sineShaperTwist", params::LOCAL_SINE_SHAPER_TWIST, writeAutomation);
+	patchedParams->writeParamAsAttribute(writer, "patchedSineShaperHarmonic", params::LOCAL_SINE_SHAPER_HARMONIC,
+	                                     writeAutomation);
 
 	writer.writeOpeningTagEnd();
 
@@ -4572,6 +4768,7 @@ bool Sound::modEncoderButtonAction(uint8_t whichModEncoder, bool on, ModelStackW
 			return false;
 		}
 	}
+
 	// Cycle through reverb presets
 	else if (ourModKnob->paramDescriptor.isSetToParamWithNoSource(params::GLOBAL_REVERB_AMOUNT)) {
 		if (on) {

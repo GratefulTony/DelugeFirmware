@@ -28,7 +28,12 @@ namespace deluge::modulation::params {
 
 bool isParamBipolar(Kind kind, int32_t paramID) {
 	return (kind == Kind::PATCH_CABLE) || isParamPan(kind, paramID) || isParamPitch(kind, paramID)
-	       || isParamPitchBend(kind, paramID);
+	       || isParamPitchBend(kind, paramID) || isParamHybridDrive(kind, paramID);
+}
+
+bool isParamHybridDrive(Kind kind, int32_t paramID) {
+	// Hybrid drive params: bipolar where 0 = unity, negative = attenuation, positive = boost
+	return (kind == Kind::PATCHED && (paramID == LOCAL_TABLE_SHAPER_DRIVE || paramID == LOCAL_SINE_SHAPER_DRIVE));
 }
 
 bool isParamPan(Kind kind, int32_t paramID) {
@@ -136,6 +141,11 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [LOCAL_OSC_A_WAVE_INDEX]         = "Osc1 wave",
 	    [LOCAL_OSC_B_WAVE_INDEX]         = "Osc2 wave",
 	    [LOCAL_PAN]                      = "Pan",
+	    [LOCAL_TABLE_SHAPER_DRIVE]          = "Sat. drive",
+	    [LOCAL_SINE_SHAPER_DRIVE]        = "Sine drive",
+	    [LOCAL_TABLE_SHAPER_MIX]               = "Sat. mix",
+	    [LOCAL_SINE_SHAPER_TWIST]        = "Sine twist",
+	    [LOCAL_SINE_SHAPER_HARMONIC]     = "Sine harm",
 	    [LOCAL_LPF_FREQ]                 = "LPf freq",
 	    [LOCAL_PITCH_ADJUST]             = "Pitch",
 	    [LOCAL_OSC_A_PITCH_ADJUST]       = "Osc1 pitch",
@@ -162,6 +172,8 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [GLOBAL_REVERB_AMOUNT]           = "Reverb amt",
 	    [GLOBAL_MOD_FX_DEPTH]            = "ModFXdepth",
 	    [GLOBAL_DELAY_FEEDBACK]          = "Delay feed",
+	    [GLOBAL_DISPERSER_TOPO]          = "Disp topo",
+	    [GLOBAL_DISPERSER_TWIST]         = "Disp twist",
 	    [GLOBAL_DELAY_RATE]              = "Delay rate",
 	    [GLOBAL_MOD_FX_RATE]             = "ModFX rate",
 	    [GLOBAL_LFO_FREQ_1]                = "LFO1 rate",
@@ -207,6 +219,11 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [LOCAL_OSC_A_WAVE_INDEX] = STRING_FOR_PARAM_LOCAL_OSC_A_WAVE_INDEX,
 	    [LOCAL_OSC_B_WAVE_INDEX] = STRING_FOR_PARAM_LOCAL_OSC_B_WAVE_INDEX,
 	    [LOCAL_PAN] = STRING_FOR_PARAM_LOCAL_PAN,
+	    [LOCAL_TABLE_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_TABLE_SHAPER_DRIVE,
+	    [LOCAL_SINE_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_SINE_SHAPER_DRIVE,
+	    [LOCAL_TABLE_SHAPER_MIX] = STRING_FOR_PARAM_LOCAL_TABLE_SHAPER_MIX,
+	    [LOCAL_SINE_SHAPER_TWIST] = STRING_FOR_SINE_SHAPER_SYMMETRY, // Reuse existing twist/symmetry string
+	    [LOCAL_SINE_SHAPER_HARMONIC] = STRING_FOR_SINE_SHAPER_HARMONIC,
 	    [LOCAL_LPF_FREQ] = STRING_FOR_PARAM_LOCAL_LPF_FREQ,
 	    [LOCAL_PITCH_ADJUST] = STRING_FOR_PARAM_LOCAL_PITCH_ADJUST,
 	    [LOCAL_OSC_A_PITCH_ADJUST] = STRING_FOR_PARAM_LOCAL_OSC_A_PITCH_ADJUST,
@@ -233,6 +250,8 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [GLOBAL_REVERB_AMOUNT] = STRING_FOR_PARAM_GLOBAL_REVERB_AMOUNT,
 	    [GLOBAL_MOD_FX_DEPTH] = STRING_FOR_PARAM_GLOBAL_MOD_FX_DEPTH,
 	    [GLOBAL_DELAY_FEEDBACK] = STRING_FOR_PARAM_GLOBAL_DELAY_FEEDBACK,
+	    [GLOBAL_DISPERSER_TOPO] = STRING_FOR_DISPERSER_TOPO,
+	    [GLOBAL_DISPERSER_TWIST] = STRING_FOR_DISPERSER_TWIST,
 	    [GLOBAL_DELAY_RATE] = STRING_FOR_PARAM_GLOBAL_DELAY_RATE,
 	    [GLOBAL_MOD_FX_RATE] = STRING_FOR_PARAM_GLOBAL_MOD_FX_RATE,
 	    [GLOBAL_LFO_FREQ_1] = STRING_FOR_PARAM_GLOBAL_LFO_FREQ_1,
@@ -268,6 +287,28 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 		    [UNPATCHED_MOD_FX_FEEDBACK] = STRING_FOR_MODFX_FEEDBACK,
 		    [UNPATCHED_SIDECHAIN_SHAPE] = STRING_FOR_SIDECHAIN_SHAPE,
 		    [UNPATCHED_COMPRESSOR_THRESHOLD] = STRING_FOR_THRESHOLD,
+		    // Multiband compressor
+		    [UNPATCHED_MB_COMPRESSOR_CHARACTER] = STRING_FOR_COMPRESSOR_CHARACTER,
+		    [UNPATCHED_MB_COMPRESSOR_LOW_CROSSOVER] = STRING_FOR_COMPRESSOR_LOW_CROSSOVER,
+		    [UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER] = STRING_FOR_COMPRESSOR_HIGH_CROSSOVER,
+		    [UNPATCHED_MB_COMPRESSOR_THRESHOLD] = STRING_FOR_THRESHOLD,
+		    [UNPATCHED_MB_COMPRESSOR_RATIO] = STRING_FOR_RATIO,
+		    [UNPATCHED_MB_COMPRESSOR_ATTACK] = STRING_FOR_ATTACK,
+		    [UNPATCHED_MB_COMPRESSOR_RELEASE] = STRING_FOR_RELEASE,
+		    [UNPATCHED_MB_COMPRESSOR_SKEW] = STRING_FOR_COMPRESSOR_UP_DOWN_SKEW,
+		    [UNPATCHED_MB_COMPRESSOR_LOW_LEVEL] = STRING_FOR_COMPRESSOR_LOW_LEVEL,
+		    [UNPATCHED_MB_COMPRESSOR_MID_LEVEL] = STRING_FOR_COMPRESSOR_MID_LEVEL,
+		    [UNPATCHED_MB_COMPRESSOR_HIGH_LEVEL] = STRING_FOR_COMPRESSOR_HIGH_LEVEL,
+		    [UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN] = STRING_FOR_COMPRESSOR_OUTPUT_GAIN,
+		    [UNPATCHED_MB_COMPRESSOR_VIBE] = STRING_FOR_COMPRESSOR_VIBE,
+		    [UNPATCHED_MB_COMPRESSOR_BLEND] = STRING_FOR_BLEND,
+		    [UNPATCHED_SINE_SHAPER_DRIVE] = STRING_FOR_SINE_SHAPER_DRIVE,
+		    [UNPATCHED_SINE_SHAPER_HARMONIC] = STRING_FOR_SINE_SHAPER_HARMONIC,
+		    [UNPATCHED_SINE_SHAPER_TWIST] = STRING_FOR_SINE_SHAPER_SYMMETRY,
+		    [UNPATCHED_TABLE_SHAPER_DRIVE] = STRING_FOR_SHAPER_DRIVE,
+		    [UNPATCHED_TABLE_SHAPER_MIX] = STRING_FOR_SHAPER_MIX,
+		    [UNPATCHED_DISPERSER_TOPO] = STRING_FOR_DISPERSER_TOPO,
+		    [UNPATCHED_DISPERSER_TWIST] = STRING_FOR_DISPERSER_TWIST,
 		    [UNPATCHED_ARP_GATE] = STRING_FOR_ARP_GATE_MENU_TITLE,
 		    [UNPATCHED_ARP_RHYTHM] = STRING_FOR_ARP_RHYTHM_MENU_TITLE,
 		    [UNPATCHED_ARP_SEQUENCE_LENGTH] = STRING_FOR_ARP_SEQUENCE_LENGTH_MENU_TITLE,
@@ -469,6 +510,54 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 		case UNPATCHED_COMPRESSOR_THRESHOLD:
 			return "compressorThreshold";
 
+		// Multiband compressor
+		case UNPATCHED_MB_COMPRESSOR_CHARACTER:
+			return "mbCompressorCharacter";
+		case UNPATCHED_MB_COMPRESSOR_LOW_CROSSOVER:
+			return "mbCompressorLowCrossover";
+		case UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER:
+			return "mbCompressorHighCrossover";
+		case UNPATCHED_MB_COMPRESSOR_THRESHOLD:
+			return "mbCompressorThreshold";
+		case UNPATCHED_MB_COMPRESSOR_RATIO:
+			return "mbCompressorRatio";
+		case UNPATCHED_MB_COMPRESSOR_ATTACK:
+			return "mbCompressorAttack";
+		case UNPATCHED_MB_COMPRESSOR_RELEASE:
+			return "mbCompressorRelease";
+		case UNPATCHED_MB_COMPRESSOR_SKEW:
+			return "mbCompressorSkew";
+		case UNPATCHED_MB_COMPRESSOR_LOW_LEVEL:
+			return "mbCompressorLowLevel";
+		case UNPATCHED_MB_COMPRESSOR_MID_LEVEL:
+			return "mbCompressorMidLevel";
+		case UNPATCHED_MB_COMPRESSOR_HIGH_LEVEL:
+			return "mbCompressorHighLevel";
+		case UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN:
+			return "mbCompressorOutputGain";
+		case UNPATCHED_MB_COMPRESSOR_VIBE:
+			return "mbCompressorVibe";
+		case UNPATCHED_MB_COMPRESSOR_BLEND:
+			return "mbCompressorBlend";
+
+		// Shapers (prefixed to avoid conflicts with LOCAL_* patched versions)
+		case UNPATCHED_SINE_SHAPER_DRIVE:
+			return "clipSineShaperDrive";
+		case UNPATCHED_SINE_SHAPER_HARMONIC:
+			return "clipSineShaperHarmonic";
+		case UNPATCHED_SINE_SHAPER_TWIST:
+			return "clipSineShaperSymmetry";
+		case UNPATCHED_TABLE_SHAPER_DRIVE:
+			return "clipTableShaperDrive";
+		case UNPATCHED_TABLE_SHAPER_MIX:
+			return "clipTableShaperMix";
+
+		// Disperser
+		case UNPATCHED_DISPERSER_TOPO:
+			return "disperserTopo";
+		case UNPATCHED_DISPERSER_TWIST:
+			return "disperserTwist";
+
 		case UNPATCHED_ARP_GATE:
 			return "arpGate";
 
@@ -540,6 +629,12 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 
 		case GLOBAL_DELAY_FEEDBACK:
 			return "delayFeedback";
+
+		case GLOBAL_DISPERSER_TOPO:
+			return "globalDisperserTopo";
+
+		case GLOBAL_DISPERSER_TWIST:
+			return "globalDisperserTwist";
 
 		case GLOBAL_REVERB_AMOUNT:
 			return "reverbAmount";
@@ -683,6 +778,21 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 
 		case LOCAL_FOLD:
 			return "waveFold";
+
+		case LOCAL_TABLE_SHAPER_DRIVE:
+			return "tableShaperDrive";
+
+		case LOCAL_TABLE_SHAPER_MIX:
+			return "tableShaperMix";
+
+		case LOCAL_SINE_SHAPER_DRIVE:
+			return "sineShaperDrive";
+
+		case LOCAL_SINE_SHAPER_TWIST:
+			return "sineShaperTwist";
+
+		case LOCAL_SINE_SHAPER_HARMONIC:
+			return "patchedSineShaperHarmonic";
 
 		case LOCAL_LAST:
 		    // Intentionally not handled

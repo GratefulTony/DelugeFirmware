@@ -21,6 +21,7 @@
 #include "dsp/dx/engine.h"
 #include "dsp/filter/filter_set.h"
 #include "dsp/oscillators/sine_osc.h"
+#include "dsp/shaper_buffer.h"
 #include "dsp/timestretch/time_stretcher.h"
 #include "dsp/util.hpp"
 #include "gui/waveform/waveform_renderer.h"
@@ -49,7 +50,10 @@
 
 #include "dsp/oscillators/basic_waves.h"
 #include "dsp/oscillators/oscillator.h"
+#include "gui/menu_item/zone_based.h"
+#include "io/debug/fx_benchmark.h"
 #include "util/misc.h"
+#include <cmath>
 #include <cstring>
 #include <new>
 
@@ -70,6 +74,7 @@ const Patcher::Config kPatcherConfigForVoice = {
     .firstParam = 0,
     .firstNonVolumeParam = params::FIRST_LOCAL_NON_VOLUME,
     .firstHybridParam = params::FIRST_LOCAL__HYBRID,
+    .firstZoneParam = params::FIRST_LOCAL_ZONE,
     .firstExpParam = params::FIRST_LOCAL_EXP,
     .endParams = params::FIRST_GLOBAL,
     .globality = GLOBALITY_LOCAL,
@@ -177,6 +182,13 @@ bool Voice::noteOn(ModelStackWithSoundFlags* modelStack, int32_t newNoteCodeBefo
 
 		lastSaturationTanHWorkingValue[0] = 2147483648;
 		lastSaturationTanHWorkingValue[1] = 2147483648;
+
+		// Reset ADAA state for Table Shaper
+		shaperPrevXL = 0.0f;
+		shaperPrevXR = 0.0f;
+
+		// Reset sine shaper state (DC blocker, feedback, feedback LPF, stereo LFO)
+		sineShaperState = deluge::dsp::SineShaperVoiceState{};
 	}
 
 	// Porta
@@ -1338,7 +1350,8 @@ cantBeDoingOscSyncForFirstOsc:
 					    phaseIncrements[s], pulseWidth, &unisonParts[u].sources[s].oscPos, false, 0,
 					    doingOscSyncThisOscillator, oscSyncPos[u], phaseIncrements[0], sound.oscRetriggerPhase[s],
 					    sourceWaveIndexIncrements[s], sourceWaveIndexesLastTime[s],
-					    static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile));
+					    static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile),
+					    &unisonParts[u].sources[s].prevPhaseScaler);
 
 					// Sine and triangle waves come out bigger in fixed-amplitude rendering (for arbitrary reasons), so
 					// we need to compensate
@@ -1504,6 +1517,58 @@ skipUnisonPart: {}
 		if (paramFinalValues[params::LOCAL_FOLD] > 0) {
 			dsp::foldBufferPolyApproximation(stereo_osc_buffer, paramFinalValues[params::LOCAL_FOLD]);
 		}
+
+		// Subtractive synths have oscillators scaled by >> 4 or filterGain (both ~quiet),
+		// so boost input to match FM operating levels, then attenuate output
+		// For subtractive, pass filterGain to compute dynamic boost; for FM, pass 0
+		bool isSubtractive = (synthMode == SynthMode::SUBTRACTIVE);
+		q31_t shaperFilterGain = isSubtractive ? filterGain : 0;
+
+		// Sine Shaper (per-voice, mod-matrix routable drive, harmonic, and twist)
+		if (sound.sineShaper.isEnabled()) {
+			dsp::processSineShaper(stereo_osc_buffer, &sound.sineShaper, &sineShaperState,
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE],
+			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_HARMONIC),
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_HARMONIC],
+			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_TWIST),
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST], shaperFilterGain,
+			                       sound.hasFilters());
+		}
+
+		// Table Shaper (per-voice, mod-matrix routable drive and mix)
+		// Benchmarking happens inside shapeBuffer with "table" tag
+		if (sound.shaper.shapeX > 0) {
+			q31_t satDrive = paramFinalValues[params::LOCAL_TABLE_SHAPER_DRIVE];
+			q31_t satMix = paramFinalValues[params::LOCAL_TABLE_SHAPER_MIX];
+			// Compute note frequency for LPF cutoff scaling
+			// FM always tracks pitch; subtractive only if a source is tracking
+			bool hasPitchTracking =
+			    (synthMode == SynthMode::FM) || sound.sources[0].isTracking || sound.sources[1].isTracking;
+			float noteFreqHz =
+			    hasPitchTracking ? 440.0f * powf(2.0f, (noteCodeAfterArpeggiation - 69) / 12.0f) : dsp::kLpfRefFreq;
+
+			// Compute oscillator harmonic weight for LPF duty cycle
+			// FM uses sine carriers (low harmonics), subtractive uses actual osc types
+			float oscHarmonic =
+			    (synthMode == SynthMode::FM)
+			        ? 0.0f // FM carriers are sine
+			        : std::max(dsp::TableShaperState::oscTypeToHarmonicWeight(sound.sources[0].oscType),
+			                   dsp::TableShaperState::oscTypeToHarmonicWeight(sound.sources[1].oscType));
+			// Update stored harmonic weight if changed (triggers table regen on next menu access)
+			if (sound.shaper.oscHarmonicWeight != oscHarmonic) {
+				sound.shaper.oscHarmonicWeight = oscHarmonic;
+			}
+
+			dsp::shapeBufferInt32(
+			    stereo_osc_buffer, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
+			    &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), &sound.shaper.prevScaledInputL,
+			    &sound.shaper.prevScaledInputR, &sound.shaper.driftSlopeL_Q16, &sound.shaper.driftSlopeR_Q16,
+			    &sound.shaper.driftAccumL, &sound.shaper.driftAccumR, &sound.shaper.driftLfsr,
+			    &sound.shaper.prevSampleL, &sound.shaper.prevSampleR, &sound.shaper.zcCountL, &sound.shaper.zcCountR,
+			    &sound.shaper.subSignL, &sound.shaper.subSignR, sound.shaper.subEnabled, sound.shaper.gammaPhase,
+			    &sound.shaper.slewedL, &sound.shaper.slewedR, noteFreqHz);
+		}
+
 		// Filters
 		filterSet.renderLongStereo(stereo_osc_buffer);
 
@@ -1535,8 +1600,10 @@ skipUnisonPart: {}
 			}
 		}
 
-		// Yes clipping
+		// Yes clipping (builtin shaper using getTanHAntialiased)
 		else {
+			FX_BENCH_DECLARE(benchClip, "shaper_builtin");
+			FX_BENCH_SCOPE(benchClip);
 
 			int32_t const* __restrict__ oscBufferPos = oscBuffer; // For traversal
 			dsp::StereoSample<q31_t>* __restrict__ outputSample = (dsp::StereoSample<q31_t>*)soundBuffer;
@@ -1590,6 +1657,60 @@ skipUnisonPart: {}
 			dsp::foldBufferPolyApproximation(std::span{oscBuffer, n}, foldAmount);
 		}
 
+		// Subtractive synths have oscillators scaled by >> 4 or filterGain (both ~quiet),
+		// so boost input to match FM operating levels, then attenuate output
+		// For subtractive, pass filterGain to compute dynamic boost; for FM, pass 0
+		bool isSubtractive = (synthMode == SynthMode::SUBTRACTIVE);
+		q31_t shaperFilterGain = isSubtractive ? filterGain : 0;
+
+		// Sine Shaper (per-voice, mod-matrix routable drive, harmonic, and twist) - mono path
+		if (sound.sineShaper.isEnabled()) {
+			dsp::processSineShaper(std::span{oscBuffer, n}, &sound.sineShaper, &sineShaperState,
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_DRIVE],
+			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_HARMONIC),
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_HARMONIC],
+			                       paramManager->getPatchedParamSet()->getValue(params::LOCAL_SINE_SHAPER_TWIST),
+			                       paramFinalValues[params::LOCAL_SINE_SHAPER_TWIST], shaperFilterGain,
+			                       sound.hasFilters());
+		}
+
+		// Table Shaper (per-voice, mod-matrix routable drive) - mono path
+		// Benchmarking happens inside shapeBuffer with "table" tag
+		if (sound.shaper.shapeX > 0) {
+			q31_t satDrive = paramFinalValues[params::LOCAL_TABLE_SHAPER_DRIVE];
+			q31_t satMix = paramFinalValues[params::LOCAL_TABLE_SHAPER_MIX];
+			// Compute note frequency for LPF cutoff scaling
+			// FM always tracks pitch; subtractive only if a source is tracking
+			bool hasPitchTracking =
+			    (synthMode == SynthMode::FM) || sound.sources[0].isTracking || sound.sources[1].isTracking;
+			float noteFreqHz =
+			    hasPitchTracking ? 440.0f * powf(2.0f, (noteCodeAfterArpeggiation - 69) / 12.0f) : dsp::kLpfRefFreq;
+
+			// Compute oscillator harmonic weight for LPF duty cycle
+			float oscHarmonic =
+			    (synthMode == SynthMode::FM)
+			        ? 0.0f
+			        : std::max(dsp::TableShaperState::oscTypeToHarmonicWeight(sound.sources[0].oscType),
+			                   dsp::TableShaperState::oscTypeToHarmonicWeight(sound.sources[1].oscType));
+			if (sound.shaper.oscHarmonicWeight != oscHarmonic) {
+				sound.shaper.oscHarmonicWeight = oscHarmonic;
+			}
+
+			dsp::ShaperModState monoState{
+			    .driftSlope = &sound.shaper.driftSlopeL_Q16,
+			    .driftAccum = &sound.shaper.driftAccumL,
+			    .prevSample = &sound.shaper.prevSampleL,
+			    .slewed = &sound.shaper.slewedL,
+			    .prevScaledInput = &sound.shaper.prevScaledInputL,
+			    .zcCount = &sound.shaper.zcCountL,
+			    .subSign = &sound.shaper.subSignL,
+			};
+			dsp::shapeBufferInt32(std::span{oscBuffer, n}, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
+			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), monoState,
+			                      &sound.shaper.driftLfsr, sound.shaper.subEnabled, sound.shaper.gammaPhase,
+			                      noteFreqHz);
+		}
+
 		filterSet.renderLong(std::span{oscBuffer, n});
 
 		// No clipping
@@ -1625,8 +1746,11 @@ skipUnisonPart: {}
 			} while (++oscBufferPos != oscBufferEnd);
 		}
 
-		// Yes clipping
+		// Yes clipping (builtin shaper using getTanHAntialiased)
 		else {
+			FX_BENCH_DECLARE(benchClip, "shaper_builtin");
+			FX_BENCH_SCOPE(benchClip);
+
 			int32_t const* __restrict__ oscBufferPos = oscBuffer; // For traversal
 			int32_t* __restrict__ outputSample = soundBuffer;
 			int32_t overallOscAmplitudeNow = overallOscAmplitudeLastTime;
@@ -2436,7 +2560,8 @@ dontUseCache: {}
 			    sound.sources[s].oscType, sourceAmplitude, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
 			    pulseWidth, &unisonParts[u].sources[s].oscPos, true, amplitudeIncrement, doOscSync,
 			    oscSyncPosThisUnison, oscSyncPhaseIncrementsThisUnison, oscRetriggerPhase, waveIndexIncrement,
-			    sourceWaveIndexesLastTime[s], static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile));
+			    sourceWaveIndexesLastTime[s], static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile),
+			    &unisonParts[u].sources[s].prevPhaseScaler);
 
 			if (stereoBuffer) {
 				// TODO: if render buffer was typed we could use addPannedMono()

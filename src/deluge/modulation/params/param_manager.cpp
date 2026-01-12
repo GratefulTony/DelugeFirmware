@@ -23,6 +23,7 @@
 #include "model/model_stack.h"
 #include "model/song/song.h"
 #include "modulation/midi/midi_param_collection.h"
+#include "modulation/params/param.h"
 #include "modulation/params/param_collection.h"
 #include "modulation/params/param_set.h"
 #include "modulation/patch/patch_cable_set.h"
@@ -44,6 +45,18 @@ ParamManager::ParamManager() {
 
 ParamManager::~ParamManager() {
 	destructAndForgetParamCollections();
+}
+
+int32_t ParamManager::getValueWithFallback(int32_t patchedParam) {
+	using namespace deluge::modulation::params;
+	if (containsPatchedParamSetCollection()) {
+		return getPatchedParamSet()->getValue(patchedParam);
+	}
+	int32_t unpatchedParam = getUnpatchedFallback(patchedParam);
+	if (unpatchedParam >= 0 && containsAnyMainParamCollections()) {
+		return getUnpatchedParamSet()->getValue(unpatchedParam);
+	}
+	return 0;
 }
 
 #if ALPHA_OR_BETA_VERSION

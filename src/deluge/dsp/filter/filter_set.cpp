@@ -17,8 +17,12 @@
 
 #include "dsp/filter/filter_set.h"
 #include "definitions_cxx.hpp"
+#include "io/debug/fx_benchmark.h"
 
 namespace deluge::dsp::filter {
+
+// Filter mode names for benchmarking (matches FilterMode enum order)
+static const char* kFilterModeNames[] = {"lp12", "lp24", "lp24drv", "svf_band", "svf_notch", "hpladder", "off"};
 
 std::array<StereoSample<q31_t>, SSI_TX_BUFFER_NUM_SAMPLES> temp_render_buffer;
 
@@ -94,6 +98,17 @@ std::array<StereoSample<q31_t>, SSI_TX_BUFFER_NUM_SAMPLES> temp_render_buffer;
 }
 // expects to receive an interleaved stereo stream
 [[gnu::hot]] void FilterSet::renderLongStereo(StereoBuffer<q31_t> buffer) {
+	// Skip if no filters are active
+	if (!LPFOn && !HPFOn) [[unlikely]] {
+		return;
+	}
+
+	// Benchmark with filter mode tags
+	FX_BENCH_DECLARE(benchFilter, "filters");
+	FX_BENCH_SET_TAG(benchFilter, 0, kFilterModeNames[static_cast<uint8_t>(lpfMode_)]);
+	FX_BENCH_SET_TAG(benchFilter, 1, kFilterModeNames[static_cast<uint8_t>(hpfMode_)]);
+	FX_BENCH_START(benchFilter);
+
 	// Do HPF, if it's on
 	switch (routing_) {
 	case FilterRoute::HIGH_TO_LOW:
@@ -113,6 +128,8 @@ std::array<StereoSample<q31_t>, SSI_TX_BUFFER_NUM_SAMPLES> temp_render_buffer;
 		std::ranges::transform(buffer, temp_render_buffer, buffer.begin(), std::plus{});
 		break;
 	}
+
+	FX_BENCH_STOP(benchFilter);
 }
 
 int32_t FilterSet::setConfig(q31_t lpfFrequency, q31_t lpfResonance, FilterMode lpfmode, q31_t lpfMorph,

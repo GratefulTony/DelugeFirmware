@@ -22,6 +22,9 @@
 #include "dsp/compressor/multiband.h"
 #include "dsp/compressor/rms_feedback.h"
 #include "dsp/delay/delay.h"
+#include "dsp/disperser.h"
+#include "dsp/shaper.h"
+#include "dsp/sine_shaper.hpp" // For SineTableShaperParams
 #include "dsp_ng/core/types.hpp"
 #include "hid/button.h"
 #include "model/fx/stutterer.h"
@@ -61,6 +64,8 @@ public:
 	                              int32_t readAutomationUpToPos, ArpeggiatorSettings* arpSettings, Song* song);
 	void processSRRAndBitcrushing(deluge::dsp::StereoBuffer<q31_t> buffer, int32_t* postFXVolume,
 	                              ParamManager* paramManager);
+	void processDisperser(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager, q31_t topoCables = 0,
+	                      q31_t twistCables = 0);
 	static void writeParamAttributesToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,
 	                                       int32_t* valuesForOverride = nullptr);
 	static void writeParamTagsToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,
@@ -92,6 +97,10 @@ public:
 	bool hasTrebleAdjusted(ParamManager* paramManager);
 	ModelStackWithAutoParam* getParamFromMIDIKnob(MIDIKnob& knob, ModelStackWithThreeMainThings* modelStack) override;
 
+	/// Get last played note code for pitch tracking (override in Sound)
+	/// Returns -1 if no note info available (e.g., clips/samples)
+	[[nodiscard]] virtual int32_t getLastNoteCode() const { return -1; }
+
 	// EQ
 	int32_t bassFreq{}; // These two should eventually not be variables like this
 	int32_t trebleFreq{};
@@ -107,6 +116,21 @@ public:
 
 	bool sampleRateReductionOnLastTime;
 	uint8_t clippingAmount; // Song probably doesn't currently use this?
+
+	// Wavefold smoothing state
+	q31_t wavefoldLast{0}; // Previous wavefold value for parameter smoothing
+
+	// Sine shaper parameters and DSP state (struct defined in dsp/util.hpp)
+	deluge::dsp::SineTableShaperParams sineShaper;
+
+	// Table Shaper with X/Y shape control
+	deluge::dsp::TableShaper shaperDsp;   // DSP processor with lookup table
+	deluge::dsp::TableShaperState shaper; // All shaper state (knob values, smoothing, ADAA)
+
+	// Disperser (allpass cascade with feedback)
+	deluge::dsp::Disperser disperserDsp;    // DSP processor
+	deluge::dsp::DisperserParams disperser; // All disperser state (freq, stages, zones, smoothing, delay)
+
 	FilterMode lpfMode;
 	FilterMode hpfMode;
 	FilterRoute filterRoute;
@@ -117,6 +141,9 @@ public:
 	deluge::dsp::RMSFeedbackCompressor compressor;
 	deluge::dsp::MultibandCompressor multibandCompressor;
 	CompressorMode compressorMode{CompressorMode::SINGLE};
+
+	/// Apply modulated params from UnpatchedParamSet to multiband compressor before rendering
+	void applyMultibandCompressorParams(ParamManager* paramManager);
 	deluge::dsp::GranularProcessor* grainFX{nullptr};
 
 	uint32_t lowSampleRatePos{};

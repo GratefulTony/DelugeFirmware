@@ -19,6 +19,7 @@
 
 #include "definitions_cxx.hpp"
 #include "dsp/filter/filter_set.h"
+#include "dsp/sine_shaper.hpp"
 #include "model/voice/voice_sample_playback_guide.h"
 #include "model/voice/voice_unison_part.h"
 #include "modulation/envelope.h"
@@ -73,6 +74,13 @@ public:
 	int32_t portaEnvelopeMaxAmplitude;
 
 	std::array<uint32_t, 2> lastSaturationTanHWorkingValue;
+
+	// Per-voice ADAA state for Table Shaper (previous input samples)
+	float shaperPrevXL{0.0f};
+	float shaperPrevXR{0.0f};
+
+	// Per-voice sine shaper state (DC blocker, feedback, feedback LPF, stereo LFO)
+	deluge::dsp::SineShaperVoiceState sineShaperState;
 
 	int32_t overallOscAmplitudeLastTime;
 	std::array<int32_t, kNumSources> sourceAmplitudesLastTime;

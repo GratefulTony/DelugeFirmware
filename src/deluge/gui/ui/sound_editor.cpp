@@ -1553,14 +1553,20 @@ void SoundEditor::modEncoderAction(int32_t whichModEncoder, int32_t offset) {
 		// If learn button is pressed, learn this knob for current param
 		if (currentUIMode == UI_MODE_MIDI_LEARN) {
 
-			// But, can't do it if it's a Kit and affect-entire is on!
+			// Can't learn patched params if it's a Kit and affect-entire is on (no patched params exist)
+			// But unpatched params are fine to learn in that context
+			bool canLearn = true;
 			if (editingKitAffectEntire()) {
-				// IndicatorLEDs::indicateErrorOnLed(affectEntireLedX, affectEntireLedY);
+				auto kind = getCurrentMenuItem()->getParamKind();
+				canLearn = (kind == deluge::modulation::params::Kind::UNPATCHED_SOUND
+				            || kind == deluge::modulation::params::Kind::UNPATCHED_GLOBAL);
 			}
 
-			// Otherwise, everything's fine
-			else {
-				getCurrentMenuItem()->learnKnob(nullptr, whichModEncoder, getCurrentOutput()->modKnobMode, 255);
+			if (canLearn) {
+				// Get mod knob mode from the modControllable - works for both clip context and master track
+				uint8_t* modKnobModePtr = currentModControllable->getModKnobMode();
+				uint8_t modKnobMode = modKnobModePtr ? *modKnobModePtr : 0;
+				getCurrentMenuItem()->learnKnob(nullptr, whichModEncoder, modKnobMode, 255);
 			}
 		}
 
@@ -1595,6 +1601,12 @@ bool SoundEditor::setup(Clip* clip, const MenuItem* item, int32_t sourceIndex) {
 
 	// getParamManager and ModControllable for Performance Session View (and Session View)
 	if (!rootUIIsClipMinderScreen()) {
+		// Ensure affect entire is on and activeModControllableModelStack points to Song
+		// so gold knobs work on master track (like performance view does)
+		// Always update - even if affectEntire was already on, the modControllable might be stale
+		currentSong->affectEntire = true;
+		view.setActiveModControllableTimelineCounter(currentSong);
+
 		char modelStackMemory[MODEL_STACK_MAX_SIZE];
 		ModelStackWithThreeMainThings* modelStack =
 		    currentSong->setupModelStackWithSongAsTimelineCounter(modelStackMemory);

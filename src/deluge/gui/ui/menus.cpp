@@ -77,6 +77,9 @@
 #include "gui/menu_item/firmware/version.h"
 #include "gui/menu_item/flash/status.h"
 #include "gui/menu_item/fx/clipping.h"
+#include "gui/menu_item/fx/disperser.h"
+#include "gui/menu_item/fx/shaper.h"
+#include "gui/menu_item/fx/sine_shaper.h"
 #include "gui/menu_item/gate/mode.h"
 #include "gui/menu_item/gate/off_time.h"
 #include "gui/menu_item/gate/selection.h"
@@ -208,8 +211,10 @@
 #include "gui/menu_item/submenu/actual_source.h"
 #include "gui/menu_item/submenu/arp_mpe_submenu.h"
 #include "gui/menu_item/submenu/bend.h"
+#include "gui/menu_item/submenu/compressor.h"
 #include "gui/menu_item/submenu/mod_fx.h"
 #include "gui/menu_item/submenu/modulator.h"
+#include "gui/menu_item/submenu/shaping.h"
 #include "gui/menu_item/swing/interval.h"
 #include "gui/menu_item/synth_mode.h"
 #include "gui/menu_item/trigger/in/ppqn.h"
@@ -610,6 +615,50 @@ UnpatchedParam srrMenu{STRING_FOR_DECIMATION, params::UNPATCHED_SAMPLE_RATE_REDU
 UnpatchedParam bitcrushMenu{STRING_FOR_BITCRUSH, params::UNPATCHED_BITCRUSHING, RenderingStyle::BAR};
 patched_param::Integer foldMenu{STRING_FOR_WAVEFOLD, STRING_FOR_WAVEFOLD, params::LOCAL_FOLD, RenderingStyle::BAR};
 
+// Sine Shaper - sinusoidal waveshaper distortion
+fx::DynamicsPatchedParam sineShaperDriveMenu{STRING_FOR_SINE_SHAPER_DRIVE, STRING_FOR_SINE_SHAPER_DRIVE,
+                                             params::LOCAL_SINE_SHAPER_DRIVE, RenderingStyle::BAR};
+fx::SineShaperHarmonic sineShaperHarmonicMenu{STRING_FOR_SINE_SHAPER_HARMONIC};
+fx::SineShaperTwist sineShaperTwistMenu{STRING_FOR_SINE_SHAPER_SYMMETRY};
+fx::SineShaperMix sineShaperMixMenu{STRING_FOR_SINE_SHAPER_MIX};
+
+HorizontalMenu sineShaperSubMenu{
+    STRING_FOR_SINE_SHAPER_MENU,
+    {&sineShaperDriveMenu, &sineShaperHarmonicMenu, &sineShaperTwistMenu, &sineShaperMixMenu},
+};
+
+// Shaper - Table Shaper with XY control and lookup table
+// Uses TableShaperDrive to toggle AA on gold knob press
+fx::TableShaperDrive shaperDriveMenu{STRING_FOR_SHAPER_DRIVE, STRING_FOR_SHAPER_DRIVE, params::LOCAL_TABLE_SHAPER_DRIVE,
+                                     RenderingStyle::BAR};
+fx::TableShaperShapeX shaperShapeXMenu{STRING_FOR_SHAPER_SHAPE_X};
+fx::TableShaperShapeY shaperShapeYMenu{STRING_FOR_SHAPER_SHAPE_Y};
+fx::TableShaperMix shaperMixMenu{STRING_FOR_SHAPER_MIX, STRING_FOR_SHAPER_MIX, params::LOCAL_TABLE_SHAPER_MIX,
+                                 RenderingStyle::BAR};
+
+HorizontalMenu tableShaperSubMenu{
+    STRING_FOR_TABLE_SHAPER_MENU,
+    {&shaperDriveMenu, &shaperShapeXMenu, &shaperShapeYMenu, &shaperMixMenu},
+};
+
+// Disperser - allpass cascade with zone-based topology and character controls
+fx::DisperserFreq disperserFreqMenu{STRING_FOR_DISPERSER_FREQ};
+fx::DisperserTopo disperserTopoMenu{STRING_FOR_DISPERSER_TOPO};
+fx::DisperserTwist disperserTwistMenu{STRING_FOR_DISPERSER_TWIST};
+fx::DisperserStages disperserStagesMenu{STRING_FOR_DISPERSER_STAGES};
+
+HorizontalMenu disperserSubMenu{
+    STRING_FOR_DISPERSER_MENU,
+    {&disperserFreqMenu, &disperserTopoMenu, &disperserTwistMenu, &disperserStagesMenu},
+};
+
+// Shaping submenu - contains Sine Shaper, Table Shaper, and Disperser
+// Gated by DynamicsSoundDesign community feature
+submenu::Shaping shapingMenu{
+    STRING_FOR_SHAPING,
+    {&sineShaperSubMenu, &tableShaperSubMenu, &disperserSubMenu},
+};
+
 HorizontalMenu soundDistortionMenu{
     STRING_FOR_DISTORTION,
     {
@@ -809,7 +858,9 @@ Submenu globalFXMenu{
         &globalReverbMenu,
         &stutterMenu,
         &globalModFXMenu,
+        &shapingMenu,
         &globalDistortionMenu,
+        &dottMenu,
     },
 };
 
@@ -864,6 +915,7 @@ Submenu audioClipFXMenu{
         &globalReverbMenu,
         &stutterMenu,
         &globalModFXMenu,
+        &shapingMenu,
         &audioClipDistortionMenu,
     },
 };
@@ -1377,8 +1429,10 @@ Submenu soundFXMenu{
         &reverbMenu,
         &stutterMenu,
         &modFXMenu,
+        &shapingMenu,
         &soundDistortionMenu,
         &noiseMenu,
+        &dottMenu,
     },
 };
 
@@ -1821,7 +1875,7 @@ deluge::vector<HorizontalMenu*> horizontalMenusChainForKit = {
 	&kitClipMasterMenu,
 	&globalFiltersMenuGroup, &globalEQMenu, &globalModFXMenu,
 	&globalReverbMenuGroup, &globalDelayMenu, &globalDistortionMenu,
-	&globalSidechainMenu, &audioCompMenu, &stutterMenu,
+	&dottMenu, &globalSidechainMenu, &audioCompMenu, &stutterMenu,
 	&arpMenuGroupKit, &randomizerMenu
 };
 
@@ -1829,14 +1883,14 @@ deluge::vector<HorizontalMenu*> horizontalMenusChainForSong = {
 	&songMasterMenu,
 	&globalFiltersMenuGroup, &globalEQMenu, &globalModFXMenu,
 	&globalReverbMenuGroup, &globalDelayMenu, &globalDistortionMenu,
-	&audioCompMenu, &stutterMenu
+	&dottMenu, &audioCompMenu, &stutterMenu
 };
 
 deluge::vector<HorizontalMenu*> horizontalMenusChainForAudioClip = {
 	&audioClipMasterMenu, &audioClipSampleMenu,
 	&globalFiltersMenuGroup, &eqMenu, &globalModFXMenu,
 	&globalReverbMenuGroup, &globalDelayMenu, &audioClipDistortionMenu,
-	&globalSidechainMenu, &audioCompMenu, &stutterMenu
+	&dottMenu, &globalSidechainMenu, &audioCompMenu, &stutterMenu
 };
 
 deluge::vector<HorizontalMenu*> horizontalMenusChainForMidiOrCv = {

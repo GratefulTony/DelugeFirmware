@@ -18,15 +18,22 @@
 #include "model/global_effectable/global_effectable_for_clip.h"
 #include "definitions.h"
 #include "definitions_cxx.hpp"
+#include "dsp/shaper_buffer.h"
+#include "dsp/sine_shaper.hpp"
+#include "dsp/util.hpp"
 #include "dsp_ng/core/types.hpp"
 #include "gui/l10n/l10n.h"
 #include "gui/views/view.h"
+#include "io/debug/fx_benchmark.h"
 #include "model/action/action.h"
 #include "model/action/action_logger.h"
+#include "model/settings/runtime_feature_settings.h"
+#include "modulation/params/param_set.h"
 #include "processing/engines/audio_engine.h"
 #include <limits>
 #include <string.h>
 // #include <algorithm>
+#include "gui/menu_item/zone_based.h"
 #include "hid/buttons.h"
 #include "memory/general_memory_allocator.h"
 #include "model/clip/clip.h"
@@ -117,8 +124,33 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	    modelStack, global_effectable_audio, nullptr, reverbBuffer, reverbAmountAdjustForDrums, sideChainHitPending,
 	    shouldLimitDelayFeedback, isClipActive, pitchAdjust, 134217728, 134217728);
 
-	// Render saturation
+	// Shapers run before filters (matching voice processing order)
+	// Sine Shaper (uses getValueWithFallback for patched→unpatched mapping)
+	if (sineShaper.isEnabled()) {
+		q31_t sineDrive = paramManagerForClip->getValueWithFallback(params::LOCAL_SINE_SHAPER_DRIVE);
+		q31_t harmonic = paramManagerForClip->getValueWithFallback(params::LOCAL_SINE_SHAPER_HARMONIC);
+		q31_t twist = paramManagerForClip->getValueWithFallback(params::LOCAL_SINE_SHAPER_TWIST);
+		deluge::dsp::processSineShaper(global_effectable_audio, &sineShaper, &sineShaperState, sineDrive, harmonic,
+		                               harmonic, twist, twist, 0, false);
+	}
+
+	// Table Shaper (uses getValueWithFallback for patched→unpatched mapping)
+	if (shaper.isEnabled()) {
+		q31_t satDrive = paramManagerForClip->getValueWithFallback(params::LOCAL_TABLE_SHAPER_DRIVE);
+		q31_t satMix = paramManagerForClip->getValueWithFallback(params::LOCAL_TABLE_SHAPER_MIX);
+		deluge::dsp::shapeBufferInt32(
+		    global_effectable_audio, shaperDsp, satDrive, &shaper.driveLast, satMix, &shaper.mixNormLast_Q16, 0, false,
+		    &shaper.prevScaledInputL, &shaper.prevScaledInputR, &shaper.driftSlopeL_Q16, &shaper.driftSlopeR_Q16,
+		    &shaper.driftAccumL, &shaper.driftAccumR, &shaper.driftLfsr, &shaper.prevSampleL, &shaper.prevSampleR,
+		    &shaper.zcCountL, &shaper.zcCountR, &shaper.subSignL, &shaper.subSignR, shaper.subEnabled,
+		    shaper.gammaPhase, &shaper.slewedL, &shaper.slewedR);
+	}
+
+	// Render saturation (builtin shaper using getTanHAntialiased)
 	if (clippingAmount != 0u) {
+		FX_BENCH_DECLARE(benchClip, "shaper_builtin");
+		FX_BENCH_SCOPE(benchClip);
+
 		for (deluge::dsp::StereoSample<q31_t>& sample : global_effectable_audio) {
 			sample.l = saturate(sample.l, &lastSaturationTanHWorkingValue[0]);
 			sample.r = saturate(sample.r, &lastSaturationTanHWorkingValue[1]);
@@ -130,9 +162,35 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 
 	// Render FX
 	processSRRAndBitcrushing(global_effectable_audio, &volumePostFX, paramManagerForClip);
-	processFXForGlobalEffectable(global_effectable_audio, &volumePostFX, paramManagerForClip, delayWorkingState,
-	                             renderedLastTime, reverbSendAmount);
+	processDisperser(global_effectable_audio, paramManagerForClip);
+
+	// Check if ModFX should run after DOTT and stutter
+	bool modFXPostDOTT =
+	    runtimeFeatureSettings.get(RuntimeFeatureSettingType::ModFXPostDOTT) == RuntimeFeatureStateToggle::On;
+	bool dottEnabled = multibandCompressor.isEnabled();
+
+	// Default order: ModFX → Stutter → DOTT → Reverb
+	// With ModFXPostDOTT: Stutter → DOTT → ModFX → Reverb
+	if (!modFXPostDOTT) {
+		processFXForGlobalEffectable(global_effectable_audio, &volumePostFX, paramManagerForClip, delayWorkingState,
+		                             renderedLastTime, reverbSendAmount);
+	}
+
 	processStutter(global_effectable_audio, paramManagerForClip);
+
+	// DOTT (multiband compressor) - runs after stutter
+	if (dottEnabled) {
+		applyMultibandCompressorParams(paramManagerForClip);
+		multibandCompressor.setMeteringEnabled(runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DOTTAnalyzer));
+		multibandCompressor.render(global_effectable_audio);
+	}
+
+	// ModFX after DOTT when setting is ON
+	if (modFXPostDOTT) {
+		processFXForGlobalEffectable(global_effectable_audio, &volumePostFX, paramManagerForClip, delayWorkingState,
+		                             renderedLastTime, reverbSendAmount);
+	}
+
 	// record before pan/compression/volume to keep volumes consistent
 	if (recorder != nullptr && recorder->status < RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
 		// we need to double it because for reasons I don't understand audio clips max volume is half the sample volume
@@ -143,16 +201,11 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 	                           pan, true);
 
 	if (compThreshold > 0) {
-		if (compressorMode == CompressorMode::MULTIBAND) {
-			multibandCompressor.render(global_effectable_audio, volumePostFX);
-		}
-		else {
-			compressor.renderVolNeutral(global_effectable_audio, volumePostFX);
-		}
+		// Single-band compressor runs when threshold is set
+		compressor.renderVolNeutral(global_effectable_audio, volumePostFX);
 	}
 	else {
 		compressor.reset();
-		multibandCompressor.reset();
 	}
 
 	// Add the global effectable data to the output

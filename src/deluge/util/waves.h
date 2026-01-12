@@ -59,3 +59,41 @@ extern uint32_t z, w, jcong;
 	}
 	return slope * phase + offset;
 }
+
+/**
+ * Compute phase scaler for audio-rate triangle with dead zone
+ * @param phaseWidth Active region width
+ * @return Precomputed scaler for use with triangleWithDeadzoneBipolar
+ */
+[[gnu::always_inline]] inline uint64_t computeTrianglePhaseScaler(uint32_t phaseWidth) {
+	return 0xFFFFFFFFFFFFFFFFULL / phaseWidth;
+}
+
+/**
+ * Bipolar triangle with dead zone - one complete cycle then silence
+ *
+ * Waveform: 0 → +max → 0 → -max → 0 within phaseWidth, then 0
+ *
+ * @param phase Full 32-bit phase accumulator
+ * @param phaseWidth Active region width (dead zone from phaseWidth to end of cycle)
+ * @param phaseScaler Precomputed scaler from computeTrianglePhaseScaler(), or 0 to compute internally
+ * @return Q31 bipolar value (-0x7FFFFFFF to +0x7FFFFFFF)
+ */
+[[gnu::always_inline]] inline int32_t triangleWithDeadzoneBipolar(uint32_t phase, uint32_t phaseWidth,
+                                                                  uint64_t phaseScaler = 0) {
+	if (phase >= phaseWidth) {
+		return 0;
+	}
+
+	// Compute scaler if not precomputed (control-rate path)
+	if (phaseScaler == 0) {
+		phaseScaler = 0xFFFFFFFFFFFFFFFFULL / phaseWidth;
+	}
+
+	// Scale phase to full cycle range, then use standard triangle
+	uint32_t scaledPhase = static_cast<uint32_t>((static_cast<uint64_t>(phase) * phaseScaler) >> 32);
+
+	// Offset so waveform starts at 0 (quarter cycle)
+	// Use getTriangleSmall for amplitude matching with OscType::TRIANGLE
+	return getTriangleSmall(scaledPhase + 0x40000000u);
+}

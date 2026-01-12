@@ -119,6 +119,11 @@ int32_t getParamNeutralValue(int32_t p) {
 	case params::LOCAL_PAN:
 	case params::LOCAL_OSC_A_PHASE_WIDTH:
 	case params::LOCAL_OSC_B_PHASE_WIDTH:
+	case params::LOCAL_TABLE_SHAPER_DRIVE: // Bipolar: 0 = unity, negative = attenuation
+	case params::LOCAL_SINE_SHAPER_DRIVE:
+	case params::LOCAL_TABLE_SHAPER_MIX:     // Unipolar mix: 0 at knob min, 100% at knob max
+	case params::LOCAL_SINE_SHAPER_TWIST:    // Pure modulation (base stored in field)
+	case params::LOCAL_SINE_SHAPER_HARMONIC: // Pure modulation (base stored in field)
 		return 0;
 
 	case params::LOCAL_ENV_0_ATTACK:
@@ -750,6 +755,9 @@ char const* oscTypeToString(OscType oscType) {
 	case OscType::TRIANGLE:
 		return "triangle";
 
+	case OscType::TRIANGLE_PW:
+		return "trianglePW";
+
 	case OscType::SAMPLE:
 		return "sample";
 
@@ -807,6 +815,9 @@ OscType stringToOscType(char const* string) {
 	}
 	else if (!strcmp(string, "dx7")) {
 		return OscType::DX7;
+	}
+	else if (!strcmp(string, "trianglePW")) {
+		return OscType::TRIANGLE_PW;
 	}
 	else {
 		return OscType::TRIANGLE;
@@ -1500,6 +1511,7 @@ bool shouldDoPanning(int32_t panAmount, int32_t* amplitudeL, int32_t* amplitudeR
 uint32_t getOscInitialPhaseForZero(OscType waveType) {
 	switch (waveType) {
 	case OscType::TRIANGLE:
+	case OscType::TRIANGLE_PW:
 		return 1073741824;
 
 	default:

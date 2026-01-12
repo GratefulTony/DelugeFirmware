@@ -32,6 +32,7 @@
 #include "hid/display/display.h"
 #include "hid/encoders.h"
 #include "hid/led/indicator_leds.h"
+#include "io/debug/fx_benchmark.h"
 #include "io/debug/log.h"
 #include "io/midi/midi_engine.h"
 #include "memory/general_memory_allocator.h"
@@ -604,6 +605,8 @@ bool calledFromScheduler = false;
 	bypassCulling = false;
 }
 void renderAudio(size_t numSamples) {
+	FX_BENCH_TICK(); // Advance global sampling counter
+
 	std::span renderingBuffer{renderingMemory.data(), numSamples};
 	std::span reverbBuffer{reverbMemory.data(), numSamples};
 
@@ -636,6 +639,8 @@ void renderAudio(size_t numSamples) {
 
 	renderingBufferOutputPos = renderingMemory.begin();
 	renderingBufferOutputEnd = renderingMemory.begin() + numSamples;
+
+	FX_BENCH_END_BUFFER(); // Reset sampling flag for next buffer
 }
 
 void renderAudioForStemExport(size_t numSamples) {
@@ -831,7 +836,11 @@ void renderReverb(size_t numSamples) {
 
 		// Mix reverb into main render
 		reverb.setPanLevels(reverbAmplitudeL, reverbAmplitudeR);
-		reverb.process(reverbBuffer, renderingBuffer);
+		{
+			FX_BENCH_DECLARE(bench, "reverb");
+			FX_BENCH_SCOPE(bench);
+			reverb.process(reverbBuffer, renderingBuffer);
+		}
 		logAction("Reverb complete");
 	}
 }
@@ -863,6 +872,7 @@ void renderSongFX(size_t numSamples) { // LPF and stutter for song (must happen 
 		currentSong->globalEffectable.processFilters(renderingBuffer);
 		currentSong->globalEffectable.processSRRAndBitcrushing(renderingBuffer, &masterVolumeAdjustmentL,
 		                                                       &currentSong->paramManager);
+		currentSong->globalEffectable.processDisperser(renderingBuffer, &currentSong->paramManager);
 
 		masterVolumeAdjustmentR = masterVolumeAdjustmentL; // This might have changed in the above function calls
 
@@ -883,6 +893,15 @@ void renderSongFX(size_t numSamples) { // LPF and stutter for song (must happen 
 				masterVolumeAdjustmentR = multiply_32x32_rshift32(masterVolumeAdjustmentR, amplitudeR) << 2;
 			}
 		}
+
+		// Master DOTT (distortion/saturation) - runs pre-compressor
+		if (currentSong->globalEffectable.multibandCompressor.isEnabled()) {
+			currentSong->globalEffectable.applyMultibandCompressorParams(&currentSong->paramManager);
+			currentSong->globalEffectable.multibandCompressor.setMeteringEnabled(
+			    runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DOTTAnalyzer));
+			currentSong->globalEffectable.multibandCompressor.render(renderingBuffer);
+		}
+
 		logAction("mastercomp start");
 
 		int32_t songVolume =
@@ -892,13 +911,8 @@ void renderSongFX(size_t numSamples) { // LPF and stutter for song (must happen 
 		    >> 1;
 		// there used to be a static subtraction of 2 nepers (natural log based dB), this is the multiplicative
 		// equivalent
-		if (currentSong->globalEffectable.compressorMode == CompressorMode::MULTIBAND) {
-			currentSong->globalEffectable.multibandCompressor.render(renderingBuffer, songVolume >> 3);
-		}
-		else {
-			currentSong->globalEffectable.compressor.render(renderingBuffer, masterVolumeAdjustmentL >> 1,
-			                                                masterVolumeAdjustmentR >> 1, songVolume >> 3);
-		}
+		currentSong->globalEffectable.compressor.render(renderingBuffer, masterVolumeAdjustmentL >> 1,
+		                                                masterVolumeAdjustmentR >> 1, songVolume >> 3);
 		masterVolumeAdjustmentL = ONE_Q31;
 		masterVolumeAdjustmentR = ONE_Q31;
 		logAction("mastercomp end");

@@ -36,3 +36,20 @@ __pycache__
 *.srctrl*
 
 .deluge_hex_key
+
+# Recovery notes (not for commit)
+DOTT_RECOVERY_NOTES.md
+
+# Design notes (not for commit)
+src/deluge/dsp/compressor/DOTT_SATURATION.md
+src/deluge/dsp/compressor/DOTT_VIBE_SATURATION.md
+
+.claude
+CLAUDE.md
+
+# PR documentation (not for commit)
+DYNAMICS_SOUND_DESIGN_PR.md
+
+# FX benchmark output
+fx_benchmark.csv
+tmp

@@ -312,6 +312,23 @@ void RuntimeFeatureSettings::init() {
 	// Retrospective Sampler - Normalize (normalize audio when saving)
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::RetrospectiveSamplerNormalize],
 	                  STRING_FOR_COMMUNITY_FEATURE_RETRO_NORMALIZE, "retroNormalize", RuntimeFeatureStateToggle::Off);
+
+	// Advanced Sound Design (OTT, Sine Shaper, etc.)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DynamicsSoundDesign],
+	                  STRING_FOR_COMMUNITY_FEATURE_DYNAMICS_SOUND_DESIGN, "dynamicsSoundDesign",
+	                  RuntimeFeatureStateToggle::Off);
+
+	// Mod FX Post DOTT - places modulation FX after DOTT and stutter (default: off, ModFX before stutter/DOTT)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::ModFXPostDOTT], STRING_FOR_COMMUNITY_FEATURE_MOD_FX_POST_DOTT,
+	                  "modFXPostDOTT", RuntimeFeatureStateToggle::Off);
+
+	// DOTT Analyzer - enables/disables the GR meter animation in DOTT menu (default: on)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DOTTAnalyzer], STRING_FOR_COMMUNITY_FEATURE_DOTT_ANALYZER,
+	                  "dottAnalyzer", RuntimeFeatureStateToggle::On);
+
+	// Disperser HiCPU - enables 9-32 stages (default: off, limited to 8 stages)
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DisperserHiCPU],
+	                  STRING_FOR_COMMUNITY_FEATURE_DISPERSER_HI_CPU, "disperserHiCPU", RuntimeFeatureStateToggle::Off);
 }
 
 void RuntimeFeatureSettings::readSettingsFromFile() {
