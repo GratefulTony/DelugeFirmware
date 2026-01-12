@@ -121,7 +121,7 @@ public:
 	}
 
 	// Show "OFF" in horizontal menu when X=0
-	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
 		if (this->getValue() == 0) {
 			deluge::hid::display::OLED::main.drawStringCentered("OFF", slot.start_x,
 			                                                    slot.start_y + kHorizontalMenuSlotYOffset,
@@ -180,8 +180,8 @@ public:
 			                               mca->shaper.oscHarmonicWeight);
 			shaper_regen::scheduleRegeneration(mca);
 			// Show current value on display
-			char buffer[12];
-			intToString(static_cast<int32_t>(gammaPhase * 10.0f), buffer);
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "G:%d", static_cast<int32_t>(gammaPhase * 10.0f));
 			display->displayPopup(buffer);
 			suppressNotification_ = true;
 		}
@@ -198,7 +198,7 @@ public:
 		return true;
 	}
 
-	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
 		float gammaPhase = soundEditor.currentModControllable->shaper.gammaPhase;
 		if (gammaPhase != 0.0f) {
 			// When secret knob is engaged, show "~N" with zone visual indicator

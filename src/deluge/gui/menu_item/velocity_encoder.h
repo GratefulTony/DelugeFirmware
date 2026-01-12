@@ -90,7 +90,7 @@ using MomentumEncoder = VelocityEncoder;
 /// @param numZones Number of zones to divide the range into
 /// @param getZoneName Function to get zone name from index
 template <typename GetZoneName>
-void renderZoneInHorizontalMenu(const HorizontalMenuSlotParams& slot, int32_t value, int32_t maxValue, int32_t numZones,
+void renderZoneInHorizontalMenu(const SlotPosition& slot, int32_t value, int32_t maxValue, int32_t numZones,
                                 GetZoneName getZoneName) {
 	using namespace deluge::hid::display;
 

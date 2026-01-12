@@ -16,6 +16,7 @@
  */
 #pragma once
 
+#include <cstdio>
 #include <cstring>
 
 #include "definitions_cxx.hpp"
@@ -116,7 +117,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -170,7 +170,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -218,7 +217,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -266,7 +264,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -314,7 +311,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return ATTACK; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -362,7 +358,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return RELEASE; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -397,9 +392,10 @@ public:
 			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
 			comp.setFeelPhaseOffset(phase);
 			// Show current value on display
-			char buffer[12];
-			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "offset:%d", static_cast<int32_t>(phase * 10.0f));
 			display->displayPopup(buffer);
+			renderUIsForOled(); // Refresh display for consistency
 			suppressNotification_ = true;
 		}
 		else {
@@ -454,7 +450,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -463,7 +458,8 @@ public:
 };
 
 /// Vibe control - controls phase relationships between oscillations in Feel
-/// Zones: Sync, Spread, Pairs, Cascade, Invert, Pulse, Drift, Chaos
+/// Zones: Sync, Spread, Pairs, Cascade, Invert, Pulse, Drift, Twist
+/// When vibePhaseOffset > 0: Full phi-triangle evolution across ALL zones, shows coordinates
 /// Secret menu: push+turn encoder to adjust twist phase offset
 class Vibe final : public ZoneBasedUnpatchedParam<params::UNPATCHED_MB_COMPRESSOR_VIBE> {
 public:
@@ -471,8 +467,13 @@ public:
 
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		static constexpr const char* kNames[] = {"Sync",   "Spread", "Pairs", "Cascade",
-		                                         "Invert", "Pulse",  "Drift", "Chaos"};
+		                                         "Invert", "Pulse",  "Drift", "Twist"};
 		return (zoneIndex >= 0 && zoneIndex < 8) ? kNames[zoneIndex] : "?";
+	}
+
+	[[nodiscard]] const char* getShortZoneName(int32_t zoneIndex) const override {
+		static constexpr const char* kNames[] = {"SY", "SP", "PA", "CA", "IN", "PU", "DR", "TW"};
+		return (zoneIndex >= 0 && zoneIndex < 8) ? kNames[zoneIndex] : "??";
 	}
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
@@ -490,9 +491,10 @@ public:
 			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
 			comp.setVibePhaseOffset(phase);
 			// Show current value on display
-			char buffer[12];
-			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "offset:%d", static_cast<int32_t>(phase * 10.0f));
 			display->displayPopup(buffer);
+			renderUIsForOled(); // Refresh display to show updated coordinate format
 			suppressNotification_ = true;
 		}
 		else {
@@ -508,8 +510,51 @@ public:
 		return true;
 	}
 
+	// Override rendering to show numeric coordinates when phaseOffset > 0
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
+		float phaseOffset = soundEditor.currentModControllable->multibandCompressor.getVibePhaseOffset();
+		if (phaseOffset != 0.0f) {
+			// When secret knob is engaged, show "P:Z" (phase:zone) with visual indicator
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			renderZoneInHorizontalMenu(slot, this->getValue(), kVibeResolution, kVibeNumZones, getCoordName);
+		}
+		else {
+			renderZoneInHorizontalMenu(slot, this->getValue(), kVibeResolution, kVibeNumZones,
+			                           [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+protected:
+	void drawPixelsForOled() override {
+		float phaseOffset = soundEditor.currentModControllable->multibandCompressor.getVibePhaseOffset();
+		if (phaseOffset != 0.0f) {
+			// When secret knob is engaged, show numeric coordinates
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			drawZoneForOled(this->getValue(), kVibeResolution, kVibeNumZones, getCoordName);
+		}
+		else {
+			drawZoneForOled(this->getValue(), kVibeResolution, kVibeNumZones,
+			                [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
 private:
 	mutable bool suppressNotification_ = false;
+
+	// Resolution and zone count for vibe (1024 steps, 8 zones - must match kZoneParamDefault)
+	static constexpr int32_t kVibeResolution = 1024;
+	static constexpr int32_t kVibeNumZones = 8;
+
+	// Static storage for coordinate display (used by getCoordName callback)
+	static inline char coordBuffer_[12] = {};
+	static void cacheCoordDisplay(float phaseOffset, int32_t value) {
+		// Format: "P:Z" where P=phaseOffset (int), Z=zone index (0-7)
+		// 128 encoder clicks = 1 zone (1024 / 8 = 128)
+		int32_t p = static_cast<int32_t>(phaseOffset * 10.0f);
+		int32_t z = value >> 7; // 0-1023 → 0-7 (zone index)
+		snprintf(coordBuffer_, sizeof(coordBuffer_), "%d:%d", p, z);
+	}
+	static const char* getCoordName([[maybe_unused]] int32_t zoneIndex) { return coordBuffer_; }
 };
 
 /// Global output gain control
@@ -554,7 +599,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -589,7 +633,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -625,7 +668,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -660,7 +702,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -723,7 +764,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 1; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)
@@ -765,7 +805,6 @@ public:
 
 	[[nodiscard]] int32_t getMaxValue() const override { return kNumModes - 1; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	/// Click encoder to toggle soft clipping
 	MenuItem* selectButtonPress() override {
@@ -784,7 +823,7 @@ public:
 	}
 
 	// Display mode name as text (not zone knob visualization)
-	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
 		deluge::hid::display::OLED::main.drawStringCentered(getModeName(this->getValue()), slot.start_x, slot.start_y,
 		                                                    kTextSmallSpacingX, kTextSmallSizeY, slot.width);
 	}
@@ -874,7 +913,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxKnobPos; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::DynamicsSoundDesign)

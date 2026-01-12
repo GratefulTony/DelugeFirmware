@@ -70,7 +70,7 @@ public:
 // Disperser Stages: Number of active allpass stages (0-8 or 0-32 with HiCPU enabled)
 // CPU cost scales roughly linearly: s8 ≈ 2x reverb, s16 ≈ 4x, s24 ≈ 8x, s32 ≈ 10x+
 // Higher stage counts (9-32) require DisperserHiCPU community feature to be enabled
-// Secret menu: Push+twist encoder to adjust gammaPhase (offsets both topo and twist meta zones by 100*gamma)
+// Secret menu: Push+twist encoder to adjust gammaPhase (offsets both topo and twist meta zones by 1024*gamma)
 class DisperserStages final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
@@ -122,13 +122,14 @@ public:
 
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret menu: adjust gammaPhase (adds 100*gamma to both topo and twist meta zones)
+			// Secret menu: adjust gammaPhase (adds 1024*gamma to both topo and twist meta zones)
 			Buttons::selectButtonPressUsedUp = true;
 			float& gamma = soundEditor.currentModControllable->disperser.phases.gammaPhase;
 			gamma = std::max(0.0f, gamma + static_cast<float>(offset) * 0.1f);
-			char buffer[12];
-			intToString(static_cast<int32_t>(gamma * 10.0f), buffer);
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "G:%d", static_cast<int32_t>(gamma * 10.0f));
 			display->displayPopup(buffer);
+			renderUIsForOled(); // Refresh display to show updated coordinate format
 			suppressNotification_ = true;
 		}
 		else {
@@ -151,7 +152,7 @@ public:
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
 
 	// Show "OFF" when stages=0 (effect bypassed)
-	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
 		if (this->getValue() == 0) {
 			deluge::hid::display::OLED::main.drawStringCentered("OFF", slot.start_x,
 			                                                    slot.start_y + kHorizontalMenuSlotYOffset,
@@ -242,9 +243,10 @@ public:
 			Buttons::selectButtonPressUsedUp = true;
 			float& phase = soundEditor.currentModControllable->disperser.phases.topoPhaseOffset;
 			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
-			char buffer[12];
-			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "offset:%d", static_cast<int32_t>(phase * 10.0f));
 			display->displayPopup(buffer);
+			renderUIsForOled(); // Refresh display for consistency
 			suppressNotification_ = true;
 		}
 		else {
@@ -302,9 +304,11 @@ public:
 		case 4:
 			return "QTilt"; // Q varies across stages
 		case 5:
+			return "Twist1"; // Meta zone 1
 		case 6:
+			return "Twist2"; // Meta zone 2
 		case 7:
-			return "Meta";
+			return "Twist3"; // Meta zone 3
 		default:
 			return "---";
 		}
@@ -323,7 +327,7 @@ public:
 		case 4:
 			return "QT"; // Q Tilt
 		default:
-			return "MT";
+			return "TW"; // Twist zones 5-7
 		}
 	}
 
@@ -333,9 +337,10 @@ public:
 			Buttons::selectButtonPressUsedUp = true;
 			float& phase = soundEditor.currentModControllable->disperser.phases.twistPhaseOffset;
 			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
-			char buffer[12];
-			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "offset:%d", static_cast<int32_t>(phase * 10.0f));
 			display->displayPopup(buffer);
+			renderUIsForOled(); // Refresh display to show updated coordinate format
 			suppressNotification_ = true;
 		}
 		else {
@@ -351,8 +356,51 @@ public:
 		return true;
 	}
 
+	// Override rendering to show numeric coordinates when phaseOffset > 0
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
+		double phaseOffset = soundEditor.currentModControllable->disperser.phases.effectiveMeta();
+		if (phaseOffset != 0.0) {
+			// When secret knob is engaged, show "P:Z" (phase:zone) with visual indicator
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			renderZoneInHorizontalMenu(slot, this->getValue(), kDisperserResolution, kDisperserNumZones, getCoordName);
+		}
+		else {
+			renderZoneInHorizontalMenu(slot, this->getValue(), kDisperserResolution, kDisperserNumZones,
+			                           [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+protected:
+	void drawPixelsForOled() override {
+		double phaseOffset = soundEditor.currentModControllable->disperser.phases.effectiveMeta();
+		if (phaseOffset != 0.0) {
+			// When secret knob is engaged, show numeric coordinates
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			drawZoneForOled(this->getValue(), kDisperserResolution, kDisperserNumZones, getCoordName);
+		}
+		else {
+			drawZoneForOled(this->getValue(), kDisperserResolution, kDisperserNumZones,
+			                [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
 private:
 	mutable bool suppressNotification_ = false;
+
+	// Resolution and zone count for disperser (1024 steps, 8 zones)
+	static constexpr int32_t kDisperserResolution = 1024;
+	static constexpr int32_t kDisperserNumZones = 8;
+
+	// Static storage for coordinate display (used by getCoordName callback)
+	static inline char coordBuffer_[12] = {};
+	static void cacheCoordDisplay(double phaseOffset, int32_t value) {
+		// Format: "P:Z" where P=phaseOffset (int), Z=zone index (0-7)
+		// 128 encoder clicks = 1 zone, so Z increments once per zone traversal
+		int32_t p = static_cast<int32_t>(phaseOffset);
+		int32_t z = value >> 7; // 0-1023 → 0-7 (zone index)
+		snprintf(coordBuffer_, sizeof(coordBuffer_), "%d:%d", p, z);
+	}
+	static const char* getCoordName([[maybe_unused]] int32_t zoneIndex) { return coordBuffer_; }
 };
 
 } // namespace deluge::gui::menu_item::fx

@@ -930,7 +930,8 @@ public:
 	}
 
 	/// Set vibe (0 to ONE_Q31) - controls phase relationships between Feel oscillations
-	/// Divided into 8 zones: Sync, Spread, Pairs, Cascade, Invert, Pulse, Drift, Chaos
+	/// Divided into 8 zones: Sync, Spread, Pairs, Cascade, Invert, Pulse, Drift, Twist
+	/// When vibePhaseOffset > 0: Full phi-triangle evolution across ALL zones
 	void setVibe(q31_t v) {
 		vibeKnob_ = v;
 		// Invalidate character cache - OWLTT zone depends on vibe phases
@@ -960,7 +961,37 @@ public:
 			vibeTwist_ = 1.0f - blend * 0.5f * (1.0f - triangleVal);
 		}
 
-		// Compute phase offsets based on zone
+		// Check if phaseOffset is engaged - use full phi-triangle evolution across all zones
+		if (vibePhaseOffset_ != 0.0f) {
+			// Full range phi-triangle evolution (like Twist zones, but across all 8 zones)
+			float pos = globalVibePos;
+
+			// Use double for phase wrapping to maintain precision at large values
+			double phRaw = static_cast<double>(vibePhaseOffset_);
+
+			// Per-frequency phase offsets - irrational frequencies create non-repeating divergence
+			float ph225 = phi::wrapPhase(phRaw * phi::kPhi225);
+			float ph300 = phi::wrapPhase(phRaw * phi::kPhi300);
+			float ph350 = phi::wrapPhase(phRaw * phi::kPhi350);
+			float ph375 = phi::wrapPhase(phRaw * phi::kPhi375);
+			float ph400 = phi::wrapPhase(phRaw * phi::kPhi400);
+			float ph325 = phi::wrapPhase(phRaw * phi::kPhi325);
+			float ph360 = phi::wrapPhase(phRaw * phi::kPhi360);
+			float ph385 = phi::wrapPhase(phRaw * phi::kPhi385);
+
+			float wpVal = 0.5f * triangleFloat(pos * phi::kPhi225 - 0.25f + ph225);
+			vibePhaseWidth_ = {wpVal, wpVal, wpVal};
+			vibePhaseKnee_ = 0.5f * triangleFloat(pos * phi::kPhi300 + ph300);
+			vibePhaseTiming_[0] = 0.5f * triangleFloat(pos * phi::kPhi350 - 0.25f + ph350);
+			vibePhaseTiming_[1] = 0.5f * triangleFloat(pos * phi::kPhi375 + 0.083f + ph375);
+			vibePhaseTiming_[2] = 0.5f * triangleFloat(pos * phi::kPhi400 + 0.417f + ph400);
+			vibePhaseSkew_[0] = 0.5f * triangleFloat(pos * phi::kPhi325 + 0.25f + ph325);
+			vibePhaseSkew_[1] = 0.5f * triangleFloat(pos * phi::kPhi360 - 0.083f + ph360);
+			vibePhaseSkew_[2] = 0.5f * triangleFloat(pos * phi::kPhi385 + 0.583f + ph385);
+			return;
+		}
+
+		// Standard discrete zone behavior (vibePhaseOffset == 0)
 		switch (zone) {
 		case 0: // Sync: all in phase, sweep from 0 to slight offset
 			vibePhaseWidth_ = {zonePos * 0.1f, zonePos * 0.1f, zonePos * 0.1f};
@@ -1011,29 +1042,16 @@ public:
 			vibePhaseSkew_ = {0.15f * zonePos, 0.35f * zonePos, 0.25f * zonePos};
 			break;
 
-		case 7: { // Chaos: phi-power frequencies with secret phase offset
-			// Use double for phase wrapping to maintain precision at large values
-			double phRaw = static_cast<double>(vibePhaseOffset_);
-
-			// Per-frequency phase offsets - irrational frequencies create non-repeating divergence
-			float ph225 = phi::wrapPhase(phRaw * phi::kPhi225);
-			float ph300 = phi::wrapPhase(phRaw * phi::kPhi300);
-			float ph350 = phi::wrapPhase(phRaw * phi::kPhi350);
-			float ph375 = phi::wrapPhase(phRaw * phi::kPhi375);
-			float ph400 = phi::wrapPhase(phRaw * phi::kPhi400);
-			float ph325 = phi::wrapPhase(phRaw * phi::kPhi325);
-			float ph360 = phi::wrapPhase(phRaw * phi::kPhi360);
-			float ph385 = phi::wrapPhase(phRaw * phi::kPhi385);
-
-			float wpVal = 0.5f * triangleFloat(zonePos * phi::kPhi225 - 0.25f + ph225);
+		case 7: { // Twist: phi-power frequencies (uses pos within zone only when phaseOffset==0)
+			float wpVal = 0.5f * triangleFloat(zonePos * phi::kPhi225 - 0.25f);
 			vibePhaseWidth_ = {wpVal, wpVal, wpVal};
-			vibePhaseKnee_ = 0.5f * triangleFloat(zonePos * phi::kPhi300 + ph300);
-			vibePhaseTiming_[0] = 0.5f * triangleFloat(zonePos * phi::kPhi350 - 0.25f + ph350);
-			vibePhaseTiming_[1] = 0.5f * triangleFloat(zonePos * phi::kPhi375 + 0.083f + ph375);
-			vibePhaseTiming_[2] = 0.5f * triangleFloat(zonePos * phi::kPhi400 + 0.417f + ph400);
-			vibePhaseSkew_[0] = 0.5f * triangleFloat(zonePos * phi::kPhi325 + 0.25f + ph325);
-			vibePhaseSkew_[1] = 0.5f * triangleFloat(zonePos * phi::kPhi360 - 0.083f + ph360);
-			vibePhaseSkew_[2] = 0.5f * triangleFloat(zonePos * phi::kPhi385 + 0.583f + ph385);
+			vibePhaseKnee_ = 0.5f * triangleFloat(zonePos * phi::kPhi300);
+			vibePhaseTiming_[0] = 0.5f * triangleFloat(zonePos * phi::kPhi350 - 0.25f);
+			vibePhaseTiming_[1] = 0.5f * triangleFloat(zonePos * phi::kPhi375 + 0.083f);
+			vibePhaseTiming_[2] = 0.5f * triangleFloat(zonePos * phi::kPhi400 + 0.417f);
+			vibePhaseSkew_[0] = 0.5f * triangleFloat(zonePos * phi::kPhi325 + 0.25f);
+			vibePhaseSkew_[1] = 0.5f * triangleFloat(zonePos * phi::kPhi360 - 0.083f);
+			vibePhaseSkew_[2] = 0.5f * triangleFloat(zonePos * phi::kPhi385 + 0.583f);
 			break;
 		}
 

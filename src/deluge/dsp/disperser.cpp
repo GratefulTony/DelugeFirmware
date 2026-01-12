@@ -254,8 +254,51 @@ DisperserTwistParams computeDisperserTwistParams(q31_t smoothedTwist, const Disp
 
 	DisperserTwistParams result;
 
-	if (zoneInfo.index < 5) {
-		// Zones 0-4: Individual effects
+	// Get combined phase offset (twistPhaseOffset + 100*gammaPhase)
+	double phRaw = params ? params->phases.effectiveMeta() : 0.0;
+
+	// When phase offset is active, use full phi-triangle evolution across entire range
+	// This matches table shaper's behavior: phaseOffset > 0 = full parameter interference
+	if (phRaw != 0.0) {
+		// Full range phi-triangle evolution (like meta zones, but across all 8 zones)
+		float pos = static_cast<float>(smoothedTwist) / static_cast<float>(ONE_Q31);
+		pos = std::clamp(pos, 0.0f, 1.0f);
+
+		// Per-effect frequency modulation using phi triangles (non-monotonic)
+		float fmW = freqMod(pos, phRaw, kPhi025);
+		float fmP = freqMod(pos, phRaw, kPhi033);
+		float fmC = freqMod(pos, phRaw, kPhi050);
+		float fmQ = freqMod(pos, phRaw, kPhi067);
+		float fmD = freqMod(pos, phRaw, kPhi075);
+
+		// Width: scale * param pattern
+		float wS = std::min(phiTri(pos, phRaw, kPhi025, fmW, 0.166f, 0.8f) * 2.0f, 1.0f);
+		float wP = phiTri(pos, phRaw, kPhi050, fmW, 0.984f, 0.7f);
+		result.width = wS * wP;
+
+		// Punch evolves - more punch during certain phases
+		result.punch = phiTri(pos, phRaw, kPhi033, fmP, 0.3f, 0.7f);
+
+		// Curve sweeps bipolar
+		float curveRaw = phiTriBi(pos, phRaw, kPhi050, fmC, 0.5f);
+		result.spreadCurve = 0.5f + curveRaw * 0.5f; // Map to 0-1
+
+		// Chirp feedback evolves (delay time from freq knob)
+		result.chirpAmount = phiTri(pos, phRaw, kPhi067, fmD, 0.4f, 0.6f);
+
+		// Q tilt sweeps bipolar
+		result.qTilt = phiTriBi(pos, phRaw, kPhiN025, fmQ, 0.7f) * 0.8f;
+
+		// Phase offset for topo: twist position rotates through topo's phi triangle patterns
+		// 5 cycles per full sweep (like sine shaper)
+		result.phaseOffset = pos * 5.0f;
+
+		// LFO rate scale: 0.25×–2× with 70% duty (30% deadzone at minimum rate)
+		float fmLfo = freqMod(pos, phRaw, kPhi100);
+		result.lfoRateScale = 0.25f + phiTri(pos, phRaw, kPhi150, fmLfo, 0.6f, 0.70f) * 1.75f;
+	}
+	else if (zoneInfo.index < 5) {
+		// Zones 0-4: Individual effects (phaseOffset == 0 only)
 		float pos = std::clamp(zoneInfo.position, 0.0f, 1.0f);
 
 		switch (zoneInfo.index) {
@@ -294,14 +337,12 @@ DisperserTwistParams computeDisperserTwistParams(q31_t smoothedTwist, const Disp
 		}
 	}
 	else {
-		// Zones 5-7: Meta - all effects with φ-triangle evolution
+		// Zones 5-7: Meta - all effects with φ-triangle evolution (phaseOffset == 0)
 		float pos = static_cast<float>(smoothedTwist - kZone5Start) / static_cast<float>(ONE_Q31 - kZone5Start);
 		pos = std::clamp(pos, 0.0f, 1.0f);
 
-		// Get combined phase offset (twistPhaseOffset + 100*gammaPhase)
-		double phRaw = params ? params->phases.effectiveMeta() : 0.0;
-
 		// Per-effect frequency modulation using phi triangles (non-monotonic)
+		// phRaw is 0 here, so this gives baseline behavior
 		float fmW = freqMod(pos, phRaw, kPhi025);
 		float fmP = freqMod(pos, phRaw, kPhi033);
 		float fmC = freqMod(pos, phRaw, kPhi050);

@@ -111,7 +111,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return RESOLUTION; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	// Scale to 0-50 for display (matches gold knob popup range)
 	[[nodiscard]] float getDisplayValue() override { return (this->getValue() * 50.0f) / RESOLUTION; }
@@ -120,7 +119,7 @@ public:
 		DecimalWithoutScrolling::selectEncoderAction(velocity_.getScaledOffset(offset));
 	}
 
-	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
 		// Capture 'this' to call virtual getZoneName
 		renderZoneInHorizontalMenu(slot, this->getValue(), RESOLUTION, NUM_ZONES,
 		                           [this](int32_t z) { return this->getZoneName(z); });
@@ -259,7 +258,6 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return RESOLUTION; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
-	[[nodiscard]] int32_t getColumnSpan() const override { return 1; }
 
 	// Scale to 0-50 for display (matches gold knob popup range)
 	[[nodiscard]] float getDisplayValue() override { return (this->getValue() * 50.0f) / RESOLUTION; }
@@ -268,7 +266,7 @@ public:
 		DecimalWithoutScrolling::selectEncoderAction(velocity_.getScaledOffset(offset));
 	}
 
-	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
 		renderZoneInHorizontalMenu(slot, this->getValue(), RESOLUTION, NUM_ZONES,
 		                           [this](int32_t z) { return this->getZoneName(z); });
 	}

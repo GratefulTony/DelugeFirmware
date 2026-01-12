@@ -398,6 +398,7 @@ struct SineShaperTwistParams {
 /**
  * Derive all Twist-dependent parameters from smoothed Twist value
  * Zones 0-3: Individual effects, Zone 4+: Meta (all effects combined)
+ * When phaseOffset > 0: Full phi-triangle evolution across ALL zones (like table shaper)
  * @param params Optional - provides per-patch phase offsets for meta zone
  */
 inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
@@ -414,6 +415,63 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
 	float phH = ssParams ? ssParams->harmonicPhaseOffset : 0.0f;
 	result.phaseHarmonic = phH;
 
+	// Compute phase offset first to determine behavior mode
+	// Use 1024x multiplier for gamma (non-overlapping zones, since range is 1024)
+	double phRaw = ssParams ? static_cast<double>(ssParams->twistPhaseOffset) + 1024.0 * ssParams->gammaPhase : 0.0;
+
+	if (phRaw != 0.0) {
+		// Full range phi-triangle evolution (like meta zones, but across all 8 zones)
+		float pos = static_cast<float>(smoothedTwist) / static_cast<float>(ONE_Q31);
+		pos = std::clamp(pos, 0.0f, 1.0f);
+
+		// Per-effect frequency modulation using phi triangles (non-monotonic)
+		float fmW = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRaw * phi::kPhi025));
+		float fmE = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRaw * phi::kPhi033));
+		float fmR = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRaw * phi::kPhi067));
+		float fmF = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRaw * phi::kPhiN025));
+
+		// Scale and wrap ph per-frequency to preserve irrational divergence with large ph values
+		float ph025 = phi::wrapPhase(phRaw * phi::kPhi025);
+		float ph033 = phi::wrapPhase(phRaw * phi::kPhi033);
+		float ph050 = phi::wrapPhase(phRaw * phi::kPhi050);
+		float ph067 = phi::wrapPhase(phRaw * phi::kPhi067);
+		float ph075 = phi::wrapPhase(phRaw * phi::kPhi075);
+		float ph100 = phi::wrapPhase(phRaw * phi::kPhi100);
+		float phN025 = phi::wrapPhase(phRaw * phi::kPhiN025);
+		float phN050 = phi::wrapPhase(phRaw * phi::kPhiN050);
+
+		result.phaseHarmonic += pos * 5.0f;
+
+		// Width: scale(φ^0.25)*2 clipped * param(φ^0.5), duty 0.8/0.7
+		float wS = std::min(triangleSimpleUnipolar(pos * phi::kPhi025 * fmW + ph025 + 0.166f, 0.8f) * 2.0f, 1.0f);
+		float wP = triangleSimpleUnipolar(pos * phi::kPhi050 * fmW + ph050 + 0.984f, 0.7f);
+		result.stereoWidth = wS * wP;
+		result.stereoPhaseOffset = triangleSimpleUnipolar(pos * phi::kPhi067 * fmW + ph067 + 0.720f, 0.5f);
+		result.stereoFreqMult = 1.0f + 0.5f * triangleSimpleUnipolar(pos * phi::kPhi100 * fmW + ph100 + 0.590f);
+
+		// Evens: bipolar rectified, scale(φ^0.33) * param(φ^0.75), sign selects mode
+		float eS = triangleSimpleUnipolar(pos * phi::kPhi033 * fmE + ph033 + 0.970f, 0.5f);
+		float eT = triangleFloat(pos * phi::kPhi075 * fmE + ph075 + 0.896f, 0.5f);
+		float eAbs = std::abs(eT);
+		result.evenAmount = eS * ((eT > 0.0f) ? eAbs : 0.0f);
+		result.evenDryBlend = eS * ((eT < 0.0f) ? eAbs : 0.0f);
+
+		// Rect: bipolar rectified, scale(φ^0.67) * param(φ^1.0), sign selects mode
+		float rS = triangleSimpleUnipolar(pos * phi::kPhi067 * fmR + ph067 + 0.910f, 0.5f);
+		float rT = triangleFloat(pos * phi::kPhi100 * fmR + ph100 + 0.845f, 0.5f);
+		float rAbs = std::abs(rT);
+		result.rectAmount = rS * ((rT > 0.0f) ? rAbs : 0.0f);
+		result.rect2Amount = rS * ((rT < 0.0f) ? rAbs : 0.0f);
+
+		// Feedback: scale(φ^-0.25) * param(φ^-0.5), quadratic param for safety
+		float fS = triangleSimpleUnipolar(pos * phi::kPhiN025 * fmF + phN025 + 0.001f, 0.8f);
+		float fP = triangleSimpleUnipolar(pos * phi::kPhiN050 * fmF + phN050 + 0.058f, 0.8f);
+		result.feedbackAmount = fS * fP * fP * 0.25f;
+
+		return result;
+	}
+
+	// Standard discrete zone behavior (phaseOffset == 0)
 	if (smoothedTwist < kZone1) {
 		// Zone 0: Width - stereo spread with animated phase evolution
 		float pos = static_cast<float>(smoothedTwist) / static_cast<float>(kZone1);
@@ -444,8 +502,7 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
 	}
 	else {
 		// Zone 4+: Meta - unified triangle evolution, all shift with (pos + ph)
-		// Use double for ph wrapping to maintain precision at large gamma values (gamma < 10^15 ok)
-		double phRaw = ssParams ? static_cast<double>(ssParams->twistPhaseOffset) + 100.0 * ssParams->gammaPhase : 0.0;
+		// phRaw is already 0.0 here (since we checked above), so just use discrete pos
 		float pos = static_cast<float>(smoothedTwist - kZone4) / static_cast<float>(ONE_Q31 - kZone4);
 
 		// Scale and wrap ph per-frequency to preserve irrational divergence with large ph values

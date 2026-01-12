@@ -226,16 +226,17 @@ struct DisperserDelayState {
 struct SecretPhases {
 	float twistPhaseOffset{0}; // Push Twist encoder
 	float topoPhaseOffset{0};  // Push Topo encoder
-	float gammaPhase{0};       // Push third encoder (×100 multiplier)
+	float gammaPhase{0};       // Push third encoder (×1024 multiplier for non-overlapping zones)
 
-	/// Effective phase for meta zones: twistPhaseOffset + 100*gammaPhase
+	/// Effective phase for meta zones: twistPhaseOffset + 1024*gammaPhase
+	/// 1024 multiplier matches twist resolution so each integer gamma = one full parameter sweep
 	[[nodiscard]] double effectiveMeta() const {
-		return static_cast<double>(twistPhaseOffset) + 100.0 * static_cast<double>(gammaPhase);
+		return static_cast<double>(twistPhaseOffset) + 1024.0 * static_cast<double>(gammaPhase);
 	}
 
-	/// Effective phase for topology: topoPhaseOffset + 100*gammaPhase
+	/// Effective phase for topology: topoPhaseOffset + 1024*gammaPhase
 	[[nodiscard]] double effectiveTopo() const {
-		return static_cast<double>(topoPhaseOffset) + 100.0 * static_cast<double>(gammaPhase);
+		return static_cast<double>(topoPhaseOffset) + 1024.0 * static_cast<double>(gammaPhase);
 	}
 
 	void writeToFile(Serializer& writer) const {
