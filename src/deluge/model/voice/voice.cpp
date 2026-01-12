@@ -1565,7 +1565,7 @@ skipUnisonPart: {}
 			    &sound.shaper.prevScaledInputR, &sound.shaper.driftSlopeL_Q16, &sound.shaper.driftSlopeR_Q16,
 			    &sound.shaper.driftAccumL, &sound.shaper.driftAccumR, &sound.shaper.driftLfsr,
 			    &sound.shaper.prevSampleL, &sound.shaper.prevSampleR, &sound.shaper.zcCountL, &sound.shaper.zcCountR,
-			    &sound.shaper.subSignL, &sound.shaper.subSignR, sound.shaper.subEnabled, sound.shaper.phaseOffset,
+			    &sound.shaper.subSignL, &sound.shaper.subSignR, sound.shaper.subEnabled, sound.shaper.gammaPhase,
 			    &sound.shaper.slewedL, &sound.shaper.slewedR, noteFreqHz);
 		}
 
@@ -1707,7 +1707,7 @@ skipUnisonPart: {}
 			};
 			dsp::shapeBufferInt32(std::span{oscBuffer, n}, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
 			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), monoState,
-			                      &sound.shaper.driftLfsr, sound.shaper.subEnabled, sound.shaper.phaseOffset,
+			                      &sound.shaper.driftLfsr, sound.shaper.subEnabled, sound.shaper.gammaPhase,
 			                      noteFreqHz);
 		}
 

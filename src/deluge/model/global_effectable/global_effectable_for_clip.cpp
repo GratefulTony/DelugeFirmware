@@ -143,7 +143,7 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 		    &shaper.prevScaledInputL, &shaper.prevScaledInputR, &shaper.driftSlopeL_Q16, &shaper.driftSlopeR_Q16,
 		    &shaper.driftAccumL, &shaper.driftAccumR, &shaper.driftLfsr, &shaper.prevSampleL, &shaper.prevSampleR,
 		    &shaper.zcCountL, &shaper.zcCountR, &shaper.subSignL, &shaper.subSignR, shaper.subEnabled,
-		    shaper.phaseOffset, &shaper.slewedL, &shaper.slewedR);
+		    shaper.gammaPhase, &shaper.slewedL, &shaper.slewedR);
 	}
 
 	// Render saturation (builtin shaper using getTanHAntialiased)

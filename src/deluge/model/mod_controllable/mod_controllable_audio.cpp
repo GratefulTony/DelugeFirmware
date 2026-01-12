@@ -99,8 +99,8 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	sineShaper.mix = other->sineShaper.mix;
 	sineShaper.harmonic = other->sineShaper.harmonic;
 	sineShaper.twist = other->sineShaper.twist;
-	sineShaper.metaPhase = other->sineShaper.metaPhase;
-	sineShaper.metaPhaseHarmonic = other->sineShaper.metaPhaseHarmonic;
+	sineShaper.twistPhaseOffset = other->sineShaper.twistPhaseOffset;
+	sineShaper.harmonicPhaseOffset = other->sineShaper.harmonicPhaseOffset;
 	sineShaper.gammaPhase = other->sineShaper.gammaPhase;
 	modFXType_ = other->modFXType_;
 	bassFreq = other->bassFreq; // Eventually, these shouldn't be variables like this
@@ -113,7 +113,7 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	// Shaper (all user params in shaper struct)
 	shaper = other->shaper;
 	if (shaper.isEnabled()) {
-		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.phaseOffset);
+		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.gammaPhase);
 	}
 	// Disperser (freq, stages, zones all inside disperser struct)
 	disperser = other->disperser;
@@ -126,7 +126,7 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 		multibandCompressor.setRatioOffset(i, other->multibandCompressor.getRatioOffset(i));
 		multibandCompressor.setBandwidthOffset(i, other->multibandCompressor.getBandwidthOffset(i));
 	}
-	multibandCompressor.setVibeTwistPhase(other->multibandCompressor.getVibeTwistPhase());
+	multibandCompressor.setVibePhaseOffset(other->multibandCompressor.getVibePhaseOffset());
 }
 
 void ModControllableAudio::initParams(ParamManager* paramManager) {
@@ -984,7 +984,7 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 	}
 	else if (shaper.readTag(reader, tagName)) {
 		// Regenerate table after any shaper param change
-		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.phaseOffset);
+		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.gammaPhase);
 	}
 	else if (disperser.readTag(reader, tagName)) {
 		// Tag handled by disperser

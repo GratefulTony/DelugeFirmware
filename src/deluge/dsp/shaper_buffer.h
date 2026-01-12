@@ -105,7 +105,7 @@ struct ShaperBufferContext {
 
 	// Flags
 	bool isLinear;        ///< True if shaper is in linear bypass
-	bool lpfActive;       ///< True if lowpass filter enabled (always on when phaseOffset != 0)
+	bool lpfActive;       ///< True if lowpass filter enabled (always on when gammaPhase != 0)
 	bool driftActive;     ///< True if drift modulation enabled (requires extrasEnabled)
 	bool needsGainAdjust; ///< True if subtractive gain compensation needed
 	bool extrasEnabled;   ///< True if drift+sub extras enabled (X encoder toggle)
@@ -139,7 +139,7 @@ constexpr float kLpfRefFreq = 110.0f; // Reference for audio tracks (A2, gives 2
 	float octaveRange = kLpfOctaveMax - kLpfOctaveMin;
 	float octaveOffset = kLpfOctaveMax - (octaveRange * static_cast<float>(intensity_Q16) / 65536.0f);
 	// Cutoff = note * 2^octaveOffset (e.g., A4=440 → 880-1760Hz range)
-	float cutoff = noteFreqHz * powf(2.0f, octaveOffset);
+	float cutoff = noteFreqHz * exp2f(octaveOffset);
 	// alpha = 2π * cutoff / fs, in Q16
 	return static_cast<int32_t>(cutoff) * kLpfAlphaScale;
 }
@@ -257,12 +257,12 @@ constexpr float kLpfRefFreq = 110.0f; // Reference for audio tracks (A2, gives 2
  * @param state Per-channel modulation state (drift, sub, slew, hysteresis)
  * @param driftLfsr Pointer to LFSR state for random walk entropy (shared)
  * @param extrasEnabled Whether drift+sub extras are enabled (X encoder toggle)
- * @param phaseOffset Secret knob phase offset for phi triangles (0 = slew disabled)
+ * @param gammaPhase Secret knob phase offset for phi triangles (0 = slew disabled)
  * @param noteFreqHz Note frequency in Hz for LPF cutoff scaling (default 440Hz = A4)
  */
 inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDriveGain,
                              q31_t mix, int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters,
-                             ShaperModState& state, uint32_t* driftLfsr, bool extrasEnabled, float phaseOffset,
+                             ShaperModState& state, uint32_t* driftLfsr, bool extrasEnabled, float gammaPhase,
                              float noteFreqHz = kLpfRefFreq) {
 	if (buffer.empty()) {
 		return;
@@ -310,7 +310,7 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 	// Hoist hysteresis offset - skip when intensity is 0 (phi triangle at zero)
 	int32_t hystOffset = 0;
 	int32_t* hystState = nullptr;
-	if (state.prevScaledInput && phaseOffset != 0.0f) {
+	if (state.prevScaledInput && gammaPhase != 0.0f) {
 		hystOffset = shaper.getHystOffset();
 		if (hystOffset != 0) {
 			hystState = state.prevScaledInput; // Only track slope when offset active
@@ -318,21 +318,21 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 	}
 
 	// Hoist subharmonic intensity (for gain modulation based on subSign)
-	// Sub requires extrasEnabled + phaseOffset != 0
+	// Sub requires extrasEnabled + gammaPhase != 0
 	int32_t subBoost_Q16 = 0;
-	if (extrasEnabled && state.zcCount && state.subSign && phaseOffset != 0.0f) {
+	if (extrasEnabled && state.zcCount && state.subSign && gammaPhase != 0.0f) {
 		int32_t subIntensity_Q16 = shaper.getSubIntensity_Q16();
 		// Pre-compute boost amount: subIntensity * maxBoost >> 16
 		subBoost_Q16 = static_cast<int32_t>((static_cast<int64_t>(subIntensity_Q16) * kSubBoostMax_Q16) >> 16);
 	}
 
 	// Drift slope setup: random walk controls rate of DC offset accumulation
-	// Drift requires extrasEnabled + phaseOffset != 0 (X encoder toggle gates drift/sub)
+	// Drift requires extrasEnabled + gammaPhase != 0 (X encoder toggle gates drift/sub)
 	// Two drift modes with bipolar intensities at uncorrelated phi frequencies:
 	// - Multiplicative: positive=sag toward zero, negative=boost away from zero
 	// - Additive: positive=pull toward center, negative=push from center
 	bool driftActive =
-	    extrasEnabled && state.driftSlope && state.driftAccum && driftLfsr && state.prevSample && phaseOffset != 0.0f;
+	    extrasEnabled && state.driftSlope && state.driftAccum && driftLfsr && state.prevSample && gammaPhase != 0.0f;
 	int32_t driftMultIntensity_Q16 = 0;
 	int32_t driftAddIntensity_Q16 = 0;
 	if (driftActive) {
@@ -354,7 +354,7 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 
 	// Lowpass filter setup: compute alpha from intensity (scaled by note frequency)
 	// Active when filter state pointer provided and slewIntensity > 0
-	// (slewIntensity is set > 0 for phaseOffset > 0 OR square waves)
+	// (slewIntensity is set > 0 for gammaPhase > 0 OR square waves)
 	bool lpfActive = state.slewed != nullptr;
 	int32_t lpfAlpha_Q16 = 0;
 	if (lpfActive) {
@@ -506,7 +506,7 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
  * @param subSignL Pointer to L channel subharmonic sign (±1)
  * @param subSignR Pointer to R channel subharmonic sign (±1)
  * @param extrasEnabled Whether drift+sub extras are enabled (X encoder toggle)
- * @param phaseOffset Secret knob phase offset for phi triangles (0 = slew disabled)
+ * @param gammaPhase Secret knob phase offset for phi triangles (0 = slew disabled)
  * @param slewedL Pointer to L channel slew rate limiter state (previous output)
  * @param slewedR Pointer to R channel slew rate limiter state (previous output)
  * @param noteFreqHz Note frequency in Hz for LPF cutoff scaling (default 440Hz = A4)
@@ -516,8 +516,8 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
                              int32_t* prevScaledInputL, int32_t* prevScaledInputR, int32_t* driftSlopeL,
                              int32_t* driftSlopeR, int32_t* driftAccumL, int32_t* driftAccumR, uint32_t* driftLfsr,
                              int32_t* prevSampleL, int32_t* prevSampleR, uint8_t* zcCountL, uint8_t* zcCountR,
-                             int8_t* subSignL, int8_t* subSignR, bool extrasEnabled, float phaseOffset,
-                             int32_t* slewedL, int32_t* slewedR, float noteFreqHz = kLpfRefFreq) {
+                             int8_t* subSignL, int8_t* subSignR, bool extrasEnabled, float gammaPhase, int32_t* slewedL,
+                             int32_t* slewedR, float noteFreqHz = kLpfRefFreq) {
 	if (buffer.empty()) {
 		return;
 	}
@@ -565,7 +565,7 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 	int32_t hystOffset = 0;
 	int32_t* hystStateL = nullptr;
 	int32_t* hystStateR = nullptr;
-	if (prevScaledInputL && prevScaledInputR && phaseOffset != 0.0f) {
+	if (prevScaledInputL && prevScaledInputR && gammaPhase != 0.0f) {
 		hystOffset = shaper.getHystOffset();
 		if (hystOffset != 0) {
 			hystStateL = prevScaledInputL; // Only track slope when offset active
@@ -574,21 +574,21 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 	}
 
 	// Hoist subharmonic intensity (for gain modulation based on subSign)
-	// Sub requires extrasEnabled + phaseOffset != 0
+	// Sub requires extrasEnabled + gammaPhase != 0
 	int32_t subBoost_Q16 = 0;
-	if (extrasEnabled && zcCountL && zcCountR && subSignL && subSignR && phaseOffset != 0.0f) {
+	if (extrasEnabled && zcCountL && zcCountR && subSignL && subSignR && gammaPhase != 0.0f) {
 		int32_t subIntensity_Q16 = shaper.getSubIntensity_Q16();
 		// Pre-compute boost amount: subIntensity * maxBoost >> 16
 		subBoost_Q16 = static_cast<int32_t>((static_cast<int64_t>(subIntensity_Q16) * kSubBoostMax_Q16) >> 16);
 	}
 
 	// Drift slope setup: separate random walks per channel with phi-controlled correlation
-	// Drift requires extrasEnabled + phaseOffset != 0 (X encoder toggle gates drift/sub)
+	// Drift requires extrasEnabled + gammaPhase != 0 (X encoder toggle gates drift/sub)
 	// Two drift modes with bipolar intensities at uncorrelated phi frequencies:
 	// - Multiplicative: positive=sag toward zero, negative=boost away from zero
 	// - Additive: positive=pull toward center, negative=push from center
 	bool driftActive = extrasEnabled && driftSlopeL && driftSlopeR && driftAccumL && driftAccumR && driftLfsr
-	                   && prevSampleL && prevSampleR && phaseOffset != 0.0f;
+	                   && prevSampleL && prevSampleR && gammaPhase != 0.0f;
 	int32_t slopeL = 0;
 	int32_t slopeR = 0;
 	int32_t driftMultIntensity_Q16 = 0;
@@ -626,7 +626,7 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 
 	// Lowpass filter setup: compute alpha from intensity (scaled by note frequency)
 	// Active when filter state pointers provided and slewIntensity > 0
-	// (slewIntensity is set > 0 for phaseOffset > 0 OR square waves)
+	// (slewIntensity is set > 0 for gammaPhase > 0 OR square waves)
 	bool lpfActive = slewedL && slewedR;
 	int32_t lpfAlpha_Q16 = 0;
 	if (lpfActive) {

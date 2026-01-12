@@ -138,7 +138,7 @@ protected:
 /// Zone 5: Add - Additive n=2,3,4,5
 /// Zone 6: Mod - FM depths d=0.25,0.5,0.75,1.0
 /// Zone 7: Poly - Cascaded polynomial waveshaping
-/// Secret menu: Push+twist encoder to adjust metaPhaseHarmonic (per-patch phase offset)
+/// Secret menu: Push+twist encoder to adjust harmonicPhaseOffset (per-patch phase offset)
 /// Press encoder (no twist): Opens mod matrix source selection
 class SineShaperHarmonic final : public ZoneBasedDualParam<params::LOCAL_SINE_SHAPER_HARMONIC> {
 public:
@@ -175,10 +175,10 @@ public:
 
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret menu: adjust metaPhaseHarmonic (unbounded, wraps via fmod in DSP)
+			// Secret menu: adjust harmonicPhaseOffset (gated ≥0 for fast floor optimization)
 			Buttons::selectButtonPressUsedUp = true;
-			float& phase = soundEditor.currentModControllable->sineShaper.metaPhaseHarmonic;
-			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			float& phase = soundEditor.currentModControllable->sineShaper.harmonicPhaseOffset;
+			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
 			// Show current value on display
 			char buffer[12];
 			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
@@ -208,7 +208,7 @@ private:
 /// Zone 2: Rect - Blended rectifier (rect + rect2 with overlap)
 /// Zone 3: Fdbk - Output→input feedback (thickening to chaos)
 /// Zones 4-7: Meta - Combined modifiers with φ-ratio triangle modulation
-/// Secret menu: Push+twist encoder to adjust metaPhase (per-patch phase offset for meta zone)
+/// Secret menu: Push+twist encoder to adjust twistPhaseOffset (per-patch phase offset for meta zone)
 /// Press encoder (no twist): Opens mod matrix source selection
 class SineShaperTwist final : public ZoneBasedDualParam<params::LOCAL_SINE_SHAPER_TWIST> {
 public:
@@ -240,10 +240,10 @@ public:
 
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret menu: adjust metaPhase (unbounded, wraps via fmod in DSP)
+			// Secret menu: adjust twistPhaseOffset (gated ≥0 for fast floor optimization)
 			Buttons::selectButtonPressUsedUp = true;
-			float& phase = soundEditor.currentModControllable->sineShaper.metaPhase;
-			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			float& phase = soundEditor.currentModControllable->sineShaper.twistPhaseOffset;
+			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
 			// Show current value on display
 			char buffer[12];
 			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
@@ -268,7 +268,7 @@ private:
 };
 
 // Mix: wet/dry blend (0-127, 0 = bypass)
-// Secret menu: Push encoder to adjust gammaPhase (offsets metaPhase by 100*gamma)
+// Secret menu: Push encoder to adjust gammaPhase (offsets twistPhaseOffset by 100*gamma)
 class SineShaperMix final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
@@ -294,10 +294,10 @@ public:
 
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret menu: adjust gammaPhase (adds 100*gamma to metaPhase in DSP)
+			// Secret menu: adjust gammaPhase (adds 100*gamma to twistPhaseOffset in DSP)
 			Buttons::selectButtonPressUsedUp = true;
 			float& gamma = soundEditor.currentModControllable->sineShaper.gammaPhase;
-			gamma += static_cast<float>(offset) * 0.1f;
+			gamma = std::max(0.0f, gamma + static_cast<float>(offset) * 0.1f);
 			// Show current value on display
 			char buffer[12];
 			intToString(static_cast<int32_t>(gamma * 10.0f), buffer);

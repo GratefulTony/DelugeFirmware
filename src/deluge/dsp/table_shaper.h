@@ -500,9 +500,11 @@ private:
 				float cheby_in3 = cheby_in2 * cheby_in;
 				float cheby_in5 = cheby_in3 * cheby_in2;
 				float cheby_raw = 16.0f * cheby_in5 - 20.0f * cheby_in3 + 5.0f * cheby_in;
-				float cheby_phase = std::fmod(cheby_raw + 1.0f, 4.0f);
-				if (cheby_phase < 0.0f)
-					cheby_phase += 4.0f;
+				// Fast fmod 4.0f using branchless floor (handles negative cheby_raw)
+				float temp = (cheby_raw + 1.0f) * 0.25f;
+				int32_t i = static_cast<int32_t>(temp);
+				float floor_temp = static_cast<float>(i - (temp < static_cast<float>(i)));
+				float cheby_phase = (cheby_raw + 1.0f) - 4.0f * floor_temp;
 				float cheby_out = (cheby_phase <= 2.0f) ? (cheby_phase - 1.0f) : (3.0f - cheby_phase);
 				cheby_out = std::fabs(cheby_out);
 
@@ -813,13 +815,13 @@ struct TableShaperXYMapper {
 	/// Derive parameters with phase offsets for secret knob integration
 	/// @param x X position (0-127)
 	/// @param y Y position (0-1023)
-	/// @param phaseOffset Phase offset for parameter interference (from secret knob)
+	/// @param gammaPhase Phase offset for parameter interference (from secret knob)
 	/// @param periodScale Period scaling for parameter sweep rate
 	/// @return TableShaperParams with all derived values
 	///
 	/// DESIGN NOTE: Phase Offset Scope
 	/// ===============================
-	/// Currently, phaseOffset rotates TWO levels of parameters:
+	/// Currently, gammaPhase rotates TWO levels of parameters:
 	///   1. Algorithm superposition weights (which basis functions are active)
 	///      - polyWeight, hardKneeWeight, chebyWeight, sineFoldWeight, rectifierWeight
 	///      - phMult values: 0.167, 0.333, 0.5, 0.667, 0.833
@@ -838,7 +840,7 @@ struct TableShaperXYMapper {
 	/// continuous exploration where zone names are approximate guides rather than
 	/// fixed definitions. This is more "sound design-y" but less predictable.
 	///
-	static TableShaperParams deriveParametersWithPhase(uint8_t x, uint16_t y, float phaseOffset, float periodScale,
+	static TableShaperParams deriveParametersWithPhase(uint8_t x, uint16_t y, float gammaPhase, float periodScale,
 	                                                   float oscHarmonicWeight = 0.5f) {
 		TableShaperParams p;
 		p.drive = static_cast<float>(x) / 127.0f;
@@ -848,9 +850,9 @@ struct TableShaperXYMapper {
 		constexpr float kAccelFactor = 3.0f;
 		float freqMult = 1.0f + yNorm * yNorm * kAccelFactor;
 
-		// Use double precision to preserve phase accuracy at large phaseOffset values (< 10^15 ok)
+		// Use double precision to preserve phase accuracy at large gammaPhase values (< 10^15 ok)
 		// Pre-wrap phase offsets at different φ frequencies (like disperser/sine_shaper/multiband)
-		double ph = static_cast<double>(phaseOffset);
+		double ph = static_cast<double>(gammaPhase);
 		float ph225 = phi::wrapPhase(ph * phi::kPhi225);
 		float ph200 = phi::wrapPhase(ph * phi::kPhi200);
 		float ph175 = phi::wrapPhase(ph * phi::kPhi175);
@@ -861,7 +863,7 @@ struct TableShaperXYMapper {
 		float ph100 = phi::wrapPhase(ph * phi::kPhi100);
 
 		// Deadzone phi triangles - use slower frequencies for smooth evolution
-		// Initial offset 0.75 places width in dead region [0.5,1) at phaseOffset=0
+		// Initial offset 0.75 places width in dead region [0.5,1) at gammaPhase=0
 		float phDzWidth = phi::wrapPhase(ph * phi::kPhiN050); // φ^-0.5 (slower)
 		float phDzPhase = phi::wrapPhase(ph * phi::kPhi033);  // φ^0.33
 
@@ -872,7 +874,7 @@ struct TableShaperXYMapper {
 		};
 
 		// Fixed phase offsets (0.167, 0.333, etc.) spread basis functions across Y axis
-		// These match deriveParameters() so phaseOffset=0 produces identical results
+		// These match deriveParameters() so gammaPhase=0 produces identical results
 		p.inflatorWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi225) + ph225), kPhaseWidth);
 		p.polyWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi200) + ph200 + 0.167f), kPhaseWidth);
 		p.hardKneeWeight = triangleSimpleUnipolar(phi::wrapPhase(base(phi::kPhi175) + ph175 + 0.333f), kPhaseWidth);
@@ -886,10 +888,10 @@ struct TableShaperXYMapper {
 		float asymBase = static_cast<float>(static_cast<double>(yNorm) * phi::kPhi100 * asymFreqMult * periodScale);
 		p.asymmetry = 0.3f + triangleSimpleUnipolar(phi::wrapPhase(asymBase + ph100), kPhaseWidth) * 0.4f;
 
-		// Deadzone modifier: completely disabled at phaseOffset=0, oscillates as secret knob increases
+		// Deadzone modifier: completely disabled at gammaPhase=0, oscillates as secret knob increases
 		// dzEnable gates the entire deadzone feature off when phase offset is zero
 		constexpr float kDeadzoneDuty = 0.2f;
-		float dzEnable = (phaseOffset != 0.0f) ? 1.0f : 0.0f;
+		float dzEnable = (gammaPhase != 0.0f) ? 1.0f : 0.0f;
 		float dzWidthBase = static_cast<float>(static_cast<double>(yNorm) * phi::kPhiN050 * freqMult * periodScale);
 		p.deadzoneWidth = dzEnable * triangleSimpleUnipolar(phi::wrapPhase(dzWidthBase + phDzWidth), kDeadzoneDuty);
 
@@ -956,8 +958,8 @@ struct TableShaperXYMapper {
 		// - saw (0.5) → 50% duty (moderate LPF)
 		// - square (1.0) → 80% duty (lots of LPF activation, sharp edges need softening)
 		// φ^1.75 frequency (uncorrelated with others)
-		// Enable for phaseOffset > 0 OR high harmonic content (square waves need LPF always)
-		float slewEnable = (phaseOffset != 0.0f || oscHarmonicWeight >= 0.8f) ? 1.0f : 0.0f;
+		// Enable for gammaPhase > 0 OR high harmonic content (square waves need LPF always)
+		float slewEnable = (gammaPhase != 0.0f || oscHarmonicWeight >= 0.8f) ? 1.0f : 0.0f;
 		float slewDuty = 0.2f + 0.6f * oscHarmonicWeight; // Range [0.2, 0.8]
 		float phSlew = phi::wrapPhase(ph * phi::kPhi175);
 		float slewBase = static_cast<float>(static_cast<double>(yNorm) * phi::kPhi175 * freqMult * periodScale);
@@ -965,17 +967,17 @@ struct TableShaperXYMapper {
 		p.slewIntensity = slewEnable * slewTri; // Linear response, enabled for phase or square waves
 
 		// Pre-expansion: X controls intensity, Y+phase sweep character
-		// NOT gated by dzEnable - works at phaseOffset=0 for vanilla expander/limiter zone
+		// NOT gated by dzEnable - works at gammaPhase=0 for vanilla expander/limiter zone
 		// At X=0: pure limiter (no expansion), X=max: full expansion range
 		// Y+phase sweeps expansion position within X-controlled intensity
 		float phPreExp = phi::wrapPhase(ph * phi::kPhi050);
 		float preExpBase = static_cast<float>(static_cast<double>(yNorm) * 2.0f * periodScale); // 2 cycles across Y
 		p.preExpandAmount = p.drive * triangleSimpleUnipolar(phi::wrapPhase(preExpBase + phPreExp), 1.0f);
 
-		// SPECIAL CASE: Zone 6 "Blend" at phaseOffset=0 → Oxford-style inflator
+		// SPECIAL CASE: Zone 6 "Blend" at gammaPhase=0 → Oxford-style inflator
 		// Only applies when secret knob is at zero (vanilla mode)
 		// Pure inflator + soft clip, X controls expansion, symmetric
-		if (phaseOffset == 0.0f) {
+		if (gammaPhase == 0.0f) {
 			constexpr float kZone6Start = 768.0f / 1023.0f;
 			constexpr float kZone6End = 896.0f / 1023.0f;
 			if (yNorm >= kZone6Start && yNorm < kZone6End) {

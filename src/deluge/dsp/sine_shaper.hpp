@@ -114,7 +114,7 @@ inline constexpr const char* kSineShaperZoneNames[] = {
 // while the menu position establishes the base zone.
 //
 // UI: Press encoder (no twist) opens mod routing menu.
-// Push+twist is secret menu for phase offsets (metaPhase, metaPhaseHarmonic, gammaPhase).
+// Push+twist is secret menu for phase offsets (twistPhaseOffset, harmonicPhaseOffset, gammaPhase).
 // Clips use UNPATCHED variants (no mod matrix routing).
 
 // Forward declaration for cached weights
@@ -131,10 +131,10 @@ struct SineTableShaperParams {
 	// Zone base values with behavior: harmonic clips to zones, twist allows cross-zone
 	ZoneBasedParam<kNumHarmonicZones, true> harmonic; // Clips to zone boundaries
 	ZoneBasedParam<kNumHarmonicZones, false> twist;   // Allows cross-zone modulation
-	// Meta zone phase offsets (per-patch, secret menus)
-	float metaPhase{0};         // Single offset for all Twist param triangles (push Twist encoder)
-	float metaPhaseHarmonic{0}; // Harmonic zone phase offset (push Harmonic encoder)
-	float gammaPhase{0};        // Additional offset = 100*gamma, accessed via Mix encoder push
+	// Phase offsets (per-patch, secret menus)
+	float twistPhaseOffset{0};    // Offset for Twist param triangles (push Twist encoder)
+	float harmonicPhaseOffset{0}; // Offset for Harmonic zone triangles (push Harmonic encoder)
+	float gammaPhase{0};          // 100x multiplier phase (push Mix encoder)
 	// DSP smoothing state (per-sound, shared across voices)
 	q31_t smoothedDrive{0};    // Previous drive value for parameter smoothing
 	q31_t smoothedHarmonic{0}; // Previous harmonic value for parameter smoothing
@@ -175,8 +175,8 @@ struct SineTableShaperParams {
 		WRITE_FIELD(writer, mix, "sineShaperMix");
 		WRITE_ZONE(writer, harmonic.value, "sineShaperHarmonicBase");
 		WRITE_ZONE(writer, twist.value, "sineShaperTwistBase");
-		WRITE_FLOAT(writer, metaPhase, "sineShaperMetaPhase", 10.0f);
-		WRITE_FLOAT(writer, metaPhaseHarmonic, "sineShaperMetaPhaseH", 10.0f);
+		WRITE_FLOAT(writer, twistPhaseOffset, "sineShaperMetaPhase", 10.0f);
+		WRITE_FLOAT(writer, harmonicPhaseOffset, "sineShaperMetaPhaseH", 10.0f);
 		WRITE_FLOAT(writer, gammaPhase, "sineShaperGamma", 10.0f);
 	}
 
@@ -186,8 +186,8 @@ struct SineTableShaperParams {
 		READ_FIELD(reader, tagName, mix, "sineShaperMix");
 		READ_ZONE(reader, tagName, harmonic.value, "sineShaperHarmonicBase");
 		READ_ZONE(reader, tagName, twist.value, "sineShaperTwistBase");
-		READ_FLOAT(reader, tagName, metaPhase, "sineShaperMetaPhase", 10.0f);
-		READ_FLOAT(reader, tagName, metaPhaseHarmonic, "sineShaperMetaPhaseH", 10.0f);
+		READ_FLOAT(reader, tagName, twistPhaseOffset, "sineShaperMetaPhase", 10.0f);
+		READ_FLOAT(reader, tagName, harmonicPhaseOffset, "sineShaperMetaPhaseH", 10.0f);
 		READ_FLOAT(reader, tagName, gammaPhase, "sineShaperGamma", 10.0f);
 		return false;
 	}
@@ -409,9 +409,9 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
 
 	SineShaperTwistParams result;
 
-	// Always apply metaPhaseHarmonic offset (Harmonic secret menu) - works in all zones
+	// Always apply harmonicPhaseOffset (Harmonic secret menu) - works in all zones
 	// This allows cycling through harmonic zones even when Twist is in zones 0-3
-	float phH = ssParams ? ssParams->metaPhaseHarmonic : 0.0f;
+	float phH = ssParams ? ssParams->harmonicPhaseOffset : 0.0f;
 	result.phaseHarmonic = phH;
 
 	if (smoothedTwist < kZone1) {
@@ -445,7 +445,7 @@ inline SineShaperTwistParams computeSineShaperTwistParams(q31_t smoothedTwist,
 	else {
 		// Zone 4+: Meta - unified triangle evolution, all shift with (pos + ph)
 		// Use double for ph wrapping to maintain precision at large gamma values (gamma < 10^15 ok)
-		double phRaw = ssParams ? static_cast<double>(ssParams->metaPhase) + 100.0 * ssParams->gammaPhase : 0.0;
+		double phRaw = ssParams ? static_cast<double>(ssParams->twistPhaseOffset) + 100.0 * ssParams->gammaPhase : 0.0;
 		float pos = static_cast<float>(smoothedTwist - kZone4) / static_cast<float>(ONE_Q31 - kZone4);
 
 		// Scale and wrap ph per-frequency to preserve irrational divergence with large ph values

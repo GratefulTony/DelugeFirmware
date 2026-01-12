@@ -88,7 +88,7 @@ public:
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
 					soundDrum->shaper.shapeX = current_value;
 					soundDrum->shaperDsp.regenerateTable(current_value, soundDrum->shaper.shapeY,
-					                                     soundDrum->shaper.phaseOffset,
+					                                     soundDrum->shaper.gammaPhase,
 					                                     soundDrum->shaper.oscHarmonicWeight);
 					soundDrum->shaperDsp.regenerateIfDirty(); // Direct for bulk kit operation
 				}
@@ -96,7 +96,7 @@ public:
 		}
 		else {
 			mca->shaper.shapeX = current_value;
-			mca->shaperDsp.regenerateTable(current_value, mca->shaper.shapeY, mca->shaper.phaseOffset,
+			mca->shaperDsp.regenerateTable(current_value, mca->shaper.shapeY, mca->shaper.gammaPhase,
 			                               mca->shaper.oscHarmonicWeight);
 			shaper_regen::scheduleRegeneration(mca);
 		}
@@ -105,7 +105,7 @@ public:
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
 
 	/// Click encoder to toggle extras (drift + sub effects)
-	/// Slew and hysteresis are always on when phaseOffset != 0
+	/// Slew and hysteresis are always on when gammaPhase != 0
 	MenuItem* selectButtonPress() override {
 		auto* mca = soundEditor.currentModControllable;
 		mca->shaper.subEnabled = !mca->shaper.subEnabled;
@@ -133,7 +133,7 @@ public:
 };
 
 // Shape Y (UI: "Color"): Sweeps through saturation characters
-// Secret menu: Push+twist to adjust shaper.phaseOffset
+// Secret menu: Push+twist to adjust shaper.gammaPhase
 class TableShaperShapeY final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
@@ -151,7 +151,7 @@ public:
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
 					soundDrum->shaper.shapeY = current_value;
 					soundDrum->shaperDsp.regenerateTable(soundDrum->shaper.shapeX, current_value,
-					                                     soundDrum->shaper.phaseOffset,
+					                                     soundDrum->shaper.gammaPhase,
 					                                     soundDrum->shaper.oscHarmonicWeight);
 					soundDrum->shaperDsp.regenerateIfDirty(); // Direct for bulk kit operation
 				}
@@ -159,7 +159,7 @@ public:
 		}
 		else {
 			mca->shaper.shapeY = current_value;
-			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, current_value, mca->shaper.phaseOffset,
+			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, current_value, mca->shaper.gammaPhase,
 			                               mca->shaper.oscHarmonicWeight);
 			shaper_regen::scheduleRegeneration(mca);
 		}
@@ -169,19 +169,19 @@ public:
 
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret: push+twist adjusts shaper.phaseOffset
+			// Secret: push+twist adjusts shaper.gammaPhase (gated ≥0 for fast floor optimization)
 			// Each increment = 1 full Y range (1024 steps) worth of phase rotation
 			Buttons::selectButtonPressUsedUp = true;
-			float& phaseOffset = soundEditor.currentModControllable->shaper.phaseOffset;
-			phaseOffset += static_cast<float>(velocity_.getScaledOffset(offset)) * 1.0f;
-			// Regenerate table with new phaseOffset
+			float& gammaPhase = soundEditor.currentModControllable->shaper.gammaPhase;
+			gammaPhase = std::max(0.0f, gammaPhase + static_cast<float>(velocity_.getScaledOffset(offset)) * 1.0f);
+			// Regenerate table with new gammaPhase
 			auto* mca = soundEditor.currentModControllable;
-			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, phaseOffset,
+			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, gammaPhase,
 			                               mca->shaper.oscHarmonicWeight);
 			shaper_regen::scheduleRegeneration(mca);
 			// Show current value on display
 			char buffer[12];
-			intToString(static_cast<int32_t>(phaseOffset * 10.0f), buffer);
+			intToString(static_cast<int32_t>(gammaPhase * 10.0f), buffer);
 			display->displayPopup(buffer);
 			suppressNotification_ = true;
 		}
@@ -199,10 +199,10 @@ public:
 	}
 
 	void renderInHorizontalMenu(const HorizontalMenuSlotParams& slot) override {
-		float phaseOffset = soundEditor.currentModControllable->shaper.phaseOffset;
-		if (phaseOffset != 0.0f) {
+		float gammaPhase = soundEditor.currentModControllable->shaper.gammaPhase;
+		if (gammaPhase != 0.0f) {
 			// When secret knob is engaged, show "~N" with zone visual indicator
-			cacheTwistNum(phaseOffset, this->getValue());
+			cacheTwistNum(gammaPhase, this->getValue());
 			renderZoneInHorizontalMenu(slot, this->getValue(), kShaperHighResSteps, kShaperNumZones, getTwistName);
 		}
 		else {
@@ -212,10 +212,10 @@ public:
 
 protected:
 	void drawPixelsForOled() override {
-		float phaseOffset = soundEditor.currentModControllable->shaper.phaseOffset;
-		if (phaseOffset != 0.0f) {
+		float gammaPhase = soundEditor.currentModControllable->shaper.gammaPhase;
+		if (gammaPhase != 0.0f) {
 			// When secret knob is engaged, show "~N" with zone visual indicator
-			cacheTwistNum(phaseOffset, this->getValue());
+			cacheTwistNum(gammaPhase, this->getValue());
 			drawZoneForOled(this->getValue(), kShaperHighResSteps, kShaperNumZones, getTwistName);
 		}
 		else {
@@ -229,10 +229,10 @@ private:
 
 	// Static storage for twist display (used by getTwistName callback)
 	static inline char twistBuffer_[12] = {};
-	static void cacheTwistNum(float phaseOffset, int32_t value) {
-		// Format: "P:Y" where P=phaseOffset (int), Y=zone index (0-7)
+	static void cacheTwistNum(float gammaPhase, int32_t value) {
+		// Format: "P:Y" where P=gammaPhase (int), Y=zone index (0-7)
 		// 128 encoder clicks = 1 zone, so Y increments once per zone traversal
-		int32_t p = static_cast<int32_t>(phaseOffset);
+		int32_t p = static_cast<int32_t>(gammaPhase);
 		int32_t y = value >> 7; // 0-1023 → 0-7 (zone index)
 		snprintf(twistBuffer_, sizeof(twistBuffer_), "%d:%d", p, y);
 	}
@@ -253,7 +253,7 @@ private:
 		case 5:
 			return "Diode"; // Rectifier, asymmetric/even harmonics
 		case 6:
-			return "Inflate"; // Oxford-style inflator (special case at phaseOffset=0)
+			return "Inflate"; // Oxford-style inflator (special case at gammaPhase=0)
 		case 7:
 			return "Morph"; // Complex combinations
 		default:
@@ -276,13 +276,13 @@ public:
 		// Auto-enable X when turning up mix from 0
 		if (mca->shaper.shapeX == 0 && offset > 0) {
 			mca->shaper.shapeX = 1;
-			mca->shaperDsp.regenerateTable(1, mca->shaper.shapeY, mca->shaper.phaseOffset,
+			mca->shaperDsp.regenerateTable(1, mca->shaper.shapeY, mca->shaper.gammaPhase,
 			                               mca->shaper.oscHarmonicWeight);
 			shaper_regen::scheduleRegeneration(mca);
 		}
 		// Regenerate tables when mix goes from 0 to non-zero (may have been skipped at load)
 		else if (wasZero && offset > 0 && mca->shaper.shapeX > 0) {
-			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, mca->shaper.phaseOffset,
+			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, mca->shaper.gammaPhase,
 			                               mca->shaper.oscHarmonicWeight);
 			shaper_regen::scheduleRegeneration(mca);
 		}

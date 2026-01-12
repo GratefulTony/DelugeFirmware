@@ -52,9 +52,11 @@
 
 namespace deluge::dsp {
 
-/// Saturating add for q31_t using NEON
+/// Saturating add for q31_t using ARM scalar qadd instruction
 [[gnu::always_inline]] inline q31_t q31_sat_add(q31_t a, q31_t b) {
-	return vget_lane_s32(vqadd_s32(vdup_n_s32(a), vdup_n_s32(b)), 0);
+	q31_t result;
+	asm("qadd %0, %1, %2" : "=r"(result) : "r"(a), "r"(b));
+	return result;
 }
 
 // Forward declarations
@@ -66,9 +68,20 @@ constexpr int32_t kDisperserNumZones =
     modulation::params::getZoneParamInfo(modulation::params::GLOBAL_DISPERSER_TOPO).zoneCount;
 
 // Fastmath constants (avoid repeated divisions and slow std::pow)
-constexpr float k127Recip = 1.0f / 127.0f; // Reciprocal for MIDI-style 0-127 params
-constexpr float kLog5 = 1.6094379124341f;  // log(5) for std::pow(5,x) → expf(x*kLog5)
-constexpr float kLog10 = 2.302585092994f;  // log(10) for curve exponent range 10.0↔0.1
+constexpr float k127Recip = 1.0f / 127.0f;    // Reciprocal for MIDI-style 0-127 params
+constexpr float kLog5 = 1.6094379124341f;     // log(5) for std::pow(5,x) → expf(x*kLog5)
+constexpr float kLog10 = 2.302585092994f;     // log(10) for curve exponent range 10.0↔0.1
+constexpr float kLog10Over20 = 0.1151292546f; // log(10)/20 for dB→linear: 10^(dB/20) = exp(dB*kLog10Over20)
+
+// Coefficient update rate limiting - reduces CPU cost when params are modulated
+// Higher values = more CPU savings but coarser response to modulation
+// 1 = update every buffer (~2.9ms), 4 = every 4th buffer (~12ms), 8 = every 8th (~23ms)
+constexpr uint8_t kCoeffUpdateStride = 4;
+
+// Smoothing alpha for parameter interpolation (0.0-1.0)
+// Higher = faster response but more zipper noise, lower = smoother but laggier
+// 0.03 = ~100ms settling, 0.05 = ~60ms, 0.08 = ~40ms
+constexpr float kParamSmoothingAlpha = 0.03f; // ~100ms settling time
 
 /**
  * Disperser zone-based parameters
@@ -120,26 +133,35 @@ struct DisperserDelayState {
 	/// Fractional write - distributes sample between two adjacent positions
 	/// Eliminates stepping when delay time changes smoothly
 	[[gnu::always_inline]] inline void writeAtOffsetFractional(q31_t inL, q31_t inR, float offset) {
-		size_t offsetInt = static_cast<size_t>(offset);
-		float frac = offset - static_cast<float>(offsetInt);
+		// Convert to 16.16 fixed point and use integer version
+		uint32_t offsetQ16 = static_cast<uint32_t>(offset * 65536.0f);
+		writeAtOffsetFractionalQ16(inL, inR, offsetQ16);
+	}
+
+	/// Integer-only fractional write using 16.16 fixed-point offset
+	/// @param offsetQ16 Delay offset in 16.16 format (upper 16 bits = integer, lower 16 = fraction)
+	[[gnu::always_inline]] inline void writeAtOffsetFractionalQ16(q31_t inL, q31_t inR, uint32_t offsetQ16) {
+		size_t offsetInt = offsetQ16 >> 16;
+		uint32_t frac16 = offsetQ16 & 0xFFFF; // 0-65535 representing 0.0-1.0
 
 		size_t pos0 = (headPos + offsetInt) % kMaxDelaySamples;
 		size_t pos1 = (headPos + offsetInt + 1) % kMaxDelaySamples;
 
 		// Distribute energy: (1-frac) to pos0, frac to pos1
-		q31_t gain0 = static_cast<q31_t>((1.0f - frac) * ONE_Q31);
-		q31_t gain1 = static_cast<q31_t>(frac * ONE_Q31);
+		// Scale frac16 to q31: frac16 << 15 (0-65535 -> 0-2147418112)
+		q31_t gain1 = static_cast<q31_t>(frac16) << 15;
+		q31_t gain0 = ONE_Q31 - gain1;
 
-		q31_t inL0 = multiply_32x32_rshift32(inL, gain0) << 1;
-		q31_t inL1 = multiply_32x32_rshift32(inL, gain1) << 1;
-		q31_t inR0 = multiply_32x32_rshift32(inR, gain0) << 1;
-		q31_t inR1 = multiply_32x32_rshift32(inR, gain1) << 1;
+		// NEON vectorized: process L/R together
+		int32x2_t inLR = {inL, inR};
+		int32x2_t scaled0 = vshl_n_s32(vqrdmulh_s32(inLR, vdup_n_s32(gain0)), 1);
+		int32x2_t scaled1 = vshl_n_s32(vqrdmulh_s32(inLR, vdup_n_s32(gain1)), 1);
 
 		// Add to both positions with saturation
-		bufferL[pos0] = signed_saturate<30>(q31_sat_add(bufferL[pos0], inL0));
-		bufferL[pos1] = signed_saturate<30>(q31_sat_add(bufferL[pos1], inL1));
-		bufferR[pos0] = signed_saturate<30>(q31_sat_add(bufferR[pos0], inR0));
-		bufferR[pos1] = signed_saturate<30>(q31_sat_add(bufferR[pos1], inR1));
+		bufferL[pos0] = signed_saturate<30>(q31_sat_add(bufferL[pos0], vget_lane_s32(scaled0, 0)));
+		bufferL[pos1] = signed_saturate<30>(q31_sat_add(bufferL[pos1], vget_lane_s32(scaled1, 0)));
+		bufferR[pos0] = signed_saturate<30>(q31_sat_add(bufferR[pos0], vget_lane_s32(scaled0, 1)));
+		bufferR[pos1] = signed_saturate<30>(q31_sat_add(bufferR[pos1], vget_lane_s32(scaled1, 1)));
 	}
 
 	/// Clear head position (call after reading, before additive writes)
@@ -165,29 +187,29 @@ struct DisperserDelayState {
  * constellation without changing the zone selection.
  */
 struct SecretPhases {
-	float metaPhase{0};     // Push Twist encoder
-	float metaPhaseTopo{0}; // Push Topo encoder
-	float gammaPhase{0};    // Push third encoder (×100 multiplier)
+	float twistPhaseOffset{0}; // Push Twist encoder
+	float topoPhaseOffset{0};  // Push Topo encoder
+	float gammaPhase{0};       // Push third encoder (×100 multiplier)
 
-	/// Effective phase for meta zones: metaPhase + 100*gammaPhase
+	/// Effective phase for meta zones: twistPhaseOffset + 100*gammaPhase
 	[[nodiscard]] double effectiveMeta() const {
-		return static_cast<double>(metaPhase) + 100.0 * static_cast<double>(gammaPhase);
+		return static_cast<double>(twistPhaseOffset) + 100.0 * static_cast<double>(gammaPhase);
 	}
 
-	/// Effective phase for topology: metaPhaseTopo + 100*gammaPhase
+	/// Effective phase for topology: topoPhaseOffset + 100*gammaPhase
 	[[nodiscard]] double effectiveTopo() const {
-		return static_cast<double>(metaPhaseTopo) + 100.0 * static_cast<double>(gammaPhase);
+		return static_cast<double>(topoPhaseOffset) + 100.0 * static_cast<double>(gammaPhase);
 	}
 
 	void writeToFile(Serializer& writer) const {
-		WRITE_FLOAT(writer, metaPhase, "dispMeta", 10.0f);
-		WRITE_FLOAT(writer, metaPhaseTopo, "dispMetaTopo", 10.0f);
+		WRITE_FLOAT(writer, twistPhaseOffset, "dispMeta", 10.0f);
+		WRITE_FLOAT(writer, topoPhaseOffset, "dispMetaTopo", 10.0f);
 		WRITE_FLOAT(writer, gammaPhase, "dispGamma", 10.0f);
 	}
 
 	bool readTag(Deserializer& reader, const char* tagName) {
-		READ_FLOAT(reader, tagName, metaPhase, "dispMeta", 10.0f);
-		READ_FLOAT(reader, tagName, metaPhaseTopo, "dispMetaTopo", 10.0f);
+		READ_FLOAT(reader, tagName, twistPhaseOffset, "dispMeta", 10.0f);
+		READ_FLOAT(reader, tagName, topoPhaseOffset, "dispMetaTopo", 10.0f);
 		READ_FLOAT(reader, tagName, gammaPhase, "dispGamma", 10.0f);
 		return false;
 	}
@@ -318,14 +340,14 @@ struct DisperserTwistParams {
  * Compute topology parameters from smoothed topo value
  *
  * Each zone has internal parameters that evolve via φ-triangles.
- * Position within zone + metaPhaseTopo drives the triangles.
+ * Position within zone + topoPhaseOffset drives the triangles.
  *
  * For detuning/harmonicBlend, an optional twistPhaseOffset can be added
  * to the raw phase, allowing twist meta position to "rotate" through
  * topo's parameter evolution (like sine shaper's phaseHarmonic pattern).
  *
  * @param smoothedTopo Smoothed topo value (q31)
- * @param params Optional - provides metaPhaseTopo for phase offset
+ * @param params Optional - provides topoPhaseOffset for phase offset
  * @param twistPhaseOffset Optional phase offset for detuning/harmonicBlend (from twist meta position)
  * @return Derived topology parameters
  */
@@ -339,7 +361,7 @@ DisperserTopoParams computeDisperserTopoParams(q31_t smoothedTopo, const Dispers
  * Zones 4-7: Meta zone combining all with φ-triangle evolution
  *
  * @param smoothedTwist Smoothed twist value (q31)
- * @param params Optional - provides metaPhase/gammaPhase for meta zone
+ * @param params Optional - provides twistPhaseOffset/gammaPhase for meta zone
  * @return Derived character parameters
  */
 DisperserTwistParams computeDisperserTwistParams(q31_t smoothedTwist, const DisperserParams* params = nullptr);
@@ -385,9 +407,16 @@ public:
 	                                float lrOffset = 0.0f, float q = kDefaultQ, uint8_t activeStages = kMaxStages,
 	                                float spreadCurve = 1.0f, float qTilt = 0.0f, float bimodalSeparation = 0.0f,
 	                                float detuning = 0.0f, float emphasis = 0.0f) {
-		constexpr q31_t smoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31); // ~100ms at 44.1kHz
+		// Always smooth parameters (cheap, runs every buffer)
+		constexpr q31_t smoothingAlpha = static_cast<q31_t>(kParamSmoothingAlpha * ONE_Q31);
 		*smoothedFreq = *smoothedFreq + (multiply_32x32_rshift32(freq - *smoothedFreq, smoothingAlpha) << 1);
 		*smoothedSpread = *smoothedSpread + (multiply_32x32_rshift32(spread - *smoothedSpread, smoothingAlpha) << 1);
+
+		// Rate-limit coefficient recalculation (expensive, runs every Nth buffer)
+		if (++coeffUpdateCounter_ < kCoeffUpdateStride) {
+			return;
+		}
+		coeffUpdateCounter_ = 0;
 
 		uint32_t freqU = static_cast<uint32_t>(*smoothedFreq) + 0x80000000u;
 		uint32_t spreadU = static_cast<uint32_t>(*smoothedSpread) + 0x80000000u;
@@ -487,48 +516,42 @@ public:
 		bool useDetuning = detuning > 0.001f;
 		float maxDetuneOct = useDetuning ? (50.0f * detuning / 1200.0f) : 0.0f;
 
-		for (size_t i = 0; i < kMaxStages; ++i) {
+		// Only calculate coefficients for active stages (significant savings when modulated)
+		for (size_t i = 0; i < numActive; ++i) {
+			float t = static_cast<float>(i) / std::max(1.0f, static_cast<float>(numActive - 1));
 			float stageHzBase;
-			float t; // 0..1 position for Q tilt (global across all stages)
 
-			if (i < numActive) {
-				t = static_cast<float>(i) / std::max(1.0f, static_cast<float>(numActive - 1));
+			if (isBimodal) {
+				// Bimodal: alternate stages between modes A and B
+				// Mode A spreads UPWARD from modeAHz (toward Mode B)
+				// Mode B spreads DOWNWARD from modeBHz (toward Mode A)
+				// This creates two clusters that "reach toward" each other
+				bool isModeB = (i % 2 == 1);
+				float modeCenter = isModeB ? modeBHz : modeAHz;
 
-				if (isBimodal) {
-					// Bimodal: alternate stages between modes A and B
-					// Mode A spreads UPWARD from modeAHz (toward Mode B)
-					// Mode B spreads DOWNWARD from modeBHz (toward Mode A)
-					// This creates two clusters that "reach toward" each other
-					bool isModeB = (i % 2 == 1);
-					float modeCenter = isModeB ? modeBHz : modeAHz;
+				// Count stages in this mode and this stage's position within mode
+				size_t stagesInMode = (numActive + (isModeB ? 0 : 1)) / 2;
+				size_t indexInMode = i / 2;
+				float tLocal = static_cast<float>(indexInMode) / std::max(1.0f, static_cast<float>(stagesInMode - 1));
 
-					// Count stages in this mode and this stage's position within mode
-					size_t stagesInMode = (numActive + (isModeB ? 0 : 1)) / 2;
-					size_t indexInMode = i / 2;
-					float tLocal =
-					    static_cast<float>(indexInMode) / std::max(1.0f, static_cast<float>(stagesInMode - 1));
+				// Apply power curve within mode (log-distributed distance from center)
+				// Fast power: t^exp = exp(exp * log(t)), but t=0 needs special handling
+				float curved = (tLocal > 0.001f) ? expf(exponent * logf(tLocal)) : 0.0f;
 
-					// Apply power curve within mode (log-distributed distance from center)
-					float curved = powf(tLocal, exponent);
+				// Mode A: positive offset (upward), Mode B: negative offset (downward)
+				// Clamping at 20Hz/16kHz handles boundaries naturally
+				float localPosition = isModeB ? -curved : curved;
 
-					// Mode A: positive offset (upward), Mode B: negative offset (downward)
-					// Clamping at 20Hz/16kHz handles boundaries naturally
-					float localPosition = isModeB ? -curved : curved;
-
-					// Each mode uses half the spread range
-					float localSpread = spreadOctaves * 0.5f;
-					stageHzBase = modeCenter * exp2f(localPosition * localSpread);
-				}
-				else {
-					// Normal single-mode distribution
-					float curved = powf(t, exponent);
-					float stagePosition = curved * 2.0f - 1.0f;
-					stageHzBase = centerHz * exp2f(stagePosition * spreadOctaves);
-				}
+				// Each mode uses half the spread range
+				float localSpread = spreadOctaves * 0.5f;
+				stageHzBase = modeCenter * exp2f(localPosition * localSpread);
 			}
 			else {
-				stageHzBase = centerHz; // Unused stages
-				t = 1.0f;
+				// Normal single-mode distribution
+				// Fast power: t^exp = exp(exp * log(t)), but t=0 needs special handling
+				float curved = (t > 0.001f) ? expf(exponent * logf(t)) : 0.0f;
+				float stagePosition = curved * 2.0f - 1.0f;
+				stageHzBase = centerHz * exp2f(stagePosition * spreadOctaves);
 			}
 
 			// Per-stage Q with tilt
@@ -547,10 +570,9 @@ public:
 			coeffsL_[i].compute(stageHzL, stageQ, static_cast<float>(kSampleRate));
 			coeffsR_[i].compute(stageHzR, stageQ, static_cast<float>(kSampleRate));
 
-			// Calculate delay offset for this stage (based on average frequency)
-			// Uses shared triangle fold + fifth quantization logic
-			float avgHz = (stageHzL + stageHzR) * 0.5f;
-			float rawOffset = kSampleRate / avgHz;
+			// Calculate delay offset from BASE frequency (not detuned)
+			// Detuning adds chorus shimmer but shouldn't shift the feedback comb
+			float rawOffset = kSampleRate / stageHzBase;
 			float foldedOffset = calculateFoldedDelay(rawOffset);
 			size_t offset = static_cast<size_t>(foldedOffset);
 
@@ -575,7 +597,8 @@ public:
 				// Asymmetric: +2.5dB for high emphasis, -2dB for low emphasis
 				float tiltDb = (emphasisClamped > 0) ? (emphasisClamped * 2.5f) : (emphasisClamped * 2.0f);
 				float stageDb = tiltDb * (t * 2.0f - 1.0f);
-				stageGain = std::pow(10.0f, stageDb / 20.0f);
+				// Fast dB→linear: 10^(dB/20) = exp(dB * log(10)/20)
+				stageGain = expf(stageDb * kLog10Over20);
 			}
 			// Smooth gain transitions to avoid transient volume excursions
 			// (especially problematic at high chirp/feedback values)
@@ -724,17 +747,21 @@ public:
 	 * Unified processing path with topology routing and optional feedback.
 	 * When punch=0 and chirp=0, this is pure topology routing (no delay access).
 	 *
-	 * @param punch Transient boost amount (0-1, 0=disabled)
+	 * @param punch Transient boost amount (0-1, 0=disabled) - used for feedback amount
 	 * @param chirp Feedback amount for chirp echoes (0-1, 0=disabled)
-	 * @param foldedDelay Pre-calculated folded delay time
-	 * @param harmonicBlend Delay tap balance: 0=f only, 0.5=equal f/2f, 1=2f emphasis
+	 * @param foldedDelay Target delay time (smoothed per-sample internally)
 	 * @param topology Topology zone for routing (0=Cascade, 1=PingPong, etc.)
 	 * @param crossGain Pre-computed cross-coupling gain for Cross topology (q31)
+	 * @param punchGain Pre-computed punch write gain (q31, computed once per buffer)
+	 * @param chirpGainF Pre-computed chirp fundamental gain (q31)
+	 * @param chirpGain2F Pre-computed chirp 2nd harmonic gain (q31)
+	 * @param useHarmonic2F Whether to write 2f tap (precomputed from harmonicBlend > 0.01)
 	 */
 	[[gnu::always_inline]] inline void processSample(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR, uint8_t stages,
 	                                                 DisperserDelayState& delay, float punch, float chirp,
-	                                                 float foldedDelay, float harmonicBlend, int32_t topology,
-	                                                 q31_t crossGain) {
+	                                                 float foldedDelay, int32_t topology, q31_t crossGain,
+	                                                 q31_t punchGain, q31_t chirpGainF, q31_t chirpGain2F,
+	                                                 bool useHarmonic2F) {
 
 		if (stages == 0) {
 			outL = inL;
@@ -743,36 +770,38 @@ public:
 			return;
 		}
 
-		// Minimum delay for clamping 2f tap
-		constexpr float kMinDelayF = 441.0f; // 10ms at 44.1kHz
+		// Minimum delay for clamping 2f tap (in Q16 format: 441 << 16)
+		constexpr uint32_t kMinDelayQ16 = 441u << 16;
 
-		needsBufferClear_ = false; // Consume flag but don't act on it
-
-		// Smooth toward folded target for glitch-free transitions
-		// Very slow glide (~5000ms settling) so folds become gradual bends
+		// Smooth toward folded target for glitch-free transitions (per-sample for zipper-free delay)
+		// ~300ms settling so folds become gradual bends
 		if (smoothedDelay_ == 0.0f) {
 			smoothedDelay_ = foldedDelay; // Initialize on first call
 		}
 		else {
-			smoothedDelay_ += (foldedDelay - smoothedDelay_) * 0.00002f;
+			smoothedDelay_ += (foldedDelay - smoothedDelay_) * 0.0003f;
 		}
-		float smoothDelay = smoothedDelay_;
 
-		// === TRANSIENT DETECTION (delay-aware) ===
-		float transient = detectTransient(inL, inR, static_cast<size_t>(smoothDelay));
+		// Reduce writes during wrap transition to prevent feedback buildup
+		// When smoothed delay is >20% away from target, we're mid-transition
+		float delayDelta = std::abs(foldedDelay - smoothedDelay_);
+		if (delayDelta > smoothedDelay_ * 0.2f) {
+			// Scale down to 10% instead of full mute
+			punchGain = punchGain / 10;
+			chirpGainF = chirpGainF / 10;
+			chirpGain2F = chirpGain2F / 10;
+		}
+
+		// Convert to Q16 once per sample for integer delay writes
+		uint32_t delayQ16 = static_cast<uint32_t>(smoothedDelay_ * 65536.0f);
 
 		// === PUNCH: Write transient-scaled DRY input to delay ===
-		// Echoes the original transient (before dispersion)
 		q31_t procL = inL;
 		q31_t procR = inR;
-		if (punch > 0.01f) {
-			float punchDelay = smoothDelay; // Already clamped to folding range
-			// Write dry input scaled by transient and punch amount
-			float punchWrite = punch * (0.5f + transient * 0.49f); // Base 50% + transient boost
-			q31_t punchGain = static_cast<q31_t>(std::min(punchWrite, 0.99f) * ONE_Q31);
+		if (punchGain != 0) {
 			q31_t writeL = multiply_32x32_rshift32(inL, punchGain) << 1;
 			q31_t writeR = multiply_32x32_rshift32(inR, punchGain) << 1;
-			delay.writeAtOffsetFractional(writeL, writeR, punchDelay);
+			delay.writeAtOffsetFractionalQ16(writeL, writeR, delayQ16);
 		}
 
 		// === READ FEEDBACK (before allpass so echoes get dispersed too) ===
@@ -783,9 +812,7 @@ public:
 			delay.clearHead();
 
 			// Feedback with hard clamp to prevent runaway
-			// 29-bit: more KS sustain/beef, occasional DC occlusion
-			// 28-bit: stable, almost no DC issues, slightly less sustain
-			q31_t fbGain = static_cast<q31_t>(fbAmount * 0.99f * ONE_Q31);
+			q31_t fbGain = static_cast<q31_t>(fbAmount * 0.98f * ONE_Q31);
 			q31_t fbL_scaled = signed_saturate<29>(multiply_32x32_rshift32(fbL, fbGain) << 1);
 			q31_t fbR_scaled = signed_saturate<29>(multiply_32x32_rshift32(fbR, fbGain) << 1);
 			procL = q31_sat_add(procL, fbL_scaled);
@@ -796,37 +823,18 @@ public:
 		processWithTopology(procL, procR, outL, outR, stages, topology, crossGain);
 
 		// === WRITE TO DELAY at f and optionally 2f ===
-		// harmonicBlend controls f/2f balance: 0=f only, 0.5=equal, 1=2f emphasis
-		// When harmonicBlend=0, skip 2f write entirely for efficiency
-		// Uses fractional writes for smooth pitch transitions
-		if (chirp > 0.01f) {
-			float delayF = smoothDelay; // Already clamped to folding range
+		if (chirpGainF != 0) {
+			// Write at f (fundamental)
+			q31_t writeLF = multiply_32x32_rshift32(outL, chirpGainF) << 1;
+			q31_t writeRF = multiply_32x32_rshift32(outR, chirpGainF) << 1;
+			delay.writeAtOffsetFractionalQ16(writeLF, writeRF, delayQ16);
 
-			// Transient-focused write: lower base prevents DC accumulation
-			// while transient boost preserves punchy attack character
-			// Tuning: 80/20 preserves full mojo, rare DC self-resolves over time
-			// (75/25 very close; 70/30 loses some sustain; 50/50 too thin)
-			float baseWrite = chirp * 0.8f;
-			float transientBoost = chirp * transient * 0.2f;
-			float writeAmount = std::min(baseWrite + transientBoost, 0.99f);
-
-			// Gain balance: harmonicBlend=0 → f=1.0, 2f=0; harmonicBlend=1 → f=0.5, 2f=0.8
-			float fGain = 1.0f - harmonicBlend * 0.5f; // 1.0 → 0.5
-			float f2Gain = harmonicBlend * 0.8f;       // 0.0 → 0.8
-
-			// Write at f (fundamental) - fractional for smooth pitch
-			q31_t writeGainF = static_cast<q31_t>(writeAmount * fGain * ONE_Q31);
-			q31_t writeLF = multiply_32x32_rshift32(outL, writeGainF) << 1;
-			q31_t writeRF = multiply_32x32_rshift32(outR, writeGainF) << 1;
-			delay.writeAtOffsetFractional(writeLF, writeRF, delayF);
-
-			// Write at 2f (octave up) only if harmonicBlend > 0
-			if (harmonicBlend > 0.01f) {
-				float delay2F = std::max(smoothDelay * 0.5f, kMinDelayF); // Clamp to minimum
-				q31_t writeGain2F = static_cast<q31_t>(writeAmount * f2Gain * ONE_Q31);
-				q31_t writeL2F = multiply_32x32_rshift32(outL, writeGain2F) << 1;
-				q31_t writeR2F = multiply_32x32_rshift32(outR, writeGain2F) << 1;
-				delay.writeAtOffsetFractional(writeL2F, writeR2F, delay2F);
+			// Write at 2f (octave up) only if harmonicBlend was > 0
+			if (useHarmonic2F) {
+				uint32_t delay2FQ16 = std::max(delayQ16 >> 1, kMinDelayQ16);
+				q31_t writeL2F = multiply_32x32_rshift32(outL, chirpGain2F) << 1;
+				q31_t writeR2F = multiply_32x32_rshift32(outR, chirpGain2F) << 1;
+				delay.writeAtOffsetFractionalQ16(writeL2F, writeR2F, delay2FQ16);
 			}
 		}
 
@@ -854,16 +862,51 @@ public:
 		FX_BENCH_SET_TAG(bench, 0, kStageNames[std::min(stages, static_cast<uint8_t>(32)) - 1]);
 		FX_BENCH_SCOPE(bench);
 
-		// Calculate folded delay ONCE per buffer (expensive log2/pow/fmod/round)
-		float foldedDelay = calculateFoldedDelay(static_cast<float>(delaySamples));
-
 		// Precompute crossGain from crossMix (40-90% based on crossMix)
 		q31_t crossGain = static_cast<q31_t>((0.4f + crossMix * 0.5f) * ONE_Q31);
 
+		// Fast path: pure allpass cascade when punch/chirp disabled
+		// Skips delay smoothing, transient detection, and feedback processing
+		bool needsFeedback = (punch > 0.01f || chirp > 0.01f);
+		if (!needsFeedback) {
+			for (auto& sample : buffer) {
+				processWithTopology(sample.l, sample.r, sample.l, sample.r, stages, topology, crossGain);
+			}
+			return;
+		}
+
+		// Full path: with punch/chirp feedback
+		// Calculate folded delay ONCE per buffer (expensive log2/pow/fmod/round)
+		float foldedDelay = calculateFoldedDelay(static_cast<float>(delaySamples));
+
+		// Detect transient using first sample of buffer
+		float transient = detectTransient(buffer[0].l, buffer[0].r, static_cast<size_t>(foldedDelay));
+
+		// Precompute gains
+		q31_t punchGain = 0;
+		q31_t chirpGainF = 0;
+		q31_t chirpGain2F = 0;
+		bool useHarmonic2F = (harmonicBlend > 0.01f);
+
+		if (punch > 0.01f) {
+			float punchWrite = punch * (0.5f + transient * 0.49f);
+			punchGain = static_cast<q31_t>(std::min(punchWrite, 0.99f) * ONE_Q31);
+		}
+
+		if (chirp > 0.01f) {
+			float baseWrite = chirp * 0.70f;
+			float transientBoost = chirp * transient * 0.30f;
+			float writeAmount = std::min(baseWrite + transientBoost, 0.99f);
+			float fGain = 1.0f - harmonicBlend * 0.5f;
+			float f2Gain = harmonicBlend * 0.8f;
+			chirpGainF = static_cast<q31_t>(writeAmount * fGain * ONE_Q31);
+			chirpGain2F = static_cast<q31_t>(writeAmount * f2Gain * ONE_Q31);
+		}
+
 		for (auto& sample : buffer) {
 			q31_t outL, outR;
-			processSample(sample.l, sample.r, outL, outR, stages, delay, punch, chirp, foldedDelay, harmonicBlend,
-			              topology, crossGain);
+			processSample(sample.l, sample.r, outL, outR, stages, delay, punch, chirp, foldedDelay, topology, crossGain,
+			              punchGain, chirpGainF, chirpGain2F, useHarmonic2F);
 			sample.l = outL;
 			sample.r = outR;
 		}
@@ -1114,13 +1157,14 @@ private:
 	uint8_t lastSpread_{255};
 	uint8_t lastActiveStages_{255}; // Force initial coefficient calculation
 	float lastLrOffset_{0.0f};
-	float lastQ_{-1.0f};           // Force initial coefficient calculation
-	float lastSpreadCurve_{-1.0f}; // Force initial coefficient calculation
-	float lastQTilt_{999.0f};      // Force initial coefficient calculation
-	float lastBimodal_{-1.0f};     // Force initial coefficient calculation
-	float lastDetuning_{-1.0f};    // Force initial coefficient calculation
-	float lastEmphasis_{999.0f};   // Force initial calculation (bipolar, so 999 triggers)
-	                               // Note: Delay buffers are in DisperserDelayState (shared state), not here
+	float lastQ_{-1.0f};            // Force initial coefficient calculation
+	float lastSpreadCurve_{-1.0f};  // Force initial coefficient calculation
+	float lastQTilt_{999.0f};       // Force initial coefficient calculation
+	float lastBimodal_{-1.0f};      // Force initial coefficient calculation
+	float lastDetuning_{-1.0f};     // Force initial coefficient calculation
+	float lastEmphasis_{999.0f};    // Force initial calculation (bipolar, so 999 triggers)
+	                                // Note: Delay buffers are in DisperserDelayState (shared state), not here
+	uint8_t coeffUpdateCounter_{0}; // Rate limiter for coefficient recalculation
 };
 
 // ============================================================================
@@ -1173,7 +1217,7 @@ inline void processDisperser(StereoBuffer<q31_t> buffer, Disperser& dsp, Dispers
 	q31_t twistValue = params.twist.combinePresetAndCables(twistPreset, twistCables);
 
 	// Smooth zone params for DSP
-	constexpr q31_t smoothingAlpha = static_cast<q31_t>(0.03 * ONE_Q31);
+	constexpr q31_t smoothingAlpha = static_cast<q31_t>(kParamSmoothingAlpha * ONE_Q31);
 	params.smoothedTopo += (multiply_32x32_rshift32(topoValue - params.smoothedTopo, smoothingAlpha) << 1);
 	params.smoothedTwist += (multiply_32x32_rshift32(twistValue - params.smoothedTwist, smoothingAlpha) << 1);
 

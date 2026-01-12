@@ -114,7 +114,8 @@ inline FloatSmoothingContext prepareSmoothingFloat(float state, float target, [[
 /// @param duty Active portion 0.0-1.0 (default 1.0 = full triangle, no deadzone)
 /// @return Output 0.0 to 1.0
 inline float triangleSimpleUnipolar(float phase, float duty = 1.0f) {
-	phase = phase - std::floor(phase); // Wrap to 0-1
+	// Fast floor via int32_t truncation (valid for non-negative phase)
+	phase = phase - static_cast<float>(static_cast<int32_t>(phase));
 	float halfDuty = duty * 0.5f;
 
 	if (phase < halfDuty) {
@@ -141,7 +142,8 @@ inline float triangleSimpleUnipolar(float phase, float duty = 1.0f) {
 /// @param duty Active portion 0.0-1.0 (default 1.0 = full wave, no deadzone)
 /// @return Output -1.0 to +1.0
 inline float triangleFloat(float phase, float duty = 1.0f) {
-	phase = phase - std::floor(phase);
+	// Fast floor via int32_t truncation (valid for non-negative phase)
+	phase = phase - static_cast<float>(static_cast<int32_t>(phase));
 	float quarterDuty = duty * 0.25f;
 	float halfDuty = duty * 0.5f;
 

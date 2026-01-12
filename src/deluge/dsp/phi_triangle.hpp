@@ -70,11 +70,15 @@ constexpr float kPhi400 = 6.8541020f; // φ^4.0
  * (gamma can reach 10^15 before precision issues). Result is always [0,1) so
  * float output is sufficient.
  *
+ * Uses int64_t truncation instead of std::floor for ~40 cycle savings per call.
+ * Safe for positive values up to ~9×10^18 (int64_t max).
+ *
  * @param phase Raw phase value (may be very large from secret knobs)
  * @return Wrapped phase in [0,1)
  */
 [[gnu::always_inline]] inline float wrapPhase(double phase) {
-	return static_cast<float>(phase - std::floor(phase));
+	// Fast floor via int64_t truncation (valid for positive values)
+	return static_cast<float>(phase - static_cast<double>(static_cast<int64_t>(phase)));
 }
 
 } // namespace deluge::dsp::phi

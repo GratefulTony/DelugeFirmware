@@ -50,7 +50,7 @@ struct TableShaperState {
 	uint8_t shapeX{0};             // Soft→Hard axis (0-127, "Knee")
 	uint16_t shapeY{0};            // Clean→Weird axis (0-1023, high-res multi-zone, "Color")
 	bool aa{false};                // Anti-aliasing enabled (default off, reserved for future use)
-	float phaseOffset{0.0f};       // Phase offset for phi triangles (secret knob, 0 = drift disabled)
+	float gammaPhase{0.0f};        // Gamma phase for phi triangles (secret knob, 0 = drift disabled)
 	float oscHarmonicWeight{0.5f}; // Oscillator harmonic content [0-1]: 0=sine, 0.5=saw, 1=square
 
 	// DSP smoothing state
@@ -134,7 +134,7 @@ struct TableShaperState {
 		if (aa) {
 			storage::writeAttributeInt(writer, "tableShaperAA", 1);
 		}
-		WRITE_FLOAT(writer, phaseOffset, "tableShaperPhase", 10.0f);
+		WRITE_FLOAT(writer, gammaPhase, "tableShaperPhase", 10.0f);
 	}
 
 	/// Read a tag into shaper state, returns true if tag was handled
@@ -145,7 +145,7 @@ struct TableShaperState {
 			aa = storage::readAndExitTag(reader, "tableShaperAA") != 0;
 			return true;
 		}
-		READ_FLOAT(reader, tagName, phaseOffset, "tableShaperPhase", 10.0f);
+		READ_FLOAT(reader, tagName, gammaPhase, "tableShaperPhase", 10.0f);
 		return false;
 	}
 };
@@ -170,14 +170,14 @@ public:
 	 * Call this when shapeX or shapeY changes (not during audio processing)
 	 * @param shapeX Controls waveshaping intensity (0-127)
 	 * @param shapeY Sweeps through combinatoric blend (0-1023, high-res)
-	 * @param phaseOffset Phase offset for triangle modulation (from secret knob)
+	 * @param gammaPhase Gamma phase for triangle modulation (from secret knob)
 	 * @param oscHarmonicWeight Oscillator harmonic content [0-1]: 0=sine, 0.5=saw, 1=square
 	 */
-	void regenerateTable(uint8_t shapeX, uint16_t shapeY, float phaseOffset = 0.0f, float oscHarmonicWeight = 0.5f) {
-		// Use phase-aware derivation when phaseOffset is set OR for square waves (need LPF always)
-		if (phaseOffset != 0.0f || oscHarmonicWeight >= 0.8f) {
+	void regenerateTable(uint8_t shapeX, uint16_t shapeY, float gammaPhase = 0.0f, float oscHarmonicWeight = 0.5f) {
+		// Use phase-aware derivation when gammaPhase is set OR for square waves (need LPF always)
+		if (gammaPhase != 0.0f || oscHarmonicWeight >= 0.8f) {
 			tableSat_.setParameters(
-			    TableShaperXYMapper::deriveParametersWithPhase(shapeX, shapeY, phaseOffset, 1.0f, oscHarmonicWeight));
+			    TableShaperXYMapper::deriveParametersWithPhase(shapeX, shapeY, gammaPhase, 1.0f, oscHarmonicWeight));
 		}
 		else {
 			tableSat_.setParameters(TableShaperXYMapper::deriveParameters(shapeX, shapeY));

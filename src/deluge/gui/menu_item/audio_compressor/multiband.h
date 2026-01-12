@@ -390,12 +390,12 @@ public:
 	// Override to add secret menu for feel meta phase adjustment
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret menu: adjust feelMetaPhase (unbounded, wraps per phi constant in DSP)
+			// Secret menu: adjust feelPhaseOffset (gated ≥0 for fast floor optimization)
 			Buttons::selectButtonPressUsedUp = true;
 			auto& comp = soundEditor.currentModControllable->multibandCompressor;
-			float phase = comp.getFeelMetaPhase();
-			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
-			comp.setFeelMetaPhase(phase);
+			float phase = comp.getFeelPhaseOffset();
+			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
+			comp.setFeelPhaseOffset(phase);
 			// Show current value on display
 			char buffer[12];
 			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
@@ -483,12 +483,12 @@ public:
 	// Override to add secret menu for twist phase adjustment
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret menu: adjust vibeTwistPhase (unbounded, wraps via fmod in DSP)
+			// Secret menu: adjust vibePhaseOffset (gated ≥0 for fast floor optimization)
 			Buttons::selectButtonPressUsedUp = true;
 			auto& comp = soundEditor.currentModControllable->multibandCompressor;
-			float phase = comp.getVibeTwistPhase();
-			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
-			comp.setVibeTwistPhase(phase);
+			float phase = comp.getVibePhaseOffset();
+			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
+			comp.setVibePhaseOffset(phase);
 			// Show current value on display
 			char buffer[12];
 			intToString(static_cast<int32_t>(phase * 10.0f), buffer);

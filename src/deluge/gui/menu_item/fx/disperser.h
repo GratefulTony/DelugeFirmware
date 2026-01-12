@@ -125,7 +125,7 @@ public:
 			// Secret menu: adjust gammaPhase (adds 100*gamma to both topo and twist meta zones)
 			Buttons::selectButtonPressUsedUp = true;
 			float& gamma = soundEditor.currentModControllable->disperser.phases.gammaPhase;
-			gamma += static_cast<float>(offset) * 0.1f;
+			gamma = std::max(0.0f, gamma + static_cast<float>(offset) * 0.1f);
 			char buffer[12];
 			intToString(static_cast<int32_t>(gamma * 10.0f), buffer);
 			display->displayPopup(buffer);
@@ -177,7 +177,7 @@ private:
  * Zone 6: Diffuse - randomized per-stage coefficient variation
  * Zone 7: Spring - chirp/spring reverb character
  *
- * Secret menu: Push+twist encoder to adjust metaPhaseTopo
+ * Secret menu: Push+twist encoder to adjust topoPhaseOffset
  * Press encoder (no twist): Opens mod matrix source selection
  */
 class DisperserTopo final : public ZoneBasedDualParam<params::GLOBAL_DISPERSER_TOPO> {
@@ -238,10 +238,10 @@ public:
 
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret menu: adjust metaPhaseTopo
+			// Secret menu: adjust topoPhaseOffset (gated ≥0 for fast floor optimization)
 			Buttons::selectButtonPressUsedUp = true;
-			float& phase = soundEditor.currentModControllable->disperser.phases.metaPhaseTopo;
-			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			float& phase = soundEditor.currentModControllable->disperser.phases.topoPhaseOffset;
+			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
 			char buffer[12];
 			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
 			display->displayPopup(buffer);
@@ -276,7 +276,7 @@ private:
  * Zone 4: QTilt - Q varies across stages (uniform → high sharp → low sharp)
  * Zones 5-7: Meta - All effects combined with φ-triangle evolution
  *
- * Secret menu: Push+twist encoder to adjust metaPhase
+ * Secret menu: Push+twist encoder to adjust twistPhaseOffset
  * Press encoder (no twist): Opens mod matrix source selection
  */
 class DisperserTwist final : public ZoneBasedDualParam<params::GLOBAL_DISPERSER_TWIST> {
@@ -329,10 +329,10 @@ public:
 
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret menu: adjust metaPhase
+			// Secret menu: adjust twistPhaseOffset (gated ≥0 for fast floor optimization)
 			Buttons::selectButtonPressUsedUp = true;
-			float& phase = soundEditor.currentModControllable->disperser.phases.metaPhase;
-			phase += static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f;
+			float& phase = soundEditor.currentModControllable->disperser.phases.twistPhaseOffset;
+			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
 			char buffer[12];
 			intToString(static_cast<int32_t>(phase * 10.0f), buffer);
 			display->displayPopup(buffer);

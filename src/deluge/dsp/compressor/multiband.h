@@ -632,14 +632,14 @@ public:
 		int32_t zone = zoneInfo.index;
 		float zonePos = zoneInfo.position;
 
-		// Compute wrapped phases from feelMetaPhase_ (creates divergent offsets per phi constant)
+		// Compute wrapped phases from feelPhaseOffset_ (creates divergent offsets per phi constant)
 		// Using small phi powers (1.1-1.6 range) so common offset -0.3 works for all
-		float ph025 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi025);
-		float ph033 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi033);
-		float ph050 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi050);
-		float ph067 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi067);
-		float ph075 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi075);
-		float ph100 = phi::wrapPhase(feelMetaPhase_ * phi::kPhi100);
+		float ph025 = phi::wrapPhase(feelPhaseOffset_ * phi::kPhi025);
+		float ph033 = phi::wrapPhase(feelPhaseOffset_ * phi::kPhi033);
+		float ph050 = phi::wrapPhase(feelPhaseOffset_ * phi::kPhi050);
+		float ph067 = phi::wrapPhase(feelPhaseOffset_ * phi::kPhi067);
+		float ph075 = phi::wrapPhase(feelPhaseOffset_ * phi::kPhi075);
+		float ph100 = phi::wrapPhase(feelPhaseOffset_ * phi::kPhi100);
 
 		// === Compute derived parameters based on zone ===
 		// Each zone has characteristic curves for width, knee, timing, skew
@@ -828,11 +828,11 @@ public:
 		};
 		// clang-format on
 
-		// Apply vibe and feelMetaPhase modulation to non-OWLTT zones
+		// Apply vibe and feelPhaseOffset modulation to non-OWLTT zones
 		if (zone != 7) {
 			float vibeModAmount = 0.3f * (static_cast<float>(vibeKnob_) / ONE_Q31f);
 			bool applyVibe = vibeModAmount > 0.01f;
-			bool applyFeel = std::abs(feelMetaPhase_) > 0.01f;
+			bool applyFeel = std::abs(feelPhaseOffset_) > 0.01f;
 
 			if (applyVibe || applyFeel) {
 				const float* vm = kVibeZoneMult[zone];
@@ -952,7 +952,7 @@ public:
 			// Last 25% of duty cycle: triangle modulation with blend ramping up
 			float rampPos = (globalVibePos - 0.5f) * 2.0f; // 0 to 1 in second half
 			// Wrap phase with fmod for precision at high values
-			float twistPhase = std::fmod(rampPos * 10.0f + vibeTwistPhase_, 1.0f);
+			float twistPhase = std::fmod(rampPos * 10.0f + vibePhaseOffset_, 1.0f);
 			float triangleVal = triangleFloat(twistPhase); // -1 to +1
 			// Blend: 0 at vibe=50%, 1 at vibe=100%
 			float blend = rampPos;
@@ -1013,7 +1013,7 @@ public:
 
 		case 7: { // Chaos: phi-power frequencies with secret phase offset
 			// Use double for phase wrapping to maintain precision at large values
-			double phRaw = static_cast<double>(vibeTwistPhase_);
+			double phRaw = static_cast<double>(vibePhaseOffset_);
 
 			// Per-frequency phase offsets - irrational frequencies create non-repeating divergence
 			float ph225 = phi::wrapPhase(phRaw * phi::kPhi225);
@@ -1048,21 +1048,21 @@ public:
 	/// Get vibe knob value
 	[[nodiscard]] q31_t getVibe() const { return vibeKnob_; }
 
-	/// Set twist phase offset (secret menu parameter, unbounded - wraps in DSP)
-	void setVibeTwistPhase(float phase) { vibeTwistPhase_ = phase; }
+	/// Set vibe phase offset (secret menu parameter, unbounded - wraps in DSP)
+	void setVibePhaseOffset(float phase) { vibePhaseOffset_ = phase; }
 
-	/// Get twist phase offset
-	[[nodiscard]] float getVibeTwistPhase() const { return vibeTwistPhase_; }
+	/// Get vibe phase offset
+	[[nodiscard]] float getVibePhaseOffset() const { return vibePhaseOffset_; }
 
-	/// Set feel meta phase offset (secret menu parameter, unbounded - wraps per phi constant)
+	/// Set feel phase offset (secret menu parameter, unbounded - wraps per phi constant)
 	/// Push+twist on Feel encoder to adjust. Shifts all phi triangles in Feel zones.
-	void setFeelMetaPhase(float phase) {
-		feelMetaPhase_ = phase;
+	void setFeelPhaseOffset(float phase) {
+		feelPhaseOffset_ = phase;
 		characterComputed_ = false; // Invalidate cache to recompute with new phase
 	}
 
-	/// Get feel meta phase offset
-	[[nodiscard]] float getFeelMetaPhase() const { return feelMetaPhase_; }
+	/// Get feel phase offset
+	[[nodiscard]] float getFeelPhaseOffset() const { return feelPhaseOffset_; }
 
 	/// Get current vibe zone for display
 	[[nodiscard]] VibeZone getVibeZone() const {
@@ -1859,8 +1859,8 @@ private:
 	std::array<float, kNumBands> vibePhaseTiming_{0.0f, 0.0f, 0.0f}; // Phase offsets for timing
 	std::array<float, kNumBands> vibePhaseSkew_{0.0f, 0.0f, 0.0f};   // Phase offsets for skew
 	float vibeTwist_ = 1.0f;                                         // Twist amount for Twisted/Twist3 (0-1)
-	float vibeTwistPhase_ = 0.0f;                                    // Secret phase offset for twist modulation
-	float feelMetaPhase_ = 0.0f;                                     // Secret phase offset for feel phi triangles
+	float vibePhaseOffset_ = 0.0f;                                   // Secret phase offset for twist modulation
+	float feelPhaseOffset_ = 0.0f;                                   // Secret phase offset for feel phi triangles
 
 	// Enable/disable zone (0 = off, >ONE_Q31/2 = on)
 	q31_t enabledZone_{0};
@@ -1915,8 +1915,8 @@ public:
 		if (!softClipEnabled_) { // Default is true, only write when disabled
 			deluge::storage::writeAttributeInt(writer, "mbSoftClip", 0);
 		}
-		WRITE_FLOAT(writer, vibeTwistPhase_, "mbVibeTwistPhase", 10.0f);
-		WRITE_FLOAT(writer, feelMetaPhase_, "mbFeelMetaPhase", 10.0f);
+		WRITE_FLOAT(writer, vibePhaseOffset_, "mbVibeTwistPhase", 10.0f);
+		WRITE_FLOAT(writer, feelPhaseOffset_, "mbFeelMetaPhase", 10.0f);
 
 		// Per-band offsets (write with index suffix)
 		for (size_t i = 0; i < kNumBands; ++i) {
@@ -1952,8 +1952,8 @@ public:
 			return true;
 		}
 		READ_FIELD(reader, tagName, crossoverType_, "mbCrossoverType");
-		READ_FLOAT(reader, tagName, vibeTwistPhase_, "mbVibeTwistPhase", 10.0f);
-		READ_FLOAT(reader, tagName, feelMetaPhase_, "mbFeelMetaPhase", 10.0f);
+		READ_FLOAT(reader, tagName, vibePhaseOffset_, "mbVibeTwistPhase", 10.0f);
+		READ_FLOAT(reader, tagName, feelPhaseOffset_, "mbFeelMetaPhase", 10.0f);
 
 		// Per-band offsets (check each index)
 		for (size_t i = 0; i < kNumBands; ++i) {

@@ -70,7 +70,7 @@ DisperserTopoParams computeDisperserTopoParams(q31_t smoothedTopo, const Dispers
 	// Position within current zone (0-1)
 	float pos = std::clamp(zoneInfo.position, 0.0f, 1.0f);
 
-	// Get phase offset from secret knob (metaPhaseTopo) - keep double precision
+	// Get phase offset from secret knob (topoPhaseOffset) - keep double precision
 	double phRaw = params ? params->phases.effectiveTopo() : 0.0;
 
 	// For detuning/harmonicBlend: add twist meta position to phase
@@ -91,8 +91,9 @@ DisperserTopoParams computeDisperserTopoParams(q31_t smoothedTopo, const Dispers
 	// At phRaw=0: Q goes 0.5→20.0 monotonically (like cascade)
 	// As phRaw increases: phase shifts (diverges from baseline)
 	constexpr float kPhiN150 = 1.0f / kPhi150; // φ^-1.5 ≈ 0.486
+	constexpr float kLog40 = 3.6888794541f;    // log(40) for fast power: 40^x = exp(x*log40)
 	float qTriangle = triangleSimpleUnipolar(wrapPhase((pos + phRaw) * kPhiN150), 1.0f);
-	result.q = 0.5f * std::pow(40.0f, qTriangle); // 0.5 to 20.0 range
+	result.q = 0.5f * expf(qTriangle * kLog40); // 0.5 to 20.0 range (fast: 40^x = exp(x*log40))
 
 	// Each zone uses these triangles differently
 	// The param meanings vary by topology - DSP dispatch interprets them
@@ -290,7 +291,7 @@ DisperserTwistParams computeDisperserTwistParams(q31_t smoothedTwist, const Disp
 		float pos = static_cast<float>(smoothedTwist - kZone5Start) / static_cast<float>(ONE_Q31 - kZone5Start);
 		pos = std::clamp(pos, 0.0f, 1.0f);
 
-		// Get combined phase offset (metaPhase + 100*gammaPhase)
+		// Get combined phase offset (twistPhaseOffset + 100*gammaPhase)
 		double phRaw = params ? params->phases.effectiveMeta() : 0.0;
 
 		// Per-effect frequency modulation using phi triangles (non-monotonic)
