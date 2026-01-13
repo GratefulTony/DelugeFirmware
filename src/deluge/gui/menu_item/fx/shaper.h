@@ -104,20 +104,35 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
 
-	/// Click encoder to toggle extras (drift + sub effects)
-	/// Slew and hysteresis are always on when gammaPhase != 0
-	MenuItem* selectButtonPress() override {
-		auto* mca = soundEditor.currentModControllable;
-		mca->shaper.subEnabled = !mca->shaper.subEnabled;
-		display->displayPopup(mca->shaper.subEnabled ? "EXTRAS ON" : "EXTRAS OFF");
-		return NO_NAVIGATION;
+	/// Push+twist to adjust extrasMask bitmask (0-31)
+	/// Bits: 0=sub, 1=feedback, 2=rotation, 3=lpf, 4=integrator
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret: push+twist adjusts extrasMask bitmask
+			Buttons::selectButtonPressUsedUp = true;
+			uint8_t& mask = soundEditor.currentModControllable->shaper.extrasMask;
+			int newMask = static_cast<int>(mask) + offset;
+			mask = static_cast<uint8_t>(std::clamp(newMask, 0, 31));
+			// Show current value on display
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "EXTRA:%d", mask);
+			display->displayPopup(buffer);
+			suppressNotification_ = true;
+		}
+		else {
+			IntegerWithOff::selectEncoderAction(offset);
+			if (this->getValue() == 0) {
+				display->displayPopup("OFF");
+			}
+		}
 	}
 
-	void selectEncoderAction(int32_t offset) override {
-		IntegerWithOff::selectEncoderAction(offset);
-		if (this->getValue() == 0) {
-			display->displayPopup("OFF");
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
 		}
+		return true;
 	}
 
 	// Show "OFF" in horizontal menu when X=0
@@ -130,6 +145,9 @@ public:
 		}
 		IntegerWithOff::renderInHorizontalMenu(slot);
 	}
+
+private:
+	mutable bool suppressNotification_ = false;
 };
 
 // Shape Y (UI: "Color"): Sweeps through saturation characters

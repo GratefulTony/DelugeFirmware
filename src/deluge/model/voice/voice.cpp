@@ -1559,14 +1559,13 @@ skipUnisonPart: {}
 				sound.shaper.oscHarmonicWeight = oscHarmonic;
 			}
 
-			dsp::shapeBufferInt32(
-			    stereo_osc_buffer, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
-			    &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), &sound.shaper.prevScaledInputL,
-			    &sound.shaper.prevScaledInputR, &sound.shaper.driftSlopeL_Q16, &sound.shaper.driftSlopeR_Q16,
-			    &sound.shaper.driftAccumL, &sound.shaper.driftAccumR, &sound.shaper.driftLfsr,
-			    &sound.shaper.prevSampleL, &sound.shaper.prevSampleR, &sound.shaper.zcCountL, &sound.shaper.zcCountR,
-			    &sound.shaper.subSignL, &sound.shaper.subSignR, sound.shaper.subEnabled, sound.shaper.gammaPhase,
-			    &sound.shaper.slewedL, &sound.shaper.slewedR, noteFreqHz);
+			dsp::shapeBufferInt32(stereo_osc_buffer, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
+			                      &sound.shaper.threshold32Last, &sound.shaper.blendSlopeLast_Q8, shaperFilterGain,
+			                      sound.hasFilters(), &sound.shaper.prevScaledInputL, &sound.shaper.prevScaledInputR,
+			                      &sound.shaper.prevSampleL, &sound.shaper.prevSampleR, &sound.shaper.zcCountL,
+			                      &sound.shaper.zcCountR, &sound.shaper.subSignL, &sound.shaper.subSignR,
+			                      sound.shaper.extrasMask, sound.shaper.gammaPhase, &sound.shaper.slewedL,
+			                      &sound.shaper.slewedR, noteFreqHz);
 		}
 
 		// Filters
@@ -1697,8 +1696,6 @@ skipUnisonPart: {}
 			}
 
 			dsp::ShaperModState monoState{
-			    .driftSlope = &sound.shaper.driftSlopeL_Q16,
-			    .driftAccum = &sound.shaper.driftAccumL,
 			    .prevSample = &sound.shaper.prevSampleL,
 			    .slewed = &sound.shaper.slewedL,
 			    .prevScaledInput = &sound.shaper.prevScaledInputL,
@@ -1706,8 +1703,8 @@ skipUnisonPart: {}
 			    .subSign = &sound.shaper.subSignL,
 			};
 			dsp::shapeBufferInt32(std::span{oscBuffer, n}, sound.shaperDsp, satDrive, &sound.shaper.driveLast, satMix,
-			                      &sound.shaper.mixNormLast_Q16, shaperFilterGain, sound.hasFilters(), monoState,
-			                      &sound.shaper.driftLfsr, sound.shaper.subEnabled, sound.shaper.gammaPhase,
+			                      &sound.shaper.threshold32Last, &sound.shaper.blendSlopeLast_Q8, shaperFilterGain,
+			                      sound.hasFilters(), monoState, sound.shaper.extrasMask, sound.shaper.gammaPhase,
 			                      noteFreqHz);
 		}
 

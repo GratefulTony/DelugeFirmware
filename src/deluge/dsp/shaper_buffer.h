@@ -33,8 +33,39 @@
 
 namespace deluge::dsp {
 
+/// Bitmask constants for selective extras control
+/// Use as extrasMask parameter to enable/disable individual effects
+constexpr uint8_t kExtrasSub = 1 << 0;        ///< bit 0: subharmonic gain modulation
+constexpr uint8_t kExtrasFeedback = 1 << 1;   ///< bit 1: feedback comb filter
+constexpr uint8_t kExtrasRotation = 1 << 2;   ///< bit 2: bit rotation (aliasing)
+constexpr uint8_t kExtrasLpf = 1 << 3;        ///< bit 3: lowpass filter (unipolar slewIntensity)
+constexpr uint8_t kExtrasIntegrator = 1 << 4; ///< bit 4: ZC-reset integrator (unipolar slewIntensity)
+constexpr uint8_t kExtrasAll = 0x1F;          ///< all extras enabled
+
+/// Benchmark tag strings for each extrasMask value (0-31)
+/// Used with FX_BENCH_SET_TAG to track performance by extras configuration
+constexpr const char* kExtrasTagStrings[32] = {
+    "ext_0",  "ext_1",  "ext_2",  "ext_3",  "ext_4",  "ext_5",  "ext_6",  "ext_7",  "ext_8",  "ext_9",  "ext_10",
+    "ext_11", "ext_12", "ext_13", "ext_14", "ext_15", "ext_16", "ext_17", "ext_18", "ext_19", "ext_20", "ext_21",
+    "ext_22", "ext_23", "ext_24", "ext_25", "ext_26", "ext_27", "ext_28", "ext_29", "ext_30", "ext_31",
+};
+
 /// Per-sample IIR alpha for q31 parameter smoothing (~40ms time constant at 44.1kHz)
 constexpr q31_t kShaperSmoothingAlpha = static_cast<q31_t>(0.0005 * ONE_Q31);
+
+/// Rotate right by n bits (ARM optimizes to single-cycle ROR instruction)
+/// Creates aliasing artifacts by moving bits in the sample word.
+/// @param value Sample to rotate
+/// @param n Rotation amount [0,31] (0 = passthrough)
+/// @return Rotated value
+[[gnu::always_inline]] inline int32_t rotateRight(int32_t value, int8_t n) {
+	if (n == 0) [[likely]] {
+		return value;
+	}
+	// GCC/Clang optimize this idiom to ARM ROR instruction
+	uint32_t uval = static_cast<uint32_t>(value);
+	return static_cast<int32_t>((uval >> n) | (uval << (32 - n)));
+}
 
 /// Subtractive gain staging analysis (from voice.cpp):
 /// - FM: sourceAmplitude at full level → signal at ~23M peak
@@ -76,9 +107,7 @@ struct ShaperSmoothingContextQ16 {
 /// Per-channel modulation state pointers (mono: 1 instance, stereo: L+R instances)
 /// Groups all state that needs to persist between buffer calls
 struct ShaperModState {
-	int32_t* driftSlope;      ///< Rate of DC offset accumulation per sample
-	int32_t* driftAccum;      ///< Accumulated drift (resets on zero crossings)
-	int32_t* prevSample;      ///< Previous sample for zero-crossing detection
+	int32_t* prevSample;      ///< Previous sample for zero-crossing detection (subharmonic)
 	int32_t* slewed;          ///< Slew rate limiter state (previous output)
 	int32_t* prevScaledInput; ///< Hysteresis state for slope detection
 	uint8_t* zcCount;         ///< Zero-crossing counter (for subharmonic)
@@ -89,34 +118,32 @@ struct ShaperModState {
 /// Computed once at buffer start, passed to per-sample processing
 struct ShaperBufferContext {
 	// Blend/table parameters
-	int32_t blendSlope_Q8; ///< Pre-computed blend slope
-	int64_t threshold64;   ///< Pre-computed amplitude threshold
-	int8_t tableIdx;       ///< Target table index
-	int32_t hystOffset;    ///< Hysteresis offset for slope detection
+	int32_t blendSlope_Q8;   ///< Pre-computed blend slope
+	int32_t threshold32;     ///< Pre-computed amplitude threshold (32-bit, shifted by kThresholdShift)
+	int8_t tableIdx;         ///< Target table index
+	int32_t hystOffset;      ///< Hysteresis offset for slope detection
+	int32_t inputScaleShift; ///< Bit shift for scaling input to table domain
 
 	// Modulator intensities (from phi triangles, gated by extrasEnabled)
-	int32_t subBoost_Q16;           ///< Subharmonic boost amount (0 = disabled)
-	int32_t driftMultIntensity_Q16; ///< Multiplicative drift intensity (bipolar)
-	int32_t driftAddIntensity_Q16;  ///< Additive drift intensity (bipolar)
-	int32_t lpfAlpha_Q16;           ///< Lowpass filter alpha (0 = bypass)
+	int32_t subBoost_Q16;        ///< Subharmonic boost amount (0 = disabled)
+	int8_t subRatio;             ///< Subharmonic ZC threshold: 2=octave, 3=twelfth, 4=2oct, etc.
+	int32_t stride;              ///< ZC detection stride [1,128]: check every N samples
+	int32_t feedback_Q16;        ///< Feedback intensity for comb filter (0 = disabled)
+	int8_t rotation;             ///< Bit rotation amount [0,31] (0 = passthrough)
+	int32_t lpfAlpha_Q16;        ///< Lowpass filter alpha (0 = bypass, when slewIntensity > 0)
+	int32_t integratorBlend_Q16; ///< Integrator blend amount (0 = bypass, when slewIntensity < 0)
 
 	// Gain staging
 	int32_t attenGain_Q16; ///< Output attenuation (subtractive mode)
 
 	// Flags
-	bool isLinear;        ///< True if shaper is in linear bypass
-	bool lpfActive;       ///< True if lowpass filter enabled (always on when gammaPhase != 0)
-	bool driftActive;     ///< True if drift modulation enabled (requires extrasEnabled)
-	bool needsGainAdjust; ///< True if subtractive gain compensation needed
-	bool extrasEnabled;   ///< True if drift+sub extras enabled (X encoder toggle)
+	bool isLinear;         ///< True if shaper is in linear bypass
+	bool lpfActive;        ///< True if lowpass filter enabled (kExtrasLpf bit set)
+	bool integratorActive; ///< True if ZC-reset integrator enabled (kExtrasIntegrator bit set)
+	bool needsGainAdjust;  ///< True if subtractive gain compensation needed
+	uint8_t
+	    extrasMask; ///< Bitmask for extras (kExtrasSub|kExtrasFeedback|kExtrasRotation|kExtrasLpf|kExtrasIntegrator)
 };
-
-/// Drift slope range and evolution rate (50% increased from 70k/80k)
-/// Slope is always positive (unipolar), oscillates between [min, max] via random walk
-/// Phi triangle intensity (bipolar) scales and applies polarity (sag vs boost)
-constexpr int32_t kDriftSlopeMin = 105000; // Tight range (~12% variation)
-constexpr int32_t kDriftSlopeMax = 120000; // Max slope (scaled by phi triangle intensity)
-constexpr int32_t kDriftSlopeStep = 8;     // Very slow evolution (~30+ sec to traverse range)
 
 /// Subharmonic gain modulation: maximum cut/boost amount at full intensity (25% decreased from 26214)
 /// 19660 Q16 = ~30% (0.7x when subSign=+1, 1.3x when subSign=-1)
@@ -144,100 +171,70 @@ constexpr float kLpfRefFreq = 110.0f; // Reference for audio tracks (A2, gives 2
 	return static_cast<int32_t>(cutoff) * kLpfAlphaScale;
 }
 
-/// Update LFSR with signal entropy and step random walk for drift slope
-/// Slope is unipolar, oscillates between [minSlope, maxSlope] - never reaches zero
-/// Returns new slope value (rate of DC offset accumulation per sample)
-[[gnu::always_inline]] inline int32_t updateDriftSlopeRandomWalk(int32_t currentSlope, uint32_t& lfsr,
-                                                                 int32_t signalEntropy, int32_t maxSlope,
-                                                                 int32_t minSlope) {
-	// Mix signal bits into LFSR for entropy
-	lfsr ^= static_cast<uint32_t>(signalEntropy) & 0xFFFF;
-	// Galois LFSR step (fast, good distribution)
-	lfsr ^= lfsr >> 7;
-	lfsr ^= lfsr << 9;
-	lfsr ^= lfsr >> 13;
-
-	// Safeguard: reseed LFSR if it degenerates to 0 (would cause stuck drift)
-	if (lfsr == 0) {
-		lfsr = 0xDEADBEEF;
-	}
-
-	// Random walk direction from LFSR
-	int8_t dir = (lfsr & 1) ? 1 : -1;
-
-	// Compute distance to the rail we're moving toward (unipolar: [minSlope, maxSlope])
-	// max(0, ...) handles bootstrap case when slope starts below minSlope
-	int32_t distanceToRail = (dir > 0) ? (maxSlope - currentSlope) : std::max(int32_t{0}, currentSlope - minSlope);
-
-	// Step is min of fixed step and distance to rail - guaranteed in bounds
-	int32_t stepMag = std::min(kDriftSlopeStep, distanceToRail);
-	int32_t newSlope = currentSlope + stepMag * dir;
-
-	// Clamp to valid range (bootstrap: if starting below min, push up to min)
-	return std::clamp(newSlope, minSlope, maxSlope);
-}
-
 /// Per-sample shaper processing - shared by mono and stereo versions
-/// Handles: drive → slew → combined drift+sub → additive → shaper
+/// Operates entirely in scaled domain: scale once, apply LPF/sub, process, unscale
 /// @param input Raw input sample
 /// @param driveGain_Q26 Smoothed drive gain (includes boost if subtractive)
 /// @param ctx Pre-computed buffer context (hoisted values)
-/// @param slewed Pointer to slew state (updated)
+/// @param slewed Pointer to slew state in SCALED domain (updated)
 /// @param prevScaledInput Pointer to hysteresis state (updated)
-/// @param driftGain_Q16 Per-sample multiplicative drift gain (65536 = unity)
 /// @param subSign Per-sample subharmonic sign (±1)
-/// @param driftOffset_Q16 Per-sample additive drift offset
 /// @param shaper Reference to shaper instance
+/// @param scaledFeedback Scaled feedback sample to add (wet path only, 0 = none)
 /// @return Processed sample (before output attenuation)
 [[gnu::always_inline]] inline q31_t processShaperSample(q31_t input, int32_t driveGain_Q26,
                                                         const ShaperBufferContext& ctx, int32_t* slewed,
-                                                        int32_t* prevScaledInput, int32_t driftGain_Q16, int8_t subSign,
-                                                        int32_t driftOffset_Q16, TableShaper& shaper) {
+                                                        int32_t* prevScaledInput, int8_t subSign, TableShaper& shaper,
+                                                        int32_t scaledFeedback = 0) {
 	// Apply drive (boost folded into driveGain_Q26)
 	q31_t drivenInput = shift_left_saturate<6, 32>(multiply_32x32_rshift32(input, driveGain_Q26));
 
-	// Build wet path: slew → mult → sub → additive
-	q31_t wetInput = drivenInput;
+	// Scale once to table domain - all processing happens in scaled space
+	int32_t scaledDry = shaper.scaleInput(drivenInput);
+	int32_t scaledWet = scaledDry;
 
-	// 1. Lowpass filter: soften transients (one-pole IIR)
-	if (ctx.lpfActive) {
-		int64_t diff = static_cast<int64_t>(drivenInput) - *slewed;
+	// 1. Feedback comb: add delayed sample (wet path only, computed at stride points)
+	if (scaledFeedback != 0) {
+		scaledWet = add_saturate(scaledWet, scaledFeedback);
+	}
+
+	// 2. Bit rotation: create aliasing artifacts (wet path only)
+	// Applied after feedback so rotation affects the comb-filtered signal
+	if (ctx.rotation != 0) {
+		scaledWet = rotateRight(scaledWet, ctx.rotation);
+	}
+
+	// 3a. ZC-reset integrator: triangle-ish waveshaping (negative slewIntensity)
+	// Accumulates signal between zero crossings, creating smooth arcs
+	// Reset happens in main loop at ZC detection points
+	if (ctx.integratorActive) {
+		*slewed = add_saturate(*slewed, scaledWet >> 6); // Accumulate with headroom
+		// Blend: scaledWet + (integrated - scaledWet) * blend
+		int64_t diff = static_cast<int64_t>(*slewed) - scaledWet;
+		scaledWet += static_cast<int32_t>((diff * ctx.integratorBlend_Q16) >> 16);
+	}
+	// 3b. Lowpass filter: soften transients (positive slewIntensity)
+	else if (ctx.lpfActive) {
+		int64_t diff = static_cast<int64_t>(scaledDry) - *slewed;
 		*slewed += static_cast<int32_t>((diff * ctx.lpfAlpha_Q16) >> 16);
-		wetInput = *slewed;
+		scaledWet = *slewed;
 	}
 
-	// 2-3. Combined multiplicative modifiers: drift + subharmonic
-	{
-		int32_t wetModGain_Q16 = 65536; // unity
-		bool hasDrift = (driftGain_Q16 != 65536 && driftGain_Q16 != 0);
-		bool hasSub = (ctx.subBoost_Q16 != 0);
-
-		if (hasDrift) {
-			wetModGain_Q16 = driftGain_Q16;
-		}
-		if (hasSub) {
-			int32_t subGain_Q16 = 65536 - subSign * ctx.subBoost_Q16;
-			if (hasDrift) {
-				wetModGain_Q16 = static_cast<int32_t>((static_cast<int64_t>(wetModGain_Q16) * subGain_Q16) >> 16);
-			}
-			else {
-				wetModGain_Q16 = subGain_Q16;
-			}
-		}
-		if (hasDrift || hasSub) {
-			wetInput = static_cast<q31_t>((static_cast<int64_t>(wetInput) * wetModGain_Q16) >> 16);
-		}
+	// 4. Subharmonic gain modulation (in scaled domain)
+	// Optimization: scaledWet * (1 - subSign*boost) = scaledWet - subSign*(scaledWet*boost)
+	// Uses SMMUL (single-cycle) instead of 64-bit multiply
+	if (ctx.subBoost_Q16 != 0) {
+		// subBoost_Q16 << 16 → Q32 format for multiply_32x32_rshift32 (max 19660<<16 = 1.29B, fits int32)
+		int32_t adjustment = multiply_32x32_rshift32(scaledWet, ctx.subBoost_Q16 << 16);
+		scaledWet = scaledWet - subSign * adjustment;
 	}
 
-	// 4. Additive drift: DC offset on transfer curve
-	if (driftOffset_Q16 != 0) {
-		int32_t offset = -driftOffset_Q16 << 8;
-		wetInput = add_saturate(wetInput, offset);
-	}
+	// Process pre-scaled inputs, returns scaled output
+	int32_t scaledOut = shaper.processPreScaled32(scaledWet, scaledDry, ctx.blendSlope_Q8, ctx.threshold32,
+	                                              ctx.tableIdx, ctx.hystOffset, prevScaledInput);
 
-	// Shaper: wet path through table, dry path for blending
-	return shaper.processWithGainHoisted(wetInput, drivenInput, ctx.blendSlope_Q8, ctx.threshold64, ctx.tableIdx,
-	                                     ctx.hystOffset, prevScaledInput);
+	// Unscale output back to signal domain
+	return scaledOut >> ctx.inputScaleShift;
 }
 
 /**
@@ -251,24 +248,25 @@ constexpr float kLpfRefFreq = 110.0f; // Reference for audio tracks (A2, gives 2
  * @param drive Patched drive parameter (q31)
  * @param smoothedDriveGain Previous driveGain_Q26 value for smoothing (updated)
  * @param mix Wet/dry blend (q31, 0 = bypass)
- * @param smoothedMixNorm_Q16 Previous mixNorm value for smoothing (Q16.16, updated)
+ * @param smoothedThreshold32 Previous threshold32 for direct coefficient smoothing (updated)
+ * @param smoothedBlendSlope_Q8 Previous blendSlope_Q8 for direct coefficient smoothing (updated)
  * @param filterGain For subtractive mode: filterGain from filter config (0 = FM mode)
  * @param hasFilters For subtractive mode: true if filters are active
- * @param state Per-channel modulation state (drift, sub, slew, hysteresis)
- * @param driftLfsr Pointer to LFSR state for random walk entropy (shared)
- * @param extrasEnabled Whether drift+sub extras are enabled (X encoder toggle)
- * @param gammaPhase Secret knob phase offset for phi triangles (0 = slew disabled)
+ * @param state Per-channel modulation state (sub, slew, hysteresis)
+ * @param extrasMask Bitmask for extras: kExtrasSub|kExtrasFeedback|kExtrasRotation|kExtrasLpf|kExtrasIntegrator
+ * @param gammaPhase Secret knob phase offset for phi triangles (affects hysteresis evolution)
  * @param noteFreqHz Note frequency in Hz for LPF cutoff scaling (default 440Hz = A4)
  */
 inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDriveGain,
-                             q31_t mix, int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters,
-                             ShaperModState& state, uint32_t* driftLfsr, bool extrasEnabled, float gammaPhase,
+                             q31_t mix, int32_t* smoothedThreshold32, int32_t* smoothedBlendSlope_Q8, q31_t filterGain,
+                             bool hasFilters, ShaperModState& state, uint8_t extrasMask, float gammaPhase,
                              float noteFreqHz = kLpfRefFreq) {
 	if (buffer.empty()) {
 		return;
 	}
 
 	FX_BENCH_DECLARE(bench, "shaper_table");
+	FX_BENCH_SET_TAG(bench, 0, kExtrasTagStrings[extrasMask & 0x1F]);
 	FX_BENCH_SCOPE(bench);
 
 	// Compute gain adjustment for subtractive mode (fixed-point, computed once per buffer)
@@ -294,18 +292,21 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 	// Smooth driveGain_Q26 (includes boost if subtractive) - stored value is Q26 gain
 	auto gainCtx = prepareShaperSmoothing(*smoothedDriveGain, targetGain_Q26);
 
-	// Convert mix param to Q16 normalized value and setup smoothing (fastmath called once)
+	// Convert mix param to Q16 normalized value (needed to derive target coefficients)
 	int32_t targetMixNorm_Q16 = TableShaper::mixParamToNormQ16(mix);
-	auto mixCtx = prepareShaperSmoothingQ16(*smoothedMixNorm_Q16, targetMixNorm_Q16);
+
+	// Target coefficients (computed once per buffer from target mix)
+	int32_t targetThreshold32 = TableShaper::computeThreshold32(targetMixNorm_Q16);
+	int32_t targetBlendSlope = shaper.computeBlendSlope_Q8(TableShaperCore::computeBaseSlope(targetMixNorm_Q16));
 
 	// Hoist atomic loads once per buffer (removes memory barriers from per-sample loop)
 	bool isLinear = shaper.getIsLinear();
 	int8_t tableIdx = shaper.getTargetTableIndex();
 
-	// Pre-compute mix-dependent values once per buffer (hoisted from per-sample loop)
-	// Uses start-of-buffer mix value; error is tiny (~3ms buffer vs ~40ms smoothing)
-	int32_t blendSlope_Q8 = shaper.computeBlendSlope_Q8(mixCtx.current);
-	int64_t threshold64 = TableShaper::computeThreshold64(mixCtx.current);
+	// For non-fast path: derive 32-bit threshold and blendSlope from target mix
+	// (per-buffer computation, ~3ms buffer vs ~40ms smoothing = negligible error)
+	int32_t blendSlope_Q8 = targetBlendSlope;
+	int32_t threshold32_ctx = TableShaper::computeThreshold32(targetMixNorm_Q16);
 
 	// Hoist hysteresis offset - skip when intensity is 0 (phi triangle at zero)
 	int32_t hystOffset = 0;
@@ -317,160 +318,252 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 		}
 	}
 
-	// Hoist subharmonic intensity (for gain modulation based on subSign)
-	// Sub requires extrasEnabled + gammaPhase != 0
+	// Hoist extras parameters based on bitmask (each effect independently gated)
 	int32_t subBoost_Q16 = 0;
-	if (extrasEnabled && state.zcCount && state.subSign && gammaPhase != 0.0f) {
-		int32_t subIntensity_Q16 = shaper.getSubIntensity_Q16();
-		// Pre-compute boost amount: subIntensity * maxBoost >> 16
-		subBoost_Q16 = static_cast<int32_t>((static_cast<int64_t>(subIntensity_Q16) * kSubBoostMax_Q16) >> 16);
-	}
-
-	// Drift slope setup: random walk controls rate of DC offset accumulation
-	// Drift requires extrasEnabled + gammaPhase != 0 (X encoder toggle gates drift/sub)
-	// Two drift modes with bipolar intensities at uncorrelated phi frequencies:
-	// - Multiplicative: positive=sag toward zero, negative=boost away from zero
-	// - Additive: positive=pull toward center, negative=push from center
-	bool driftActive =
-	    extrasEnabled && state.driftSlope && state.driftAccum && driftLfsr && state.prevSample && gammaPhase != 0.0f;
-	int32_t driftMultIntensity_Q16 = 0;
-	int32_t driftAddIntensity_Q16 = 0;
-	if (driftActive) {
-		driftMultIntensity_Q16 = shaper.getDriftMultIntensity_Q16();
-		driftAddIntensity_Q16 = shaper.getDriftAddIntensity_Q16();
-		// Scale slope range by absolute intensity (higher intensity = wider slope range)
-		int32_t absMultIntensity = (driftMultIntensity_Q16 < 0) ? -driftMultIntensity_Q16 : driftMultIntensity_Q16;
-		int32_t absAddIntensity = (driftAddIntensity_Q16 < 0) ? -driftAddIntensity_Q16 : driftAddIntensity_Q16;
-		// Use max of both intensities for slope scaling (both need the slope walker)
-		int32_t maxIntensity = std::max(absMultIntensity, absAddIntensity);
-		int32_t maxSlope = static_cast<int32_t>((static_cast<int64_t>(kDriftSlopeMax) * maxIntensity) >> 16);
-		int32_t minSlope = static_cast<int32_t>((static_cast<int64_t>(kDriftSlopeMin) * maxIntensity) >> 16);
-		// Ensure min doesn't exceed max (clamp if intensity is very low)
-		minSlope = std::min(minSlope, maxSlope);
-		// Update random walk using signal entropy from buffer middle
-		int32_t entropy = buffer[buffer.size() / 2];
-		*state.driftSlope = updateDriftSlopeRandomWalk(*state.driftSlope, *driftLfsr, entropy, maxSlope, minSlope);
-	}
-
-	// Lowpass filter setup: compute alpha from intensity (scaled by note frequency)
-	// Active when filter state pointer provided and slewIntensity > 0
-	// (slewIntensity is set > 0 for gammaPhase > 0 OR square waves)
-	bool lpfActive = state.slewed != nullptr;
+	int8_t subRatio = 2;      // Default octave-down
+	int32_t stride = 64;      // Default buffer midpoint
+	int32_t feedback_Q16 = 0; // Default no feedback
+	int8_t rotation = 0;      // Default no rotation
+	bool lpfActive = false;
+	bool integratorActive = false;
 	int32_t lpfAlpha_Q16 = 0;
-	if (lpfActive) {
+	int32_t integratorBlend_Q16 = 0;
+
+	// Extras processing: extrasMask controls which effects are enabled
+	if (extrasMask != 0) {
+		// Stride is shared by sub and feedback - hoist if either is enabled
+		if ((extrasMask & (kExtrasSub | kExtrasFeedback)) != 0) {
+			stride = shaper.getStride();
+		}
+		// Subharmonic: needs ZC state pointers
+		if ((extrasMask & kExtrasSub) != 0 && state.zcCount && state.subSign) {
+			int32_t subIntensity_Q16 = shaper.getSubIntensity_Q16();
+			subBoost_Q16 = static_cast<int32_t>((static_cast<int64_t>(subIntensity_Q16) * kSubBoostMax_Q16) >> 16);
+			subRatio = shaper.getSubRatio();
+		}
+		// Feedback: needs stride (already hoisted above)
+		if ((extrasMask & kExtrasFeedback) != 0) {
+			feedback_Q16 = shaper.getFeedback_Q16();
+		}
+		// Rotation: independent
+		if ((extrasMask & kExtrasRotation) != 0) {
+			rotation = shaper.getRotation();
+		}
+		// LPF and Integrator: separate bits, both use unipolar slewIntensity
+		// Integrator takes precedence if both enabled (mutually exclusive in practice)
+		if (state.slewed != nullptr) {
+			int32_t slewIntensity_Q16 = shaper.getSlewIntensity_Q16();
+			if ((extrasMask & kExtrasIntegrator) != 0 && slewIntensity_Q16 > 0) {
+				integratorActive = true;
+				integratorBlend_Q16 = slewIntensity_Q16;
+			}
+			else if ((extrasMask & kExtrasLpf) != 0 && slewIntensity_Q16 > 0) {
+				lpfActive = true;
+				lpfAlpha_Q16 = computeLpfAlpha_Q16(slewIntensity_Q16, noteFreqHz);
+			}
+		}
+	}
+
+	// Force LPF for vanilla square waves: at gammaPhase==0, slewIntensity > 0 means square wave
+	// (XYToParams sets slewIntensity for oscHarmonicWeight >= 0.8 even at gammaPhase==0)
+	// This auto-enables LPF for square waves in vanilla mode without requiring extrasMask config
+	if (!lpfActive && !integratorActive && state.slewed != nullptr && gammaPhase == 0.0f) {
 		int32_t slewIntensity_Q16 = shaper.getSlewIntensity_Q16();
 		if (slewIntensity_Q16 > 0) {
+			lpfActive = true;
 			lpfAlpha_Q16 = computeLpfAlpha_Q16(slewIntensity_Q16, noteFreqHz);
-		}
-		else {
-			lpfActive = false; // Intensity 0 = disabled
 		}
 	}
 
 	// Build per-buffer context (hoisted values for per-sample helper)
+	// Hoist input scale shift for unscaling in processShaperSample
+	int32_t inputScaleShift = shaper.getInputScaleShift();
+
 	ShaperBufferContext ctx{
 	    .blendSlope_Q8 = blendSlope_Q8,
-	    .threshold64 = threshold64,
+	    .threshold32 = threshold32_ctx,
 	    .tableIdx = tableIdx,
 	    .hystOffset = hystOffset,
+	    .inputScaleShift = inputScaleShift,
 	    .subBoost_Q16 = subBoost_Q16,
-	    .driftMultIntensity_Q16 = driftMultIntensity_Q16,
-	    .driftAddIntensity_Q16 = driftAddIntensity_Q16,
+	    .subRatio = subRatio,
+	    .stride = stride,
+	    .feedback_Q16 = feedback_Q16,
+	    .rotation = rotation,
 	    .lpfAlpha_Q16 = lpfAlpha_Q16,
+	    .integratorBlend_Q16 = integratorBlend_Q16,
 	    .attenGain_Q16 = attenGain_Q16,
 	    .isLinear = isLinear,
 	    .lpfActive = lpfActive,
-	    .driftActive = driftActive,
+	    .integratorActive = integratorActive,
 	    .needsGainAdjust = needsGainAdjust,
-	    .extrasEnabled = extrasEnabled,
+	    .extrasMask = extrasMask,
 	};
 
 	// Fast path: linear bypass (X=0 or table not ready)
 	if (ctx.isLinear) {
 		for (auto& sample : buffer) {
 			gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
-			mixCtx.current += ((mixCtx.target - mixCtx.current) * mixCtx.alpha) >> 16;
 			// Apply drive only (consistent with shaped path)
 			sample = multiply_32x32_rshift32(sample, gainCtx.current) << 6;
 		}
 		*smoothedDriveGain = gainCtx.current;
-		*smoothedMixNorm_Q16 = mixCtx.current;
+		// Set coefficients to target (linear path doesn't use them, so no smoothing needed)
+		*smoothedThreshold32 = targetThreshold32;
+		*smoothedBlendSlope_Q8 = targetBlendSlope;
 		return;
 	}
 
-	for (auto& sample : buffer) {
-		gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
-		// Q16 IIR smoothing: current += (target - current) * alpha >> 16
-		mixCtx.current += ((mixCtx.target - mixCtx.current) * mixCtx.alpha) >> 16;
+	// Fast path: vanilla mode (no extras, no forced LPF)
+	// Uses processWithGainFast which skips scale/unscale entirely
+	// Linear interpolation over buffer for threshold32/blendSlope (IIR doesn't work for small values)
+	// Drive uses IIR (large Q31 range works with multiply_32x32_rshift32)
+	if (extrasMask == 0 && !lpfActive) {
+		int32_t currentThreshold32 = *smoothedThreshold32;
+		int32_t currentBlendSlope = *smoothedBlendSlope_Q8;
 
-		q31_t input = sample;
+		// Snap to target on first use (when at default "dry" values) to avoid starting silent
+		// Default threshold32 = kInt32MaxShifted (full dry), default blendSlope = 0 (no blend)
+		bool isFirstUse = (currentThreshold32 == TableShaperCore::kInt32MaxShifted && currentBlendSlope == 0
+		                   && targetMixNorm_Q16 > 0);
+		if (isFirstUse) {
+			currentThreshold32 = targetThreshold32;
+			currentBlendSlope = targetBlendSlope;
+		}
 
-		// Drift: two complementary effects that reset on zero crossings
-		// - Multiplicative: gain sag/boost (capacitor discharge / charge)
-		// - Additive: DC offset pull/push (toward or from center)
-		// Both use the same accumulator/slope but apply based on their bipolar intensities
-		int32_t driftGain_Q16 = 0;   // 0 = disabled, >0 = apply multiplicative gain
-		int32_t driftOffset_Q16 = 0; // 0 = disabled, additive DC offset
-		if (driftActive) {
-			int32_t prev = *state.prevSample;
-			*state.prevSample = input;
-			// Zero crossing detection: reset accumulator
-			bool zc = (input ^ prev) < 0;
-			if (zc) {
-				*state.driftAccum = 0;
-				// Subharmonic: toggle sign every 2nd ZC (full wave cycle modulation)
-				// Toggle on EVEN counts so both halves of each cycle get same treatment
-				// (extrasEnabled already checked via driftActive gate)
-				if (state.zcCount && state.subSign) {
-					(*state.zcCount)++;
-					if ((*state.zcCount & 1) == 0) {
-						*state.subSign = -*state.subSign;
+		// Close half the distance per buffer (IIR with alpha=0.5, computed once per buffer)
+		currentThreshold32 = (currentThreshold32 + targetThreshold32) >> 1;
+		currentBlendSlope = (currentBlendSlope + targetBlendSlope) >> 1;
+
+		for (auto& sample : buffer) {
+			// Per-sample IIR for drive (smoother sonically, no perf penalty - memory-bound)
+			gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
+
+			q31_t driven = shift_left_saturate<6, 32>(multiply_32x32_rshift32(sample, gainCtx.current));
+			q31_t out = shaper.processWithGainFast(driven, currentBlendSlope, currentThreshold32, tableIdx);
+
+			if (ctx.needsGainAdjust) {
+				out = static_cast<q31_t>((static_cast<int64_t>(out) * ctx.attenGain_Q16) >> 16);
+			}
+
+			sample = out;
+		}
+		*smoothedDriveGain = gainCtx.current;
+		// Store current values (closes half distance per buffer, converges exponentially)
+		*smoothedThreshold32 = currentThreshold32;
+		*smoothedBlendSlope_Q8 = currentBlendSlope;
+		return;
+	}
+
+	// ========================================================================
+	// Path summary:
+	//   1. Linear bypass (isLinear): drive only, ~minimal cycles
+	//   2. Vanilla fast path (extrasMask==0 && !lpfActive): shaper only, ~1830 cycles
+	//   3. Full slow path (below): extras + hysteresis, ~2400+ cycles
+	// ========================================================================
+
+	// Slow path: full processing with sub/lpf extras
+	// Per-sample linear interpolation for threshold32/blendSlope (IIR doesn't work for small values)
+	int32_t currentThreshold32 = *smoothedThreshold32;
+	int32_t currentBlendSlope = *smoothedBlendSlope_Q8;
+
+	// Snap to target on first use (when at default "dry" values) to avoid starting silent
+	bool isFirstUse =
+	    (currentThreshold32 == TableShaperCore::kInt32MaxShifted && currentBlendSlope == 0 && targetMixNorm_Q16 > 0);
+	if (isFirstUse) {
+		currentThreshold32 = targetThreshold32;
+		currentBlendSlope = targetBlendSlope;
+	}
+
+	// Close half the distance per buffer (IIR with alpha=0.5, computed once per buffer)
+	currentThreshold32 = (currentThreshold32 + targetThreshold32) >> 1;
+	currentBlendSlope = (currentBlendSlope + targetBlendSlope) >> 1;
+
+	// Update ctx with smoothed values for this buffer
+	ctx.threshold32 = currentThreshold32;
+	ctx.blendSlope_Q8 = currentBlendSlope;
+
+	// Split loops: simple path (hysteresis + optional rotation) vs full extras
+	// Rotation is single-cycle ROR, no stride/state needed - can use simple path
+	// Mask 0x1B = sub|feedback|lpf|integrator - these need the full path
+	// Also check lpfActive: forced LPF for square waves needs full path for processShaperSample
+	if ((ctx.extrasMask & 0x1B) == 0 && !ctx.lpfActive) {
+		// Simple path: scale → optional rotation → processPreScaled32 → unscale
+		// Handles: no extras (0), rotation-only (4), or both with hysteresis
+		for (auto& sample : buffer) {
+			gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
+			q31_t driven = shift_left_saturate<6, 32>(multiply_32x32_rshift32(sample, gainCtx.current));
+			int32_t scaledDry = shaper.scaleInput(driven);
+			int32_t scaledWet = (ctx.rotation != 0) ? rotateRight(scaledDry, ctx.rotation) : scaledDry;
+			int32_t scaledOut = shaper.processPreScaled32(scaledWet, scaledDry, ctx.blendSlope_Q8, ctx.threshold32,
+			                                              ctx.tableIdx, ctx.hystOffset, hystState);
+			q31_t out = scaledOut >> ctx.inputScaleShift;
+			if (ctx.needsGainAdjust) {
+				out = static_cast<q31_t>((static_cast<int64_t>(out) * ctx.attenGain_Q16) >> 16);
+			}
+			sample = out;
+		}
+	}
+	else {
+		// Full extras path: stride loop + all extras processing
+		bool needsStrideLoop = state.prevSample
+		                       && ((ctx.subBoost_Q16 != 0 && state.zcCount && state.subSign) || ctx.feedback_Q16 > 0
+		                           || ctx.integratorActive);
+		int32_t strideCounter = 0;
+
+		for (auto& sample : buffer) {
+			gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
+
+			q31_t input = sample;
+			int32_t scaledFeedback = 0;
+
+			if (needsStrideLoop) {
+				strideCounter++;
+				if (strideCounter >= ctx.stride) {
+					strideCounter = 0;
+					int32_t prev = *state.prevSample;
+
+					if (ctx.feedback_Q16 > 0) {
+						q31_t drivenPrev = shift_left_saturate<6, 32>(multiply_32x32_rshift32(prev, gainCtx.current));
+						int32_t scaledPrev = shaper.scaleInput(drivenPrev);
+						scaledFeedback =
+						    static_cast<int32_t>((static_cast<int64_t>(scaledPrev) * ctx.feedback_Q16) >> 16);
+					}
+
+					*state.prevSample = input;
+
+					bool zc = (input ^ prev) < 0;
+					if (zc) {
+						if (ctx.subBoost_Q16 != 0 && state.zcCount && state.subSign) {
+							(*state.zcCount)++;
+							if (*state.zcCount >= ctx.subRatio) {
+								*state.subSign = -*state.subSign;
+								*state.zcCount = 0;
+							}
+						}
+						if (ctx.integratorActive && state.slewed) {
+							*state.slewed = 0;
+						}
 					}
 				}
 			}
-			else {
-				// Accumulate: grows linearly within each half-cycle
-				*state.driftAccum += *state.driftSlope;
+
+			int8_t currentSubSign = (state.subSign && ctx.subBoost_Q16 != 0) ? *state.subSign : 1;
+			q31_t out = processShaperSample(input, gainCtx.current, ctx, state.slewed, hystState, currentSubSign,
+			                                shaper, scaledFeedback);
+
+			if (ctx.needsGainAdjust) {
+				out = static_cast<q31_t>((static_cast<int64_t>(out) * ctx.attenGain_Q16) >> 16);
 			}
 
-			// Compute drift effects from accumulator based on bipolar intensities
-			// Shift 11 gives ~30% max effect at low frequencies, ~10% at mid frequencies
-			int32_t baseEffect = *state.driftAccum >> 11;
-
-			// Multiplicative drift: positive intensity = sag (toward zero), negative = boost (away)
-			// Apply as gain: 65536 = unity, lower = sag, higher = boost
-			if (driftMultIntensity_Q16 != 0) {
-				// Scale effect by intensity magnitude, then apply polarity
-				int32_t scaledMult =
-				    static_cast<int32_t>((static_cast<int64_t>(baseEffect) * driftMultIntensity_Q16) >> 16);
-				// Positive intensity: subtract from unity (sag), negative: add to unity (boost)
-				driftGain_Q16 = std::clamp(65536 - scaledMult, int32_t{0}, int32_t{131072});
-			}
-
-			// Additive drift: positive intensity = pull toward center, negative = push from center
-			// Apply as DC offset added to wet signal
-			if (driftAddIntensity_Q16 != 0) {
-				// Scale effect by intensity (polarity determines push vs pull direction)
-				// Negative intensity pushes signal away from zero (toward rails)
-				driftOffset_Q16 =
-				    static_cast<int32_t>((static_cast<int64_t>(baseEffect) * driftAddIntensity_Q16) >> 16);
-			}
+			sample = out;
 		}
-
-		// Process sample through shared helper (drive → slew → drift+sub → additive → shaper)
-		int8_t currentSubSign = (state.subSign && ctx.subBoost_Q16 != 0) ? *state.subSign : 1;
-		q31_t out = processShaperSample(input, gainCtx.current, ctx, state.slewed, hystState, driftGain_Q16,
-		                                currentSubSign, driftOffset_Q16, shaper);
-
-		if (ctx.needsGainAdjust) {
-			out = static_cast<q31_t>((static_cast<int64_t>(out) * ctx.attenGain_Q16) >> 16);
-		}
-
-		sample = out;
 	}
 
 	*smoothedDriveGain = gainCtx.current;
-	*smoothedMixNorm_Q16 = mixCtx.current;
+	// Store current values (closes half distance per buffer, converges exponentially)
+	*smoothedThreshold32 = currentThreshold32;
+	*smoothedBlendSlope_Q8 = currentBlendSlope;
 }
 
 /**
@@ -488,41 +581,37 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
  * @param drive Patched drive parameter (q31)
  * @param smoothedDriveGain Previous driveGain_Q26 value for smoothing (updated, stores Q26 gain not raw drive)
  * @param mix Wet/dry blend (q31, 0 = bypass)
- * @param smoothedMixNorm_Q16 Previous mixNorm value for smoothing (Q16.16 format, updated)
+ * @param smoothedThreshold32 Previous threshold32 for direct coefficient smoothing (updated)
+ * @param smoothedBlendSlope_Q8 Previous blendSlope_Q8 for direct coefficient smoothing (updated)
  * @param filterGain For subtractive mode: pass the filterGain from filter config.
  *                   For FM mode: pass 0 (no boost needed).
  * @param hasFilters For subtractive mode: true if filters are active
  * @param prevScaledInputL Pointer to previous scaled input for left channel hysteresis (updated, can be null)
  * @param prevScaledInputR Pointer to previous scaled input for right channel hysteresis (updated, can be null)
- * @param driftSlopeL Pointer to L channel drift slope state (rate of DC offset accumulation per sample)
- * @param driftSlopeR Pointer to R channel drift slope state (decorrelated from L by phi triangle)
- * @param driftAccumL Pointer to L channel accumulated DC offset (resets on zero crossings)
- * @param driftAccumR Pointer to R channel accumulated DC offset (resets on zero crossings)
- * @param driftLfsr Pointer to LFSR state for random walk entropy
- * @param prevSampleL Pointer to previous L sample for zero-crossing detection
- * @param prevSampleR Pointer to previous R sample for zero-crossing detection
+ * @param prevSampleL Pointer to previous L sample for zero-crossing detection (subharmonic)
+ * @param prevSampleR Pointer to previous R sample for zero-crossing detection (subharmonic)
  * @param zcCountL Pointer to L channel zero-crossing counter (for subharmonic)
  * @param zcCountR Pointer to R channel zero-crossing counter (for subharmonic)
  * @param subSignL Pointer to L channel subharmonic sign (±1)
  * @param subSignR Pointer to R channel subharmonic sign (±1)
- * @param extrasEnabled Whether drift+sub extras are enabled (X encoder toggle)
- * @param gammaPhase Secret knob phase offset for phi triangles (0 = slew disabled)
+ * @param extrasMask Bitmask for extras: kExtrasSub|kExtrasFeedback|kExtrasRotation|kExtrasLpf|kExtrasIntegrator
+ * @param gammaPhase Secret knob phase offset for phi triangles (affects hysteresis evolution)
  * @param slewedL Pointer to L channel slew rate limiter state (previous output)
  * @param slewedR Pointer to R channel slew rate limiter state (previous output)
  * @param noteFreqHz Note frequency in Hz for LPF cutoff scaling (default 440Hz = A4)
  */
 inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q31_t drive, q31_t* smoothedDriveGain,
-                             q31_t mix, int32_t* smoothedMixNorm_Q16, q31_t filterGain, bool hasFilters,
-                             int32_t* prevScaledInputL, int32_t* prevScaledInputR, int32_t* driftSlopeL,
-                             int32_t* driftSlopeR, int32_t* driftAccumL, int32_t* driftAccumR, uint32_t* driftLfsr,
+                             q31_t mix, int32_t* smoothedThreshold32, int32_t* smoothedBlendSlope_Q8, q31_t filterGain,
+                             bool hasFilters, int32_t* prevScaledInputL, int32_t* prevScaledInputR,
                              int32_t* prevSampleL, int32_t* prevSampleR, uint8_t* zcCountL, uint8_t* zcCountR,
-                             int8_t* subSignL, int8_t* subSignR, bool extrasEnabled, float gammaPhase, int32_t* slewedL,
+                             int8_t* subSignL, int8_t* subSignR, uint8_t extrasMask, float gammaPhase, int32_t* slewedL,
                              int32_t* slewedR, float noteFreqHz = kLpfRefFreq) {
 	if (buffer.empty()) {
 		return;
 	}
 
 	FX_BENCH_DECLARE(bench, "shaper_table");
+	FX_BENCH_SET_TAG(bench, 0, kExtrasTagStrings[extrasMask & 0x1F]);
 	FX_BENCH_SCOPE(bench);
 
 	// Compute gain adjustment for subtractive mode (fixed-point, computed once per buffer)
@@ -548,18 +637,21 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 	// Smooth driveGain_Q26 (includes boost if subtractive) - stored value is Q26 gain
 	auto gainCtx = prepareShaperSmoothing(*smoothedDriveGain, targetGain_Q26);
 
-	// Convert mix param to Q16 normalized value and setup smoothing (fastmath called once)
+	// Convert mix param to Q16 normalized value (needed to derive target coefficients)
 	int32_t targetMixNorm_Q16 = TableShaper::mixParamToNormQ16(mix);
-	auto mixCtx = prepareShaperSmoothingQ16(*smoothedMixNorm_Q16, targetMixNorm_Q16);
+
+	// Target coefficients (computed once per buffer from target mix)
+	int32_t targetThreshold32 = TableShaper::computeThreshold32(targetMixNorm_Q16);
+	int32_t targetBlendSlope = shaper.computeBlendSlope_Q8(TableShaperCore::computeBaseSlope(targetMixNorm_Q16));
 
 	// Hoist atomic loads once per buffer (removes memory barriers from per-sample loop)
 	bool isLinear = shaper.getIsLinear();
 	int8_t tableIdx = shaper.getTargetTableIndex();
 
-	// Pre-compute mix-dependent values once per buffer (hoisted from per-sample loop)
-	// Uses start-of-buffer mix value; error is tiny (~3ms buffer vs ~40ms smoothing)
-	int32_t blendSlope_Q8 = shaper.computeBlendSlope_Q8(mixCtx.current);
-	int64_t threshold64 = TableShaper::computeThreshold64(mixCtx.current);
+	// For non-fast path: derive 32-bit threshold and blendSlope from target mix
+	// (per-buffer computation, ~3ms buffer vs ~40ms smoothing = negligible error)
+	int32_t blendSlope_Q8 = targetBlendSlope;
+	int32_t threshold32_ctx = TableShaper::computeThreshold32(targetMixNorm_Q16);
 
 	// Hoist hysteresis offset - skip when intensity is 0 (phi triangle at zero)
 	int32_t hystOffset = 0;
@@ -573,206 +665,294 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 		}
 	}
 
-	// Hoist subharmonic intensity (for gain modulation based on subSign)
-	// Sub requires extrasEnabled + gammaPhase != 0
+	// Hoist extras parameters based on bitmask (each effect independently gated)
 	int32_t subBoost_Q16 = 0;
-	if (extrasEnabled && zcCountL && zcCountR && subSignL && subSignR && gammaPhase != 0.0f) {
-		int32_t subIntensity_Q16 = shaper.getSubIntensity_Q16();
-		// Pre-compute boost amount: subIntensity * maxBoost >> 16
-		subBoost_Q16 = static_cast<int32_t>((static_cast<int64_t>(subIntensity_Q16) * kSubBoostMax_Q16) >> 16);
-	}
-
-	// Drift slope setup: separate random walks per channel with phi-controlled correlation
-	// Drift requires extrasEnabled + gammaPhase != 0 (X encoder toggle gates drift/sub)
-	// Two drift modes with bipolar intensities at uncorrelated phi frequencies:
-	// - Multiplicative: positive=sag toward zero, negative=boost away from zero
-	// - Additive: positive=pull toward center, negative=push from center
-	bool driftActive = extrasEnabled && driftSlopeL && driftSlopeR && driftAccumL && driftAccumR && driftLfsr
-	                   && prevSampleL && prevSampleR && gammaPhase != 0.0f;
-	int32_t slopeL = 0;
-	int32_t slopeR = 0;
-	int32_t driftMultIntensity_Q16 = 0;
-	int32_t driftAddIntensity_Q16 = 0;
-	if (driftActive) {
-		driftMultIntensity_Q16 = shaper.getDriftMultIntensity_Q16();
-		driftAddIntensity_Q16 = shaper.getDriftAddIntensity_Q16();
-		// Scale slope range by absolute intensity (higher intensity = wider slope range)
-		int32_t absMultIntensity = (driftMultIntensity_Q16 < 0) ? -driftMultIntensity_Q16 : driftMultIntensity_Q16;
-		int32_t absAddIntensity = (driftAddIntensity_Q16 < 0) ? -driftAddIntensity_Q16 : driftAddIntensity_Q16;
-		// Use max of both intensities for slope scaling (both need the slope walker)
-		int32_t maxIntensity = std::max(absMultIntensity, absAddIntensity);
-		int32_t maxSlope = static_cast<int32_t>((static_cast<int64_t>(kDriftSlopeMax) * maxIntensity) >> 16);
-		int32_t minSlope = static_cast<int32_t>((static_cast<int64_t>(kDriftSlopeMin) * maxIntensity) >> 16);
-		// Ensure min doesn't exceed max (clamp if intensity is very low)
-		minSlope = std::min(minSlope, maxSlope);
-
-		// L channel: random walk using L signal entropy
-		int32_t entropyL = buffer[buffer.size() / 2].l;
-		*driftSlopeL = updateDriftSlopeRandomWalk(*driftSlopeL, *driftLfsr, entropyL, maxSlope, minSlope);
-		slopeL = *driftSlopeL;
-
-		// R channel: independent random walk using R signal entropy
-		int32_t entropyR = buffer[buffer.size() / 2].r;
-		int32_t rIndependent = updateDriftSlopeRandomWalk(*driftSlopeR, *driftLfsr, entropyR, maxSlope, minSlope);
-
-		// Correlation control: |stereoOffset| = 0 means R follows L, |stereoOffset| = 1 means fully independent
-		// Blend: R = L + (R_independent - L) * |stereoOffset|
-		int32_t stereoOffset_Q16 = shaper.getDriftStereoOffset_Q16();
-		int32_t absOffset = (stereoOffset_Q16 < 0) ? -stereoOffset_Q16 : stereoOffset_Q16;
-		int32_t diff = rIndependent - slopeL;
-		*driftSlopeR = slopeL + static_cast<int32_t>((static_cast<int64_t>(diff) * absOffset) >> 16);
-		slopeR = *driftSlopeR;
-	}
-
-	// Lowpass filter setup: compute alpha from intensity (scaled by note frequency)
-	// Active when filter state pointers provided and slewIntensity > 0
-	// (slewIntensity is set > 0 for gammaPhase > 0 OR square waves)
-	bool lpfActive = slewedL && slewedR;
+	int8_t subRatio = 2;      // Default octave-down
+	int32_t stride = 64;      // Default buffer midpoint
+	int32_t feedback_Q16 = 0; // Default no feedback
+	int8_t rotation = 0;      // Default no rotation
+	bool lpfActive = false;
+	bool integratorActive = false;
 	int32_t lpfAlpha_Q16 = 0;
-	if (lpfActive) {
+	int32_t integratorBlend_Q16 = 0;
+
+	// Extras processing: extrasMask controls which effects are enabled
+	if (extrasMask != 0) {
+		// Stride is shared by sub and feedback - hoist if either is enabled
+		if ((extrasMask & (kExtrasSub | kExtrasFeedback)) != 0) {
+			stride = shaper.getStride();
+		}
+		// Subharmonic: needs ZC state pointers
+		if ((extrasMask & kExtrasSub) != 0 && zcCountL && zcCountR && subSignL && subSignR) {
+			int32_t subIntensity_Q16 = shaper.getSubIntensity_Q16();
+			subBoost_Q16 = static_cast<int32_t>((static_cast<int64_t>(subIntensity_Q16) * kSubBoostMax_Q16) >> 16);
+			subRatio = shaper.getSubRatio();
+		}
+		// Feedback: needs stride (already hoisted above)
+		if ((extrasMask & kExtrasFeedback) != 0) {
+			feedback_Q16 = shaper.getFeedback_Q16();
+		}
+		// Rotation: independent
+		if ((extrasMask & kExtrasRotation) != 0) {
+			rotation = shaper.getRotation();
+		}
+		// LPF and Integrator: separate bits, both use unipolar slewIntensity
+		// Integrator takes precedence if both enabled (mutually exclusive in practice)
+		if (slewedL && slewedR) {
+			int32_t slewIntensity_Q16 = shaper.getSlewIntensity_Q16();
+			if ((extrasMask & kExtrasIntegrator) != 0 && slewIntensity_Q16 > 0) {
+				integratorActive = true;
+				integratorBlend_Q16 = slewIntensity_Q16;
+			}
+			else if ((extrasMask & kExtrasLpf) != 0 && slewIntensity_Q16 > 0) {
+				lpfActive = true;
+				lpfAlpha_Q16 = computeLpfAlpha_Q16(slewIntensity_Q16, noteFreqHz);
+			}
+		}
+	}
+
+	// Force LPF for vanilla square waves: at gammaPhase==0, slewIntensity > 0 means square wave
+	// (XYToParams sets slewIntensity for oscHarmonicWeight >= 0.8 even at gammaPhase==0)
+	// This auto-enables LPF for square waves in vanilla mode without requiring extrasMask config
+	if (!lpfActive && !integratorActive && slewedL && slewedR && gammaPhase == 0.0f) {
 		int32_t slewIntensity_Q16 = shaper.getSlewIntensity_Q16();
 		if (slewIntensity_Q16 > 0) {
+			lpfActive = true;
 			lpfAlpha_Q16 = computeLpfAlpha_Q16(slewIntensity_Q16, noteFreqHz);
-		}
-		else {
-			lpfActive = false; // Intensity 0 = disabled
 		}
 	}
 
 	// Build per-buffer context (hoisted values for per-sample helper)
+	// Hoist input scale shift for unscaling in processShaperSample
+	int32_t inputScaleShift = shaper.getInputScaleShift();
+
 	ShaperBufferContext ctx{
 	    .blendSlope_Q8 = blendSlope_Q8,
-	    .threshold64 = threshold64,
+	    .threshold32 = threshold32_ctx,
 	    .tableIdx = tableIdx,
 	    .hystOffset = hystOffset,
+	    .inputScaleShift = inputScaleShift,
 	    .subBoost_Q16 = subBoost_Q16,
-	    .driftMultIntensity_Q16 = driftMultIntensity_Q16,
-	    .driftAddIntensity_Q16 = driftAddIntensity_Q16,
+	    .subRatio = subRatio,
+	    .stride = stride,
+	    .feedback_Q16 = feedback_Q16,
+	    .rotation = rotation,
 	    .lpfAlpha_Q16 = lpfAlpha_Q16,
+	    .integratorBlend_Q16 = integratorBlend_Q16,
 	    .attenGain_Q16 = attenGain_Q16,
 	    .isLinear = isLinear,
 	    .lpfActive = lpfActive,
-	    .driftActive = driftActive,
+	    .integratorActive = integratorActive,
 	    .needsGainAdjust = needsGainAdjust,
-	    .extrasEnabled = extrasEnabled,
+	    .extrasMask = extrasMask,
 	};
 
 	// Fast path: linear bypass (X=0 or table not ready)
 	if (ctx.isLinear) {
 		for (auto& sample : buffer) {
 			gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
-			mixCtx.current += ((mixCtx.target - mixCtx.current) * mixCtx.alpha) >> 16;
 			// Apply drive only (consistent with shaped path)
 			sample.l = multiply_32x32_rshift32(sample.l, gainCtx.current) << 6;
 			sample.r = multiply_32x32_rshift32(sample.r, gainCtx.current) << 6;
 		}
 		*smoothedDriveGain = gainCtx.current;
-		*smoothedMixNorm_Q16 = mixCtx.current;
+		// Set coefficients to target (linear path doesn't use them, so no smoothing needed)
+		*smoothedThreshold32 = targetThreshold32;
+		*smoothedBlendSlope_Q8 = targetBlendSlope;
 		return;
 	}
 
-	for (auto& sample : buffer) {
-		gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
-		// Q16 IIR smoothing: current += (target - current) * alpha >> 16
-		mixCtx.current += ((mixCtx.target - mixCtx.current) * mixCtx.alpha) >> 16;
+	// Fast path: vanilla mode (no extras, no forced LPF)
+	// Linear interpolation over buffer for threshold32/blendSlope (IIR doesn't work for small values)
+	// Drive uses IIR (large Q31 range works with multiply_32x32_rshift32)
+	if (ctx.extrasMask == 0 && !lpfActive) {
+		int32_t currentThreshold32 = *smoothedThreshold32;
+		int32_t currentBlendSlope = *smoothedBlendSlope_Q8;
 
-		q31_t inputL = sample.l;
-		q31_t inputR = sample.r;
+		// Snap to target on first use (when at default "dry" values) to avoid starting silent
+		// Default threshold32 = kInt32MaxShifted (full dry), default blendSlope = 0 (no blend)
+		bool isFirstUse = (currentThreshold32 == TableShaperCore::kInt32MaxShifted && currentBlendSlope == 0
+		                   && targetMixNorm_Q16 > 0);
+		if (isFirstUse) {
+			currentThreshold32 = targetThreshold32;
+			currentBlendSlope = targetBlendSlope;
+		}
 
-		// Drift: two complementary effects that reset on zero crossings
-		// - Multiplicative: gain sag/boost (capacitor discharge / charge)
-		// - Additive: DC offset pull/push (toward or from center)
-		// Stereo: separate accumulators with phi-correlated slopes for analog character
-		int32_t driftGainL_Q16 = 0; // 0 = disabled, >0 = apply multiplicative gain
-		int32_t driftGainR_Q16 = 0;
-		int32_t driftOffsetL_Q16 = 0; // 0 = disabled, additive DC offset
-		int32_t driftOffsetR_Q16 = 0;
-		if (driftActive) {
-			int32_t prevL = *prevSampleL;
-			int32_t prevR = *prevSampleR;
-			*prevSampleL = inputL;
-			*prevSampleR = inputR;
+		// Close half the distance per buffer (IIR with alpha=0.5, computed once per buffer)
+		currentThreshold32 = (currentThreshold32 + targetThreshold32) >> 1;
+		currentBlendSlope = (currentBlendSlope + targetBlendSlope) >> 1;
 
-			// L channel: reset on L zero crossing, accumulate with L slope
-			bool zcL = (inputL ^ prevL) < 0;
-			if (zcL) {
-				*driftAccumL = 0;
-				// Subharmonic: toggle sign every 2nd ZC (full wave cycle modulation)
-				// Toggle on EVEN counts so both halves of each cycle get same treatment
-				// (extrasEnabled already checked via driftActive gate)
-				if (zcCountL && subSignL) {
-					(*zcCountL)++;
-					if ((*zcCountL & 1) == 0) {
-						*subSignL = -*subSignL;
+		for (auto& sample : buffer) {
+			// Per-sample IIR for drive (smoother sonically, no perf penalty - memory-bound)
+			gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
+
+			// Apply drive
+			q31_t drivenL = shift_left_saturate<6, 32>(multiply_32x32_rshift32(sample.l, gainCtx.current));
+			q31_t drivenR = shift_left_saturate<6, 32>(multiply_32x32_rshift32(sample.r, gainCtx.current));
+
+			// Fast shaper path (32-bit threshold, no wet/dry split, no extras)
+			q31_t outL = shaper.processWithGainFast(drivenL, currentBlendSlope, currentThreshold32, tableIdx);
+			q31_t outR = shaper.processWithGainFast(drivenR, currentBlendSlope, currentThreshold32, tableIdx);
+
+			if (ctx.needsGainAdjust) {
+				outL = static_cast<q31_t>((static_cast<int64_t>(outL) * ctx.attenGain_Q16) >> 16);
+				outR = static_cast<q31_t>((static_cast<int64_t>(outR) * ctx.attenGain_Q16) >> 16);
+			}
+
+			sample.l = outL;
+			sample.r = outR;
+		}
+		*smoothedDriveGain = gainCtx.current;
+		// Store current values (closes half distance per buffer, converges exponentially)
+		*smoothedThreshold32 = currentThreshold32;
+		*smoothedBlendSlope_Q8 = currentBlendSlope;
+		return;
+	}
+
+	// ========================================================================
+	// Path summary:
+	//   1. Linear bypass (isLinear): drive only, ~minimal cycles
+	//   2. Vanilla fast path (extrasMask==0 && !lpfActive): shaper only, ~1830 cycles
+	//   3. Full slow path (below): extras + hysteresis, ~2400+ cycles
+	// ========================================================================
+
+	// Slow path: full processing with sub/lpf extras
+	// Per-sample linear interpolation for threshold32/blendSlope (IIR doesn't work for small values)
+	int32_t currentThreshold32 = *smoothedThreshold32;
+	int32_t currentBlendSlope = *smoothedBlendSlope_Q8;
+
+	// Snap to target on first use (when at default "dry" values) to avoid starting silent
+	bool isFirstUse =
+	    (currentThreshold32 == TableShaperCore::kInt32MaxShifted && currentBlendSlope == 0 && targetMixNorm_Q16 > 0);
+	if (isFirstUse) {
+		currentThreshold32 = targetThreshold32;
+		currentBlendSlope = targetBlendSlope;
+	}
+
+	// Close half the distance per buffer (IIR with alpha=0.5, computed once per buffer)
+	currentThreshold32 = (currentThreshold32 + targetThreshold32) >> 1;
+	currentBlendSlope = (currentBlendSlope + targetBlendSlope) >> 1;
+
+	// Update ctx with smoothed values for this buffer
+	ctx.threshold32 = currentThreshold32;
+	ctx.blendSlope_Q8 = currentBlendSlope;
+
+	// Split loops: simple path (hysteresis + optional rotation) vs full extras
+	// Rotation is single-cycle ROR, no stride/state needed - can use simple path
+	// Mask 0x1B = sub|feedback|lpf|integrator - these need the full path
+	// Also check lpfActive: forced LPF for square waves needs full path for processShaperSample
+	if ((ctx.extrasMask & 0x1B) == 0 && !ctx.lpfActive) {
+		// Simple path: scale → optional rotation → processPreScaled32 → unscale
+		for (auto& sample : buffer) {
+			gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
+			q31_t drivenL = shift_left_saturate<6, 32>(multiply_32x32_rshift32(sample.l, gainCtx.current));
+			q31_t drivenR = shift_left_saturate<6, 32>(multiply_32x32_rshift32(sample.r, gainCtx.current));
+			int32_t scaledDryL = shaper.scaleInput(drivenL);
+			int32_t scaledDryR = shaper.scaleInput(drivenR);
+			int32_t scaledWetL = (ctx.rotation != 0) ? rotateRight(scaledDryL, ctx.rotation) : scaledDryL;
+			int32_t scaledWetR = (ctx.rotation != 0) ? rotateRight(scaledDryR, ctx.rotation) : scaledDryR;
+			int32_t scaledOutL = shaper.processPreScaled32(scaledWetL, scaledDryL, ctx.blendSlope_Q8, ctx.threshold32,
+			                                               ctx.tableIdx, ctx.hystOffset, hystStateL);
+			int32_t scaledOutR = shaper.processPreScaled32(scaledWetR, scaledDryR, ctx.blendSlope_Q8, ctx.threshold32,
+			                                               ctx.tableIdx, ctx.hystOffset, hystStateR);
+			q31_t outL = scaledOutL >> ctx.inputScaleShift;
+			q31_t outR = scaledOutR >> ctx.inputScaleShift;
+			if (ctx.needsGainAdjust) {
+				outL = static_cast<q31_t>((static_cast<int64_t>(outL) * ctx.attenGain_Q16) >> 16);
+				outR = static_cast<q31_t>((static_cast<int64_t>(outR) * ctx.attenGain_Q16) >> 16);
+			}
+			sample.l = outL;
+			sample.r = outR;
+		}
+	}
+	else {
+		// Full extras path: stride loop + all extras processing
+		bool needsStrideLoop = prevSampleL && prevSampleR
+		                       && ((ctx.subBoost_Q16 != 0 && zcCountL && zcCountR && subSignL && subSignR)
+		                           || ctx.feedback_Q16 > 0 || ctx.integratorActive);
+		int32_t strideCounter = 0;
+
+		for (auto& sample : buffer) {
+			gainCtx.current += multiply_32x32_rshift32(gainCtx.target - gainCtx.current, gainCtx.alpha) * 2;
+
+			q31_t inputL = sample.l;
+			q31_t inputR = sample.r;
+			int32_t scaledFeedbackL = 0;
+			int32_t scaledFeedbackR = 0;
+
+			if (needsStrideLoop) {
+				strideCounter++;
+				if (strideCounter >= ctx.stride) {
+					strideCounter = 0;
+					int32_t prevL = *prevSampleL;
+					int32_t prevR = *prevSampleR;
+
+					if (ctx.feedback_Q16 > 0) {
+						q31_t drivenPrevL = shift_left_saturate<6, 32>(multiply_32x32_rshift32(prevL, gainCtx.current));
+						q31_t drivenPrevR = shift_left_saturate<6, 32>(multiply_32x32_rshift32(prevR, gainCtx.current));
+						int32_t scaledPrevL = shaper.scaleInput(drivenPrevL);
+						int32_t scaledPrevR = shaper.scaleInput(drivenPrevR);
+						scaledFeedbackL =
+						    static_cast<int32_t>((static_cast<int64_t>(scaledPrevL) * ctx.feedback_Q16) >> 16);
+						scaledFeedbackR =
+						    static_cast<int32_t>((static_cast<int64_t>(scaledPrevR) * ctx.feedback_Q16) >> 16);
+					}
+
+					*prevSampleL = inputL;
+					*prevSampleR = inputR;
+
+					bool zcL = (inputL ^ prevL) < 0;
+					if (zcL) {
+						if (ctx.subBoost_Q16 != 0 && zcCountL && subSignL) {
+							(*zcCountL)++;
+							if (*zcCountL >= ctx.subRatio) {
+								*subSignL = -*subSignL;
+								*zcCountL = 0;
+							}
+						}
+						if (ctx.integratorActive && slewedL) {
+							*slewedL = 0;
+						}
+					}
+
+					bool zcR = (inputR ^ prevR) < 0;
+					if (zcR) {
+						if (ctx.subBoost_Q16 != 0 && zcCountR && subSignR) {
+							(*zcCountR)++;
+							if (*zcCountR >= ctx.subRatio) {
+								*subSignR = -*subSignR;
+								*zcCountR = 0;
+							}
+						}
+						if (ctx.integratorActive && slewedR) {
+							*slewedR = 0;
+						}
 					}
 				}
 			}
-			else {
-				*driftAccumL += slopeL;
+
+			int8_t currentSubSignL = (subSignL && ctx.subBoost_Q16 != 0) ? *subSignL : 1;
+			int8_t currentSubSignR = (subSignR && ctx.subBoost_Q16 != 0) ? *subSignR : 1;
+
+			q31_t outL = processShaperSample(inputL, gainCtx.current, ctx, slewedL, hystStateL, currentSubSignL, shaper,
+			                                 scaledFeedbackL);
+			q31_t outR = processShaperSample(inputR, gainCtx.current, ctx, slewedR, hystStateR, currentSubSignR, shaper,
+			                                 scaledFeedbackR);
+
+			if (ctx.needsGainAdjust) {
+				outL = static_cast<q31_t>((static_cast<int64_t>(outL) * ctx.attenGain_Q16) >> 16);
+				outR = static_cast<q31_t>((static_cast<int64_t>(outR) * ctx.attenGain_Q16) >> 16);
 			}
 
-			// R channel: reset on R zero crossing, accumulate with R slope (phi-correlated)
-			bool zcR = (inputR ^ prevR) < 0;
-			if (zcR) {
-				*driftAccumR = 0;
-				// Subharmonic: toggle sign every 2nd ZC (full wave cycle modulation)
-				// Toggle on EVEN counts so both halves of each cycle get same treatment
-				// (extrasEnabled already checked via driftActive gate)
-				if (zcCountR && subSignR) {
-					(*zcCountR)++;
-					if ((*zcCountR & 1) == 0) {
-						*subSignR = -*subSignR;
-					}
-				}
-			}
-			else {
-				*driftAccumR += slopeR;
-			}
-
-			// Compute drift effects from accumulators based on bipolar intensities
-			// Shift 11 gives ~30% max effect at low frequencies, ~10% at mid frequencies
-			int32_t baseEffectL = *driftAccumL >> 11;
-			int32_t baseEffectR = *driftAccumR >> 11;
-
-			// Multiplicative drift: positive intensity = sag (toward zero), negative = boost (away)
-			if (driftMultIntensity_Q16 != 0) {
-				int32_t scaledMultL =
-				    static_cast<int32_t>((static_cast<int64_t>(baseEffectL) * driftMultIntensity_Q16) >> 16);
-				int32_t scaledMultR =
-				    static_cast<int32_t>((static_cast<int64_t>(baseEffectR) * driftMultIntensity_Q16) >> 16);
-				driftGainL_Q16 = std::clamp(65536 - scaledMultL, int32_t{0}, int32_t{131072});
-				driftGainR_Q16 = std::clamp(65536 - scaledMultR, int32_t{0}, int32_t{131072});
-			}
-
-			// Additive drift: positive intensity = pull toward center, negative = push from center
-			if (driftAddIntensity_Q16 != 0) {
-				driftOffsetL_Q16 =
-				    static_cast<int32_t>((static_cast<int64_t>(baseEffectL) * driftAddIntensity_Q16) >> 16);
-				driftOffsetR_Q16 =
-				    static_cast<int32_t>((static_cast<int64_t>(baseEffectR) * driftAddIntensity_Q16) >> 16);
-			}
+			sample.l = outL;
+			sample.r = outR;
 		}
-
-		// Process L/R samples through shared helper (drive → slew → drift+sub → additive → shaper)
-		int8_t currentSubSignL = (subSignL && ctx.subBoost_Q16 != 0) ? *subSignL : 1;
-		int8_t currentSubSignR = (subSignR && ctx.subBoost_Q16 != 0) ? *subSignR : 1;
-
-		q31_t outL = processShaperSample(inputL, gainCtx.current, ctx, slewedL, hystStateL, driftGainL_Q16,
-		                                 currentSubSignL, driftOffsetL_Q16, shaper);
-		q31_t outR = processShaperSample(inputR, gainCtx.current, ctx, slewedR, hystStateR, driftGainR_Q16,
-		                                 currentSubSignR, driftOffsetR_Q16, shaper);
-
-		if (ctx.needsGainAdjust) {
-			outL = static_cast<q31_t>((static_cast<int64_t>(outL) * ctx.attenGain_Q16) >> 16);
-			outR = static_cast<q31_t>((static_cast<int64_t>(outR) * ctx.attenGain_Q16) >> 16);
-		}
-
-		sample.l = outL;
-		sample.r = outR;
 	}
 
 	*smoothedDriveGain = gainCtx.current;
-	*smoothedMixNorm_Q16 = mixCtx.current;
+	// Store current values (closes half distance per buffer, converges exponentially)
+	*smoothedThreshold32 = currentThreshold32;
+	*smoothedBlendSlope_Q8 = currentBlendSlope;
 }
 
 } // namespace deluge::dsp

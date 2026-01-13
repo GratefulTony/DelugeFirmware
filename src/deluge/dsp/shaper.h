@@ -50,34 +50,28 @@ struct TableShaperState {
 	uint8_t shapeX{0};             // Soft→Hard axis (0-127, "Knee")
 	uint16_t shapeY{0};            // Clean→Weird axis (0-1023, high-res multi-zone, "Color")
 	bool aa{false};                // Anti-aliasing enabled (default off, reserved for future use)
-	float gammaPhase{0.0f};        // Gamma phase for phi triangles (secret knob, 0 = drift disabled)
+	float gammaPhase{0.0f};        // Gamma phase for phi triangles (secret knob, 0 = LPF/hyst/sub disabled)
 	float oscHarmonicWeight{0.5f}; // Oscillator harmonic content [0-1]: 0=sine, 0.5=saw, 1=square
 
-	// DSP smoothing state
-	q31_t driveLast{0};         // Previous drive value for smoothing
-	int32_t mixNormLast_Q16{0}; // Previous mixNorm value for smoothing (Q16.16 format)
+	// DSP smoothing state (stores last per-buffer target values)
+	q31_t driveLast{0};                                         // Previous drive value for smoothing
+	int32_t threshold32Last{TableShaperCore::kInt32MaxShifted}; // Previous threshold32 (max = full dry)
+	int32_t blendSlopeLast_Q8{0};                               // Previous blendSlope_Q8 (per-buffer target)
 
 	// Hysteresis state (per-channel previous scaled input for slope detection)
 	int32_t prevScaledInputL{0};
 	int32_t prevScaledInputR{0};
 
-	// Slope drift state for analog character
-	// Each channel has its own random walk; phi triangle controls correlation
-	// Intensity from phi triangle (computed at table regen based on Y position + phase offset)
-	int32_t driftSlopeL_Q16{0};     // L channel random walk: rate of offset accumulation per sample
-	int32_t driftSlopeR_Q16{0};     // R channel random walk (decorrelated from L by phi)
-	int32_t driftAccumL{0};         // L channel accumulated offset, resets on zero crossings
-	int32_t driftAccumR{0};         // R channel accumulated offset, resets on zero crossings
-	uint32_t driftLfsr{0xDEADBEEF}; // LFSR for random walk (seeded with golden ratio bits)
-	int32_t prevSampleL{0};         // Previous sample for zero-crossing detection
-	int32_t prevSampleR{0};         // Previous sample for zero-crossing detection
+	// Zero-crossing detection state for subharmonic
+	int32_t prevSampleL{0}; // Previous sample for zero-crossing detection
+	int32_t prevSampleR{0}; // Previous sample for zero-crossing detection
 
 	// Subharmonic state: toggles every 2nd zero crossing for octave-down effects
-	uint8_t zcCountL{0};    // Zero crossing counter for L channel
-	uint8_t zcCountR{0};    // Zero crossing counter for R channel
-	int8_t subSignL{1};     // Subharmonic sign for L (±1, toggles every 2nd ZC)
-	int8_t subSignR{1};     // Subharmonic sign for R (±1, toggles every 2nd ZC)
-	bool subEnabled{false}; // Toggle via encoder button on X
+	uint8_t zcCountL{0};   // Zero crossing counter for L channel
+	uint8_t zcCountR{0};   // Zero crossing counter for R channel
+	int8_t subSignL{1};    // Subharmonic sign for L (±1, toggles every 2nd ZC)
+	int8_t subSignR{1};    // Subharmonic sign for R (±1, toggles every 2nd ZC)
+	uint8_t extrasMask{0}; // Bitmask for extras: bit0=sub, bit1=feedback, bit2=rotation, bit3=lpf, bit4=integrator
 
 	// Slew rate limiting state: previous output for rate limiting
 	int32_t slewedL{0}; // L channel slew-limited output
@@ -109,13 +103,10 @@ struct TableShaperState {
 	/// Reset DSP state (call when starting new audio stream)
 	void resetDspState() {
 		driveLast = 0;
-		mixNormLast_Q16 = 0;
+		threshold32Last = TableShaperCore::kInt32MaxShifted; // max = full dry (no effect)
+		blendSlopeLast_Q8 = 0;
 		prevScaledInputL = 0;
 		prevScaledInputR = 0;
-		driftSlopeL_Q16 = 0;
-		driftSlopeR_Q16 = 0;
-		driftAccumL = 0;
-		driftAccumR = 0;
 		prevSampleL = 0;
 		prevSampleR = 0;
 		zcCountL = 0;
@@ -124,7 +115,6 @@ struct TableShaperState {
 		subSignR = 1;
 		slewedL = 0;
 		slewedR = 0;
-		// Don't reset driftLfsr - keep it running for continuous entropy
 	}
 
 	/// Write shaper state to file (only non-default values)
@@ -260,6 +250,12 @@ public:
 		return TableShaperCore::computeThreshold64(mixNorm_Q16);
 	}
 
+	/// Compute 32-bit threshold from mixNorm_Q16 (faster than 64-bit version)
+	/// Use with processWithGainFast() for vanilla mode (no extras)
+	[[gnu::always_inline]] static int32_t computeThreshold32(int32_t mixNorm_Q16) {
+		return TableShaperCore::computeThreshold32(mixNorm_Q16);
+	}
+
 	/// Get isLinear flag (call once per buffer for hoisting)
 	[[gnu::always_inline]] bool getIsLinear() const { return tableSat_.getIsLinear(); }
 
@@ -285,25 +281,83 @@ public:
 		                                        prevScaledInput);
 	}
 
+	/// Fast processing path for vanilla mode (gammaPhase==0, no extras)
+	/// Uses 32-bit threshold. In vanilla mode wet == dry, so single path suffices.
+	/// IMPORTANT: The driven signal (with drive gain applied) is used as the dry reference.
+	/// @param drivenInput Input sample with drive gain already applied by caller
+	/// @param blendSlope_Q8 Pre-computed from computeBlendSlope_Q8()
+	/// @param threshold32 Pre-computed from computeThreshold32()
+	/// @param tableIdx Pre-computed from getTargetTableIndex()
+	/// @return Output with drive gain preserved
+	[[gnu::always_inline]] inline q31_t processWithGainFast(q31_t drivenInput, int32_t blendSlope_Q8,
+	                                                        int32_t threshold32, int8_t tableIdx) {
+		return tableSat_.processInt32Fast(drivenInput, blendSlope_Q8, threshold32, tableIdx);
+	}
+
+	/// Fast processing path with separate wet/dry and hysteresis (32-bit threshold)
+	/// Uses 32-bit threshold for extras path where wet != dry (slew/drift/sub applied).
+	/// @param wetInput Wet path input (pre-driven, with slew/drift/sub applied)
+	/// @param dryInput Dry path input (pre-driven, original signal for blending)
+	/// @param blendSlope_Q8 Pre-computed from computeBlendSlope_Q8()
+	/// @param threshold32 Pre-computed from computeThreshold32()
+	/// @param tableIdx Pre-computed from getTargetTableIndex()
+	/// @param hystOffset Hysteresis offset (0 = disabled, from getHystOffset())
+	/// @param prevScaledInput Pointer to previous scaled input for slope detection (updated)
+	/// @return Output with drive gain preserved
+	[[gnu::always_inline]] inline q31_t processWithGainFast32(q31_t wetInput, q31_t dryInput, int32_t blendSlope_Q8,
+	                                                          int32_t threshold32, int8_t tableIdx,
+	                                                          int32_t hystOffset = 0,
+	                                                          int32_t* prevScaledInput = nullptr) {
+		return tableSat_.processInt32Fast32Hoisted(wetInput, dryInput, blendSlope_Q8, threshold32, tableIdx, hystOffset,
+		                                           prevScaledInput);
+	}
+
 	/// Get hysteresis offset (call once per buffer for hoisting)
 	[[gnu::always_inline]] int32_t getHystOffset() const { return tableSat_.getHystOffset(); }
-
-	/// Get multiplicative drift intensity (bipolar, call once per buffer for hoisting)
-	/// Positive = sag toward zero, negative = boost away from zero
-	[[gnu::always_inline]] int32_t getDriftMultIntensity_Q16() const { return tableSat_.getDriftMultIntensity_Q16(); }
-
-	/// Get additive drift intensity (bipolar, call once per buffer for hoisting)
-	/// Positive = pull toward center, negative = push from center
-	[[gnu::always_inline]] int32_t getDriftAddIntensity_Q16() const { return tableSat_.getDriftAddIntensity_Q16(); }
-
-	/// Get stereo decorrelation offset (call once per buffer for hoisting)
-	[[gnu::always_inline]] int32_t getDriftStereoOffset_Q16() const { return tableSat_.getDriftStereoOffset_Q16(); }
 
 	/// Get subharmonic gain boost intensity (call once per buffer for hoisting)
 	[[gnu::always_inline]] int32_t getSubIntensity_Q16() const { return tableSat_.getSubIntensity_Q16(); }
 
+	/// Get subharmonic ZC ratio (call once per buffer for hoisting)
+	[[gnu::always_inline]] int8_t getSubRatio() const { return tableSat_.getSubRatio(); }
+
+	/// Get ZC detection stride (call once per buffer for hoisting)
+	[[gnu::always_inline]] int32_t getStride() const { return tableSat_.getStride(); }
+
+	/// Get feedback intensity (call once per buffer for hoisting)
+	[[gnu::always_inline]] int32_t getFeedback_Q16() const { return tableSat_.getFeedback_Q16(); }
+
+	/// Get bit rotation amount (call once per buffer for hoisting)
+	[[gnu::always_inline]] int8_t getRotation() const { return tableSat_.getRotation(); }
+
 	/// Get slew rate limiting intensity (call once per buffer for hoisting)
 	[[gnu::always_inline]] int32_t getSlewIntensity_Q16() const { return tableSat_.getSlewIntensity_Q16(); }
+
+	/// Scale input to table domain (call once per sample, before LPF/sub processing)
+	[[gnu::always_inline]] int32_t scaleInput(int32_t input) const {
+		return lshiftAndSaturateUnknown(input, tableSat_.getInputScaleShift());
+	}
+
+	/// Get input scale shift for manual scaling operations
+	[[gnu::always_inline]] int32_t getInputScaleShift() const { return tableSat_.getInputScaleShift(); }
+
+	/// Process with pre-scaled inputs (scaled domain throughout, returns scaled output)
+	/// Use scaleInput() to pre-scale, then >> getInputScaleShift() to unscale result
+	/// @param scaledWet Pre-scaled wet input (after LPF/sub in scaled domain)
+	/// @param scaledDry Pre-scaled dry input (reference for threshold/blend)
+	/// @param blendSlope_Q8 Pre-computed from computeBlendSlope_Q8()
+	/// @param threshold32 Pre-computed from computeThreshold32()
+	/// @param tableIdx Pre-computed from getTargetTableIndex()
+	/// @param hystOffset Hysteresis offset (0 = disabled)
+	/// @param prevScaledInput Pointer to previous scaled input for slope detection
+	/// @return Scaled output (caller must >> getInputScaleShift() to unscale)
+	[[gnu::always_inline]] inline int32_t processPreScaled32(int32_t scaledWet, int32_t scaledDry,
+	                                                         int32_t blendSlope_Q8, int32_t threshold32,
+	                                                         int8_t tableIdx, int32_t hystOffset = 0,
+	                                                         int32_t* prevScaledInput = nullptr) {
+		return tableSat_.processPreScaled32(scaledWet, scaledDry, blendSlope_Q8, threshold32, tableIdx, hystOffset,
+		                                    prevScaledInput);
+	}
 
 	/// Process with integer mixNorm (Q16.16 format: 65536 = 1.0)
 	/// Note: Prefer processWithGain() and driveToGainQ26() for buffer processing

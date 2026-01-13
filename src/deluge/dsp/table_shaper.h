@@ -70,7 +70,11 @@ struct TableShaperParams {
 	float driftAddIntensity{0.0f};  // Additive drift intensity [-1,+1] (pull/push from center)
 	float driftStereoOffset{0.0f};  // Stereo decorrelation: R channel slope multiplier offset [-1,1]
 	float subIntensity{0.0f};       // Subharmonic gain boost intensity from phi triangle [0,1]
-	float slewIntensity{0.0f};      // Slew rate limiting intensity [0,1] (0=disabled, 1=extreme)
+	int8_t subRatio{2};             // Subharmonic ZC threshold: 2=octave, 3=twelfth, 4=2oct, 5=2oct+3rd, 6=2oct+5th
+	int32_t stride{64};             // ZC detection stride [1,128]: lower=more freq, higher=bass-only + feedback comb
+	float feedback{0.0f};           // Feedback intensity [0,0.8]: comb filter at 44100/stride Hz
+	int8_t rotation{0};             // Bit rotation amount [0,31]: aliasing effect (0=passthrough)
+	float slewIntensity{0.0f};      // Unipolar [0,1]: intensity for LPF or integrator (bit selects which)
 	float preExpandAmount{0.0f};    // Pre-expansion intensity [0,1] (0=linear, 1=50% boost at zero crossing)
 
 	/// Clamp all parameters to valid ranges
@@ -92,6 +96,10 @@ struct TableShaperParams {
 		driftAddIntensity = std::clamp(driftAddIntensity, -1.0f, 1.0f);
 		driftStereoOffset = std::clamp(driftStereoOffset, -1.0f, 1.0f);
 		subIntensity = std::clamp(subIntensity, 0.0f, 1.0f);
+		subRatio = std::clamp(subRatio, static_cast<int8_t>(2), static_cast<int8_t>(6));
+		stride = std::clamp(stride, static_cast<int32_t>(1), static_cast<int32_t>(128));
+		feedback = std::clamp(feedback, 0.0f, 0.8f);
+		rotation = std::clamp(rotation, static_cast<int8_t>(0), static_cast<int8_t>(31));
 		slewIntensity = std::clamp(slewIntensity, 0.0f, 1.0f);
 		preExpandAmount = std::clamp(preExpandAmount, 0.0f, 1.0f);
 	}
@@ -103,7 +111,8 @@ struct TableShaperParams {
 		       || asymmetry != o.asymmetry || deadzoneWidth != o.deadzoneWidth || deadzonePhase != o.deadzonePhase
 		       || hysteresis != o.hysteresis || hystMixInfluence != o.hystMixInfluence
 		       || driftMultIntensity != o.driftMultIntensity || driftAddIntensity != o.driftAddIntensity
-		       || driftStereoOffset != o.driftStereoOffset || subIntensity != o.subIntensity
+		       || driftStereoOffset != o.driftStereoOffset || subIntensity != o.subIntensity || subRatio != o.subRatio
+		       || stride != o.stride || feedback != o.feedback || rotation != o.rotation
 		       || slewIntensity != o.slewIntensity || preExpandAmount != o.preExpandAmount;
 	}
 };
@@ -127,7 +136,7 @@ public:
 	// - 1024: Click-free regeneration, minimal quality difference for most curves
 	// - 512/256/128: Faster regeneration, noticeable smoothing on sharp features
 	// Linear interpolation adds 16-bit fractional precision between entries.
-	static constexpr size_t kTableSize = 2048;
+	static constexpr size_t kTableSize = 1024;
 	// =============================================================================
 
 	static constexpr float kTableScale = static_cast<float>(kTableSize) / 2.0f;
@@ -183,12 +192,19 @@ public:
 	static constexpr int32_t kBaseSlope = 256;
 	static constexpr int32_t kSlopeShift = 20;
 
-	// Threshold calculation constants
+	// Threshold calculation constants (64-bit version - legacy)
 	static constexpr int32_t kMaxSlope = kBaseSlope + ((static_cast<int64_t>(kMaxMix) * kMaxMix) >> kSlopeShift);
 	static constexpr int32_t kBlendTarget = kOne_Q16 << 8;
 	static constexpr int32_t kRequiredDiffQ16 = (kBlendTarget + kMaxSlope - 1) / kMaxSlope;
 	static constexpr int64_t kThresholdForFullWet = -(static_cast<int64_t>(kRequiredDiffQ16) << 15);
 	static constexpr int64_t kThresholdRange = kInt32Max64 - kThresholdForFullWet;
+
+	// 32-bit threshold constants (shifted down by 8 bits to fit in int32)
+	// This eliminates 64-bit arithmetic in the per-sample path
+	static constexpr int32_t kThresholdShift = 8;
+	static constexpr int32_t kThresholdForFullWet32 = static_cast<int32_t>(kThresholdForFullWet >> kThresholdShift);
+	static constexpr int32_t kInt32MaxShifted = kInt32Max >> kThresholdShift;
+	static constexpr int32_t kThresholdRange32 = kInt32MaxShifted - kThresholdForFullWet32;
 
 	/// Compute baseSlope from mixNorm_Q16 (call once per buffer for hoisting)
 	/// baseSlope = kBaseSlope + (mixNorm² >> kSlopeShift)
@@ -201,6 +217,15 @@ public:
 	/// Maps mix range to threshold: [INT32_MAX at mix=0] to [negative at mix=max]
 	[[gnu::always_inline]] static int64_t computeThreshold64(int32_t mixNorm_Q16) {
 		return kInt32Max64 - ((kThresholdRange * mixNorm_Q16) >> 17);
+	}
+
+	/// Compute 32-bit threshold from mixNorm_Q16 (faster than 64-bit version)
+	/// Threshold is shifted down by kThresholdShift bits to fit in int32
+	/// Use with processInt32Fast() for vanilla mode (no extras)
+	[[gnu::always_inline]] static int32_t computeThreshold32(int32_t mixNorm_Q16) {
+		// Same calculation as 64-bit but in shifted domain
+		// Note: multiplication needs int64 to avoid overflow (8.5M * 131072 = 1.1T)
+		return kInt32MaxShifted - static_cast<int32_t>((static_cast<int64_t>(kThresholdRange32) * mixNorm_Q16) >> 17);
 	}
 
 	/// Compute blendSlope_Q8 from baseSlope (call once per buffer for hoisting)
@@ -362,6 +387,193 @@ public:
 		int32_t blended = dryPart + wetPart;
 
 		return blended >> inputScaleShift_;
+	}
+
+	/// Fast processing path for vanilla mode (gammaPhase==0, no extras)
+	/// Uses 32-bit threshold arithmetic. In vanilla mode, wet and dry paths are identical
+	/// (no slew/drift/sub modifiers), so we use a single scaled value for both.
+	/// @param drivenInput Input sample with drive gain already applied by caller
+	/// @param blendSlope_Q8 Pre-computed from computeBlendSlope_Q8(baseSlope)
+	/// @param threshold32 Pre-computed from computeThreshold32(mixNorm_Q16)
+	/// @param tableIdx Pre-computed from getTargetTableIndex()
+	/// @return Output sample at same level as input (drive gain preserved)
+	[[gnu::always_inline]] int32_t processInt32Fast(int32_t drivenInput, int32_t blendSlope_Q8, int32_t threshold32,
+	                                                int8_t tableIdx) {
+		// Scale up for table resolution. In vanilla mode, wet == dry (no modifiers applied),
+		// so we use one scaled value for both the dry blend component and table lookup.
+		// INTENTIONAL: The driven signal (with drive gain) is used as the dry reference.
+		int32_t scaledDry = lshiftAndSaturateUnknown(drivenInput, inputScaleShift_);
+		int32_t scaledWet = scaledDry; // Identical in vanilla mode - no wet-path modifications
+
+		// Branchless abs for threshold check (based on dry signal level)
+		int32_t clamped = std::max(scaledDry, static_cast<int32_t>(-2147483647));
+		int32_t sign = clamped >> 31;
+		int32_t absVal = (clamped ^ sign) - sign;
+
+		// 32-bit threshold comparison (absVal shifted down to match threshold domain)
+		int32_t absShifted = absVal >> kThresholdShift;
+		int32_t diff = absShifted - threshold32;
+		if (diff <= 0) {
+			// Below threshold: return driven input unchanged (drive gain preserved)
+			return drivenInput;
+		}
+
+		// Blend calculation (diff is in shifted domain, adjust shift accordingly)
+		// Original: diff_Q16 = diff >> 15, but diff is already shifted by 8
+		// So: diff_Q16 = diff >> (15 - kThresholdShift) = diff >> 7
+		int32_t diff_Q16 = diff >> (15 - kThresholdShift);
+		int32_t blend_Q16 = (diff_Q16 * blendSlope_Q8) >> 8;
+		if (blend_Q16 > kOne_Q16) {
+			blend_Q16 = kOne_Q16;
+		}
+
+		// Table lookup using wet path (same as dry in vanilla mode)
+		uint32_t tableInput = static_cast<uint32_t>(scaledWet) + 2147483648u;
+		int32_t lookup = lookupFunctionIntDirect(tableInput, tableIdx);
+
+		// Blend at scaled level: output = dry * (1 - blend) + wet * blend
+		// INTENTIONAL: dry component uses the driven signal (scaledDry) to preserve drive gain
+		int32_t blend_Q30 = blend_Q16 << 14;
+		int32_t oneMinusBlend_Q30 = (kOne_Q16 << 14) - blend_Q30;
+
+		int32_t dryPart = multiply_32x32_rshift32(scaledDry, oneMinusBlend_Q30) << 2;
+		int32_t wetPart = multiply_32x32_rshift32(lookup, blend_Q30) << 2;
+		int32_t blended = dryPart + wetPart;
+
+		// Scale back to original level (drive gain preserved in output)
+		return blended >> inputScaleShift_;
+	}
+
+	/// Fast processing path with separate wet/dry inputs and hysteresis support
+	/// Uses 32-bit threshold arithmetic (eliminates 64-bit ops in per-sample path).
+	/// For use when extras (slew/drift/sub) modify wet path differently from dry.
+	/// @param wetInput Wet path input (pre-driven, with slew/drift/sub applied)
+	/// @param dryInput Dry path input (pre-driven, original signal for blending)
+	/// @param blendSlope_Q8 Pre-computed from computeBlendSlope_Q8(baseSlope)
+	/// @param threshold32 Pre-computed from computeThreshold32(mixNorm_Q16)
+	/// @param tableIdx Pre-computed from getTargetTableIndex()
+	/// @param hystOffset Hysteresis offset (0 = disabled, from getHystOffset())
+	/// @param prevScaledInput Pointer to previous scaled input for slope detection (updated)
+	/// @return Output sample at same level as input (drive gain preserved)
+	[[gnu::always_inline]] int32_t processInt32Fast32Hoisted(int32_t wetInput, int32_t dryInput, int32_t blendSlope_Q8,
+	                                                         int32_t threshold32, int8_t tableIdx,
+	                                                         int32_t hystOffset = 0,
+	                                                         int32_t* prevScaledInput = nullptr) {
+		// Scale for table resolution (drive already applied by caller)
+		int32_t scaledWet = lshiftAndSaturateUnknown(wetInput, inputScaleShift_);
+		int32_t scaledDry = lshiftAndSaturateUnknown(dryInput, inputScaleShift_);
+
+		// Amplitude-dependent blend based on DRY signal (branchless abs)
+		int32_t clampedDry = std::max(scaledDry, static_cast<int32_t>(-2147483647));
+		int32_t sign = clampedDry >> 31;
+		int32_t absDry = (clampedDry ^ sign) - sign;
+
+		// 32-bit threshold comparison (absVal shifted down to match threshold domain)
+		int32_t absShifted = absDry >> kThresholdShift;
+		int32_t diff = absShifted - threshold32;
+		if (diff <= 0) {
+			// Still update prev state for hysteresis even in bypass
+			if (prevScaledInput) {
+				*prevScaledInput = scaledDry;
+			}
+			// Return dry signal when below threshold (already at driven level)
+			return dryInput;
+		}
+
+		// Blend calculation (diff is in shifted domain, adjust shift accordingly)
+		// Original: diff_Q16 = diff >> 15, but diff is already shifted by 8
+		// So: diff_Q16 = diff >> (15 - kThresholdShift) = diff >> 7
+		int32_t diff_Q16 = diff >> (15 - kThresholdShift);
+		int32_t blend_Q16 = (diff_Q16 * blendSlope_Q8) >> 8;
+		if (blend_Q16 > kOne_Q16) {
+			blend_Q16 = kOne_Q16;
+		}
+
+		// Hysteresis: direction-dependent table offset (based on dry signal)
+		// Note: prevScaledInput is null when hystOffset is 0 (optimization in shaper_buffer.h)
+		int32_t offsetWet = scaledWet;
+		if (prevScaledInput) {
+			int32_t slope = scaledDry - *prevScaledInput;
+			int32_t signMask = slope >> 31;
+			int32_t hystTableOffset = (hystOffset ^ signMask) - signMask;
+			*prevScaledInput = scaledDry;
+			offsetWet = add_saturate(scaledWet, hystTableOffset);
+		}
+
+		// Table lookup on wet path (with hysteresis offset if enabled)
+		uint32_t tableInput = static_cast<uint32_t>(offsetWet) + 2147483648u;
+		int32_t lookup = lookupFunctionIntDirect(tableInput, tableIdx);
+
+		// Blend at scaled level (dry signal, wet table lookup)
+		int32_t blend_Q30 = blend_Q16 << 14;
+		int32_t oneMinusBlend_Q30 = (kOne_Q16 << 14) - blend_Q30;
+
+		int32_t dryPart = multiply_32x32_rshift32(scaledDry, oneMinusBlend_Q30) << 2;
+		int32_t wetPart = multiply_32x32_rshift32(lookup, blend_Q30) << 2;
+		int32_t blended = dryPart + wetPart;
+
+		return blended >> inputScaleShift_;
+	}
+
+	/// Process with pre-scaled inputs (for operating entirely in scaled domain)
+	/// Caller scales input once, applies LPF/sub in scaled domain, then calls this.
+	/// Returns SCALED output - caller must >> inputScaleShift_ to unscale.
+	/// @param scaledWet Pre-scaled wet input (after LPF/sub modifications in scaled domain)
+	/// @param scaledDry Pre-scaled dry input (for threshold comparison and blend)
+	/// @param blendSlope_Q8 Pre-computed from computeBlendSlope_Q8()
+	/// @param threshold32 Pre-computed from computeThreshold32()
+	/// @param tableIdx Pre-computed from getTargetTableIndex()
+	/// @param hystOffset Hysteresis offset (0 = disabled)
+	/// @param prevScaledInput Pointer to previous scaled input for slope detection
+	/// @return SCALED output (caller must >> inputScaleShift_ to unscale)
+	[[gnu::always_inline]] int32_t processPreScaled32(int32_t scaledWet, int32_t scaledDry, int32_t blendSlope_Q8,
+	                                                  int32_t threshold32, int8_t tableIdx, int32_t hystOffset = 0,
+	                                                  int32_t* prevScaledInput = nullptr) {
+		// Amplitude-dependent blend based on DRY signal (branchless abs)
+		int32_t clampedDry = std::max(scaledDry, static_cast<int32_t>(-2147483647));
+		int32_t sign = clampedDry >> 31;
+		int32_t absDry = (clampedDry ^ sign) - sign;
+
+		// 32-bit threshold comparison (absVal shifted down to match threshold domain)
+		int32_t absShifted = absDry >> kThresholdShift;
+		int32_t diff = absShifted - threshold32;
+		if (diff <= 0) {
+			// Still update prev state for hysteresis even in bypass
+			if (prevScaledInput) {
+				*prevScaledInput = scaledDry;
+			}
+			// Return scaled dry signal when below threshold
+			return scaledDry;
+		}
+
+		// Blend calculation (diff is in shifted domain, adjust shift accordingly)
+		int32_t diff_Q16 = diff >> (15 - kThresholdShift);
+		int32_t blend_Q16 = (diff_Q16 * blendSlope_Q8) >> 8;
+		if (blend_Q16 > kOne_Q16) {
+			blend_Q16 = kOne_Q16;
+		}
+
+		// Hysteresis: direction-dependent table offset (based on dry signal)
+		int32_t offsetWet = scaledWet;
+		if (prevScaledInput) {
+			int32_t slope = scaledDry - *prevScaledInput;
+			int32_t signMask = slope >> 31;
+			int32_t hystTableOffset = (hystOffset ^ signMask) - signMask;
+			*prevScaledInput = scaledDry;
+			offsetWet = add_saturate(scaledWet, hystTableOffset);
+		}
+
+		// Table lookup on wet path (with hysteresis offset if enabled)
+		uint32_t tableInput = static_cast<uint32_t>(offsetWet) + 2147483648u;
+		int32_t lookup = lookupFunctionIntDirect(tableInput, tableIdx);
+
+		// Blend at scaled level (dry signal, wet table lookup)
+		int32_t blend_Q30 = blend_Q16 << 14;
+		int32_t oneMinusBlend_Q30 = (kOne_Q16 << 14) - blend_Q30;
+
+		int32_t dryPart = multiply_32x32_rshift32(scaledDry, oneMinusBlend_Q30) << 2;
+		int32_t wetPart = multiply_32x32_rshift32(lookup, blend_Q30) << 2;
+		return dryPart + wetPart; // Return SCALED - caller unscales
 	}
 
 	/// Deallocate tables to free memory (~4KB)
@@ -605,6 +817,14 @@ private:
 		driftStereoOffset_Q16_ = static_cast<int32_t>(params_.driftStereoOffset * 65536.0f);
 		// Compute subharmonic gain boost intensity (Q16: 65536 = 1.0)
 		subIntensity_Q16_ = static_cast<int32_t>(params_.subIntensity * 65536.0f);
+		// Store subharmonic ratio directly (int8_t, already clamped in params)
+		subRatio_ = params_.subRatio;
+		// Store stride directly (int32_t, already clamped in params)
+		stride_ = params_.stride;
+		// Compute feedback intensity (Q16: 52428 = 0.8 max for stability)
+		feedback_Q16_ = static_cast<int32_t>(params_.feedback * 65536.0f);
+		// Store bit rotation amount directly (int8_t, already clamped in params)
+		rotation_ = params_.rotation;
 		// Compute slew rate limiting intensity (Q16: 65536 = 1.0)
 		slewIntensity_Q16_ = static_cast<int32_t>(params_.slewIntensity * 65536.0f);
 
@@ -689,6 +909,18 @@ private:
 	// Subharmonic gain boost intensity: phi triangle modulation
 	// Q16 format: 0 = no boost, 65536 = full boost (~6dB when subSign=+1)
 	int32_t subIntensity_Q16_{0};
+	// Subharmonic ZC ratio: how many zero crossings per sign toggle
+	// 2 = octave down, 3 = twelfth, 4 = 2 octaves, 5 = 2oct+3rd, 6 = 2oct+5th
+	int8_t subRatio_{2};
+	// ZC detection stride: check every N samples instead of every sample
+	// Lower = more accurate, higher = bass-only (also sets feedback comb freq)
+	int32_t stride_{64};
+	// Feedback intensity: comb filter using prevSample at stride points
+	// Q16 format: 0 = disabled, 52428 = 0.8 max (stability limit)
+	int32_t feedback_Q16_{0};
+	// Bit rotation amount: aliasing effect via ARM ROR instruction
+	// Range [0,31]: 0 = passthrough, 31 = max rotation (single-cycle)
+	int8_t rotation_{0};
 	// Slew rate limiting intensity: phi triangle modulation
 	// Q16 format: 0 = disabled, 65536 = extreme limiting
 	int32_t slewIntensity_Q16_{0};
@@ -730,6 +962,14 @@ public:
 	[[nodiscard]] int32_t getDriftStereoOffset_Q16() const { return driftStereoOffset_Q16_; }
 	/// Get subharmonic gain boost intensity (for hoisting to buffer level)
 	[[nodiscard]] int32_t getSubIntensity_Q16() const { return subIntensity_Q16_; }
+	/// Get subharmonic ZC ratio (for hoisting to buffer level)
+	[[nodiscard]] int8_t getSubRatio() const { return subRatio_; }
+	/// Get ZC detection stride (for hoisting to buffer level)
+	[[nodiscard]] int32_t getStride() const { return stride_; }
+	/// Get feedback intensity (for hoisting to buffer level)
+	[[nodiscard]] int32_t getFeedback_Q16() const { return feedback_Q16_; }
+	/// Get bit rotation amount (for hoisting to buffer level)
+	[[nodiscard]] int8_t getRotation() const { return rotation_; }
 	/// Get slew rate limiting intensity (for hoisting to buffer level)
 	[[nodiscard]] int32_t getSlewIntensity_Q16() const { return slewIntensity_Q16_; }
 };
@@ -952,19 +1192,29 @@ struct TableShaperXYMapper {
 		float subTri = triangleSimpleUnipolar(phi::wrapPhase(subBase + phSub), kSubDuty);
 		p.subIntensity = dzEnable * subTri; // Linear response, gated by phase offset
 
-		// Slew rate limiting (now LPF): softens transients before waveshaping
-		// Duty cycle scales with oscillator harmonic content:
-		// - sine (0.0) → 20% duty (minimal LPF activation, already smooth)
-		// - saw (0.5) → 50% duty (moderate LPF)
-		// - square (1.0) → 80% duty (lots of LPF activation, sharp edges need softening)
+		// Extras bank: additional cheap effects controlled by phi triangles
+		// Uses PhiTriContext for consistent evaluation pattern
+		phi::PhiTriContext extrasCtx{yNorm, freqMult, periodScale, gammaPhase};
+		auto extras = extrasCtx.evalBank(phi::kExtrasBank, dzEnable);
+		p.subRatio = phi::subRatioFromTriangle(extras[0]); // [0] = sub ratio selector
+		p.stride = phi::strideFromTriangle(extras[1]);     // [1] = ZC stride
+		p.feedback = phi::feedbackFromTriangle(extras[2]); // [2] = comb filter intensity
+		p.rotation = phi::rotationFromTriangle(extras[3]); // [3] = bit rotation amount
+
+		// Slew intensity: unipolar [0,1], bit selection (LPF vs integrator) via extrasMask
+		// Duty cycle = oscHarmonicWeight + 0.2 (clamped to 1.0):
+		// - sine (0.0) → 20% duty (minimal activation, already smooth)
+		// - saw (0.5) → 70% duty (moderate)
+		// - square (1.0) → 100% duty (always active - reliable detection)
 		// φ^1.75 frequency (uncorrelated with others)
-		// Enable for gammaPhase > 0 OR high harmonic content (square waves need LPF always)
+		// Enable for gammaPhase > 0 OR high harmonic content (square waves always)
 		float slewEnable = (gammaPhase != 0.0f || oscHarmonicWeight >= 0.8f) ? 1.0f : 0.0f;
-		float slewDuty = 0.2f + 0.6f * oscHarmonicWeight; // Range [0.2, 0.8]
+		float slewDuty = std::min(1.0f, oscHarmonicWeight + 0.2f); // Range [0.2, 1.0]
 		float phSlew = phi::wrapPhase(ph * phi::kPhi175);
 		float slewBase = static_cast<float>(static_cast<double>(yNorm) * phi::kPhi175 * freqMult * periodScale);
+		// Unipolar triangle [0,1]: intensity for whichever slew mode is enabled by bit
 		float slewTri = triangleSimpleUnipolar(phi::wrapPhase(slewBase + phSlew), slewDuty);
-		p.slewIntensity = slewEnable * slewTri; // Linear response, enabled for phase or square waves
+		p.slewIntensity = slewEnable * slewTri;
 
 		// Pre-expansion: X controls intensity, Y+phase sweep character
 		// NOT gated by dzEnable - works at gammaPhase=0 for vanilla expander/limiter zone

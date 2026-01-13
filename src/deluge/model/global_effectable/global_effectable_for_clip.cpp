@@ -139,11 +139,10 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 		q31_t satDrive = paramManagerForClip->getValueWithFallback(params::LOCAL_TABLE_SHAPER_DRIVE);
 		q31_t satMix = paramManagerForClip->getValueWithFallback(params::LOCAL_TABLE_SHAPER_MIX);
 		deluge::dsp::shapeBufferInt32(
-		    global_effectable_audio, shaperDsp, satDrive, &shaper.driveLast, satMix, &shaper.mixNormLast_Q16, 0, false,
-		    &shaper.prevScaledInputL, &shaper.prevScaledInputR, &shaper.driftSlopeL_Q16, &shaper.driftSlopeR_Q16,
-		    &shaper.driftAccumL, &shaper.driftAccumR, &shaper.driftLfsr, &shaper.prevSampleL, &shaper.prevSampleR,
-		    &shaper.zcCountL, &shaper.zcCountR, &shaper.subSignL, &shaper.subSignR, shaper.subEnabled,
-		    shaper.gammaPhase, &shaper.slewedL, &shaper.slewedR);
+		    global_effectable_audio, shaperDsp, satDrive, &shaper.driveLast, satMix, &shaper.threshold32Last,
+		    &shaper.blendSlopeLast_Q8, 0, false, &shaper.prevScaledInputL, &shaper.prevScaledInputR,
+		    &shaper.prevSampleL, &shaper.prevSampleR, &shaper.zcCountL, &shaper.zcCountR, &shaper.subSignL,
+		    &shaper.subSignR, shaper.extrasMask, shaper.gammaPhase, &shaper.slewedL, &shaper.slewedR);
 	}
 
 	// Render saturation (builtin shaper using getTanHAntialiased)
