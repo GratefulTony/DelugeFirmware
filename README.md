@@ -1,8 +1,4 @@
-# Deluge Community Firmware
-
----
-
-## Owlet Firmware
+# Deluge Owlet Firmware
 
 This is **owlet-firmware**, a personal fork of the Deluge Community Firmware maintained at [owlet-labs/DelugeFirmware](https://github.com/owlet-labs/DelugeFirmware). It serves as a playground for experimental sound design features that may be too specialized or CPU-intensive for the main community branch.
 
