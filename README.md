@@ -10,7 +10,7 @@ This is **owlet-firmware**, a personal fork of the Deluge Community Firmware mai
 
 | Feature | Description |
 |---------|-------------|
-| **Multiband OTT Compressor (OWLTT)** | 3-band upward/downward compressor with "Feel" modulation system. 8 vibe zones for dynamic character control and creative crossover options. Realistically its the worls best creative multiband compressor. Also can serve utillity duty and cleans up nice when not acting nuts. Can funciton as full downward or full upward compression or anywhere in between. |
+| **Multiband OTT Compressor (OWLTT)** | 3-band upward/downward compressor with "Feel" modulation system. 8 vibe zones for dynamic character control and creative crossover options. Realistically its the worlds best creative multiband compressor. Also can serve utillity duty and cleans up nice when not acting nuts. Can funciton as full downward or full upward compression or anywhere in between. |
 | **Sine Shaper (HOOT)** | 4-knob Harmonic waveshaping with width, evolution, recursion, and feedback zones. 8 Different algorithms with complex routing capabilities. |
 | **Disperser (OWLPASS)** | Allpass filter cascade for frequency-dependent phase smearing. 8 algorithms and various Twist zones with punch, curve, chirp, and Q-tilt. Classic and exotic phase dispersion sounds with some Karplus Strong capabilitites in certain configurations. Unlike any dispersion you have ever heard.|
 | **Table Shaper** | Wavetable-based waveshaping but its the best one ever with pre slew and post hysteresis along with other creative modifiers. |
