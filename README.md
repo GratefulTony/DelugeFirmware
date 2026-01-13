@@ -20,7 +20,7 @@ This is **owlet-firmware**, a personal fork of the Deluge Community Firmware mai
 
 ### Benchmarks
 
-CPU usage per voice (optimization ongoing):
+CPU usage per voice (optimization ongoing). Target: stay under 2x the builtin saturation (`getTanhAntialiased`) cost, except for disperser which is inherently more expensive.
 
 ![Benchmark Comparison](docs/benchmarks/fx_benchmark_comparison.png)
 
