@@ -903,7 +903,7 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_SCATTER_ZONE_A, "Zone A"},
         {STRING_FOR_SCATTER_ZONE_B, "Zone B"},
         {STRING_FOR_SCATTER_DEPTH, "Scatter Depth"},
-        {STRING_FOR_SCATTER_GATE, "Scatter Gate"},
+        {STRING_FOR_SCATTER_MACRO, "Macro"},
         {STRING_FOR_SCATTER_CLASSIC, "Classic"},
         {STRING_FOR_SCATTER_REPEAT, "Repeat"},
         {STRING_FOR_SCATTER_REVERSE, "Reverse"},

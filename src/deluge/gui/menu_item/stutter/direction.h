@@ -30,13 +30,25 @@ class StutterDirection final : public Selection {
 public:
 	using Selection::Selection;
 
+	// Classic mode directions
 	enum Direction : uint8_t { USE_SONG_STUTTER = 0, FORWARD, REVERSED, FORWARD_PING_PONG, REVERSED_PING_PONG };
+
+	// Scatter mode: Latch behavior
+	enum ScatterLatch : uint8_t { MOMENTARY = 0, LATCH };
 
 	deluge::vector<std::string_view> getOptions(OptType optType = OptType::FULL) override {
 		using namespace deluge::l10n;
 
 		deluge::vector<std::string_view> result;
 
+		// In scatter mode, show Latch/Momentary options instead
+		if (isScatterMode()) {
+			result.push_back("Momentary"); // Normal: releases when you let go
+			result.push_back("Latch");     // Stays on after release
+			return result;
+		}
+
+		// Classic mode: direction options
 		if (showUseSongOption()) {
 			result.push_back(l10n::getView(optType == OptType::SHORT ? String::STRING_FOR_USE_SONG_SHORT
 			                                                         : String::STRING_FOR_USE_SONG));
@@ -52,6 +64,13 @@ public:
 	void readCurrentValue() override {
 		const auto* stutter = &soundEditor.currentModControllable->stutterConfig;
 
+		// Scatter mode: read latch state
+		if (isScatterMode()) {
+			Selection::setValue(stutter->latch ? LATCH : MOMENTARY);
+			return;
+		}
+
+		// Classic mode: read direction
 		if (showUseSongOption() && stutter->useSongStutter) {
 			setValue(USE_SONG_STUTTER);
 		}
@@ -72,9 +91,28 @@ public:
 	bool usesAffectEntire() override { return true; }
 
 	void writeCurrentValue() override {
+		// Scatter mode: write latch state
+		if (isScatterMode()) {
+			bool latch = (Selection::getValue() == LATCH);
+
+			if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
+				Kit* kit = getCurrentKit();
+				for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
+					if (thisDrum->type == DrumType::SOUND) {
+						auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
+						soundDrum->stutterConfig.latch = latch;
+					}
+				}
+			}
+			else {
+				soundEditor.currentModControllable->stutterConfig.latch = latch;
+			}
+			return;
+		}
+
+		// Classic mode: write direction
 		Direction value = getValue();
 
-		// If affect-entire button held, do whole kit
 		if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
 			Kit* kit = getCurrentKit();
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
@@ -84,7 +122,6 @@ public:
 				}
 			}
 		}
-		// Or, the normal case of just one sound
 		else {
 			applyOptionToStutterConfig(value, soundEditor.currentModControllable->stutterConfig);
 		}
@@ -103,6 +140,10 @@ private:
 	}
 
 	static bool showUseSongOption() { return !soundEditor.currentModControllable->isSong(); }
+
+	static bool isScatterMode() {
+		return soundEditor.currentModControllable->stutterConfig.scatterMode != ScatterMode::Classic;
+	}
 
 	static void applyOptionToStutterConfig(const Direction value, StutterConfig& stutter) {
 		stutter.useSongStutter = value == USE_SONG_STUTTER;
@@ -125,6 +166,15 @@ private:
 		using namespace deluge::hid::display;
 		oled_canvas::Canvas& image = OLED::main;
 
+		// Scatter mode: show Latch/Momentary text
+		if (isScatterMode()) {
+			const char* label = (Selection::getValue() == LATCH) ? "Latch" : "Mom";
+			image.drawStringCentered(label, slot.start_x, slot.start_y + kHorizontalMenuSlotYOffset, kTextSpacingX,
+			                         kTextSpacingY, slot.width);
+			return;
+		}
+
+		// Classic mode: show direction icons
 		const auto value = getValue();
 
 		if (value == USE_SONG_STUTTER) {

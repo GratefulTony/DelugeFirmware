@@ -148,16 +148,17 @@ enum Global : ParamType {
 	FIRST_GLOBAL_NON_VOLUME,
 	GLOBAL_DELAY_FEEDBACK = FIRST_GLOBAL_NON_VOLUME,
 
-	// Global hybrid params begin
-
-	// There are no global hybrid params, so FIRST_GLOBAL_ZONE is set to the same value. If you add a GLOBAL_HYBRID
-	// param, make sure you undo that!
+	// Global hybrid params begin (additive mod: base + mod)
 	FIRST_GLOBAL_HYBRID,
+	GLOBAL_SCATTER_MACRO = FIRST_GLOBAL_HYBRID, // Scatter macro control (not a zone param)
 
 	// Global zone params begin (pure modulation pass-through, scaling handled by ZoneBasedParam)
-	FIRST_GLOBAL_ZONE = FIRST_GLOBAL_HYBRID,
+	FIRST_GLOBAL_ZONE,
 	GLOBAL_DISPERSER_TOPO = FIRST_GLOBAL_ZONE, // Disperser topology zone (clips to boundaries)
 	GLOBAL_DISPERSER_TWIST,                    // Disperser character zone (allows cross-zone)
+	GLOBAL_SCATTER_ZONE_A,                     // Scatter structural zone
+	GLOBAL_SCATTER_ZONE_B,                     // Scatter timbral zone
+	GLOBAL_SCATTER_DEPTH,                      // Scatter effect depth
 
 	// Global exp params begin
 	FIRST_GLOBAL_EXP,
@@ -227,7 +228,7 @@ enum UnpatchedShared : ParamType {
 	UNPATCHED_SCATTER_ZONE_A,
 	UNPATCHED_SCATTER_ZONE_B,
 	UNPATCHED_SCATTER_DEPTH,
-	UNPATCHED_SCATTER_GATE,
+	UNPATCHED_SCATTER_MACRO,
 	// Arp
 	UNPATCHED_FIRST_ARP_PARAM,
 	UNPATCHED_ARP_GATE = UNPATCHED_FIRST_ARP_PARAM,
@@ -325,6 +326,9 @@ constexpr ZoneParamInfo getZoneParamInfo(ParamType param) {
 	case LOCAL_SINE_SHAPER_TWIST:
 	case GLOBAL_DISPERSER_TOPO:
 	case GLOBAL_DISPERSER_TWIST:
+	case GLOBAL_SCATTER_ZONE_A:
+	case GLOBAL_SCATTER_ZONE_B:
+	case GLOBAL_SCATTER_DEPTH:
 		return kZoneParamDefault;
 	default:
 		return kStandardParamDefault;
@@ -340,6 +344,9 @@ constexpr ZoneParamInfo getZoneParamInfo(UnpatchedShared param) {
 	case UNPATCHED_DISPERSER_TWIST:
 	case UNPATCHED_MB_COMPRESSOR_CHARACTER:
 	case UNPATCHED_MB_COMPRESSOR_VIBE:
+	case UNPATCHED_SCATTER_ZONE_A:
+	case UNPATCHED_SCATTER_ZONE_B:
+	case UNPATCHED_SCATTER_DEPTH:
 		return kZoneParamDefault;
 	default:
 		return kStandardParamDefault;
@@ -375,6 +382,14 @@ constexpr int32_t getUnpatchedFallback(int32_t patchedParam) {
 		return UNPATCHED_DISPERSER_TOPO;
 	case GLOBAL_DISPERSER_TWIST:
 		return UNPATCHED_DISPERSER_TWIST;
+	case GLOBAL_SCATTER_ZONE_A:
+		return UNPATCHED_SCATTER_ZONE_A;
+	case GLOBAL_SCATTER_ZONE_B:
+		return UNPATCHED_SCATTER_ZONE_B;
+	case GLOBAL_SCATTER_DEPTH:
+		return UNPATCHED_SCATTER_DEPTH;
+	case GLOBAL_SCATTER_MACRO:
+		return UNPATCHED_SCATTER_MACRO;
 	default:
 		return -1;
 	}

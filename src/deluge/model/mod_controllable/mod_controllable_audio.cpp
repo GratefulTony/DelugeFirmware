@@ -1632,8 +1632,7 @@ void ModControllableAudio::processStutter(deluge::dsp::StereoBuffer<q31_t> buffe
 	}
 
 	if (stutterer.isStuttering(this)) {
-		FX_BENCH_DECLARE(bench, "stutter");
-		FX_BENCH_SCOPE(bench);
+		// Note: benchmarking is done inside processStutter() to separate classic vs scatter modes
 		stutterer.processStutter(buffer, paramManager, magnitude, timePerTickInverse);
 	}
 	else {

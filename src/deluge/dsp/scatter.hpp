@@ -28,22 +28,39 @@
 namespace deluge::dsp::scatter {
 
 /**
- * Pre-configured phi triangle bank for scatter effects
+ * Phi triangle bank for structural scatter params (Zone A meta)
  *
  * Bank indices:
- *   [0] sliceSelect  - Which slice to play (for shuffle/rearrange)
- *   [1] gateModulate - Gate duty cycle modulation
- *   [2] reverseProb  - Probability of reversing a slice
- *   [3] pitchVar     - Pitch/speed variance
+ *   [0] sliceOffset - Offset added to slice selection
+ *   [1] lengthMult  - Slice length multiplier
+ *   [2] skipProb    - Probability of skipping to non-adjacent slice
  *
- * Phase offsets spread by 0.25 for decorrelation.
- * Uses φ^n frequencies for quasi-periodic evolution.
+ * Slower φ^n frequencies for gradual structural evolution.
+ * Phase offsets spread for decorrelation.
  */
-constexpr std::array<phi::PhiTriConfig, 4> kScatterBank = {{
-    {phi::kPhi100, 1.00f, 0.00f, false}, // [0] slice selection
-    {phi::kPhi150, 1.00f, 0.25f, false}, // [1] gate modulation
-    {phi::kPhi175, 0.80f, 0.50f, false}, // [2] reverse probability
-    {phi::kPhi200, 1.00f, 0.75f, false}, // [3] pitch/speed variance
+constexpr std::array<phi::PhiTriConfig, 3> kStructuralBank = {{
+    {phi::kPhi100, 0.80f, 0.00f, false}, // [0] sliceOffset
+    {phi::kPhi150, 0.60f, 0.33f, false}, // [1] lengthMult
+    {phi::kPhi175, 0.70f, 0.67f, false}, // [2] skipProb
+}};
+
+/**
+ * Phi triangle bank for timbral scatter params (Zone B meta)
+ *
+ * Bank indices:
+ *   [0] reverseProb - Probability of reversing slice
+ *   [1] filterFreq  - Bandpass center frequency
+ *   [2] delayFeed   - Per-grain delay send amount
+ *   [3] envShape    - Envelope shape (percussive to reversed)
+ *
+ * Mix of slower and faster φ^n for varied timbral movement.
+ * Phase offsets spread by 0.25 for decorrelation.
+ */
+constexpr std::array<phi::PhiTriConfig, 4> kTimbraBank = {{
+    {phi::kPhiN050, 0.50f, 0.00f, false}, // [0] reverseProb (slow)
+    {phi::kPhi067, 0.70f, 0.25f, false},  // [1] filterFreq
+    {phi::kPhi125, 0.60f, 0.50f, false},  // [2] delayFeed
+    {phi::kPhi200, 0.80f, 0.75f, false},  // [3] envShape (faster)
 }};
 
 /**
@@ -283,5 +300,139 @@ struct ScatterState {
 	/// Advance phi phase for quasi-periodic evolution
 	void advancePhase(float rate = 0.001f) { phiPhase += rate; }
 };
+
+/**
+ * Computed grain parameters from zone knobs
+ * All values normalized [0,1] unless noted
+ */
+struct GrainParams {
+	// Structural (from Zone A)
+	float sliceOffset{0};   ///< Offset to add to slice selection [0,1] maps to [0,numSlices)
+	float lengthMult{1.0f}; ///< Slice length multiplier [0.25, 2.0]
+	float skipProb{0};      ///< Probability of skipping to non-adjacent slice
+
+	// Timbral (from Zone B)
+	float reverseProb{0};   ///< Probability of reversing slice
+	float filterFreq{0.5f}; ///< Bandpass center [0,1] maps to freq range
+	float delayFeed{0};     ///< Per-grain delay send amount
+	float envShape{0.5f};   ///< Envelope shape (0=percussive, 0.5=hanning, 1=reverse)
+
+	// Combined
+	float gateRatio{1.0f}; ///< Gate duty cycle [0.125, 1.0]
+};
+
+/**
+ * Compute grain parameters from zone knobs via phi triangles
+ *
+ * Zone A (Structural): Controls grain selection, length, skip patterns
+ *   Zones 0-3: Individual behaviors with position controlling intensity
+ *   Zones 4-7: Meta - all structural params via phi evolution (uses kStructuralBank)
+ *
+ * Zone B (Timbral): Controls per-grain effects
+ *   Zones 0-3: Individual effects (reverse, filter, delay, envelope)
+ *   Zones 4-7: Meta - all timbral params via phi evolution (uses kTimbraBank)
+ *
+ * @param zoneA Zone A normalized [0,1]
+ * @param zoneB Zone B normalized [0,1]
+ * @param depth Depth/intensity [0,1] - scales phi evolution rate
+ * @param sliceIndex Current slice index (converted to phi-based phase internally)
+ */
+inline GrainParams computeGrainParams(float zoneA, float zoneB, float depth, int32_t sliceIndex) {
+	GrainParams p;
+
+	// Phi triangle deadzone: when triangle output is low, sliceIndex contribution is zeroed
+	// This creates sparse activation - many consecutive slices get identical params → cache hits
+	// Uses slow φ^-0.5 frequency so deadzone spans multiple slices
+	float sliceWeight = triangleSimpleUnipolar(phi::wrapPhase(static_cast<float>(sliceIndex) * phi::kPhiN050), 0.5f);
+
+	// Quantize: only use sliceIndex when outside deadzone (weight > threshold)
+	int32_t effectiveSlice = (sliceWeight > 0.1f) ? sliceIndex : 0;
+
+	// Convert effective slice to phi-based phase for quasi-random distribution
+	float slicePhase = phi::wrapPhase(static_cast<float>(effectiveSlice) * phi::kPhi);
+
+	// Phase evolution scaled by depth (depth=0: static, depth=1: full evolution)
+	float gammaPhase = slicePhase * depth;
+
+	// PhiTriContext: yNorm from slice phase, freqMult=1, periodScale=1, gammaPhase
+	phi::PhiTriContext ctx{slicePhase, 1.0f, 1.0f, gammaPhase};
+
+	// === Zone A: Structural ===
+	constexpr float kZoneBoundary = 0.5f; // Zones 0-3 vs 4-7
+
+	if (zoneA < kZoneBoundary) {
+		// Zones 0-3: Discrete behaviors
+		float pos = zoneA * 2.0f; // Remap to [0,1] within lower half
+		int32_t zone = static_cast<int32_t>(pos * 4.0f);
+		float inZone = (pos * 4.0f) - static_cast<float>(zone);
+
+		switch (zone) {
+		case 0: // Sequential with drift
+			p.sliceOffset = inZone * 0.25f;
+			break;
+		case 1: // Swap adjacent pairs
+			p.sliceOffset = (inZone > 0.5f) ? 0.5f : 0.0f;
+			p.skipProb = inZone * 0.5f;
+			break;
+		case 2: // Reverse order tendency
+			p.sliceOffset = inZone * 0.5f;
+			p.lengthMult = 1.0f - inZone * 0.5f;
+			break;
+		case 3: // Interleave
+		default:
+			p.sliceOffset = inZone * 0.5f;
+			p.skipProb = inZone;
+			break;
+		}
+	}
+	else {
+		// Zones 4-7: Meta - phi triangle evolution via bank
+		float pos = (zoneA - kZoneBoundary) * 2.0f; // Intensity within meta zone
+
+		auto structural = ctx.evalBank(kStructuralBank, pos);
+		p.sliceOffset = structural[0];
+		p.lengthMult = 0.5f + structural[1] * 0.5f; // Map [0,1] to [0.5, 1.0]
+		p.skipProb = structural[2] * 0.8f;          // Cap at 80%
+	}
+
+	// === Zone B: Timbral ===
+	if (zoneB < kZoneBoundary) {
+		// Zones 0-3: Individual effects
+		float pos = zoneB * 2.0f;
+		int32_t zone = static_cast<int32_t>(pos * 4.0f);
+		float inZone = (pos * 4.0f) - static_cast<float>(zone);
+
+		switch (zone) {
+		case 0: // Reverse probability
+			p.reverseProb = inZone;
+			break;
+		case 1: // Bandpass sweep
+			p.filterFreq = inZone;
+			break;
+		case 2: // Delay feed
+			p.delayFeed = inZone * 0.8f;
+			break;
+		case 3: // Envelope shape
+		default:
+			p.envShape = inZone;
+			break;
+		}
+	}
+	else {
+		// Zones 4-7: Meta - phi triangle evolution via bank
+		float pos = (zoneB - kZoneBoundary) * 2.0f; // Intensity within meta zone
+
+		auto timbral = ctx.evalBank(kTimbraBank, pos);
+		p.reverseProb = timbral[0];
+		p.filterFreq = timbral[1];
+		p.delayFeed = timbral[2] * 0.8f; // Cap at 80%
+		p.envShape = timbral[3];
+	}
+
+	// Gate from depth (lower depth = more gating for rhythmic effect)
+	p.gateRatio = 0.25f + (1.0f - depth * 0.5f) * 0.75f;
+
+	return p;
+}
 
 } // namespace deluge::dsp::scatter

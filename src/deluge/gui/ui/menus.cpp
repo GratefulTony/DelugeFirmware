@@ -207,8 +207,7 @@
 #include "gui/menu_item/stutter/mode.h"
 #include "gui/menu_item/stutter/quantized.h"
 #include "gui/menu_item/stutter/rate.h"
-#include "gui/menu_item/stutter/scatter_depth.h"
-#include "gui/menu_item/stutter/scatter_gate.h"
+#include "gui/menu_item/stutter/scatter_macro.h"
 #include "gui/menu_item/stutter/scatter_zone.h"
 #include "gui/menu_item/submenu.h"
 #include "gui/menu_item/submenu/MPE.h"
@@ -524,7 +523,8 @@ stutter::ScatterModeMenu stutterModeMenu{STRING_FOR_SCATTER_MODE, STRING_FOR_SCA
 stutter::ScatterZoneA stutterZoneAMenu{STRING_FOR_SCATTER_ZONE_A, STRING_FOR_SCATTER_ZONE_A};
 stutter::ScatterZoneB stutterZoneBMenu{STRING_FOR_SCATTER_ZONE_B, STRING_FOR_SCATTER_ZONE_B};
 stutter::ScatterDepth stutterDepthMenu{STRING_FOR_SCATTER_DEPTH, STRING_FOR_SCATTER_DEPTH};
-stutter::ScatterGate stutterGateMenu{STRING_FOR_SCATTER_GATE, STRING_FOR_SCATTER_GATE};
+stutter::ScatterMacro stutterMacroMenu{STRING_FOR_SCATTER_MACRO, STRING_FOR_SCATTER_MACRO,
+                                       params::GLOBAL_SCATTER_MACRO};
 
 HorizontalMenu stutterMenu{STRING_FOR_STUTTER,
                            {
@@ -537,7 +537,7 @@ HorizontalMenu stutterMenu{STRING_FOR_STUTTER,
                                &stutterZoneAMenu,
                                &stutterZoneBMenu,
                                &stutterDepthMenu,
-                               &stutterGateMenu,
+                               &stutterMacroMenu,
                            },
                            HorizontalMenu::Layout::FIXED};
 

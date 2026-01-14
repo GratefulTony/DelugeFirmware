@@ -264,7 +264,12 @@ bool GlobalEffectable::modEncoderButtonAction(uint8_t whichModEncoder, bool on,
 			beginStutter((ParamManagerForTimeline*)modelStack->paramManager);
 		}
 		else {
-			endStutter((ParamManagerForTimeline*)modelStack->paramManager);
+			// On release: don't end if latched in scatter mode
+			bool isScatter = (stutterConfig.scatterMode != ScatterMode::Classic);
+			bool isLatched = isScatter && stutterConfig.latch;
+			if (!isLatched) {
+				endStutter((ParamManagerForTimeline*)modelStack->paramManager);
+			}
 		}
 		return false;
 	}

@@ -42,6 +42,7 @@ struct StutterConfig {
 	bool quantized = true;
 	bool reversed = false;
 	bool pingPong = false;
+	bool latch = false; ///< Scatter mode: latch (stays on after release) vs normal (release to stop)
 	ScatterMode scatterMode = ScatterMode::Classic;
 };
 
@@ -178,6 +179,11 @@ private:
 
 	/// Half-bar mode: when bar is too long for buffer, we capture 2 beats and virtually double them
 	bool halfBarMode = false;
+
+	/// Scatter/Shuffle state
+	int32_t scatterSliceIndex{0}; ///< Current sequential slice (0 to numSlices-1)
+	int32_t scatterNumSlices{8};  ///< Number of slices to divide bar into
+	bool scatterReversed{false};  ///< Whether current slice is playing reversed
 
 	/// Armed trigger state - stored for when beat trigger fires
 	int64_t armedTargetTick{0};
