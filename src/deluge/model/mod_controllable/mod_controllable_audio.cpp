@@ -1553,14 +1553,68 @@ const uint32_t stutterUIModes[] = {UI_MODE_CLIP_PRESSED_IN_SONG_VIEW, UI_MODE_HO
                                    UI_MODE_HOLDING_ARRANGEMENT_ROW_AUDITION, UI_MODE_AUDITIONING, 0};
 
 void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
-	if (!isUIModeWithinRange(stutterUIModes)) {
+	// TODO: Re-enable UI mode check after testing looper
+	// Original check only allowed stutter when auditioning/holding clips
+	// if (!isUIModeWithinRange(stutterUIModes)) {
+	// 	return;
+	// }
+	// Get base config from song or local depending on useSongStutter
+	StutterConfig config = stutterConfig.useSongStutter ? currentSong->globalEffectable.stutterConfig : stutterConfig;
+	// Scatter mode is always per-sound (independent of useSongStutter)
+	config.scatterMode = stutterConfig.scatterMode;
+	// For scatter modes, also use local quantize setting (scatter is per-sound feature)
+	if (config.scatterMode != ScatterMode::Classic) {
+		config.quantized = stutterConfig.quantized;
+	}
+
+	int32_t magnitude = currentSong->getInputTickMagnitude();
+	uint32_t timePerTickInverse = playbackHandler.getTimePerInternalTickInverse();
+
+	// Calculate loop length in samples for scatter modes (one bar, max 4 seconds)
+	// Rate knob controls slice size within this buffer, not buffer length
+	size_t loopLengthSamples = 0;
+	bool halfBarMode = false;
+	if (config.scatterMode != ScatterMode::Classic && playbackHandler.isEitherClockActive()) {
+		uint64_t timePerTickBig = playbackHandler.getTimePerInternalTickBig();
+		uint32_t barLengthInTicks = currentSong->getBarLength();
+		loopLengthSamples = ((uint64_t)barLengthInTicks * timePerTickBig) >> 32;
+
+		// If bar exceeds buffer (4 seconds), use 2 beats instead
+		// Scatter processing will virtually double these 2 beats to make a full bar
+		if (loopLengthSamples > Stutterer::kLooperBufferSize) {
+			uint32_t halfBarInTicks = barLengthInTicks / 2; // 2 beats
+			loopLengthSamples = ((uint64_t)halfBarInTicks * timePerTickBig) >> 32;
+			halfBarMode = true;
+		}
+	}
+
+	// For scatter modes with quantize, arm trigger to start on next beat
+	if (config.scatterMode != ScatterMode::Classic && config.quantized && playbackHandler.isEitherClockActive()) {
+		// Calculate next beat boundary (16th note = bar / 16)
+		int64_t currentTick = playbackHandler.getCurrentInternalTickCount();
+		uint32_t barLength = currentSong->getBarLength();
+		uint32_t beatLength = barLength / 16; // 16th note resolution
+		if (beatLength == 0) {
+			beatLength = 1;
+		}
+
+		// Round up to next beat boundary
+		int64_t nextBeat = ((currentTick / beatLength) + 1) * beatLength;
+
+		if (Error::NONE
+		    == stutterer.armStutter(this, paramManager, config, magnitude, timePerTickInverse, nextBeat,
+		                            loopLengthSamples, halfBarMode)) {
+			// Armed successfully - UI mode entered, will start on beat
+			view.notifyParamAutomationOccurred(paramManager);
+			enterUIMode(UI_MODE_STUTTERING);
+		}
 		return;
 	}
+
+	// Immediate trigger for Classic mode or when quantize is off
 	if (Error::NONE
-	    == stutterer.beginStutter(
-	        this, paramManager,
-	        stutterConfig.useSongStutter ? currentSong->globalEffectable.stutterConfig : stutterConfig,
-	        currentSong->getInputTickMagnitude(), playbackHandler.getTimePerInternalTickInverse())) {
+	    == stutterer.beginStutter(this, paramManager, config, magnitude, timePerTickInverse, loopLengthSamples,
+	                              halfBarMode)) {
 		// Redraw the LEDs. Really only for quantized stutter, but doing it for unquantized won't hurt.
 		view.notifyParamAutomationOccurred(paramManager);
 		enterUIMode(UI_MODE_STUTTERING);
@@ -1568,17 +1622,36 @@ void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
 }
 
 void ModControllableAudio::processStutter(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager) {
+	int32_t magnitude = currentSong->getInputTickMagnitude();
+	uint32_t timePerTickInverse = playbackHandler.getTimePerInternalTickInverse();
+
+	// Check if armed trigger should fire
+	if (stutterer.isArmed()) {
+		int64_t currentTick = playbackHandler.getCurrentInternalTickCount();
+		stutterer.checkArmedTrigger(currentTick, paramManager, magnitude, timePerTickInverse);
+	}
+
 	if (stutterer.isStuttering(this)) {
 		FX_BENCH_DECLARE(bench, "stutter");
 		FX_BENCH_SCOPE(bench);
-		stutterer.processStutter(buffer, paramManager, currentSong->getInputTickMagnitude(),
-		                         playbackHandler.getTimePerInternalTickInverse());
+		stutterer.processStutter(buffer, paramManager, magnitude, timePerTickInverse);
+	}
+	else {
+		// Feed audio to standby buffer (handles STANDBY and ARMED+startedFromStandby states)
+		// Pass 'this' so only the correct source records to the shared buffer
+		stutterer.recordStandby(this, buffer);
 	}
 }
 
 // paramManager is optional - if you don't send it, it won't restore the stutter rate and we won't redraw the LEDs
 void ModControllableAudio::endStutter(ParamManagerForTimeline* paramManager) {
-	stutterer.endStutter(paramManager);
+	// Cancel armed trigger if waiting for beat
+	if (stutterer.isArmed()) {
+		stutterer.cancelArmed();
+	}
+	else {
+		stutterer.endStutter(paramManager);
+	}
 	if (paramManager) {
 		// Redraw the LEDs.
 		view.notifyParamAutomationOccurred(paramManager);

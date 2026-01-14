@@ -204,8 +204,12 @@
 #include "gui/menu_item/source/patched_param/modulator_level.h"
 #include "gui/menu_item/stem_export/start.h"
 #include "gui/menu_item/stutter/direction.h"
+#include "gui/menu_item/stutter/mode.h"
 #include "gui/menu_item/stutter/quantized.h"
 #include "gui/menu_item/stutter/rate.h"
+#include "gui/menu_item/stutter/scatter_depth.h"
+#include "gui/menu_item/stutter/scatter_gate.h"
+#include "gui/menu_item/stutter/scatter_zone.h"
 #include "gui/menu_item/submenu.h"
 #include "gui/menu_item/submenu/MPE.h"
 #include "gui/menu_item/submenu/actual_source.h"
@@ -515,9 +519,26 @@ HorizontalMenu delayMenu{
 stutter::StutterDirection stutterDirectionMenu{STRING_FOR_DIRECTION, STRING_FOR_DIRECTION};
 stutter::QuantizedStutter stutterQuantizedMenu{STRING_FOR_QUANTIZE, STRING_FOR_QUANTIZE};
 stutter::Rate stutterRateMenu{STRING_FOR_RATE, STRING_FOR_STUTTER_RATE};
+stutter::ScatterModeMenu stutterModeMenu{STRING_FOR_SCATTER_MODE, STRING_FOR_SCATTER_MODE};
+// Scatter page 2
+stutter::ScatterZoneA stutterZoneAMenu{STRING_FOR_SCATTER_ZONE_A, STRING_FOR_SCATTER_ZONE_A};
+stutter::ScatterZoneB stutterZoneBMenu{STRING_FOR_SCATTER_ZONE_B, STRING_FOR_SCATTER_ZONE_B};
+stutter::ScatterDepth stutterDepthMenu{STRING_FOR_SCATTER_DEPTH, STRING_FOR_SCATTER_DEPTH};
+stutter::ScatterGate stutterGateMenu{STRING_FOR_SCATTER_GATE, STRING_FOR_SCATTER_GATE};
 
 HorizontalMenu stutterMenu{STRING_FOR_STUTTER,
-                           {&stutterRateMenu, &stutterDirectionMenu, &stutterQuantizedMenu},
+                           {
+                               // Page 1: Core stutter controls
+                               &stutterRateMenu,
+                               &stutterDirectionMenu,
+                               &stutterQuantizedMenu,
+                               &stutterModeMenu,
+                               // Page 2: Scatter zone controls
+                               &stutterZoneAMenu,
+                               &stutterZoneBMenu,
+                               &stutterDepthMenu,
+                               &stutterGateMenu,
+                           },
                            HorizontalMenu::Layout::FIXED};
 
 // Bend Ranges -------------------------------------------------------------------------------

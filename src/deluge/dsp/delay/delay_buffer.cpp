@@ -61,15 +61,31 @@ void DelayBuffer::clear() {
 	memset(start_, 0, sizeof(StereoSample<q31_t>) * (delaySpaceBetweenReadAndWrite + 2));
 	current_ = start_ + delaySpaceBetweenReadAndWrite;
 	resample_config_ = std::nullopt;
+	longPos = 0;
+	lastShortPos = 0;
+}
+
+void DelayBuffer::clearFull() {
+	if (start_ != nullptr) {
+		memset(start_, 0, sizeof(StereoSample<q31_t>) * sizeIncludingExtra);
+	}
+	current_ = start_ + delaySpaceBetweenReadAndWrite;
+	resample_config_ = std::nullopt;
+	longPos = 0;
+	lastShortPos = 0;
 }
 
 std::pair<int32_t, bool> DelayBuffer::getIdealBufferSizeFromRate(uint32_t newRate) {
+	return getIdealBufferSizeFromRate(newRate, kMaxSize);
+}
+
+std::pair<int32_t, bool> DelayBuffer::getIdealBufferSizeFromRate(uint32_t newRate, size_t maxSize) {
 	int32_t buffer_size = (uint64_t)kNeutralSize * kMaxSampleValue / newRate;
 
 	bool clamped = false;
 
-	if (buffer_size > kMaxSize) {
-		buffer_size = kMaxSize;
+	if (buffer_size > static_cast<int32_t>(maxSize)) {
+		buffer_size = static_cast<int32_t>(maxSize);
 		clamped = true;
 	}
 
@@ -79,6 +95,62 @@ std::pair<int32_t, bool> DelayBuffer::getIdealBufferSizeFromRate(uint32_t newRat
 	}
 
 	return std::make_pair(buffer_size, clamped);
+}
+
+Error DelayBuffer::initForStutter(uint32_t rate, uint32_t failIfThisSize, bool includeExtraSpace) {
+	// Use larger max size for stutter to allow 1 bar at slow tempos
+	auto [size, make_precise] = getIdealBufferSizeFromRate(rate, kStutterMaxSize);
+
+	native_rate_ = rate;
+	size_ = size;
+
+	if (size_ == failIfThisSize) {
+		return Error::UNSPECIFIED;
+	}
+
+	if (make_precise) {
+		makeNativeRatePrecise();
+	}
+
+	sizeIncludingExtra = size_ + (includeExtraSpace ? delaySpaceBetweenReadAndWrite : 0);
+
+	start_ = (StereoSample<q31_t>*)allocLowSpeed(sizeIncludingExtra * sizeof(StereoSample<q31_t>));
+
+	if (start_ == nullptr) {
+		return Error::INSUFFICIENT_RAM;
+	}
+
+	end_ = start_ + sizeIncludingExtra;
+	clear();
+	return Error::NONE;
+}
+
+Error DelayBuffer::initWithSize(size_t sampleCount, bool includeExtraSpace) {
+	// Clamp to valid range
+	if (sampleCount > kStutterMaxSize) {
+		sampleCount = kStutterMaxSize;
+	}
+	if (sampleCount < kMinSize) {
+		sampleCount = kMinSize;
+	}
+
+	size_ = sampleCount;
+	// Calculate native rate from size (inverse of size calculation)
+	// buffer_size = kNeutralSize * kMaxSampleValue / rate
+	// rate = kNeutralSize * kMaxSampleValue / buffer_size
+	native_rate_ = static_cast<uint32_t>((uint64_t)kNeutralSize * kMaxSampleValue / size_);
+
+	sizeIncludingExtra = size_ + (includeExtraSpace ? delaySpaceBetweenReadAndWrite : 0);
+
+	start_ = (StereoSample<q31_t>*)allocLowSpeed(sizeIncludingExtra * sizeof(StereoSample<q31_t>));
+
+	if (start_ == nullptr) {
+		return Error::INSUFFICIENT_RAM;
+	}
+
+	end_ = start_ + sizeIncludingExtra;
+	clear();
+	return Error::NONE;
 }
 
 void DelayBuffer::makeNativeRatePrecise() {

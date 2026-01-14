@@ -17,9 +17,12 @@
 
 #include "model/fx/stutterer.h"
 #include "dsp_ng/core/types.hpp"
+#include "memory/memory_allocator_interface.h"
 #include "modulation/params/param_manager.h"
 #include "modulation/params/param_set.h"
 #include "util/functions.h"
+#include <algorithm>
+#include <cstring>
 
 namespace params = deluge::modulation::params;
 
@@ -34,19 +37,14 @@ int32_t Stutterer::getStutterRate(ParamManager* paramManager, int32_t magnitude,
 	int32_t paramValue = unpatchedParams->getValue(params::UNPATCHED_STUTTER_RATE);
 
 	// Quantized Stutter diff
-	// Convert to knobPos (range -64 to 64) for easy operation
 	int32_t knobPos = unpatchedParams->paramValueToKnobPos(paramValue, nullptr);
-	// Add diff "lastQuantizedKnobDiff" (this value will be set if Quantized Stutter is On, zero if not so this will be
-	// a no-op)
 	knobPos = knobPos + lastQuantizedKnobDiff;
-	// Avoid the param to go beyond limits
 	if (knobPos < -64) {
 		knobPos = -64;
 	}
 	else if (knobPos > 64) {
 		knobPos = 64;
 	}
-	// Convert back to value range
 	paramValue = unpatchedParams->knobPosToParamValue(knobPos, nullptr);
 
 	int32_t rate =
@@ -54,8 +52,6 @@ int32_t Stutterer::getStutterRate(ParamManager* paramManager, int32_t magnitude,
 
 	if (sync != 0) {
 		rate = multiply_32x32_rshift32(rate, timePerTickInverse);
-
-		// Limit to the biggest number we can store...
 		int32_t lShiftAmount = sync + 6 - magnitude;
 		int32_t limit = 2147483647 >> lShiftAmount;
 		rate = std::min(rate, limit);
@@ -64,10 +60,110 @@ int32_t Stutterer::getStutterRate(ParamManager* paramManager, int32_t magnitude,
 	return rate;
 }
 
+/// Calculate slice length for Repeat mode based on rate knob
+/// Higher rate = smaller slice = faster repeats (from end of buffer)
+size_t Stutterer::getRepeatSliceLength(ParamManager* paramManager, size_t maxLength) {
+	UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
+	int32_t paramValue = unpatchedParams->getValue(params::UNPATCHED_STUTTER_RATE);
+	int32_t knobPos = unpatchedParams->paramValueToKnobPos(paramValue, nullptr);
+	// knobPos ranges from -64 to +64
+	// Map to slice length: -64 = full bar, +64 = minimum slice
+	// Use exponential curve for musical divisions
+
+	// Normalize knobPos to 0-128 range, then to 0.0-1.0
+	// Higher knobPos = smaller slice
+	int32_t normalized = 64 - knobPos; // 0 at +64, 128 at -64
+	if (normalized < 0) {
+		normalized = 0;
+	}
+	if (normalized > 128) {
+		normalized = 128;
+	}
+
+	// Exponential mapping: slice = maxLength * (normalized/128)^2
+	// This gives finer control over small slices
+	// At normalized=128 (knob=-64): full length
+	// At normalized=64 (knob=0): 1/4 length
+	// At normalized=0 (knob=+64): minimum
+	constexpr size_t kMinSlice = 256; // ~6ms minimum to avoid clicks
+
+	size_t sliceLength = (maxLength * normalized * normalized) / (128 * 128);
+	if (sliceLength < kMinSlice) {
+		sliceLength = kMinSlice;
+	}
+	if (sliceLength > maxLength) {
+		sliceLength = maxLength;
+	}
+	return sliceLength;
+}
+
 Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManager, StutterConfig sc, int32_t magnitude,
-                              uint32_t timePerTickInverse) {
+                              uint32_t timePerTickInverse, size_t loopLengthSamples, bool halfBar) {
 	stutterConfig = sc;
 	currentReverse = stutterConfig.reversed;
+	halfBarMode = halfBar;
+
+	// Non-Classic modes: double buffer system (swap instead of copy)
+	bool useLooper = (stutterConfig.scatterMode != ScatterMode::Classic);
+	if (useLooper) {
+		// If we have buffers from standby recording, swap and start playback
+		if (recordBuffer != nullptr && loopLengthSamples > 0) {
+			// Clamp loop length to buffer size
+			// KNOWN ISSUE: If user releases and re-triggers before a full bar has been recorded,
+			// playback may include stale audio from before the previous trigger.
+			// Fix if needed: clamp to recordWritePos: std::min({loopLengthSamples, kLooperBufferSize, recordWritePos})
+			playbackLength = std::min(loopLengthSamples, kLooperBufferSize);
+
+			// Calculate where loop starts in the record buffer (which becomes play buffer)
+			// recordWritePos is where we WOULD write next, so loop ends there
+			if (recordWritePos >= playbackLength) {
+				playbackStartPos = recordWritePos - playbackLength;
+			}
+			else {
+				playbackStartPos = kLooperBufferSize - (playbackLength - recordWritePos);
+			}
+
+			// Swap buffers - no copy needed!
+			std::swap(recordBuffer, playBuffer);
+
+			// Reset for playback and new recording
+			playbackPos = 0;
+			recordWritePos = 0;
+			// Initialize slice to full length; will be updated at first sample for Repeat mode
+			currentSliceLength = playbackLength;
+			sliceStartOffset = 0;
+			status = Status::PLAYING;
+			stutterSource = source;
+			return Error::NONE;
+		}
+
+		// No buffers - allocate both and start standby recording
+		if (bufferA == nullptr) {
+			bufferA = static_cast<deluge::dsp::StereoSample<q31_t>*>(
+			    allocLowSpeed(kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
+			if (bufferA == nullptr) {
+				status = Status::OFF;
+				return Error::INSUFFICIENT_RAM;
+			}
+		}
+		if (bufferB == nullptr) {
+			bufferB = static_cast<deluge::dsp::StereoSample<q31_t>*>(
+			    allocLowSpeed(kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
+			if (bufferB == nullptr) {
+				status = Status::OFF;
+				return Error::INSUFFICIENT_RAM;
+			}
+		}
+		recordBuffer = bufferA;
+		playBuffer = bufferB;
+		recordWritePos = 0;
+		status = Status::STANDBY;
+		stutterSource = source;
+		return Error::NONE;
+	}
+
+	// Classic mode: original community behavior
+	// Quantized snapping
 	if (stutterConfig.quantized) {
 		UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
 		int32_t paramValue = unpatchedParams->getValue(params::UNPATCHED_STUTTER_RATE);
@@ -87,18 +183,12 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 		else {
 			knobPos = 16; // 64ths
 		}
-		// Save current values for later recovering them
 		valueBeforeStuttering = paramValue;
 		lastQuantizedKnobDiff = knobPos;
-
-		// When stuttering, we center the value at 0, so the center is the reference for the stutter rate that we
-		// selected just before pressing the knob and we use the lastQuantizedKnobDiff value to calculate the relative
-		// (real) value
 		unpatchedParams->params[params::UNPATCHED_STUTTER_RATE].setCurrentValueBasicForSetup(0);
 	}
 
-	// You'd think I should apply "false" here, to make it not add extra space to the buffer, but somehow this seems to
-	// sound as good if not better (in terms of ticking / crackling)...
+	startedFromStandby = false;
 	Error error = buffer.init(getStutterRate(paramManager, magnitude, timePerTickInverse), 0, true);
 	if (error == Error::NONE) {
 		status = Status::RECORDING;
@@ -107,10 +197,67 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 	}
 	return error;
 }
+
 void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamManager* paramManager, int32_t magnitude,
                                uint32_t timePerTickInverse) {
-	int32_t rate = getStutterRate(paramManager, magnitude, timePerTickInverse);
 
+	// Non-Classic modes: double buffer - play from playBuffer, record to recordBuffer
+	// Core loop: play current slice fully, then get next slice at boundary
+	bool useLooper = (stutterConfig.scatterMode != ScatterMode::Classic);
+	if (useLooper) {
+		if (status == Status::PLAYING && playBuffer != nullptr && playbackLength > 0) {
+			for (deluge::dsp::StereoSample<q31_t>& sample : audio) {
+				// Record incoming audio to recordBuffer (continuous recording)
+				if (recordBuffer != nullptr) {
+					recordBuffer[recordWritePos] = sample;
+					recordWritePos++;
+					if (recordWritePos >= kLooperBufferSize) {
+						recordWritePos = 0;
+					}
+				}
+
+				// === SLICE BOUNDARY: get next slice parameters ===
+				// This is where each mode determines what to play next.
+				// Slice changes ONLY happen here, ensuring complete playback.
+				// Future modes: advance pattern index, call setSliceByBeat(), etc.
+				if (playbackPos == 0) {
+					switch (stutterConfig.scatterMode) {
+					case ScatterMode::Repeat:
+						// Rate knob controls slice length from END of captured bar
+						currentSliceLength = getRepeatSliceLength(paramManager, playbackLength);
+						sliceStartOffset = playbackLength - currentSliceLength;
+						break;
+					// Future modes would go here:
+					// case ScatterMode::Scatter: advancePatternIndex(); break;
+					// case ScatterMode::Random: pickRandomSlice(); break;
+					default:
+						// Default: play full bar
+						currentSliceLength = playbackLength;
+						sliceStartOffset = 0;
+						break;
+					}
+				}
+
+				// === PLAYBACK: read from current slice ===
+				size_t readPos = playbackStartPos + sliceStartOffset + playbackPos;
+				if (readPos >= kLooperBufferSize) {
+					readPos -= kLooperBufferSize;
+				}
+				sample.l = playBuffer[readPos].l;
+				sample.r = playBuffer[readPos].r;
+
+				// === ADVANCE: move through slice, wrap at boundary ===
+				playbackPos++;
+				if (playbackPos >= currentSliceLength) {
+					playbackPos = 0; // Triggers next slice selection on next sample
+				}
+			}
+		}
+		return;
+	}
+
+	// Classic mode: original community behavior with resampling
+	int32_t rate = getStutterRate(paramManager, magnitude, timePerTickInverse);
 	buffer.setupForRender(rate);
 
 	if (status == Status::RECORDING) {
@@ -150,10 +297,10 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 
 			if (buffer.isNative()) {
 				if (currentReverse) {
-					buffer.moveBack(); // move backward in the buffer
+					buffer.moveBack();
 				}
 				else {
-					buffer.moveOn(); // move forward in the buffer
+					buffer.moveOn();
 				}
 				sample.l = buffer.current().l;
 				sample.r = buffer.current().r;
@@ -171,7 +318,7 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				if (currentReverse) {
 					deluge::dsp::StereoSample<q31_t>* prevPos = &buffer.current() - 1;
 					if (prevPos < buffer.begin()) {
-						prevPos = buffer.end() - 1; // Wrap around to the end of the buffer
+						prevPos = buffer.end() - 1;
 					}
 					deluge::dsp::StereoSample<q31_t>& fromDelay1 = buffer.current();
 					deluge::dsp::StereoSample<q31_t>& fromDelay2 = *prevPos;
@@ -198,7 +345,7 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				}
 			}
 
-			// If ping-pong is active and we're at the start or end of the buffer, reverse the direction
+			// Ping-pong
 			if (stutterConfig.pingPong
 			    && ((currentReverse && &buffer.current() == buffer.begin())
 			        || (!currentReverse && &buffer.current() == buffer.end() - 1))) {
@@ -208,31 +355,261 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 	}
 }
 
-// paramManager is optional - if you don't send it, it won't change the stutter rate
 void Stutterer::endStutter(ParamManagerForTimeline* paramManager) {
-	buffer.discard();
-	status = Status::OFF;
+	bool isScatterMode = (stutterConfig.scatterMode != ScatterMode::Classic);
 
-	bool automationOccurred = false;
+	if (isScatterMode) {
+		// Non-Classic modes: return to standby for continuous recording
+		// Don't clear buffer - old audio will be overwritten during standby recording
+		// and clearing 1.7MB causes audio glitches
+		// Playback buffer is kept allocated for next trigger
+		playbackPos = 0;
+		status = Status::STANDBY;
+		return;
+	}
+
+	// Classic mode: original community behavior
+	if (startedFromStandby) {
+		status = Status::STANDBY;
+		buffer.setCurrent(buffer.begin() + deluge::dsp::delaySpaceBetweenReadAndWrite);
+		startedFromStandby = false;
+	}
+	else {
+		buffer.discard();
+		status = Status::OFF;
+	}
 
 	if (paramManager) {
-
 		UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
 
 		if (stutterConfig.quantized) {
-			// Sset back the value it had just before stuttering so orange LEDs are redrawn.
 			unpatchedParams->params[params::UNPATCHED_STUTTER_RATE].setCurrentValueBasicForSetup(valueBeforeStuttering);
 		}
 		else {
-			// Regular Stutter FX (if below middle value, reset it back to middle)
-			// Normally we shouldn't call this directly, but it's ok because automation isn't allowed for stutter anyway
 			if (unpatchedParams->getValue(params::UNPATCHED_STUTTER_RATE) < 0) {
 				unpatchedParams->params[params::UNPATCHED_STUTTER_RATE].setCurrentValueBasicForSetup(0);
 			}
 		}
 	}
-	// Reset temporary and diff values for Quantized stutter
 	lastQuantizedKnobDiff = 0;
 	valueBeforeStuttering = 0;
-	stutterSource = nullptr;
+	if (!startedFromStandby && !isScatterMode) {
+		stutterSource = nullptr;
+	}
+}
+
+Error Stutterer::enableStandby(void* source, int32_t magnitude, uint32_t timePerTickInverse) {
+	if (status == Status::STANDBY && stutterSource == source) {
+		return Error::NONE;
+	}
+
+	if (status == Status::RECORDING || status == Status::PLAYING) {
+		return Error::UNSPECIFIED;
+	}
+
+	if (status == Status::STANDBY) {
+		buffer.discard();
+	}
+
+	// Allocate ring buffer for continuous recording
+	Error error = buffer.initWithSize(kLooperBufferSize, false);
+	if (error != Error::NONE) {
+		return error;
+	}
+	buffer.setCurrent(buffer.begin());
+
+	status = Status::STANDBY;
+	stutterSource = source;
+	return Error::NONE;
+}
+
+void Stutterer::disableStandby() {
+	if (status == Status::STANDBY) {
+		// Classic mode: discard delay buffer
+		buffer.discard();
+
+		// Non-Classic modes: deallocate double buffers
+		if (bufferA != nullptr) {
+			delugeDealloc(bufferA);
+			bufferA = nullptr;
+		}
+		if (bufferB != nullptr) {
+			delugeDealloc(bufferB);
+			bufferB = nullptr;
+		}
+		recordBuffer = nullptr;
+		playBuffer = nullptr;
+
+		status = Status::OFF;
+		stutterSource = nullptr;
+	}
+}
+
+void Stutterer::recordStandby(void* source, deluge::dsp::StereoBuffer<q31_t> audio) {
+	// Non-Classic modes: use double buffer system
+	bool useLooper = (stutterConfig.scatterMode != ScatterMode::Classic);
+
+	// For non-Classic modes, record during STANDBY, ARMED, and PLAYING (continuous recording)
+	if (useLooper) {
+		if (status != Status::STANDBY && status != Status::ARMED && status != Status::PLAYING) {
+			return;
+		}
+	}
+	else {
+		// Classic mode: only record during STANDBY
+		if (status != Status::STANDBY) {
+			return;
+		}
+	}
+
+	// Only record from the source that owns this stutter session
+	if (source != stutterSource) {
+		return;
+	}
+
+	if (useLooper && recordBuffer != nullptr) {
+		for (deluge::dsp::StereoSample<q31_t> sample : audio) {
+			recordBuffer[recordWritePos].l = sample.l;
+			recordBuffer[recordWritePos].r = sample.r;
+			recordWritePos++;
+			if (recordWritePos >= kLooperBufferSize) {
+				recordWritePos = 0;
+			}
+		}
+		return;
+	}
+
+	// Classic mode: use delay buffer
+	for (deluge::dsp::StereoSample<q31_t> sample : audio) {
+		buffer.current().l = sample.l;
+		buffer.current().r = sample.r;
+		buffer.moveOn();
+	}
+}
+
+Error Stutterer::armStutter(void* source, ParamManagerForTimeline* paramManager, StutterConfig sc, int32_t magnitude,
+                            uint32_t timePerTickInverse, int64_t targetTick, size_t loopLengthSamples, bool halfBar) {
+	if (status == Status::RECORDING || status == Status::PLAYING) {
+		return Error::UNSPECIFIED;
+	}
+
+	startedFromStandby = (status == Status::STANDBY && stutterSource == source);
+
+	// Store armed state
+	armedTargetTick = targetTick;
+	armedConfig = sc;
+	armedHalfBarMode = halfBar;
+	armedMagnitude = magnitude;
+	armedTimePerTickInverse = timePerTickInverse;
+	armedParamManager = paramManager;
+	armedLoopLengthSamples = loopLengthSamples;
+	stutterSource = source;
+	status = Status::ARMED;
+
+	return Error::NONE;
+}
+
+bool Stutterer::checkArmedTrigger(int64_t currentTick, ParamManager* paramManager, int32_t magnitude,
+                                  uint32_t timePerTickInverse) {
+	if (status != Status::ARMED) {
+		return false;
+	}
+
+	if (currentTick >= armedTargetTick) {
+		stutterConfig = armedConfig;
+		currentReverse = stutterConfig.reversed;
+		halfBarMode = armedHalfBarMode;
+
+		// Non-Classic modes: swap buffers (same logic as beginStutter)
+		bool useLooper = (stutterConfig.scatterMode != ScatterMode::Classic);
+		if (useLooper) {
+			// If we have buffers, swap and start playback
+			// See KNOWN ISSUE comment in beginStutter re: stale audio on rapid re-trigger
+			if (recordBuffer != nullptr && armedLoopLengthSamples > 0) {
+				playbackLength = std::min(armedLoopLengthSamples, kLooperBufferSize);
+
+				// Calculate where loop starts in record buffer (which becomes play buffer)
+				if (recordWritePos >= playbackLength) {
+					playbackStartPos = recordWritePos - playbackLength;
+				}
+				else {
+					playbackStartPos = kLooperBufferSize - (playbackLength - recordWritePos);
+				}
+
+				// Swap buffers - no copy needed!
+				std::swap(recordBuffer, playBuffer);
+
+				playbackPos = 0;
+				recordWritePos = 0;
+				// Initialize slice to full length; will be updated at first sample for Repeat mode
+				currentSliceLength = playbackLength;
+				sliceStartOffset = 0;
+				status = Status::PLAYING;
+				armedParamManager = nullptr;
+				armedLoopLengthSamples = 0;
+				return true;
+			}
+
+			// No buffers - allocate both and start standby
+			if (bufferA == nullptr) {
+				bufferA = static_cast<deluge::dsp::StereoSample<q31_t>*>(
+				    allocLowSpeed(kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
+				if (bufferA == nullptr) {
+					status = Status::OFF;
+					stutterSource = nullptr;
+					armedParamManager = nullptr;
+					return false;
+				}
+			}
+			if (bufferB == nullptr) {
+				bufferB = static_cast<deluge::dsp::StereoSample<q31_t>*>(
+				    allocLowSpeed(kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
+				if (bufferB == nullptr) {
+					status = Status::OFF;
+					stutterSource = nullptr;
+					armedParamManager = nullptr;
+					return false;
+				}
+			}
+			recordBuffer = bufferA;
+			playBuffer = bufferB;
+			recordWritePos = 0;
+			status = Status::STANDBY;
+			armedParamManager = nullptr;
+			armedLoopLengthSamples = 0;
+			return true;
+		}
+
+		// Classic mode: use DelayBuffer with resampling
+		int32_t rate = getStutterRate(armedParamManager, armedMagnitude, armedTimePerTickInverse);
+		Error error = buffer.init(rate, 0, true);
+		if (error == Error::NONE) {
+			status = Status::RECORDING;
+			sizeLeftUntilRecordFinished = buffer.size();
+			armedParamManager = nullptr;
+			return true;
+		}
+
+		// Failed to allocate
+		status = Status::OFF;
+		stutterSource = nullptr;
+		armedParamManager = nullptr;
+		return false;
+	}
+
+	return false;
+}
+
+void Stutterer::cancelArmed() {
+	if (status == Status::ARMED) {
+		if (startedFromStandby) {
+			status = Status::STANDBY;
+		}
+		else {
+			buffer.discard();
+			status = Status::OFF;
+			stutterSource = nullptr;
+		}
+		armedParamManager = nullptr;
+	}
 }

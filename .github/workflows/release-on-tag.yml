@@ -1,0 +1,29 @@
+name: Release on Tag
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      firmware-retention-days: 90
+      build-type: "Release"
+      build-tag: "release"
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release_Release_build_bundle
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.bin"
+          generate_release_notes: true

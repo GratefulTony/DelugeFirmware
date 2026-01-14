@@ -28,13 +28,16 @@ constexpr ptrdiff_t delaySpaceBetweenReadAndWrite = 20;
 
 class DelayBuffer {
 public:
-	constexpr static size_t kMaxSize = 88200;
+	constexpr static size_t kMaxSize = 88200;         // 2 seconds - for delay effect
+	constexpr static size_t kStutterMaxSize = 264600; // 6 seconds - for stutter/scatter (allows 1 bar at slow tempos)
 	constexpr static size_t kMinSize = 1;
 	constexpr static size_t kNeutralSize = 16384;
 
 	DelayBuffer() = default;
 	~DelayBuffer() { discard(); }
 	Error init(uint32_t newRate, uint32_t failIfThisSize = 0, bool includeExtraSpace = true);
+	Error initForStutter(uint32_t newRate, uint32_t failIfThisSize = 0, bool includeExtraSpace = true);
+	Error initWithSize(size_t sampleCount, bool includeExtraSpace = true);
 
 	// Prevent the delaybuffer from deallocing the Sample array on destruction
 	// TODO (Kate): investigate a shared_ptr for start_
@@ -75,6 +78,7 @@ public:
 	void setupForRender(int32_t rate);
 
 	static std::pair<int32_t, bool> getIdealBufferSizeFromRate(uint32_t rate);
+	static std::pair<int32_t, bool> getIdealBufferSizeFromRate(uint32_t rate, size_t maxSize);
 
 	[[nodiscard]] constexpr bool isActive() const { return (start_ != nullptr); }
 
@@ -274,6 +278,7 @@ public:
 	[[nodiscard]] constexpr size_t size() const { return size_; }
 
 	void clear();
+	void clearFull(); ///< Zero entire buffer (for scatter modes that do direct reads)
 
 	constexpr void setCurrent(StereoSample<q31_t>* sample) { current_ = sample; }
 

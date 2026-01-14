@@ -22,5 +22,6 @@ jobs:
           bun install
           bun run check:fix
       - uses: autofix-ci/action@v1
+        if: github.event_name == 'pull_request'
         with:
           commit-message: "Apply Prettier format"

@@ -309,6 +309,10 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 		    [UNPATCHED_TABLE_SHAPER_MIX] = STRING_FOR_SHAPER_MIX,
 		    [UNPATCHED_DISPERSER_TOPO] = STRING_FOR_DISPERSER_TOPO,
 		    [UNPATCHED_DISPERSER_TWIST] = STRING_FOR_DISPERSER_TWIST,
+		    [UNPATCHED_SCATTER_ZONE_A] = STRING_FOR_SCATTER_ZONE_A,
+		    [UNPATCHED_SCATTER_ZONE_B] = STRING_FOR_SCATTER_ZONE_B,
+		    [UNPATCHED_SCATTER_DEPTH] = STRING_FOR_SCATTER_DEPTH,
+		    [UNPATCHED_SCATTER_GATE] = STRING_FOR_SCATTER_GATE,
 		    [UNPATCHED_ARP_GATE] = STRING_FOR_ARP_GATE_MENU_TITLE,
 		    [UNPATCHED_ARP_RHYTHM] = STRING_FOR_ARP_RHYTHM_MENU_TITLE,
 		    [UNPATCHED_ARP_SEQUENCE_LENGTH] = STRING_FOR_ARP_SEQUENCE_LENGTH_MENU_TITLE,
@@ -557,6 +561,16 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 			return "disperserTopo";
 		case UNPATCHED_DISPERSER_TWIST:
 			return "disperserTwist";
+
+		// Scatter
+		case UNPATCHED_SCATTER_ZONE_A:
+			return "scatterZoneA";
+		case UNPATCHED_SCATTER_ZONE_B:
+			return "scatterZoneB";
+		case UNPATCHED_SCATTER_DEPTH:
+			return "scatterDepth";
+		case UNPATCHED_SCATTER_GATE:
+			return "scatterGate";
 
 		case UNPATCHED_ARP_GATE:
 			return "arpGate";
