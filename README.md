@@ -14,6 +14,7 @@ This is **owlet-firmware**, a personal fork of the Deluge Community Firmware mai
 | **Sine Shaper** | Harmonic waveshaping with width, evolution, recursion, and feedback zones. |
 | **Disperser** | Allpass filter cascade for frequency-dependent phase smearing. Twist zones with punch, curve, chirp, and Q-tilt. |
 | **Table Shaper** | Wavetable-based waveshaping. |
+| **Scatter (Bird Brain)** ⚠️ WIP | Beat-repeat and slice manipulation effect. Double-buffer system for glitch-free triggering. Rate knob controls slice length. Future modes: beat reordering, fractional positions, random patterns. |
 | **Retrospective Sampler** | Lookback buffer for capturing audio after the fact. |
 | **Zone Menu Items** | Horizontal menu UI component for zone-based parameters with visual feedback. |
 | **FX Benchmarking Framework** | Performance profiling tools for DSP development. |
