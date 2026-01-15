@@ -348,17 +348,16 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						// Store grain params for playback
 						scatterDryMix = grain.dryMix;
 
-						// Dry threshold: macro knob (knob 4) goes through phi triangle configured by macroConfig (knob
-						// 3) macro = performance knob user turns, macroConfig = configures the triangle behavior
+						// Dry threshold: macroConfig phi triangle determines how much influence macro has
+						// When triangle=0, macro has no effect (threshold=0, all grains)
+						// When triangle=1, macro has full effect on threshold
 						float macroConfigNorm = static_cast<float>(macroConfigParam) / static_cast<float>(ONE_Q31);
 						float macroNorm = static_cast<float>(macroParam) / static_cast<float>(ONE_Q31);
-						// macroConfig controls triangle frequency multiplier (1x to 4x)
-						float freqMult = 1.0f + macroConfigNorm * 3.0f;
-						// Macro knob sweeps through the phi triangle
-						float triPhase = macroNorm * freqMult;
-						float triUnipolar = deluge::dsp::triangleSimpleUnipolar(triPhase, 0.5f);
-						// Map to threshold range [0, 1] - higher = more grains
-						scatterDryThreshold = triUnipolar;
+						// Phi triangle from macroConfig position - determines macro's routing/influence
+						float macroInfluence =
+						    deluge::dsp::triangleSimpleUnipolar(macroConfigNorm * deluge::dsp::phi::kPhi, 0.5f);
+						// Threshold = macro scaled by its influence (0 influence = always grains)
+						scatterDryThreshold = macroNorm * macroInfluence;
 
 						// Envelope and gate from Zone B via phi triangles (same for all grains)
 						// Zone B knob position drives depth, shape, and gate through phi frequencies
@@ -409,7 +408,7 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				}
 				// Density threshold: hard cut between grain and dry (not a blend)
 				// dryMix > threshold = use dry signal for this grain, else use buffer grain
-				// Threshold is macroConfig * bipolar phi triangle (negative = always grain)
+				// Threshold = macro * macroInfluence (macroConfig phi triangle gates macro's effect)
 				bool useDry = (scatterDryMix > scatterDryThreshold);
 
 				q31_t outputL, outputR;
