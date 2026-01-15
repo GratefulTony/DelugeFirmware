@@ -348,15 +348,17 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						// Store grain params for playback
 						scatterDryMix = grain.dryMix;
 
-						// Dry threshold: macro knob (knob 4) * bipolar phi triangle from macroConfig (knob 3)
-						// macroConfig drives the triangle phase, macro is the intensity multiplier
+						// Dry threshold: macro knob (knob 4) goes through phi triangle configured by macroConfig (knob
+						// 3) macro = performance knob user turns, macroConfig = configures the triangle behavior
 						float macroConfigNorm = static_cast<float>(macroConfigParam) / static_cast<float>(ONE_Q31);
 						float macroNorm = static_cast<float>(macroParam) / static_cast<float>(ONE_Q31);
-						// Bipolar phi triangle (50% duty) with phase from macroConfig
-						float triUnipolar = deluge::dsp::triangleSimpleUnipolar(macroConfigNorm, 0.5f);
-						float triBipolar = triUnipolar * 2.0f - 1.0f; // Map [0,1] to [-1,1]
-						// threshold = macro * bipolarTriangle (negative = always grain)
-						scatterDryThreshold = macroNorm * triBipolar;
+						// macroConfig controls triangle frequency multiplier (1x to 4x)
+						float freqMult = 1.0f + macroConfigNorm * 3.0f;
+						// Macro knob sweeps through the phi triangle
+						float triPhase = macroNorm * freqMult;
+						float triUnipolar = deluge::dsp::triangleSimpleUnipolar(triPhase, 0.5f);
+						// Map to threshold range [0, 1] - higher = more grains
+						scatterDryThreshold = triUnipolar;
 
 						// Envelope and gate from Zone B via phi triangles (same for all grains)
 						// Zone B knob position drives depth, shape, and gate through phi frequencies
