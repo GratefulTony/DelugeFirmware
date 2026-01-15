@@ -151,6 +151,7 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 			scatterSliceIndex = 0;
 			scatterReversed = false;
 			scatterDryMix = 0;
+			scatterDryThreshold = 1.0f;
 			scatterEnvDepth = 0;
 			scatterEnvShape = 0.5f;
 			scatterEnvWidth = 1.0f;
@@ -287,16 +288,19 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						scatterNumSlices = std::clamp(scatterNumSlices, int32_t{2}, int32_t{16});
 
 						// Read zone params - use patched params for Sound context, unpatched for Song
-						// Note: macroConfig (knob 3) and knob 4 are reserved for future use (second page)
-						q31_t zoneAParam, zoneBParam;
+						q31_t zoneAParam, zoneBParam, macroConfigParam, macroParam;
 						if (paramManager->containsPatchedParamSetCollection()) {
 							PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
 							zoneAParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_A);
 							zoneBParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_B);
+							macroConfigParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO_CONFIG);
+							macroParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO);
 						}
 						else {
 							zoneAParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_A);
 							zoneBParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_B);
+							macroConfigParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_MACRO_CONFIG);
+							macroParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_MACRO);
 						}
 
 						// Phase offsets from secret encoder menus (push+twist)
@@ -343,6 +347,16 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 
 						// Store grain params for playback
 						scatterDryMix = grain.dryMix;
+
+						// Dry threshold: macro knob (knob 4) * bipolar phi triangle from macroConfig (knob 3)
+						// macroConfig drives the triangle phase, macro is the intensity multiplier
+						float macroConfigNorm = static_cast<float>(macroConfigParam) / static_cast<float>(ONE_Q31);
+						float macroNorm = static_cast<float>(macroParam) / static_cast<float>(ONE_Q31);
+						// Bipolar phi triangle (50% duty) with phase from macroConfig
+						float triUnipolar = deluge::dsp::triangleSimpleUnipolar(macroConfigNorm, 0.5f);
+						float triBipolar = triUnipolar * 2.0f - 1.0f; // Map [0,1] to [-1,1]
+						// threshold = macro * bipolarTriangle (negative = always grain)
+						scatterDryThreshold = macroNorm * triBipolar;
 
 						// Envelope and gate from Zone B via phi triangles (same for all grains)
 						// Zone B knob position drives depth, shape, and gate through phi frequencies
@@ -393,8 +407,8 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				}
 				// Density threshold: hard cut between grain and dry (not a blend)
 				// dryMix > threshold = use dry signal for this grain, else use buffer grain
-				constexpr float kDryThreshold = 0.75f;
-				bool useDry = (scatterDryMix > kDryThreshold);
+				// Threshold is macroConfig * bipolar phi triangle (negative = always grain)
+				bool useDry = (scatterDryMix > scatterDryThreshold);
 
 				q31_t outputL, outputR;
 				if (useDry) {

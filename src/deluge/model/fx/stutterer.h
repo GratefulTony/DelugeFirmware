@@ -222,7 +222,8 @@ private:
 	int32_t scatterSliceIndex{0}; ///< Current sequential slice (0 to numSlices-1)
 	int32_t scatterNumSlices{8};  ///< Number of slices to divide bar into
 	bool scatterReversed{false};  ///< Whether current slice is playing reversed
-	float scatterDryMix{0};       ///< Per-grain dry crossfade [0,1]: 0=full grain, 1=full dry
+	float scatterDryMix{0};       ///< Per-grain dry value [0,1] compared against threshold
+	float scatterDryThreshold{1}; ///< Threshold for dry cut [0,1]: higher = more grains, lower = more dry
 	float scatterEnvDepth{0};     ///< Envelope depth [0,1]: 0=hard cut, 1=full envelope
 	float scatterEnvShape{0.5f};  ///< Envelope shape [0,1]: 0=fade-out, 0.5=symmetric, 1=fade-in
 	float scatterEnvWidth{1.0f};  ///< Envelope region [0,1]: 1=full slice, smaller=edges only
