@@ -154,6 +154,7 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 			scatterEnvDepth = 0;
 			scatterEnvShape = 0.5f;
 			scatterEnvWidth = 1.0f;
+			scatterGateRatio = 1.0f;
 			status = Status::PLAYING;
 			// Source now owns both buffers
 			playSource = source;
@@ -286,17 +287,16 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						scatterNumSlices = std::clamp(scatterNumSlices, int32_t{2}, int32_t{16});
 
 						// Read zone params - use patched params for Sound context, unpatched for Song
-						q31_t zoneAParam, zoneBParam, depthParam;
+						// Note: macroConfig (knob 3) and knob 4 are reserved for future use (second page)
+						q31_t zoneAParam, zoneBParam;
 						if (paramManager->containsPatchedParamSetCollection()) {
 							PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
 							zoneAParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_A);
 							zoneBParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_B);
-							depthParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO_CONFIG);
 						}
 						else {
 							zoneAParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_A);
 							zoneBParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_B);
-							depthParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_MACRO_CONFIG);
 						}
 
 						// Phase offsets from secret encoder menus (push+twist)
@@ -308,7 +308,8 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						};
 
 						// Compute grain params using raw q31 values - zone helpers ensure UI/DSP match
-						auto grain = deluge::dsp::scatter::computeGrainParams(zoneAParam, zoneBParam, depthParam,
+						// Pass 0 for depth (macroConfig reserved for future use)
+						auto grain = deluge::dsp::scatter::computeGrainParams(zoneAParam, zoneBParam, 0,
 						                                                      scatterSliceIndex, offsets);
 
 						// Calculate target slice from sequential index + offset
@@ -343,15 +344,21 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						// Store grain params for playback
 						scatterDryMix = grain.dryMix;
 
-						// Envelope from Zone B via phi triangles (same for all grains)
-						// Zone B knob position drives both depth and shape through phi frequencies
+						// Envelope and gate from Zone B via phi triangles (same for all grains)
+						// Zone B knob position drives depth, shape, and gate through phi frequencies
 						float zoneBNorm = static_cast<float>(zoneBParam) / static_cast<float>(ONE_Q31);
 						// envDepth: slower phi, ramps up as Zone B increases
-						scatterEnvDepth =
-						    deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi050, 0.6f);
+						// Minimum 0.15 ensures ~10ms fade at slice edges to avoid clicks
+						float envRaw = deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi050, 0.6f);
+						scatterEnvDepth = 0.15f + envRaw * 0.85f;
 						// envShape: different phi frequency for non-monotonic evolution
 						scatterEnvShape =
 						    deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi075, 0.7f);
+						// gateRatio: yet another phi frequency, range [0.25, 1.0] to avoid total silence
+						// 60% deadzone (duty 0.4) gives full grains, inverted so Zone B=0 is clean
+						float gateRaw =
+						    deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi100, 0.4f);
+						scatterGateRatio = 0.25f + (1.0f - gateRaw) * 0.75f;
 
 						// Advance for next slice
 						scatterSliceIndex = (scatterSliceIndex + 1) % scatterNumSlices;
@@ -387,11 +394,12 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				q31_t grainL = playBuffer[readPos].l;
 				q31_t grainR = playBuffer[readPos].r;
 
-				// Apply grain envelope (Shuffle mode only for now)
-				if (stutterConfig.scatterMode == ScatterMode::Shuffle && scatterEnvDepth > 0.001f) {
+				// Apply grain envelope and gate (Shuffle mode only for now)
+				bool envActive = scatterEnvDepth > 0.001f;
+				bool gateActive = scatterGateRatio < 0.999f;
+				if (stutterConfig.scatterMode == ScatterMode::Shuffle && (envActive || gateActive)) {
 					float envMult = deluge::dsp::scatter::grainEnvelope(
-					    static_cast<int32_t>(playbackPos), static_cast<int32_t>(currentSliceLength),
-					    1.0f, // gateRatio (full gate for now)
+					    static_cast<int32_t>(playbackPos), static_cast<int32_t>(currentSliceLength), scatterGateRatio,
 					    scatterEnvDepth, scatterEnvShape, scatterEnvWidth);
 					// Convert to q31 multiplier and apply
 					int32_t envQ31 = static_cast<int32_t>(envMult * 2147483647.0f);
