@@ -303,10 +303,24 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 							macroParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_MACRO);
 						}
 
-						// Phase offsets from secret encoder menus (push+twist)
+						// Macro influence on zone phases - macroConfig phi triangles gate macro's effect
+						// Different phi frequencies for independent routing of A vs B
+						float macroConfigNorm = static_cast<float>(macroConfigParam) / static_cast<float>(ONE_Q31);
+						float macroNorm = static_cast<float>(macroParam) / static_cast<float>(ONE_Q31);
+						float zoneAMacroInfluence =
+						    deluge::dsp::triangleSimpleUnipolar(macroConfigNorm * deluge::dsp::phi::kPhi050, 0.5f);
+						float zoneBMacroInfluence =
+						    deluge::dsp::triangleSimpleUnipolar(macroConfigNorm * deluge::dsp::phi::kPhi075, 0.5f);
+						// Macro adds to phase offsets (max 30% of full phase range at full influence)
+						// Additive with secret encoder offsets and gamma scaling
+						constexpr float kMacroPhaseMax = 0.3f;
+						float macroZoneAPhase = macroNorm * zoneAMacroInfluence * kMacroPhaseMax;
+						float macroZoneBPhase = macroNorm * zoneBMacroInfluence * kMacroPhaseMax;
+
+						// Phase offsets from secret encoder menus (push+twist) + macro contribution
 						deluge::dsp::scatter::ScatterPhaseOffsets offsets{
-						    stutterConfig.zoneAPhaseOffset,
-						    stutterConfig.zoneBPhaseOffset,
+						    stutterConfig.zoneAPhaseOffset + macroZoneAPhase,
+						    stutterConfig.zoneBPhaseOffset + macroZoneBPhase,
 						    stutterConfig.macroConfigPhaseOffset,
 						    stutterConfig.gammaPhase,
 						};
@@ -351,13 +365,11 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						// Dry threshold: macroConfig phi triangle determines how much influence macro has
 						// When triangle=0, macro has no effect (threshold=0, all grains)
 						// When triangle=1, macro has full effect on threshold
-						float macroConfigNorm = static_cast<float>(macroConfigParam) / static_cast<float>(ONE_Q31);
-						float macroNorm = static_cast<float>(macroParam) / static_cast<float>(ONE_Q31);
-						// Phi triangle from macroConfig position - determines macro's routing/influence
-						float macroInfluence =
+						// Uses different phi frequency than zone phase influence for independent routing
+						float thresholdInfluence =
 						    deluge::dsp::triangleSimpleUnipolar(macroConfigNorm * deluge::dsp::phi::kPhi, 0.5f);
 						// Threshold = macro scaled by its influence (0 influence = always grains)
-						scatterDryThreshold = macroNorm * macroInfluence;
+						scatterDryThreshold = macroNorm * thresholdInfluence;
 
 						// Envelope and gate from Zone B via phi triangles (same for all grains)
 						// Zone B knob position drives depth, shape, and gate through phi frequencies
