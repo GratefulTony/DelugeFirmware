@@ -458,25 +458,28 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					outputR = multiply_32x32_rshift32(outputR, envQ31) << 1;
 				}
 
-				// Apply crossfeed pan (equal energy: -3dB crossfeed, -6dB keep reduction)
+				// Apply crossfeed pan (folds stereo to mono on one side at full pan)
+				// At pan=1: L=0, R=(L+R)/2  |  At pan=-1: L=(L+R)/2, R=0
 				if (scatterPan > 0.001f || scatterPan < -0.001f) {
 					float panAbs = (scatterPan > 0) ? scatterPan : -scatterPan;
-					// Equal energy: keep attenuates source, cross at -3dB (0.707)
-					float keep = 1.0f - panAbs * 0.5f;
-					float cross = panAbs * 0.707f;
-					int32_t keepQ31 = static_cast<int32_t>(keep * 2147483647.0f);
-					int32_t crossQ31 = static_cast<int32_t>(cross * 2147483647.0f);
+					// Fading side: (1 - pan)
+					// Target side: blend from original to mono sum: orig*(1-pan/2) + other*(pan/2)
+					int32_t fadeQ31 = static_cast<int32_t>((1.0f - panAbs) * 2147483647.0f);
+					int32_t keepQ31 = static_cast<int32_t>((1.0f - panAbs * 0.5f) * 2147483647.0f);
+					int32_t crossQ31 = static_cast<int32_t>((panAbs * 0.5f) * 2147483647.0f);
 					if (scatterPan > 0) {
-						// Pan right: L feeds into R
-						q31_t newL = multiply_32x32_rshift32(outputL, keepQ31) << 1;
-						q31_t newR = outputR + (multiply_32x32_rshift32(outputL, crossQ31) << 1);
+						// Pan right: L fades to 0, R blends toward (L+R)/2
+						q31_t newL = multiply_32x32_rshift32(outputL, fadeQ31) << 1;
+						q31_t newR = (multiply_32x32_rshift32(outputR, keepQ31) << 1)
+						             + (multiply_32x32_rshift32(outputL, crossQ31) << 1);
 						outputL = newL;
 						outputR = newR;
 					}
 					else {
-						// Pan left: R feeds into L
-						q31_t newR = multiply_32x32_rshift32(outputR, keepQ31) << 1;
-						q31_t newL = outputL + (multiply_32x32_rshift32(outputR, crossQ31) << 1);
+						// Pan left: R fades to 0, L blends toward (L+R)/2
+						q31_t newR = multiply_32x32_rshift32(outputR, fadeQ31) << 1;
+						q31_t newL = (multiply_32x32_rshift32(outputL, keepQ31) << 1)
+						             + (multiply_32x32_rshift32(outputR, crossQ31) << 1);
 						outputL = newL;
 						outputR = newR;
 					}
