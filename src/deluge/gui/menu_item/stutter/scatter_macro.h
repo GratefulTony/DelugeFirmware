@@ -99,7 +99,7 @@ public:
 	}
 
 	[[nodiscard]] int32_t getMinValue() const override { return 0; }
-	[[nodiscard]] int32_t getMaxValue() const override { return 50; }
+	[[nodiscard]] int32_t getMaxValue() const override { return 128; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
 
 	void getColumnLabel(StringBuf& label) override { label.append("Macro"); }
