@@ -66,9 +66,6 @@ public:
 
 	int32_t getFinalValue() override {
 		int32_t value = this->getValue();
-		if (value >= 128) {
-			return 2147483647; // INT32_MAX
-		}
 		return value << 24;
 	}
 
@@ -99,7 +96,7 @@ public:
 	}
 
 	[[nodiscard]] int32_t getMinValue() const override { return 0; }
-	[[nodiscard]] int32_t getMaxValue() const override { return 128; }
+	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
 
 	void getColumnLabel(StringBuf& label) override { label.append("Macro"); }
