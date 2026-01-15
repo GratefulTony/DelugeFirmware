@@ -391,10 +391,24 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				if (readPos >= kLooperBufferSize) {
 					readPos -= kLooperBufferSize;
 				}
-				q31_t grainL = playBuffer[readPos].l;
-				q31_t grainR = playBuffer[readPos].r;
+				// Density threshold: hard cut between grain and dry (not a blend)
+				// dryMix > threshold = use dry signal for this grain, else use buffer grain
+				constexpr float kDryThreshold = 0.5f;
+				bool useDry = (scatterDryMix > kDryThreshold);
 
-				// Apply grain envelope and gate (Shuffle mode only for now)
+				q31_t outputL, outputR;
+				if (useDry) {
+					// Use dry input signal
+					outputL = dryL;
+					outputR = dryR;
+				}
+				else {
+					// Use grain from buffer
+					outputL = playBuffer[readPos].l;
+					outputR = playBuffer[readPos].r;
+				}
+
+				// Apply grain envelope and gate to whichever signal was selected
 				bool envActive = scatterEnvDepth > 0.001f;
 				bool gateActive = scatterGateRatio < 0.999f;
 				if (stutterConfig.scatterMode == ScatterMode::Shuffle && (envActive || gateActive)) {
@@ -403,26 +417,12 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					    scatterEnvDepth, scatterEnvShape, scatterEnvWidth);
 					// Convert to q31 multiplier and apply
 					int32_t envQ31 = static_cast<int32_t>(envMult * 2147483647.0f);
-					grainL = multiply_32x32_rshift32(grainL, envQ31) << 1;
-					grainR = multiply_32x32_rshift32(grainR, envQ31) << 1;
+					outputL = multiply_32x32_rshift32(outputL, envQ31) << 1;
+					outputR = multiply_32x32_rshift32(outputR, envQ31) << 1;
 				}
 
-				// Apply density crossfade: blend grain with dry input
-				// dryMix=0: full grain, dryMix=1: full dry
-				if (scatterDryMix > 0.001f) {
-					// Convert to fixed-point for mixing (dryMix scaled to q31)
-					int32_t dryWeight = static_cast<int32_t>(scatterDryMix * 2147483647.0f);
-					int32_t grainWeight = 2147483647 - dryWeight;
-					sample.l = multiply_32x32_rshift32(grainL, grainWeight) + multiply_32x32_rshift32(dryL, dryWeight);
-					sample.r = multiply_32x32_rshift32(grainR, grainWeight) + multiply_32x32_rshift32(dryR, dryWeight);
-					// Compensate for rshift32 (results are halved)
-					sample.l <<= 1;
-					sample.r <<= 1;
-				}
-				else {
-					sample.l = grainL;
-					sample.r = grainR;
-				}
+				sample.l = outputL;
+				sample.r = outputR;
 
 				// === ADVANCE: move through slice, wrap at boundary ===
 				playbackPos++;
