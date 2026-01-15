@@ -156,6 +156,7 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 			scatterEnvShape = 0.5f;
 			scatterEnvWidth = 1.0f;
 			scatterGateRatio = 1.0f;
+			scatterPan = 0;
 			status = Status::PLAYING;
 			// Source now owns both buffers
 			playSource = source;
@@ -387,6 +388,15 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						    deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi100, 0.4f);
 						scatterGateRatio = 0.25f + (1.0f - gateRaw) * 0.75f;
 
+						// Crossfeed pan: random L/R direction, phi triangle controls amount
+						// Low duty (0.25) = mostly centered, sparse swings
+						float panDir =
+						    (deluge::dsp::phi::wrapPhase(static_cast<float>(scatterSliceIndex) * 5.3f) < 0.5f) ? -1.0f
+						                                                                                       : 1.0f;
+						float panAmt =
+						    deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi125, 0.25f);
+						scatterPan = panDir * panAmt;
+
 						// Advance for next slice
 						scatterSliceIndex = (scatterSliceIndex + 1) % scatterNumSlices;
 						break;
@@ -446,6 +456,30 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					int32_t envQ31 = static_cast<int32_t>(envMult * 2147483647.0f);
 					outputL = multiply_32x32_rshift32(outputL, envQ31) << 1;
 					outputR = multiply_32x32_rshift32(outputR, envQ31) << 1;
+				}
+
+				// Apply crossfeed pan (equal energy: -3dB crossfeed, -6dB keep reduction)
+				if (scatterPan > 0.001f || scatterPan < -0.001f) {
+					float panAbs = (scatterPan > 0) ? scatterPan : -scatterPan;
+					// Equal energy: keep attenuates source, cross at -3dB (0.707)
+					float keep = 1.0f - panAbs * 0.5f;
+					float cross = panAbs * 0.707f;
+					int32_t keepQ31 = static_cast<int32_t>(keep * 2147483647.0f);
+					int32_t crossQ31 = static_cast<int32_t>(cross * 2147483647.0f);
+					if (scatterPan > 0) {
+						// Pan right: L feeds into R
+						q31_t newL = multiply_32x32_rshift32(outputL, keepQ31) << 1;
+						q31_t newR = outputR + (multiply_32x32_rshift32(outputL, crossQ31) << 1);
+						outputL = newL;
+						outputR = newR;
+					}
+					else {
+						// Pan left: R feeds into L
+						q31_t newR = multiply_32x32_rshift32(outputR, keepQ31) << 1;
+						q31_t newL = outputL + (multiply_32x32_rshift32(outputR, crossQ31) << 1);
+						outputL = newL;
+						outputR = newR;
+					}
 				}
 
 				sample.l = outputL;

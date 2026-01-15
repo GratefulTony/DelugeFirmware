@@ -228,6 +228,7 @@ private:
 	float scatterEnvShape{0.5f};  ///< Envelope shape [0,1]: 0=fade-out, 0.5=symmetric, 1=fade-in
 	float scatterEnvWidth{1.0f};  ///< Envelope region [0,1]: 1=full slice, smaller=edges only
 	float scatterGateRatio{1.0f}; ///< Gate duty cycle [0,1]: 1=full slice, smaller=truncated with silence
+	float scatterPan{0};          ///< Crossfeed pan [-1,1]: 0=center, +1=L→R, -1=R→L
 
 	/// Stored config for takeover (when recordSource triggers playback)
 	StutterConfig armedConfig{};
