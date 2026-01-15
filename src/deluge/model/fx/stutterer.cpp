@@ -393,7 +393,7 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				}
 				// Density threshold: hard cut between grain and dry (not a blend)
 				// dryMix > threshold = use dry signal for this grain, else use buffer grain
-				constexpr float kDryThreshold = 0.5f;
+				constexpr float kDryThreshold = 0.75f;
 				bool useDry = (scatterDryMix > kDryThreshold);
 
 				q31_t outputL, outputR;
