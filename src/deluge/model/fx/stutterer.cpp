@@ -101,10 +101,6 @@ size_t Stutterer::getRepeatSliceLength(ParamManager* paramManager, size_t maxLen
 
 Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManager, StutterConfig sc, int32_t magnitude,
                               uint32_t timePerTickInverse, size_t loopLengthSamples, bool halfBar) {
-	// Note: We don't auto-unlatch the old source here because stutterSource is a void*
-	// and we can't safely cast it back - the old source may have been deleted.
-	// Users need to manually switch from Latch to Momentary if they want to stop.
-
 	stutterConfig = sc;
 	currentReverse = stutterConfig.reversed;
 	halfBarMode = halfBar;
@@ -112,12 +108,21 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 	// Non-Classic modes: double buffer system (swap instead of copy)
 	bool useLooper = (stutterConfig.scatterMode != ScatterMode::Classic);
 	if (useLooper) {
-		// If we have buffers from standby recording, swap and start playback
-		if (recordBuffer != nullptr && loopLengthSamples > 0) {
-			// Clamp loop length to buffer size
-			// KNOWN ISSUE: If user releases and re-triggers before a full bar has been recorded,
-			// playback may include stale audio from before the previous trigger.
-			// Fix if needed: clamp to recordWritePos: std::min({loopLengthSamples, kLooperBufferSize, recordWritePos})
+		// Check if this is a takeover trigger (source was recording, now wants to play)
+		bool isTakeoverTrigger = (recordSource == source && playSource != source && status == Status::PLAYING);
+		if (isTakeoverTrigger) {
+			// Use stored values from armStutter
+			stutterConfig = armedConfig;
+			currentReverse = stutterConfig.reversed;
+			if (loopLengthSamples == 0) {
+				loopLengthSamples = armedLoopLengthSamples;
+			}
+			halfBarMode = armedHalfBarMode;
+		}
+
+		// If source has been recording (owns recordBuffer), swap and start playback
+		if (recordBuffer != nullptr && recordSource == source && loopLengthSamples > 0) {
+			// Use full loop length for correct timing
 			playbackLength = std::min(loopLengthSamples, kLooperBufferSize);
 
 			// Calculate where loop starts in the record buffer (which becomes play buffer)
@@ -132,21 +137,28 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 			// Swap buffers - no copy needed!
 			std::swap(recordBuffer, playBuffer);
 
+			// Clear new recordBuffer to prevent stale audio on next trigger
+			// EXPERIMENT: commented out to test if memset causes audio glitch
+			// if (recordBuffer != nullptr) {
+			// 	memset(recordBuffer, 0, kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
+			// }
+
 			// Reset for playback and new recording
 			playbackPos = 0;
 			recordWritePos = 0;
-			// Initialize slice to full length; will be updated at first sample for Repeat mode
 			currentSliceLength = playbackLength;
 			sliceStartOffset = 0;
-			// Reset scatter state
 			scatterSliceIndex = 0;
 			scatterReversed = false;
+			scatterDryMix = 0;
 			status = Status::PLAYING;
-			stutterSource = source;
+			// Source now owns both buffers
+			playSource = source;
+			recordSource = source;
 			return Error::NONE;
 		}
 
-		// No buffers - allocate both and start standby recording
+		// No buffers yet - allocate both and start standby recording
 		if (bufferA == nullptr) {
 			bufferA = static_cast<deluge::dsp::StereoSample<q31_t>*>(
 			    allocLowSpeed(kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
@@ -166,8 +178,16 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 		recordBuffer = bufferA;
 		playBuffer = bufferB;
 		recordWritePos = 0;
-		status = Status::STANDBY;
-		stutterSource = source;
+		// Clear record buffer
+		// EXPERIMENT: commented out to test if memset causes audio glitch
+		// memset(recordBuffer, 0, kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
+
+		// Source claims recordBuffer, starts recording in STANDBY
+		// If someone else was playing, they keep playSource
+		recordSource = source;
+		if (status != Status::PLAYING) {
+			status = Status::STANDBY;
+		}
 		return Error::NONE;
 	}
 
@@ -202,7 +222,8 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 	if (error == Error::NONE) {
 		status = Status::RECORDING;
 		sizeLeftUntilRecordFinished = buffer.size();
-		stutterSource = source;
+		playSource = source;
+		recordSource = source;
 	}
 	return error;
 }
@@ -228,8 +249,9 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			FX_BENCH_START(benchTotal);
 
 			for (deluge::dsp::StereoSample<q31_t>& sample : audio) {
-				// Record incoming audio to recordBuffer (continuous recording)
-				if (recordBuffer != nullptr) {
+				// Record incoming audio to recordBuffer for re-trigger capability
+				// Only record if playSource also owns recordSource (no takeover in progress)
+				if (recordBuffer != nullptr && recordSource == playSource) {
 					recordBuffer[recordWritePos] = sample;
 					recordWritePos++;
 					if (recordWritePos >= kLooperBufferSize) {
@@ -248,6 +270,7 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						// Rate knob controls slice length from END of captured bar
 						currentSliceLength = getRepeatSliceLength(paramManager, playbackLength);
 						sliceStartOffset = playbackLength - currentSliceLength;
+						scatterDryMix = 0; // No density crossfade in Repeat mode
 						break;
 
 					case ScatterMode::Shuffle: {
@@ -259,19 +282,31 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						scatterNumSlices = 2 + ((knobPos + 64) * 14) / 128;
 						scatterNumSlices = std::clamp(scatterNumSlices, int32_t{2}, int32_t{16});
 
-						// Read zone params from menu
-						int32_t zoneAParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_A);
-						int32_t zoneBParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_B);
-						int32_t depthParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_DEPTH);
+						// Read zone params - use patched params for Sound context, unpatched for Song
+						q31_t zoneAParam, zoneBParam, depthParam;
+						if (paramManager->containsPatchedParamSetCollection()) {
+							PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
+							zoneAParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_A);
+							zoneBParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_B);
+							depthParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO_CONFIG);
+						}
+						else {
+							zoneAParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_A);
+							zoneBParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_B);
+							depthParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_MACRO_CONFIG);
+						}
 
-						// Compute grain params - phi triangle deadzone in computeGrainParams
-						// makes many consecutive slices equivalent, so we always call but
-						// the result will be identical when sliceIndex is in deadzone
-						float zoneA = deluge::dsp::scatter::ScatterParams::paramToNormalized(zoneAParam);
-						float zoneB = deluge::dsp::scatter::ScatterParams::paramToNormalized(zoneBParam);
-						float depth = deluge::dsp::scatter::ScatterParams::paramToNormalized(depthParam);
+						// Phase offsets from secret encoder menus (push+twist)
+						deluge::dsp::scatter::ScatterPhaseOffsets offsets{
+						    stutterConfig.zoneAPhaseOffset,
+						    stutterConfig.zoneBPhaseOffset,
+						    stutterConfig.depthPhaseOffset,
+						    stutterConfig.gammaPhase,
+						};
 
-						auto grain = deluge::dsp::scatter::computeGrainParams(zoneA, zoneB, depth, scatterSliceIndex);
+						// Compute grain params using raw q31 values - zone helpers ensure UI/DSP match
+						auto grain = deluge::dsp::scatter::computeGrainParams(zoneAParam, zoneBParam, depthParam,
+						                                                      scatterSliceIndex, offsets);
 
 						// Calculate target slice from sequential index + offset
 						int32_t targetSlice = scatterSliceIndex;
@@ -302,6 +337,9 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						float revRoll = deluge::dsp::phi::wrapPhase(static_cast<float>(scatterSliceIndex) * 3.7f);
 						scatterReversed = (revRoll < grain.reverseProb);
 
+						// Store dryMix for crossfade during playback
+						scatterDryMix = grain.dryMix;
+
 						// Advance for next slice
 						scatterSliceIndex = (scatterSliceIndex + 1) % scatterNumSlices;
 						break;
@@ -311,12 +349,17 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						// Default: play full bar
 						currentSliceLength = playbackLength;
 						sliceStartOffset = 0;
+						scatterDryMix = 0; // No density crossfade in default mode
 						break;
 					}
 					FX_BENCH_STOP(benchSlice);
 				}
 
 				// === PLAYBACK: read from current slice ===
+				// Save dry input for potential crossfade (density zone)
+				q31_t dryL = sample.l;
+				q31_t dryR = sample.r;
+
 				size_t readPos;
 				if (scatterReversed && stutterConfig.scatterMode == ScatterMode::Shuffle) {
 					// Reverse: read from end of slice going backward
@@ -328,8 +371,25 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				if (readPos >= kLooperBufferSize) {
 					readPos -= kLooperBufferSize;
 				}
-				sample.l = playBuffer[readPos].l;
-				sample.r = playBuffer[readPos].r;
+				q31_t grainL = playBuffer[readPos].l;
+				q31_t grainR = playBuffer[readPos].r;
+
+				// Apply density crossfade: blend grain with dry input
+				// dryMix=0: full grain, dryMix=1: full dry
+				if (scatterDryMix > 0.001f) {
+					// Convert to fixed-point for mixing (dryMix scaled to q31)
+					int32_t dryWeight = static_cast<int32_t>(scatterDryMix * 2147483647.0f);
+					int32_t grainWeight = 2147483647 - dryWeight;
+					sample.l = multiply_32x32_rshift32(grainL, grainWeight) + multiply_32x32_rshift32(dryL, dryWeight);
+					sample.r = multiply_32x32_rshift32(grainR, grainWeight) + multiply_32x32_rshift32(dryR, dryWeight);
+					// Compensate for rshift32 (results are halved)
+					sample.l <<= 1;
+					sample.r <<= 1;
+				}
+				else {
+					sample.l = grainL;
+					sample.r = grainR;
+				}
 
 				// === ADVANCE: move through slice, wrap at boundary ===
 				playbackPos++;
@@ -451,10 +511,15 @@ void Stutterer::endStutter(ParamManagerForTimeline* paramManager) {
 
 	if (isScatterMode) {
 		// Non-Classic modes: return to standby for continuous recording
-		// Don't clear buffer - old audio will be overwritten during standby recording
-		// and clearing 1.7MB causes audio glitches
-		// Playback buffer is kept allocated for next trigger
 		playbackPos = 0;
+		playSource = nullptr; // Stop playing
+
+		// If someone else was recording for takeover, their recording is now orphaned
+		// Reset to clean state - nobody owns anything
+		if (recordSource != nullptr) {
+			recordSource = nullptr;
+			recordWritePos = 0;
+		}
 		status = Status::STANDBY;
 		return;
 	}
@@ -468,6 +533,8 @@ void Stutterer::endStutter(ParamManagerForTimeline* paramManager) {
 	else {
 		buffer.discard();
 		status = Status::OFF;
+		playSource = nullptr;
+		recordSource = nullptr;
 	}
 
 	if (paramManager) {
@@ -484,13 +551,10 @@ void Stutterer::endStutter(ParamManagerForTimeline* paramManager) {
 	}
 	lastQuantizedKnobDiff = 0;
 	valueBeforeStuttering = 0;
-	if (!startedFromStandby && !isScatterMode) {
-		stutterSource = nullptr;
-	}
 }
 
 Error Stutterer::enableStandby(void* source, int32_t magnitude, uint32_t timePerTickInverse) {
-	if (status == Status::STANDBY && stutterSource == source) {
+	if (status == Status::STANDBY && recordSource == source) {
 		return Error::NONE;
 	}
 
@@ -510,7 +574,7 @@ Error Stutterer::enableStandby(void* source, int32_t magnitude, uint32_t timePer
 	buffer.setCurrent(buffer.begin());
 
 	status = Status::STANDBY;
-	stutterSource = source;
+	recordSource = source;
 	return Error::NONE;
 }
 
@@ -532,36 +596,30 @@ void Stutterer::disableStandby() {
 		playBuffer = nullptr;
 
 		status = Status::OFF;
-		stutterSource = nullptr;
+		playSource = nullptr;
+		recordSource = nullptr;
 	}
 }
 
 void Stutterer::recordStandby(void* source, deluge::dsp::StereoBuffer<q31_t> audio) {
-	// Non-Classic modes: use double buffer system
-	bool useLooper = (stutterConfig.scatterMode != ScatterMode::Classic);
+	// === CLEAN OWNERSHIP MODEL ===
+	// Only recordSource can write to recordBuffer. Period.
+	// This works for both standby (source == recordSource) and takeover (B stole recordSource from A).
 
-	// For non-Classic modes, record during STANDBY, ARMED, and PLAYING (continuous recording)
-	if (useLooper) {
-		if (status != Status::STANDBY && status != Status::ARMED && status != Status::PLAYING) {
+	if (source != recordSource) {
+		return; // Not your buffer
+	}
+
+	// Check if double buffers are in use (scatter mode)
+	bool hasDoubleBuffers = (recordBuffer != nullptr && playBuffer != nullptr);
+
+	if (hasDoubleBuffers) {
+		// Scatter mode: record during STANDBY or PLAYING (takeover)
+		if (status != Status::STANDBY && status != Status::PLAYING) {
 			return;
 		}
-	}
-	else {
-		// Classic mode: only record during STANDBY
-		if (status != Status::STANDBY) {
-			return;
-		}
-	}
-
-	// Only record from the source that owns this stutter session
-	if (source != stutterSource) {
-		return;
-	}
-
-	if (useLooper && recordBuffer != nullptr) {
 		for (deluge::dsp::StereoSample<q31_t> sample : audio) {
-			recordBuffer[recordWritePos].l = sample.l;
-			recordBuffer[recordWritePos].r = sample.r;
+			recordBuffer[recordWritePos] = sample;
 			recordWritePos++;
 			if (recordWritePos >= kLooperBufferSize) {
 				recordWritePos = 0;
@@ -570,7 +628,10 @@ void Stutterer::recordStandby(void* source, deluge::dsp::StereoBuffer<q31_t> aud
 		return;
 	}
 
-	// Classic mode: use delay buffer
+	// Classic mode: use delay buffer during STANDBY only
+	if (status != Status::STANDBY) {
+		return;
+	}
 	for (deluge::dsp::StereoSample<q31_t> sample : audio) {
 		buffer.current().l = sample.l;
 		buffer.current().r = sample.r;
@@ -580,130 +641,74 @@ void Stutterer::recordStandby(void* source, deluge::dsp::StereoBuffer<q31_t> aud
 
 Error Stutterer::armStutter(void* source, ParamManagerForTimeline* paramManager, StutterConfig sc, int32_t magnitude,
                             uint32_t timePerTickInverse, int64_t targetTick, size_t loopLengthSamples, bool halfBar) {
-	if (status == Status::RECORDING || status == Status::PLAYING) {
-		return Error::UNSPECIFIED;
+	// === SIMPLIFIED: armStutter just claims recordBuffer for this source ===
+	// No beat quantization for now - that's broken anyway.
+	// This is called when a source wants to START recording (first encoder press).
+
+	if (status == Status::RECORDING) {
+		return Error::UNSPECIFIED; // Classic mode recording, can't interrupt
 	}
 
-	startedFromStandby = (status == Status::STANDBY && stutterSource == source);
+	bool hasDoubleBuffers = (bufferA != nullptr && bufferB != nullptr);
 
-	// Store armed state
-	armedTargetTick = targetTick;
+	// Store config for when trigger fires
 	armedConfig = sc;
 	armedHalfBarMode = halfBar;
-	armedMagnitude = magnitude;
-	armedTimePerTickInverse = timePerTickInverse;
-	armedParamManager = paramManager;
 	armedLoopLengthSamples = loopLengthSamples;
-	stutterSource = source;
-	status = Status::ARMED;
 
-	return Error::NONE;
+	if (status == Status::PLAYING && hasDoubleBuffers) {
+		// TAKEOVER: Someone else is playing, we want to steal the record buffer
+		// Source claims recordBuffer, starts recording while other source keeps playing
+		recordSource = source;
+		recordWritePos = 0;
+		// Clear buffer to start fresh
+		// EXPERIMENT: commented out to test if memset causes audio glitch
+		// if (recordBuffer != nullptr) {
+		// 	memset(recordBuffer, 0, kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
+		// }
+		return Error::NONE;
+	}
+
+	// Not playing - this is initial setup, delegate to beginStutter
+	return beginStutter(source, paramManager, sc, magnitude, timePerTickInverse, loopLengthSamples, halfBar);
 }
 
 bool Stutterer::checkArmedTrigger(int64_t currentTick, ParamManager* paramManager, int32_t magnitude,
                                   uint32_t timePerTickInverse) {
-	if (status != Status::ARMED) {
-		return false;
-	}
-
-	if (currentTick >= armedTargetTick) {
-		stutterConfig = armedConfig;
-		currentReverse = stutterConfig.reversed;
-		halfBarMode = armedHalfBarMode;
-
-		// Non-Classic modes: swap buffers (same logic as beginStutter)
-		bool useLooper = (stutterConfig.scatterMode != ScatterMode::Classic);
-		if (useLooper) {
-			// If we have buffers, swap and start playback
-			// See KNOWN ISSUE comment in beginStutter re: stale audio on rapid re-trigger
-			if (recordBuffer != nullptr && armedLoopLengthSamples > 0) {
-				playbackLength = std::min(armedLoopLengthSamples, kLooperBufferSize);
-
-				// Calculate where loop starts in record buffer (which becomes play buffer)
-				if (recordWritePos >= playbackLength) {
-					playbackStartPos = recordWritePos - playbackLength;
-				}
-				else {
-					playbackStartPos = kLooperBufferSize - (playbackLength - recordWritePos);
-				}
-
-				// Swap buffers - no copy needed!
-				std::swap(recordBuffer, playBuffer);
-
-				playbackPos = 0;
-				recordWritePos = 0;
-				// Initialize slice to full length; will be updated at first sample for Repeat mode
-				currentSliceLength = playbackLength;
-				sliceStartOffset = 0;
-				// Reset scatter state
-				scatterSliceIndex = 0;
-				scatterReversed = false;
-				status = Status::PLAYING;
-				armedParamManager = nullptr;
-				armedLoopLengthSamples = 0;
-				return true;
-			}
-
-			// No buffers - allocate both and start standby
-			if (bufferA == nullptr) {
-				bufferA = static_cast<deluge::dsp::StereoSample<q31_t>*>(
-				    allocLowSpeed(kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
-				if (bufferA == nullptr) {
-					status = Status::OFF;
-					stutterSource = nullptr;
-					armedParamManager = nullptr;
-					return false;
-				}
-			}
-			if (bufferB == nullptr) {
-				bufferB = static_cast<deluge::dsp::StereoSample<q31_t>*>(
-				    allocLowSpeed(kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
-				if (bufferB == nullptr) {
-					status = Status::OFF;
-					stutterSource = nullptr;
-					armedParamManager = nullptr;
-					return false;
-				}
-			}
-			recordBuffer = bufferA;
-			playBuffer = bufferB;
-			recordWritePos = 0;
-			status = Status::STANDBY;
-			armedParamManager = nullptr;
-			armedLoopLengthSamples = 0;
-			return true;
-		}
-
-		// Classic mode: use DelayBuffer with resampling
-		int32_t rate = getStutterRate(armedParamManager, armedMagnitude, armedTimePerTickInverse);
-		Error error = buffer.init(rate, 0, true);
-		if (error == Error::NONE) {
-			status = Status::RECORDING;
-			sizeLeftUntilRecordFinished = buffer.size();
-			armedParamManager = nullptr;
-			return true;
-		}
-
-		// Failed to allocate
-		status = Status::OFF;
-		stutterSource = nullptr;
-		armedParamManager = nullptr;
-		return false;
-	}
-
+	// === SIMPLIFIED: No beat quantization for now ===
+	// Takeover trigger happens via beginStutter when recordSource calls it.
+	// This function is vestigial - always returns false.
+	// TODO: Re-implement beat quantization properly later.
 	return false;
 }
 
 void Stutterer::cancelArmed() {
+	// === SIMPLIFIED: Cancel takeover ===
+	// If source was recording for takeover, give up recordBuffer
+	// The current playSource keeps playing.
+
+	if (status == Status::PLAYING && recordSource != playSource) {
+		// Someone was preparing takeover - cancel it
+		// Give recordBuffer back to playSource
+		recordSource = playSource;
+		recordWritePos = 0;
+		// EXPERIMENT: commented out to test if memset causes audio glitch
+		// if (recordBuffer != nullptr) {
+		// 	memset(recordBuffer, 0, kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
+		// }
+		return;
+	}
+
 	if (status == Status::ARMED) {
+		// Classic mode armed - go back to standby or off
 		if (startedFromStandby) {
 			status = Status::STANDBY;
 		}
 		else {
 			buffer.discard();
 			status = Status::OFF;
-			stutterSource = nullptr;
+			playSource = nullptr;
+			recordSource = nullptr;
 		}
-		armedParamManager = nullptr;
 	}
 }

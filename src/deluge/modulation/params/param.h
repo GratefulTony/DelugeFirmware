@@ -158,7 +158,7 @@ enum Global : ParamType {
 	GLOBAL_DISPERSER_TWIST,                    // Disperser character zone (allows cross-zone)
 	GLOBAL_SCATTER_ZONE_A,                     // Scatter structural zone
 	GLOBAL_SCATTER_ZONE_B,                     // Scatter timbral zone
-	GLOBAL_SCATTER_DEPTH,                      // Scatter effect depth
+	GLOBAL_SCATTER_MACRO_CONFIG,               // Scatter effect depth
 
 	// Global exp params begin
 	FIRST_GLOBAL_EXP,
@@ -227,7 +227,7 @@ enum UnpatchedShared : ParamType {
 	// Scatter controls
 	UNPATCHED_SCATTER_ZONE_A,
 	UNPATCHED_SCATTER_ZONE_B,
-	UNPATCHED_SCATTER_DEPTH,
+	UNPATCHED_SCATTER_MACRO_CONFIG,
 	UNPATCHED_SCATTER_MACRO,
 	// Arp
 	UNPATCHED_FIRST_ARP_PARAM,
@@ -328,7 +328,7 @@ constexpr ZoneParamInfo getZoneParamInfo(ParamType param) {
 	case GLOBAL_DISPERSER_TWIST:
 	case GLOBAL_SCATTER_ZONE_A:
 	case GLOBAL_SCATTER_ZONE_B:
-	case GLOBAL_SCATTER_DEPTH:
+	case GLOBAL_SCATTER_MACRO_CONFIG:
 		return kZoneParamDefault;
 	default:
 		return kStandardParamDefault;
@@ -346,7 +346,7 @@ constexpr ZoneParamInfo getZoneParamInfo(UnpatchedShared param) {
 	case UNPATCHED_MB_COMPRESSOR_VIBE:
 	case UNPATCHED_SCATTER_ZONE_A:
 	case UNPATCHED_SCATTER_ZONE_B:
-	case UNPATCHED_SCATTER_DEPTH:
+	case UNPATCHED_SCATTER_MACRO_CONFIG:
 		return kZoneParamDefault;
 	default:
 		return kStandardParamDefault;
@@ -386,8 +386,8 @@ constexpr int32_t getUnpatchedFallback(int32_t patchedParam) {
 		return UNPATCHED_SCATTER_ZONE_A;
 	case GLOBAL_SCATTER_ZONE_B:
 		return UNPATCHED_SCATTER_ZONE_B;
-	case GLOBAL_SCATTER_DEPTH:
-		return UNPATCHED_SCATTER_DEPTH;
+	case GLOBAL_SCATTER_MACRO_CONFIG:
+		return UNPATCHED_SCATTER_MACRO_CONFIG;
 	case GLOBAL_SCATTER_MACRO:
 		return UNPATCHED_SCATTER_MACRO;
 	default:

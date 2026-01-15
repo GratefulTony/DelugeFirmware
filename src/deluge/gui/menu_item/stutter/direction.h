@@ -18,6 +18,7 @@
 #include "gui/menu_item/selection.h"
 #include "gui/ui/sound_editor.h"
 #include "model/drum/drum.h"
+#include "model/fx/stutterer.h"
 #include "model/instrument/kit.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
 #include "processing/sound/sound_drum.h"
@@ -101,11 +102,19 @@ public:
 					if (thisDrum->type == DrumType::SOUND) {
 						auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
 						soundDrum->stutterConfig.latch = latch;
+						// Switching to momentary while scattering should end scatter
+						if (!latch && stutterer.isStuttering(soundDrum)) {
+							soundDrum->endStutter(nullptr);
+						}
 					}
 				}
 			}
 			else {
 				soundEditor.currentModControllable->stutterConfig.latch = latch;
+				// Switching to momentary while scattering should end scatter
+				if (!latch && stutterer.isStuttering(soundEditor.currentModControllable)) {
+					soundEditor.currentModControllable->endStutter(nullptr);
+				}
 			}
 			return;
 		}

@@ -522,7 +522,7 @@ stutter::ScatterModeMenu stutterModeMenu{STRING_FOR_SCATTER_MODE, STRING_FOR_SCA
 // Scatter page 2
 stutter::ScatterZoneA stutterZoneAMenu{STRING_FOR_SCATTER_ZONE_A, STRING_FOR_SCATTER_ZONE_A};
 stutter::ScatterZoneB stutterZoneBMenu{STRING_FOR_SCATTER_ZONE_B, STRING_FOR_SCATTER_ZONE_B};
-stutter::ScatterDepth stutterDepthMenu{STRING_FOR_SCATTER_DEPTH, STRING_FOR_SCATTER_DEPTH};
+stutter::ScatterMacroConfig stutterMacroConfigMenu{STRING_FOR_SCATTER_MACRO_CONFIG, STRING_FOR_SCATTER_MACRO_CONFIG};
 stutter::ScatterMacro stutterMacroMenu{STRING_FOR_SCATTER_MACRO, STRING_FOR_SCATTER_MACRO,
                                        params::GLOBAL_SCATTER_MACRO};
 
@@ -536,7 +536,7 @@ HorizontalMenu stutterMenu{STRING_FOR_STUTTER,
                                // Page 2: Scatter zone controls
                                &stutterZoneAMenu,
                                &stutterZoneBMenu,
-                               &stutterDepthMenu,
+                               &stutterMacroConfigMenu,
                                &stutterMacroMenu,
                            },
                            HorizontalMenu::Layout::FIXED};

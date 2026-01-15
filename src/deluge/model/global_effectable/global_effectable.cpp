@@ -134,7 +134,8 @@ bool GlobalEffectable::learnKnob(MIDICable* cable, ParamDescriptor paramDescript
 void GlobalEffectable::modButtonAction(uint8_t whichModButton, bool on, ParamManagerForTimeline* paramManager) {
 
 	// leave stutter running in perfomance session view
-	if (getRootUI() != &performanceView) {
+	// Also don't end scatter (which allows navigation between mod banks)
+	if (getRootUI() != &performanceView && stutterConfig.scatterMode == ScatterMode::Classic) {
 		// If we're leaving this mod function or anything else is happening, we want to be sure that stutter has stopped
 		endStutter(paramManager);
 	}
@@ -260,12 +261,19 @@ bool GlobalEffectable::modEncoderButtonAction(uint8_t whichModEncoder, bool on,
 
 	// Stutter section
 	if (modKnobMode == 6 && whichModEncoder == 1) {
+		bool isScatter = (stutterConfig.scatterMode != ScatterMode::Classic);
 		if (on) {
-			beginStutter((ParamManagerForTimeline*)modelStack->paramManager);
+			if (isScatter && stutterer.isStuttering(this)) {
+				// WE are playing scatter - toggle off
+				stutterer.endStutter((ParamManagerForTimeline*)modelStack->paramManager);
+			}
+			else {
+				// Either nothing playing, or someone ELSE is playing (takeover)
+				beginStutter((ParamManagerForTimeline*)modelStack->paramManager);
+			}
 		}
 		else {
 			// On release: don't end if latched in scatter mode
-			bool isScatter = (stutterConfig.scatterMode != ScatterMode::Classic);
 			bool isLatched = isScatter && stutterConfig.latch;
 			if (!isLatched) {
 				endStutter((ParamManagerForTimeline*)modelStack->paramManager);

@@ -66,6 +66,7 @@
 #include "model/consequence/consequence_note_row_mute.h"
 #include "model/drum/drum.h"
 #include "model/drum/midi_drum.h"
+#include "model/fx/stutterer.h"
 #include "model/instrument/kit.h"
 #include "model/instrument/melodic_instrument.h"
 #include "model/instrument/non_audio_instrument.h"
@@ -4064,9 +4065,9 @@ void InstrumentClipView::mutePadPress(uint8_t yDisplay) {
 
 	InstrumentClip* clip = (InstrumentClip*)modelStack->getTimelineCounter();
 
-	// We do not want to change the selected Drum if stutter is happening, because the user needs to keep
-	// controlling, and eventually stop stuttering on, their current selected Drum
-	bool wasStuttering = isUIModeActive(UI_MODE_STUTTERING);
+	// We do not want to change the selected Drum if stutter/scatter is happening, because the user needs to keep
+	// controlling, and eventually stop on, their current selected Drum
+	bool wasStuttering = isUIModeActive(UI_MODE_STUTTERING) || stutterer.isScatterPlaying();
 
 	// We do not want to change the selected drum if we're in the automation view note editor
 	// because the selected drum for note editing is the last auditioned note row and we don't want

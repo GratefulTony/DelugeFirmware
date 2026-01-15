@@ -44,6 +44,12 @@ struct StutterConfig {
 	bool pingPong = false;
 	bool latch = false; ///< Scatter mode: latch (stays on after release) vs normal (release to stop)
 	ScatterMode scatterMode = ScatterMode::Classic;
+
+	// Secret knob phase offsets (push+twist encoder on zone knobs)
+	float zoneAPhaseOffset{0}; ///< Zone A structural phase offset (push Zone A encoder)
+	float zoneBPhaseOffset{0}; ///< Zone B timbral phase offset (push Zone B encoder)
+	float depthPhaseOffset{0}; ///< Depth phase offset (push Depth encoder)
+	float gammaPhase{0};       ///< Gamma multiplier for macro (push Macro encoder)
 };
 
 class Stutterer {
@@ -53,9 +59,17 @@ public:
 
 	/// Buffer size for non-Classic looper modes (4 seconds at 44.1kHz for ring buffer)
 	static constexpr size_t kLooperBufferSize = 44100 * 4;
+	/// Check if source is actively playing from the scatter buffer
 	inline bool isStuttering(void* source) {
-		return stutterSource == source && (status == Status::RECORDING || status == Status::PLAYING);
+		return playSource == source && (status == Status::RECORDING || status == Status::PLAYING);
 	}
+	/// Check if scatter is actively playing (regardless of ownership)
+	inline bool isScatterPlaying() const {
+		return stutterConfig.scatterMode != ScatterMode::Classic
+		       && (status == Status::RECORDING || status == Status::PLAYING);
+	}
+	/// Check if this source owns either play or record buffer
+	inline bool ownsStutter(void* source) { return playSource == source || recordSource == source; }
 	/// Get the current scatter mode (valid while stuttering or armed)
 	inline ScatterMode getScatterMode() const {
 		if (status == Status::ARMED) {
@@ -66,7 +80,14 @@ public:
 	/// Check if standby recording is active
 	inline bool isInStandby() const { return status == Status::STANDBY; }
 	/// Check if armed and waiting for beat quantize
-	inline bool isArmed() const { return status == Status::ARMED; }
+	/// Takeover = PLAYING with a different source recording (preparing to take over)
+	inline bool isArmed() const {
+		return status == Status::ARMED || (status == Status::PLAYING && recordSource != playSource);
+	}
+	/// Check if source is armed for takeover (recording while someone else plays)
+	inline bool isArmedForTakeover(void* source) const {
+		return status == Status::PLAYING && recordSource == source && playSource != source;
+	}
 	// These calls are slightly awkward with the magniture & timePerTickInverse, but that's the price for not depending
 	// on currentSong and playbackhandler...
 	// loopLengthSamples: for scatter modes, the length of the loop region in samples (one bar or 2 beats)
@@ -123,9 +144,17 @@ private:
 	int32_t sizeLeftUntilRecordFinished = 0;
 	int32_t valueBeforeStuttering = 0;
 	int32_t lastQuantizedKnobDiff = 0;
-	/// This functions as cookie, allowing different users to know who is currently stuttering, so only those who
-	/// are will send audio here.
-	void* stutterSource = nullptr;
+	/// === CLEAN BUFFER OWNERSHIP MODEL ===
+	/// Two independent ownership slots - can be same or different sources:
+	/// - playSource: who is playing from playBuffer (gets scatter output)
+	/// - recordSource: who is recording to recordBuffer (capturing audio)
+	///
+	/// When different, we have a takeover in progress:
+	///   A is playSource (still playing), B is recordSource (preparing to take over)
+	/// When B triggers, swap buffers and B becomes both playSource and recordSource.
+	void* playSource = nullptr;   ///< Who owns playBuffer (or nullptr)
+	void* recordSource = nullptr; ///< Who owns recordBuffer (or nullptr)
+
 	/// Track if we started from standby mode (to return to it after stutter ends)
 	bool startedFromStandby = false;
 
@@ -184,16 +213,16 @@ private:
 	int32_t scatterSliceIndex{0}; ///< Current sequential slice (0 to numSlices-1)
 	int32_t scatterNumSlices{8};  ///< Number of slices to divide bar into
 	bool scatterReversed{false};  ///< Whether current slice is playing reversed
+	float scatterDryMix{0};       ///< Per-grain dry crossfade [0,1]: 0=full grain, 1=full dry
 
-	/// Armed trigger state - stored for when beat trigger fires
-	int64_t armedTargetTick{0};
+	/// Stored config for takeover (when recordSource triggers playback)
 	StutterConfig armedConfig{};
-	int32_t armedMagnitude{0};
-	uint32_t armedTimePerTickInverse{0};
-	ParamManagerForTimeline* armedParamManager{nullptr};
 	size_t armedLoopLengthSamples{0};
 	bool armedHalfBarMode{false};
 };
 
 // There's only one stutter effect active at a time, so we have a global stutterer to save memory.
+// NOTE: Classic mode uses DelayBuffer, scatter modes use double buffers (bufferA/bufferB).
+// These are separate memory, so in theory classic + scatter could run simultaneously on
+// different tracks. Would require separating the state (status, playSource, recordSource) per mode.
 extern Stutterer stutterer;

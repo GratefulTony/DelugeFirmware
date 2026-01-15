@@ -59,6 +59,7 @@
 #include "model/clip/clip_instance.h"
 #include "model/clip/instrument_clip.h"
 #include "model/clip/instrument_clip_minder.h"
+#include "model/fx/stutterer.h"
 #include "model/instrument/instrument.h"
 #include "model/instrument/melodic_instrument.h"
 #include "model/note/note_row.h"
@@ -934,8 +935,8 @@ midiLearnMelodicInstrumentAction:
 			// If Clip was pressed before...
 			if (isUIModeActive(UI_MODE_CLIP_PRESSED_IN_SONG_VIEW)) {
 
-				// Stop stuttering if we are
-				if (isUIModeActive(UI_MODE_STUTTERING)) {
+				// Stop stuttering/scattering if we are
+				if (isUIModeActive(UI_MODE_STUTTERING) || stutterer.isScatterPlaying()) {
 					((ModControllableAudio*)view.activeModControllableModelStack.modControllable)
 					    ->endStutter((ParamManagerForTimeline*)view.activeModControllableModelStack.paramManager);
 				}

@@ -24,10 +24,16 @@
 #include "gui/ui/sound_editor.h"
 #include "model/fx/stutterer.h"
 #include "modulation/params/param.h"
+#include <hid/buttons.h>
+#include <hid/display/display.h>
 
 namespace params = deluge::modulation::params;
 
 namespace deluge::gui::menu_item::stutter {
+
+// Resolution and zone count for scatter zone params (1024 steps, 8 zones)
+static constexpr int32_t kScatterResolution = 1024;
+static constexpr int32_t kScatterNumZones = 8;
 
 /**
  * Scatter Zone A - Structural control
@@ -37,6 +43,8 @@ namespace deluge::gui::menu_item::stutter {
  * Zone 2: Retro - Reverse order tendency
  * Zone 3: Leap - Interleaved skipping
  * Zones 4-7: Meta - All structural params via phi triangle evolution
+ *
+ * Secret menu: Push+twist encoder to adjust zoneAPhaseOffset
  */
 class ScatterZoneA final : public ZoneBasedDualParam<params::GLOBAL_SCATTER_ZONE_A> {
 public:
@@ -53,13 +61,13 @@ public:
 		case 3:
 			return "Leap";
 		case 4:
-			return "Meta1";
+			return "Density";
 		case 5:
-			return "Meta2";
+			return "Meta1";
 		case 6:
-			return "Meta3";
+			return "Meta2";
 		case 7:
-			return "Meta4";
+			return "Meta3";
 		default:
 			return "?";
 		}
@@ -75,10 +83,80 @@ public:
 			return "RE";
 		case 3:
 			return "LP";
+		case 4:
+			return "DN";
 		default:
 			return "MT";
 		}
 	}
+
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust zoneAPhaseOffset
+			Buttons::selectButtonPressUsedUp = true;
+			float& phase = soundEditor.currentModControllable->stutterConfig.zoneAPhaseOffset;
+			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
+			// Show current value on display
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "offset:%d", static_cast<int32_t>(phase * 10.0f));
+			display->displayPopup(buffer);
+			renderUIsForOled();
+			suppressNotification_ = true;
+		}
+		else {
+			ZoneBasedDualParam::selectEncoderAction(offset);
+		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
+	// Override rendering to show numeric coordinates when phaseOffset > 0
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
+		float phaseOffset = effectivePhaseOffset();
+		if (phaseOffset != 0.0f) {
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			renderZoneInHorizontalMenu(slot, this->getValue(), kScatterResolution, kScatterNumZones, getCoordName);
+		}
+		else {
+			renderZoneInHorizontalMenu(slot, this->getValue(), kScatterResolution, kScatterNumZones,
+			                           [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+protected:
+	void drawPixelsForOled() override {
+		float phaseOffset = effectivePhaseOffset();
+		if (phaseOffset != 0.0f) {
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			drawZoneForOled(this->getValue(), kScatterResolution, kScatterNumZones, getCoordName);
+		}
+		else {
+			drawZoneForOled(this->getValue(), kScatterResolution, kScatterNumZones,
+			                [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+private:
+	mutable bool suppressNotification_ = false;
+
+	[[nodiscard]] float effectivePhaseOffset() const {
+		auto& sc = soundEditor.currentModControllable->stutterConfig;
+		return sc.zoneAPhaseOffset + static_cast<float>(kScatterResolution) * sc.gammaPhase;
+	}
+
+	static inline char coordBuffer_[12] = {};
+	static void cacheCoordDisplay(float phaseOffset, int32_t value) {
+		int32_t p = static_cast<int32_t>(phaseOffset);
+		int32_t z = value >> 7; // 0-1023 → 0-7 (zone index)
+		snprintf(coordBuffer_, sizeof(coordBuffer_), "%d:%d", p, z);
+	}
+	static const char* getCoordName([[maybe_unused]] int32_t zoneIndex) { return coordBuffer_; }
 };
 
 /**
@@ -89,6 +167,8 @@ public:
  * Zone 2: Echo - Delay feedback
  * Zone 3: Shape - Envelope shaping
  * Zones 4-7: Meta - All timbral params via phi triangle evolution
+ *
+ * Secret menu: Push+twist encoder to adjust zoneBPhaseOffset
  */
 class ScatterZoneB final : public ZoneBasedDualParam<params::GLOBAL_SCATTER_ZONE_B> {
 public:
@@ -131,15 +211,83 @@ public:
 			return "MT";
 		}
 	}
+
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust zoneBPhaseOffset
+			Buttons::selectButtonPressUsedUp = true;
+			float& phase = soundEditor.currentModControllable->stutterConfig.zoneBPhaseOffset;
+			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
+			// Show current value on display
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "offset:%d", static_cast<int32_t>(phase * 10.0f));
+			display->displayPopup(buffer);
+			renderUIsForOled();
+			suppressNotification_ = true;
+		}
+		else {
+			ZoneBasedDualParam::selectEncoderAction(offset);
+		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
+		float phaseOffset = effectivePhaseOffset();
+		if (phaseOffset != 0.0f) {
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			renderZoneInHorizontalMenu(slot, this->getValue(), kScatterResolution, kScatterNumZones, getCoordName);
+		}
+		else {
+			renderZoneInHorizontalMenu(slot, this->getValue(), kScatterResolution, kScatterNumZones,
+			                           [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+protected:
+	void drawPixelsForOled() override {
+		float phaseOffset = effectivePhaseOffset();
+		if (phaseOffset != 0.0f) {
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			drawZoneForOled(this->getValue(), kScatterResolution, kScatterNumZones, getCoordName);
+		}
+		else {
+			drawZoneForOled(this->getValue(), kScatterResolution, kScatterNumZones,
+			                [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+private:
+	mutable bool suppressNotification_ = false;
+
+	[[nodiscard]] float effectivePhaseOffset() const {
+		auto& sc = soundEditor.currentModControllable->stutterConfig;
+		return sc.zoneBPhaseOffset + static_cast<float>(kScatterResolution) * sc.gammaPhase;
+	}
+
+	static inline char coordBuffer_[12] = {};
+	static void cacheCoordDisplay(float phaseOffset, int32_t value) {
+		int32_t p = static_cast<int32_t>(phaseOffset);
+		int32_t z = value >> 7;
+		snprintf(coordBuffer_, sizeof(coordBuffer_), "%d:%d", p, z);
+	}
+	static const char* getCoordName([[maybe_unused]] int32_t zoneIndex) { return coordBuffer_; }
 };
 
 /**
- * Scatter Depth - Effect intensity control
+ * Scatter Macro Config - Configuration for macro parameter behavior
  *
- * Zone 0-3: Subtle (depth=0 is static, no evolution)
- * Zone 4-7: Intense (full phi triangle evolution)
+ * Not yet hooked up - placeholder for future macro configuration options
+ *
+ * Secret menu: Push+twist encoder to adjust depthPhaseOffset
  */
-class ScatterDepth final : public ZoneBasedDualParam<params::GLOBAL_SCATTER_DEPTH> {
+class ScatterMacroConfig final : public ZoneBasedDualParam<params::GLOBAL_SCATTER_MACRO_CONFIG> {
 public:
 	using ZoneBasedDualParam::ZoneBasedDualParam;
 
@@ -188,6 +336,75 @@ public:
 			return "??";
 		}
 	}
+
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust depthPhaseOffset
+			Buttons::selectButtonPressUsedUp = true;
+			float& phase = soundEditor.currentModControllable->stutterConfig.depthPhaseOffset;
+			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
+			// Show current value on display
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "offset:%d", static_cast<int32_t>(phase * 10.0f));
+			display->displayPopup(buffer);
+			renderUIsForOled();
+			suppressNotification_ = true;
+		}
+		else {
+			ZoneBasedDualParam::selectEncoderAction(offset);
+		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
+		float phaseOffset = effectivePhaseOffset();
+		if (phaseOffset != 0.0f) {
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			renderZoneInHorizontalMenu(slot, this->getValue(), kScatterResolution, kScatterNumZones, getCoordName);
+		}
+		else {
+			renderZoneInHorizontalMenu(slot, this->getValue(), kScatterResolution, kScatterNumZones,
+			                           [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+	void getColumnLabel(StringBuf& label) override { label.append("mcon"); }
+
+protected:
+	void drawPixelsForOled() override {
+		float phaseOffset = effectivePhaseOffset();
+		if (phaseOffset != 0.0f) {
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			drawZoneForOled(this->getValue(), kScatterResolution, kScatterNumZones, getCoordName);
+		}
+		else {
+			drawZoneForOled(this->getValue(), kScatterResolution, kScatterNumZones,
+			                [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+private:
+	mutable bool suppressNotification_ = false;
+
+	[[nodiscard]] float effectivePhaseOffset() const {
+		auto& sc = soundEditor.currentModControllable->stutterConfig;
+		return sc.depthPhaseOffset + static_cast<float>(kScatterResolution) * sc.gammaPhase;
+	}
+
+	static inline char coordBuffer_[12] = {};
+	static void cacheCoordDisplay(float phaseOffset, int32_t value) {
+		int32_t p = static_cast<int32_t>(phaseOffset);
+		int32_t z = value >> 7;
+		snprintf(coordBuffer_, sizeof(coordBuffer_), "%d:%d", p, z);
+	}
+	static const char* getCoordName([[maybe_unused]] int32_t zoneIndex) { return coordBuffer_; }
 };
 
 } // namespace deluge::gui::menu_item::stutter

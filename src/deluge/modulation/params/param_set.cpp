@@ -21,6 +21,7 @@
 #include "gui/views/view.h"
 #include "model/action/action_logger.h"
 #include "model/clip/instrument_clip.h"
+#include "model/fx/stutterer.h"
 #include "model/instrument/instrument.h"
 #include "model/instrument/melodic_instrument.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
@@ -401,7 +402,7 @@ bool UnpatchedParamSet::shouldParamIndicateMiddleValue(ModelStackWithParamId con
 		return !(((ModControllableAudio*)modelStack->modControllable)->stutterConfig.useSongStutter
 		             ? currentSong->globalEffectable.stutterConfig.quantized
 		             : ((ModControllableAudio*)modelStack->modControllable)->stutterConfig.quantized)
-		       || isUIModeActive(UI_MODE_STUTTERING);
+		       || isUIModeActive(UI_MODE_STUTTERING) || stutterer.isScatterPlaying();
 	case params::UNPATCHED_BASS:
 	case params::UNPATCHED_TREBLE:
 		return true;

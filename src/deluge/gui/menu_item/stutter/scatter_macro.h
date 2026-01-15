@@ -27,6 +27,8 @@
 #include "model/model_stack.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_set.h"
+#include <hid/buttons.h>
+#include <hid/display/display.h>
 
 namespace params = deluge::modulation::params;
 
@@ -34,6 +36,8 @@ namespace deluge::gui::menu_item::stutter {
 
 /// Scatter macro parameter - dual patched/unpatched param for macro control
 /// Uses GLOBAL_SCATTER_MACRO when in Sound context, UNPATCHED_SCATTER_MACRO for GlobalEffectable
+///
+/// Secret menu: Push+twist encoder to adjust gammaPhase (multiplier for all zone phase offsets)
 class ScatterMacro final : public patched_param::Integer {
 public:
 	using patched_param::Integer::Integer;
@@ -68,11 +72,40 @@ public:
 		return value << 24;
 	}
 
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Secret menu: adjust gammaPhase (multiplier for all zone phase offsets)
+			Buttons::selectButtonPressUsedUp = true;
+			float& gamma = soundEditor.currentModControllable->stutterConfig.gammaPhase;
+			gamma = std::max(0.0f, gamma + static_cast<float>(offset) * 0.1f);
+			// Show current value on display
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "gamma:%d", static_cast<int32_t>(gamma * 10.0f));
+			display->displayPopup(buffer);
+			renderUIsForOled();
+			suppressNotification_ = true;
+		}
+		else {
+			patched_param::Integer::selectEncoderAction(offset);
+		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
 	[[nodiscard]] int32_t getMinValue() const override { return 0; }
 	[[nodiscard]] int32_t getMaxValue() const override { return 50; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
 
 	void getColumnLabel(StringBuf& label) override { label.append("Macro"); }
+
+private:
+	mutable bool suppressNotification_ = false;
 };
 
 } // namespace deluge::gui::menu_item::stutter

@@ -902,7 +902,7 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_SCATTER_MODE, "Scatter Mode"},
         {STRING_FOR_SCATTER_ZONE_A, "Zone A"},
         {STRING_FOR_SCATTER_ZONE_B, "Zone B"},
-        {STRING_FOR_SCATTER_DEPTH, "Scatter Depth"},
+        {STRING_FOR_SCATTER_MACRO_CONFIG, "Macro Config"},
         {STRING_FOR_SCATTER_MACRO, "Macro"},
         {STRING_FOR_SCATTER_CLASSIC, "Classic"},
         {STRING_FOR_SCATTER_REPEAT, "Repeat"},

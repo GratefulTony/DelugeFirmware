@@ -177,7 +177,7 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [GLOBAL_DISPERSER_TWIST]         = "Disp twist",
 	    [GLOBAL_SCATTER_ZONE_A]          = "Scat zoneA",
 	    [GLOBAL_SCATTER_ZONE_B]          = "Scat zoneB",
-	    [GLOBAL_SCATTER_DEPTH]           = "Scat depth",
+	    [GLOBAL_SCATTER_MACRO_CONFIG]           = "Scat depth",
 	    [GLOBAL_DELAY_RATE]              = "Delay rate",
 	    [GLOBAL_MOD_FX_RATE]             = "ModFX rate",
 	    [GLOBAL_LFO_FREQ_1]                = "LFO1 rate",
@@ -259,7 +259,7 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [GLOBAL_DISPERSER_TWIST] = STRING_FOR_DISPERSER_TWIST,
 	    [GLOBAL_SCATTER_ZONE_A] = STRING_FOR_SCATTER_ZONE_A,
 	    [GLOBAL_SCATTER_ZONE_B] = STRING_FOR_SCATTER_ZONE_B,
-	    [GLOBAL_SCATTER_DEPTH] = STRING_FOR_SCATTER_DEPTH,
+	    [GLOBAL_SCATTER_MACRO_CONFIG] = STRING_FOR_SCATTER_MACRO_CONFIG,
 	    [GLOBAL_DELAY_RATE] = STRING_FOR_PARAM_GLOBAL_DELAY_RATE,
 	    [GLOBAL_MOD_FX_RATE] = STRING_FOR_PARAM_GLOBAL_MOD_FX_RATE,
 	    [GLOBAL_LFO_FREQ_1] = STRING_FOR_PARAM_GLOBAL_LFO_FREQ_1,
@@ -319,7 +319,7 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 		    [UNPATCHED_DISPERSER_TWIST] = STRING_FOR_DISPERSER_TWIST,
 		    [UNPATCHED_SCATTER_ZONE_A] = STRING_FOR_SCATTER_ZONE_A,
 		    [UNPATCHED_SCATTER_ZONE_B] = STRING_FOR_SCATTER_ZONE_B,
-		    [UNPATCHED_SCATTER_DEPTH] = STRING_FOR_SCATTER_DEPTH,
+		    [UNPATCHED_SCATTER_MACRO_CONFIG] = STRING_FOR_SCATTER_MACRO_CONFIG,
 		    [UNPATCHED_SCATTER_MACRO] = STRING_FOR_SCATTER_MACRO,
 		    [UNPATCHED_ARP_GATE] = STRING_FOR_ARP_GATE_MENU_TITLE,
 		    [UNPATCHED_ARP_RHYTHM] = STRING_FOR_ARP_RHYTHM_MENU_TITLE,
@@ -575,7 +575,7 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 			return "scatterZoneA";
 		case UNPATCHED_SCATTER_ZONE_B:
 			return "scatterZoneB";
-		case UNPATCHED_SCATTER_DEPTH:
+		case UNPATCHED_SCATTER_MACRO_CONFIG:
 			return "scatterDepth";
 		case UNPATCHED_SCATTER_MACRO:
 			return "scatterMacro";
@@ -664,7 +664,7 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 		case GLOBAL_SCATTER_ZONE_B:
 			return "globalScatterZoneB";
 
-		case GLOBAL_SCATTER_DEPTH:
+		case GLOBAL_SCATTER_MACRO_CONFIG:
 			return "globalScatterDepth";
 
 		case GLOBAL_SCATTER_MACRO:

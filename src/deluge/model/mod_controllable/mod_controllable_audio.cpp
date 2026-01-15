@@ -619,6 +619,19 @@ void ModControllableAudio::writeTagsToFile(Serializer& writer) {
 	writer.writeAttribute("quantized", stutterConfig.quantized);
 	writer.writeAttribute("reverse", stutterConfig.reversed);
 	writer.writeAttribute("pingPong", stutterConfig.pingPong);
+	// Scatter secret knob phase offsets (only write if non-zero)
+	if (stutterConfig.zoneAPhaseOffset != 0) {
+		writer.writeAttribute("scatterPhaseA", static_cast<int32_t>(stutterConfig.zoneAPhaseOffset * 10.0f));
+	}
+	if (stutterConfig.zoneBPhaseOffset != 0) {
+		writer.writeAttribute("scatterPhaseB", static_cast<int32_t>(stutterConfig.zoneBPhaseOffset * 10.0f));
+	}
+	if (stutterConfig.depthPhaseOffset != 0) {
+		writer.writeAttribute("scatterPhaseDepth", static_cast<int32_t>(stutterConfig.depthPhaseOffset * 10.0f));
+	}
+	if (stutterConfig.gammaPhase != 0) {
+		writer.writeAttribute("scatterGamma", static_cast<int32_t>(stutterConfig.gammaPhase * 10.0f));
+	}
 	writer.closeTag();
 }
 
@@ -1020,6 +1033,10 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 		stutterConfig.quantized = true;
 		stutterConfig.reversed = false;
 		stutterConfig.pingPong = false;
+		stutterConfig.zoneAPhaseOffset = 0;
+		stutterConfig.zoneBPhaseOffset = 0;
+		stutterConfig.depthPhaseOffset = 0;
+		stutterConfig.gammaPhase = 0;
 		reader.match('{');
 		while (*(tagName = reader.readNextTagOrAttributeName())) {
 			if (!strcmp(tagName, "quantized")) {
@@ -1036,6 +1053,22 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 				int32_t contents = reader.readTagOrAttributeValueInt();
 				stutterConfig.pingPong = static_cast<bool>(std::clamp(contents, 0_i32, 1_i32));
 				reader.exitTag("pingPong");
+			}
+			else if (!strcmp(tagName, "scatterPhaseA")) {
+				stutterConfig.zoneAPhaseOffset = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+				reader.exitTag("scatterPhaseA");
+			}
+			else if (!strcmp(tagName, "scatterPhaseB")) {
+				stutterConfig.zoneBPhaseOffset = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+				reader.exitTag("scatterPhaseB");
+			}
+			else if (!strcmp(tagName, "scatterPhaseDepth")) {
+				stutterConfig.depthPhaseOffset = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+				reader.exitTag("scatterPhaseDepth");
+			}
+			else if (!strcmp(tagName, "scatterGamma")) {
+				stutterConfig.gammaPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+				reader.exitTag("scatterGamma");
 			}
 		}
 		reader.exitTag("stutter", true);
@@ -1589,7 +1622,9 @@ void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
 	}
 
 	// For scatter modes with quantize, arm trigger to start on next beat
-	if (config.scatterMode != ScatterMode::Classic && config.quantized && playbackHandler.isEitherClockActive()) {
+	// Only arm if we DON'T already own the stutter - if we do, fall through to beginStutter (trigger)
+	if (config.scatterMode != ScatterMode::Classic && config.quantized && playbackHandler.isEitherClockActive()
+	    && !stutterer.ownsStutter(this)) {
 		// Calculate next beat boundary (16th note = bar / 16)
 		int64_t currentTick = playbackHandler.getCurrentInternalTickCount();
 		uint32_t barLength = currentSong->getBarLength();
@@ -1604,9 +1639,9 @@ void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
 		if (Error::NONE
 		    == stutterer.armStutter(this, paramManager, config, magnitude, timePerTickInverse, nextBeat,
 		                            loopLengthSamples, halfBarMode)) {
-			// Armed successfully - UI mode entered, will start on beat
+			// Armed successfully, will start on beat
 			view.notifyParamAutomationOccurred(paramManager);
-			enterUIMode(UI_MODE_STUTTERING);
+			display->displayPopup("Armed");
 		}
 		return;
 	}
@@ -1617,7 +1652,10 @@ void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
 	                              halfBarMode)) {
 		// Redraw the LEDs. Really only for quantized stutter, but doing it for unquantized won't hurt.
 		view.notifyParamAutomationOccurred(paramManager);
-		enterUIMode(UI_MODE_STUTTERING);
+		// Classic stutter locks UI, scatter doesn't need UI mode
+		if (config.scatterMode == ScatterMode::Classic) {
+			enterUIMode(UI_MODE_STUTTERING);
+		}
 	}
 }
 
@@ -1644,17 +1682,32 @@ void ModControllableAudio::processStutter(deluge::dsp::StereoBuffer<q31_t> buffe
 
 // paramManager is optional - if you don't send it, it won't restore the stutter rate and we won't redraw the LEDs
 void ModControllableAudio::endStutter(ParamManagerForTimeline* paramManager) {
-	// Cancel armed trigger if waiting for beat
-	if (stutterer.isArmed()) {
-		stutterer.cancelArmed();
+	// Check what role this source has in the current stutter session
+	bool isPlayer = stutterer.isStuttering(this);
+	bool isRecorder = stutterer.isArmedForTakeover(this);
+
+	if (!isPlayer && !isRecorder) {
+		return; // Not involved in current stutter
 	}
-	else {
+
+	if (isRecorder && !isPlayer) {
+		// We're recording for takeover but NOT playing yet.
+		// DON'T cancel on encoder release - keep recording until we trigger.
+		// This allows: press (arm) → release → press (trigger) → play
+		return;
+	}
+
+	if (isPlayer) {
+		// We're playing - end our playback
+		// If someone else is recording for takeover, they lose their recording
 		stutterer.endStutter(paramManager);
 	}
+
 	if (paramManager) {
 		// Redraw the LEDs.
 		view.notifyParamAutomationOccurred(paramManager);
 	}
+	// Exit classic stutter UI mode if active
 	exitUIMode(UI_MODE_STUTTERING);
 }
 
