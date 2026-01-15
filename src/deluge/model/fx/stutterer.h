@@ -99,6 +99,15 @@ public:
 	                    uint32_t timePerTickInverse);
 	void endStutter(ParamManagerForTimeline* paramManager = nullptr);
 
+	/// Update phase offsets from source's current config (call before processStutter)
+	/// This allows real-time adjustment of offsets while scatter is playing
+	inline void updatePhaseOffsets(const StutterConfig& sourceConfig) {
+		stutterConfig.zoneAPhaseOffset = sourceConfig.zoneAPhaseOffset;
+		stutterConfig.zoneBPhaseOffset = sourceConfig.zoneBPhaseOffset;
+		stutterConfig.macroConfigPhaseOffset = sourceConfig.macroConfigPhaseOffset;
+		stutterConfig.gammaPhase = sourceConfig.gammaPhase;
+	}
+
 	/// Arm stutter for quantized trigger (starts on next beat)
 	/// Returns Error::NONE if armed successfully
 	/// loopLengthSamples: for scatter modes, the length of the loop region in samples

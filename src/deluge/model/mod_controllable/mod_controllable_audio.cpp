@@ -1675,6 +1675,10 @@ void ModControllableAudio::processStutter(deluge::dsp::StereoBuffer<q31_t> buffe
 	}
 
 	if (stutterer.isStuttering(this)) {
+		// Update phase offsets from current config (allows real-time adjustment while playing)
+		if (stutterer.isScatterPlaying()) {
+			stutterer.updatePhaseOffsets(stutterConfig);
+		}
 		// Note: benchmarking is done inside processStutter() to separate classic vs scatter modes
 		stutterer.processStutter(buffer, paramManager, magnitude, timePerTickInverse);
 	}
