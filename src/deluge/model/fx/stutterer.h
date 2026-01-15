@@ -46,10 +46,10 @@ struct StutterConfig {
 	ScatterMode scatterMode = ScatterMode::Classic;
 
 	// Secret knob phase offsets (push+twist encoder on zone knobs)
-	float zoneAPhaseOffset{0}; ///< Zone A structural phase offset (push Zone A encoder)
-	float zoneBPhaseOffset{0}; ///< Zone B timbral phase offset (push Zone B encoder)
-	float depthPhaseOffset{0}; ///< Depth phase offset (push Depth encoder)
-	float gammaPhase{0};       ///< Gamma multiplier for macro (push Macro encoder)
+	float zoneAPhaseOffset{0};       ///< Zone A structural phase offset (push Zone A encoder)
+	float zoneBPhaseOffset{0};       ///< Zone B timbral phase offset (push Zone B encoder)
+	float macroConfigPhaseOffset{0}; ///< Macro config phase offset (push Macro Config encoder)
+	float gammaPhase{0};             ///< Gamma multiplier for macro (push Macro encoder)
 };
 
 class Stutterer {

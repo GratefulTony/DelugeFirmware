@@ -285,7 +285,7 @@ private:
  *
  * Not yet hooked up - placeholder for future macro configuration options
  *
- * Secret menu: Push+twist encoder to adjust depthPhaseOffset
+ * Secret menu: Push+twist encoder to adjust macroConfigPhaseOffset
  */
 class ScatterMacroConfig final : public ZoneBasedDualParam<params::GLOBAL_SCATTER_MACRO_CONFIG> {
 public:
@@ -339,9 +339,9 @@ public:
 
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
-			// Secret menu: adjust depthPhaseOffset
+			// Secret menu: adjust macroConfigPhaseOffset
 			Buttons::selectButtonPressUsedUp = true;
-			float& phase = soundEditor.currentModControllable->stutterConfig.depthPhaseOffset;
+			float& phase = soundEditor.currentModControllable->stutterConfig.macroConfigPhaseOffset;
 			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
 			// Show current value on display
 			char buffer[16];
@@ -395,7 +395,7 @@ private:
 
 	[[nodiscard]] float effectivePhaseOffset() const {
 		auto& sc = soundEditor.currentModControllable->stutterConfig;
-		return sc.depthPhaseOffset + static_cast<float>(kScatterResolution) * sc.gammaPhase;
+		return sc.macroConfigPhaseOffset + static_cast<float>(kScatterResolution) * sc.gammaPhase;
 	}
 
 	static inline char coordBuffer_[12] = {};

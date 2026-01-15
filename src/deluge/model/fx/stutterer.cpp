@@ -303,12 +303,12 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						deluge::dsp::scatter::ScatterPhaseOffsets offsets{
 						    stutterConfig.zoneAPhaseOffset,
 						    stutterConfig.zoneBPhaseOffset,
-						    stutterConfig.depthPhaseOffset,
+						    stutterConfig.macroConfigPhaseOffset,
 						    stutterConfig.gammaPhase,
 						};
 
 						// Compute grain params using raw q31 values - zone helpers ensure UI/DSP match
-						// Pass 0 for depth (macroConfig reserved for future use)
+						// Pass 0 for macroConfig (reserved for future use)
 						auto grain = deluge::dsp::scatter::computeGrainParams(zoneAParam, zoneBParam, 0,
 						                                                      scatterSliceIndex, offsets);
 

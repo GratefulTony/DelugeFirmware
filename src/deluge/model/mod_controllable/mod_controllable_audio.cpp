@@ -626,8 +626,8 @@ void ModControllableAudio::writeTagsToFile(Serializer& writer) {
 	if (stutterConfig.zoneBPhaseOffset != 0) {
 		writer.writeAttribute("scatterPhaseB", static_cast<int32_t>(stutterConfig.zoneBPhaseOffset * 10.0f));
 	}
-	if (stutterConfig.depthPhaseOffset != 0) {
-		writer.writeAttribute("scatterPhaseDepth", static_cast<int32_t>(stutterConfig.depthPhaseOffset * 10.0f));
+	if (stutterConfig.macroConfigPhaseOffset != 0) {
+		writer.writeAttribute("scatterPhaseMacro", static_cast<int32_t>(stutterConfig.macroConfigPhaseOffset * 10.0f));
 	}
 	if (stutterConfig.gammaPhase != 0) {
 		writer.writeAttribute("scatterGamma", static_cast<int32_t>(stutterConfig.gammaPhase * 10.0f));
@@ -1035,7 +1035,7 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 		stutterConfig.pingPong = false;
 		stutterConfig.zoneAPhaseOffset = 0;
 		stutterConfig.zoneBPhaseOffset = 0;
-		stutterConfig.depthPhaseOffset = 0;
+		stutterConfig.macroConfigPhaseOffset = 0;
 		stutterConfig.gammaPhase = 0;
 		reader.match('{');
 		while (*(tagName = reader.readNextTagOrAttributeName())) {
@@ -1062,9 +1062,9 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 				stutterConfig.zoneBPhaseOffset = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
 				reader.exitTag("scatterPhaseB");
 			}
-			else if (!strcmp(tagName, "scatterPhaseDepth")) {
-				stutterConfig.depthPhaseOffset = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
-				reader.exitTag("scatterPhaseDepth");
+			else if (!strcmp(tagName, "scatterPhaseDepth") || !strcmp(tagName, "scatterPhaseMacro")) {
+				stutterConfig.macroConfigPhaseOffset = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+				reader.exitTag(tagName);
 			}
 			else if (!strcmp(tagName, "scatterGamma")) {
 				stutterConfig.gammaPhase = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;

@@ -376,10 +376,10 @@ struct GrainParams {
  * These shift the effective zone position and scale phi evolution
  */
 struct ScatterPhaseOffsets {
-	float zoneA{0}; ///< Zone A structural phase offset
-	float zoneB{0}; ///< Zone B timbral phase offset
-	float depth{0}; ///< Depth phase offset
-	float gamma{0}; ///< Gamma multiplier for phi evolution (100x scale)
+	float zoneA{0};       ///< Zone A structural phase offset
+	float zoneB{0};       ///< Zone B timbral phase offset
+	float macroConfig{0}; ///< Macro config phase offset
+	float gamma{0};       ///< Gamma multiplier for phi evolution (100x scale)
 };
 
 /**
@@ -400,11 +400,11 @@ struct ScatterPhaseOffsets {
  *
  * @param zoneAParam Zone A raw q31 param value [0, ONE_Q31]
  * @param zoneBParam Zone B raw q31 param value [0, ONE_Q31]
- * @param depthParam Depth/intensity raw q31 param value [0, ONE_Q31]
+ * @param macroConfigParam Macro config raw q31 param value [0, ONE_Q31]
  * @param sliceIndex Current slice index (converted to phi-based phase internally)
  * @param offsets Phase offsets from secret encoder menus (optional)
  */
-inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t depthParam, int32_t sliceIndex,
+inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t macroConfigParam, int32_t sliceIndex,
                                       const ScatterPhaseOffsets& offsets = {}) {
 	GrainParams p;
 
@@ -417,9 +417,9 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 	double phRawA = static_cast<double>(offsets.zoneA) + kResolution * static_cast<double>(offsets.gamma);
 	double phRawB = static_cast<double>(offsets.zoneB) + kResolution * static_cast<double>(offsets.gamma);
 
-	// Apply depth offset (in normalized units, 0.1 per click)
-	float depth = static_cast<float>(depthParam) / static_cast<float>(ONE_Q31);
-	depth = std::clamp(depth + offsets.depth * 0.1f, 0.0f, 1.0f);
+	// Apply macroConfig offset (in normalized units, 0.1 per click)
+	float macroConfig = static_cast<float>(macroConfigParam) / static_cast<float>(ONE_Q31);
+	macroConfig = std::clamp(macroConfig + offsets.macroConfig * 0.1f, 0.0f, 1.0f);
 
 	// Phi triangle deadzone: when triangle output is low, sliceIndex contribution is zeroed
 	// This creates sparse activation - many consecutive slices get identical params → cache hits
@@ -575,8 +575,8 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 		}
 	}
 
-	// Gate from depth (lower depth = more gating for rhythmic effect)
-	p.gateRatio = 0.25f + (1.0f - depth * 0.5f) * 0.75f;
+	// Gate from macroConfig (lower value = more gating for rhythmic effect)
+	p.gateRatio = 0.25f + (1.0f - macroConfig * 0.5f) * 0.75f;
 
 	return p;
 }
