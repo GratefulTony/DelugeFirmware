@@ -160,6 +160,32 @@ constexpr std::array<phi::PhiTriConfig, 4> kTimbraBank = {{
 		return 1.0f;
 	}
 
+	// Anti-click fade: always fade to 0 at grain edges (~10ms = 440 samples at 44.1kHz)
+	// This is independent of depth and happens at the raw slice boundaries
+	constexpr int32_t kAntiClickSamples = 440;
+	float antiClick = 1.0f;
+	int32_t gatedLength = static_cast<int32_t>(static_cast<float>(sliceLength) * gateRatio);
+	if (gatedLength > kAntiClickSamples * 2) {
+		if (positionInSlice < kAntiClickSamples) {
+			antiClick = static_cast<float>(positionInSlice) / static_cast<float>(kAntiClickSamples);
+		}
+		else if (positionInSlice > gatedLength - kAntiClickSamples) {
+			antiClick = static_cast<float>(gatedLength - positionInSlice) / static_cast<float>(kAntiClickSamples);
+		}
+	}
+	else if (gatedLength > 0) {
+		// Very short slice: use half the length for fade
+		int32_t fadeLen = gatedLength / 2;
+		if (fadeLen > 0) {
+			if (positionInSlice < fadeLen) {
+				antiClick = static_cast<float>(positionInSlice) / static_cast<float>(fadeLen);
+			}
+			else if (positionInSlice > gatedLength - fadeLen) {
+				antiClick = static_cast<float>(gatedLength - positionInSlice) / static_cast<float>(fadeLen);
+			}
+		}
+	}
+
 	// Normalized position within slice [0,1]
 	float pos = static_cast<float>(positionInSlice) / static_cast<float>(sliceLength);
 
@@ -223,10 +249,11 @@ constexpr std::array<phi::PhiTriConfig, 4> kTimbraBank = {{
 		}
 	}
 
-	// Blend between hard gate (1.0) and envelope based on depth
-	// depth=0: return 1.0 (hard gate, no fade)
-	// depth=1: return envelope (full smooth grain)
-	return 1.0f + depth * (envelope - 1.0f);
+	// Combine: anti-click always applied, depth-controlled envelope on top
+	// depth=0: just anti-click fade at edges
+	// depth=1: full envelope shape
+	float depthEnv = 1.0f + depth * (envelope - 1.0f);
+	return antiClick * depthEnv;
 }
 
 /**

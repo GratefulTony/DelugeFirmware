@@ -376,9 +376,9 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						// Zone B knob position drives depth, shape, and gate through phi frequencies
 						float zoneBNorm = static_cast<float>(zoneBParam) / static_cast<float>(ONE_Q31);
 						// envDepth: slower phi, ramps up as Zone B increases
-						// Minimum 0.15 ensures ~10ms fade at slice edges to avoid clicks
+						// Anti-click fade is always applied in grainEnvelope, depth controls artistic shape
 						float envRaw = deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi050, 0.6f);
-						scatterEnvDepth = 0.15f + envRaw * 0.85f;
+						scatterEnvDepth = envRaw;
 						// envShape: different phi frequency for non-monotonic evolution
 						scatterEnvShape =
 						    deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi075, 0.7f);
