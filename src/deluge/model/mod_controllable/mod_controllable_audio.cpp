@@ -1595,9 +1595,14 @@ void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
 	StutterConfig config = stutterConfig.useSongStutter ? currentSong->globalEffectable.stutterConfig : stutterConfig;
 	// Scatter mode is always per-sound (independent of useSongStutter)
 	config.scatterMode = stutterConfig.scatterMode;
-	// For scatter modes, also use local quantize setting (scatter is per-sound feature)
+	// For scatter modes, also use local settings (scatter is per-sound feature)
 	if (config.scatterMode != ScatterMode::Classic) {
 		config.quantized = stutterConfig.quantized;
+		// Phase offsets are set via secret encoder menus on local config
+		config.zoneAPhaseOffset = stutterConfig.zoneAPhaseOffset;
+		config.zoneBPhaseOffset = stutterConfig.zoneBPhaseOffset;
+		config.macroConfigPhaseOffset = stutterConfig.macroConfigPhaseOffset;
+		config.gammaPhase = stutterConfig.gammaPhase;
 	}
 
 	int32_t magnitude = currentSong->getInputTickMagnitude();
