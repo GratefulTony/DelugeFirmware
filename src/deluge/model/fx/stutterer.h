@@ -18,6 +18,7 @@
 #pragma once
 
 #include "dsp/delay/delay_buffer.h"
+#include "dsp/scatter.hpp"
 #include <cstdint>
 #include <span>
 
@@ -229,6 +230,21 @@ private:
 	float scatterEnvWidth{1.0f};  ///< Envelope region [0,1]: 1=full slice, smaller=edges only
 	float scatterGateRatio{1.0f}; ///< Gate duty cycle [0,1]: 1=full slice, smaller=truncated with silence
 	float scatterPan{0};          ///< Crossfeed pan [-1,1]: 0=center, +1=L→R, -1=R→L
+	int32_t scatterPanCounter{0}; ///< Ever-incrementing counter for decorrelated pan (not tied to slice content)
+
+	/// Precomputed pan coefficients (Q31 fixed-point, computed once per slice)
+	int32_t scatterPanFadeQ31{0};       ///< Fading side multiplier: (1 - |pan|)
+	int32_t scatterPanKeepQ31{ONE_Q31}; ///< Target side keep: (1 - |pan|/2)
+	int32_t scatterPanCrossQ31{0};      ///< Target side crossfeed: |pan|/2
+	bool scatterPanRight{false};        ///< Pan direction: true = pan right (L fades), false = pan left (R fades)
+	bool scatterPanActive{false};       ///< Precomputed: pan != 0, skip per-sample check
+	bool scatterEnvActive{false};       ///< Precomputed: depth > 0, envelope applies
+	bool scatterGateActive{false};      ///< Precomputed: gate < 1, truncation applies
+	int32_t scatterSubdivisions{1};     ///< Current subdivision count (1,2,3,4,6,8,12) - ratchet
+	int32_t scatterSubdivIndex{0};      ///< Current subdivision within slice [0, subdivisions-1]
+
+	/// Precomputed envelope parameters (Q31 fixed-point, computed once per slice, used per-sample)
+	deluge::dsp::scatter::GrainEnvPrecomputedQ31 scatterEnvPrecomputed{};
 
 	/// Stored config for takeover (when recordSource triggers playback)
 	StutterConfig armedConfig{};

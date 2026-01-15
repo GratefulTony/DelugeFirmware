@@ -22,6 +22,7 @@
 #pragma once
 
 #include "dsp/phi_triangle.hpp"
+#include "dsp/util.hpp"
 #include "dsp/zone_param.hpp"
 #include <array>
 #include <cstdint>
@@ -30,6 +31,9 @@ namespace deluge::dsp::scatter {
 
 // Zone helpers from parent namespace (dsp::computeZoneQ31, dsp::ZoneInfo) are
 // accessible via C++ parent namespace lookup without explicit qualification
+
+// Precomputed reciprocal for q31 to float conversion (multiplication is ~10x faster than division on ARM)
+constexpr float kQ31ToFloat = 1.0f / static_cast<float>(ONE_Q31);
 
 /**
  * Phi triangle bank for structural scatter params (Zone A meta)
@@ -257,6 +261,402 @@ constexpr std::array<phi::PhiTriConfig, 4> kTimbraBank = {{
 }
 
 /**
+ * Precomputed envelope parameters (Q31 fixed-point) for zero-float per-sample evaluation
+ * Compute once per slice boundary, use for all samples in slice
+ * All reciprocals stored as Q31: multiply position by reciprocal, result is Q31 [0, ONE_Q31]
+ */
+struct GrainEnvPrecomputedQ31 {
+	int32_t invSliceLength{0};         ///< ONE_Q31 / sliceLength (for pos normalization)
+	int32_t invGateRatio{ONE_Q31};     ///< ONE_Q31 / gateRatio (for gated pos)
+	int32_t invFadeLen{0};             ///< ONE_Q31 / fadeLen (for anti-click, legacy)
+	int32_t invAttackLen{0};           ///< ONE_Q31 / attackFadeLen (asymmetric fade-in)
+	int32_t invDecayLen{0};            ///< ONE_Q31 / decayFadeLen (asymmetric fade-out)
+	int32_t invEdgeSize{0};            ///< ONE_Q31 / edgeSize (for edge-only mode)
+	int32_t invEnvShape{0};            ///< ONE_Q31 / envShape (for attack phase)
+	int32_t invOneMinusEnvShape{0};    ///< ONE_Q31 / (1 - envShape) (for decay phase)
+	int32_t gatedLength{0};            ///< sliceLength * gateRatio
+	int32_t fadeLen{0};                ///< Base anti-click fade length
+	int32_t attackFadeLen{0};          ///< Fade-in length (envShape scales this)
+	int32_t decayFadeLen{0};           ///< Fade-out length (1-envShape scales this)
+	int32_t edgeSizeQ31{0};            ///< envWidth * 0.5 in Q31
+	int32_t depthQ31{0};               ///< Envelope depth in Q31
+	int32_t oneMinusDepthQ31{ONE_Q31}; ///< (1 - depth) in Q31, precomputed for blend
+	int32_t envShapeQ31{ONE_Q31 / 2};  ///< Envelope shape in Q31
+	int32_t gateRatioQ31{ONE_Q31};     ///< Gate ratio in Q31 for threshold check
+	bool useEdgeMode{false};           ///< Whether envWidth < 1.0
+	bool useShortFade{false};          ///< Whether gatedLength <= 880 (2x anti-click)
+	bool depthIsMax{false};            ///< depth >= 0.99, skip blending
+};
+
+/**
+ * Precomputed envelope parameters for fast per-sample evaluation
+ * Compute once per slice boundary, use for all samples in slice
+ * Eliminates ~9 divisions per sample by converting to multiplications
+ */
+struct GrainEnvPrecomputed {
+	float invSliceLength{0};      ///< 1.0 / sliceLength
+	float invGateRatio{1.0f};     ///< 1.0 / gateRatio
+	float invFadeLen{0};          ///< 1.0 / fadeLen (for anti-click)
+	float invEdgeSize{0};         ///< 1.0 / edgeSize (for edge-only mode)
+	float invEnvShape{0};         ///< 1.0 / envShape (for attack phase)
+	float invOneMinusEnvShape{0}; ///< 1.0 / (1 - envShape) (for decay phase)
+	int32_t gatedLength{0};       ///< sliceLength * gateRatio
+	int32_t fadeLen{0};           ///< Anti-click fade length
+	float edgeSize{0};            ///< envWidth * 0.5
+	float depth{0};               ///< Envelope depth
+	float envShape{0.5f};         ///< Envelope shape
+	float envWidth{1.0f};         ///< Envelope width
+	float gateRatio{1.0f};        ///< Gate ratio for threshold check
+	bool useEdgeMode{false};      ///< Whether envWidth < 1.0
+	bool useShortFade{false};     ///< Whether gatedLength <= 880 (2x anti-click)
+};
+
+/**
+ * Prepare precomputed envelope parameters at slice boundary
+ * Call once when slice changes, result used for all samples in slice
+ */
+[[gnu::always_inline]] inline GrainEnvPrecomputed
+prepareGrainEnvelope(int32_t sliceLength, float gateRatio, float depth, float envShape = 0.5f, float envWidth = 1.0f) {
+	GrainEnvPrecomputed p;
+	constexpr int32_t kAntiClickSamples = 440;
+
+	if (sliceLength <= 0) {
+		return p; // Will return 1.0 for all samples
+	}
+
+	p.invSliceLength = 1.0f / static_cast<float>(sliceLength);
+	p.gateRatio = gateRatio;
+	p.depth = depth;
+	p.envShape = envShape;
+	p.envWidth = envWidth;
+
+	// Gate ratio reciprocal (avoid div by zero)
+	p.invGateRatio = (gateRatio > 0.001f) ? (1.0f / gateRatio) : 1000.0f;
+
+	// Gated length and fade parameters
+	p.gatedLength = static_cast<int32_t>(static_cast<float>(sliceLength) * gateRatio);
+
+	if (p.gatedLength > kAntiClickSamples * 2) {
+		p.fadeLen = kAntiClickSamples;
+		p.invFadeLen = 1.0f / static_cast<float>(kAntiClickSamples);
+		p.useShortFade = false;
+	}
+	else if (p.gatedLength > 0) {
+		p.fadeLen = p.gatedLength / 2;
+		p.invFadeLen = (p.fadeLen > 0) ? (1.0f / static_cast<float>(p.fadeLen)) : 0.0f;
+		p.useShortFade = true;
+	}
+
+	// Edge mode parameters
+	p.useEdgeMode = (envWidth < 1.0f && envWidth > 0.0f);
+	if (p.useEdgeMode) {
+		p.edgeSize = envWidth * 0.5f;
+		p.invEdgeSize = (p.edgeSize > 0.001f) ? (1.0f / p.edgeSize) : 1000.0f;
+	}
+
+	// Envelope shape reciprocals
+	p.invEnvShape = (envShape > 0.001f) ? (1.0f / envShape) : 1000.0f;
+	p.invOneMinusEnvShape = (envShape < 0.999f) ? (1.0f / (1.0f - envShape)) : 1000.0f;
+
+	return p;
+}
+
+/**
+ * Prepare precomputed Q31 envelope parameters at slice boundary
+ * All reciprocals in Q31 format for pure integer per-sample math
+ */
+[[gnu::always_inline]] inline GrainEnvPrecomputedQ31 prepareGrainEnvelopeQ31(int32_t sliceLength, float gateRatio,
+                                                                             float depth, float envShape = 0.5f,
+                                                                             float envWidth = 1.0f) {
+	GrainEnvPrecomputedQ31 p;
+	constexpr int32_t kAntiClickSamples = 440;
+
+	if (sliceLength <= 0) {
+		return p; // Will return ONE_Q31 for all samples
+	}
+
+	// Inverse slice length: ONE_Q31 / sliceLength
+	p.invSliceLength = ONE_Q31 / sliceLength;
+
+	// Gate ratio and inverse
+	p.gateRatioQ31 = static_cast<int32_t>(gateRatio * static_cast<float>(ONE_Q31));
+	p.invGateRatio = (gateRatio > 0.001f) ? static_cast<int32_t>(ONE_Q31 / gateRatio) : ONE_Q31;
+
+	// Depth in Q31
+	p.depthQ31 = static_cast<int32_t>(depth * static_cast<float>(ONE_Q31));
+
+	// Envelope shape in Q31
+	p.envShapeQ31 = static_cast<int32_t>(envShape * static_cast<float>(ONE_Q31));
+
+	// Gated length and fade parameters
+	p.gatedLength = static_cast<int32_t>(static_cast<float>(sliceLength) * gateRatio);
+
+	if (p.gatedLength > kAntiClickSamples * 2) {
+		p.fadeLen = kAntiClickSamples;
+		p.invFadeLen = ONE_Q31 / kAntiClickSamples;
+		p.useShortFade = false;
+	}
+	else if (p.gatedLength > 0) {
+		p.fadeLen = p.gatedLength / 2;
+		p.invFadeLen = (p.fadeLen > 0) ? (ONE_Q31 / p.fadeLen) : 0;
+		p.useShortFade = true;
+	}
+
+	// Asymmetric fade lengths based on envShape
+	// envShape=0: instant attack, full decay (percussive)
+	// envShape=0.5: symmetric
+	// envShape=1: full attack, instant decay (reversed)
+	// Scale factor 2x so envShape=0.5 gives full fadeLen to each
+	int32_t baseFade = p.fadeLen;
+	float attackScale = std::min(envShape * 2.0f, 1.0f);
+	float decayScale = std::min((1.0f - envShape) * 2.0f, 1.0f);
+	p.attackFadeLen = static_cast<int32_t>(static_cast<float>(baseFade) * attackScale);
+	p.decayFadeLen = static_cast<int32_t>(static_cast<float>(baseFade) * decayScale);
+	// Ensure minimum anti-click even at extreme shapes
+	constexpr int32_t kMinAntiClick = 64;
+	if (p.attackFadeLen < kMinAntiClick && baseFade >= kMinAntiClick) {
+		p.attackFadeLen = kMinAntiClick;
+	}
+	if (p.decayFadeLen < kMinAntiClick && baseFade >= kMinAntiClick) {
+		p.decayFadeLen = kMinAntiClick;
+	}
+	p.invAttackLen = (p.attackFadeLen > 0) ? (ONE_Q31 / p.attackFadeLen) : 0;
+	p.invDecayLen = (p.decayFadeLen > 0) ? (ONE_Q31 / p.decayFadeLen) : 0;
+
+	// Edge mode parameters
+	p.useEdgeMode = (envWidth < 1.0f && envWidth > 0.0f);
+	if (p.useEdgeMode) {
+		float edgeSize = envWidth * 0.5f;
+		p.edgeSizeQ31 = static_cast<int32_t>(edgeSize * static_cast<float>(ONE_Q31));
+		// invEdgeSize: need Q31 / edgeSize, but edgeSize is [0,0.5], so divide by fraction
+		p.invEdgeSize = (edgeSize > 0.001f) ? static_cast<int32_t>(ONE_Q31 / edgeSize) : ONE_Q31;
+	}
+
+	// Envelope shape reciprocals
+	p.invEnvShape = (envShape > 0.001f) ? static_cast<int32_t>(ONE_Q31 / envShape) : ONE_Q31;
+	p.invOneMinusEnvShape = (envShape < 0.999f) ? static_cast<int32_t>(ONE_Q31 / (1.0f - envShape)) : ONE_Q31;
+
+	// Precompute depth blend values for per-sample optimization
+	p.oneMinusDepthQ31 = ONE_Q31 - p.depthQ31;
+	p.depthIsMax = (depth >= 0.99f);
+
+	return p;
+}
+
+/**
+ * Fast grain envelope using precomputed reciprocals
+ * ~10x faster than grainEnvelope() - uses only multiplications, no divisions
+ *
+ * @param positionInSlice Current position within slice [0, sliceLength)
+ * @param p Precomputed parameters from prepareGrainEnvelope()
+ * @return Amplitude multiplier [0,1]
+ */
+[[gnu::always_inline]] inline float grainEnvelopeFast(int32_t positionInSlice, const GrainEnvPrecomputed& p) {
+	// Early out if no valid slice
+	if (p.invSliceLength == 0.0f) {
+		return 1.0f;
+	}
+
+	// Anti-click fade (multiplication instead of division)
+	float antiClick = 1.0f;
+	if (!p.useShortFade) {
+		if (positionInSlice < p.fadeLen) {
+			antiClick = static_cast<float>(positionInSlice) * p.invFadeLen;
+		}
+		else if (positionInSlice > p.gatedLength - p.fadeLen) {
+			antiClick = static_cast<float>(p.gatedLength - positionInSlice) * p.invFadeLen;
+		}
+	}
+	else if (p.fadeLen > 0) {
+		if (positionInSlice < p.fadeLen) {
+			antiClick = static_cast<float>(positionInSlice) * p.invFadeLen;
+		}
+		else if (positionInSlice > p.gatedLength - p.fadeLen) {
+			antiClick = static_cast<float>(p.gatedLength - positionInSlice) * p.invFadeLen;
+		}
+	}
+
+	// Normalized position (multiplication instead of division)
+	float pos = static_cast<float>(positionInSlice) * p.invSliceLength;
+
+	// Gate threshold check
+	if (pos > p.gateRatio) {
+		return 0.0f;
+	}
+
+	// Gated position (multiplication instead of division)
+	float gatedPos = pos * p.invGateRatio;
+
+	// Envelope calculation
+	float envelope;
+	if (p.useEdgeMode) {
+		if (gatedPos < p.edgeSize) {
+			float t = gatedPos * p.invEdgeSize;
+			envelope = (p.envShape > 0.001f) ? t * t : 1.0f;
+		}
+		else if (gatedPos > (1.0f - p.edgeSize)) {
+			float t = (gatedPos - (1.0f - p.edgeSize)) * p.invEdgeSize;
+			envelope = (p.envShape < 0.999f) ? (1.0f - t) * (1.0f - t) : 1.0f;
+		}
+		else {
+			envelope = 1.0f;
+		}
+	}
+	else {
+		if (p.envShape < 0.001f) {
+			envelope = (1.0f - gatedPos) * (1.0f - gatedPos);
+		}
+		else if (p.envShape > 0.999f) {
+			envelope = gatedPos * gatedPos;
+		}
+		else {
+			if (gatedPos < p.envShape) {
+				float t = gatedPos * p.invEnvShape;
+				envelope = t * t;
+			}
+			else {
+				float t = (gatedPos - p.envShape) * p.invOneMinusEnvShape;
+				envelope = (1.0f - t) * (1.0f - t);
+			}
+		}
+	}
+
+	// Combine anti-click with depth-controlled envelope
+	float depthEnv = 1.0f + p.depth * (envelope - 1.0f);
+	return antiClick * depthEnv;
+}
+
+/**
+ * Ultra-fast linear-only Q31 grain envelope - minimal per-sample cost
+ * Only computes linear anti-click fades, no parabolic curves or depth blending.
+ * Use this when caller has already determined we're in a fade region.
+ *
+ * @param positionInSlice Current position within slice [0, sliceLength)
+ * @param p Precomputed Q31 parameters from prepareGrainEnvelopeQ31()
+ * @return Amplitude multiplier in Q31 format [0, ONE_Q31]
+ */
+[[gnu::always_inline]] inline int32_t grainEnvelopeLinearQ31(int32_t positionInSlice, const GrainEnvPrecomputedQ31& p) {
+	// Asymmetric fade: attackFadeLen for fade-in, decayFadeLen for fade-out
+	// envShape=0: short attack, long decay (percussive)
+	// envShape=1: long attack, short decay (reversed)
+
+	// Fade in region (uses attackFadeLen)
+	if (positionInSlice < p.attackFadeLen) {
+		return positionInSlice * p.invAttackLen;
+	}
+	// Fade out region (uses decayFadeLen)
+	if (positionInSlice > p.gatedLength - p.decayFadeLen) {
+		int32_t remaining = p.gatedLength - positionInSlice;
+		return (remaining > 0) ? (remaining * p.invDecayLen) : 0;
+	}
+	// Flat middle
+	return ONE_Q31;
+}
+
+/**
+ * Pure Q31 fixed-point grain envelope - zero float operations per sample
+ * Uses only integer math: comparisons, additions, subtractions, and multiply_32x32_rshift32
+ *
+ * @param positionInSlice Current position within slice [0, sliceLength)
+ * @param p Precomputed Q31 parameters from prepareGrainEnvelopeQ31()
+ * @return Amplitude multiplier in Q31 format [0, ONE_Q31]
+ */
+[[gnu::always_inline]] inline int32_t grainEnvelopeQ31(int32_t positionInSlice, const GrainEnvPrecomputedQ31& p) {
+	// Early out if no valid slice
+	if (p.invSliceLength == 0) {
+		return ONE_Q31;
+	}
+
+	// Anti-click fade in Q31
+	// t = pos * invFadeLen gives Q31 result directly since pos is int and invFadeLen is Q31/len
+	int32_t antiClickQ31 = ONE_Q31;
+	if (!p.useShortFade) {
+		if (positionInSlice < p.fadeLen) {
+			// antiClick = position / fadeLen = position * invFadeLen
+			antiClickQ31 = positionInSlice * p.invFadeLen;
+		}
+		else if (positionInSlice > p.gatedLength - p.fadeLen) {
+			antiClickQ31 = (p.gatedLength - positionInSlice) * p.invFadeLen;
+		}
+	}
+	else if (p.fadeLen > 0) {
+		if (positionInSlice < p.fadeLen) {
+			antiClickQ31 = positionInSlice * p.invFadeLen;
+		}
+		else if (positionInSlice > p.gatedLength - p.fadeLen) {
+			antiClickQ31 = (p.gatedLength - positionInSlice) * p.invFadeLen;
+		}
+	}
+
+	// Normalized position in Q31: pos = positionInSlice * invSliceLength
+	int32_t posQ31 = positionInSlice * p.invSliceLength;
+
+	// Gate threshold check (Q31 comparison)
+	if (posQ31 > p.gateRatioQ31) {
+		return 0;
+	}
+
+	// Gated position in Q31 - need to rescale [0, gateRatio] to [0, 1]
+	// gatedPos = pos / gateRatio = pos * invGateRatio, but both are Q31, so multiply_32x32_rshift32
+	int32_t gatedPosQ31 = multiply_32x32_rshift32(posQ31, p.invGateRatio) << 1;
+
+	// Envelope calculation in Q31
+	// For t^2 in Q31: multiply_32x32_rshift32(t, t) << 1 gives Q31 result
+	int32_t envelopeQ31;
+	if (p.useEdgeMode) {
+		if (gatedPosQ31 < p.edgeSizeQ31) {
+			// t = gatedPos / edgeSize
+			int32_t tQ31 = multiply_32x32_rshift32(gatedPosQ31, p.invEdgeSize) << 1;
+			// envelope = t^2
+			envelopeQ31 = (p.envShapeQ31 > (ONE_Q31 / 1000)) ? (multiply_32x32_rshift32(tQ31, tQ31) << 1) : ONE_Q31;
+		}
+		else if (gatedPosQ31 > (ONE_Q31 - p.edgeSizeQ31)) {
+			// t = (gatedPos - (1 - edgeSize)) / edgeSize
+			int32_t tQ31 = multiply_32x32_rshift32(gatedPosQ31 - (ONE_Q31 - p.edgeSizeQ31), p.invEdgeSize) << 1;
+			// envelope = (1-t)^2
+			int32_t oneMinusT = ONE_Q31 - tQ31;
+			envelopeQ31 = (p.envShapeQ31 < (ONE_Q31 - ONE_Q31 / 1000))
+			                  ? (multiply_32x32_rshift32(oneMinusT, oneMinusT) << 1)
+			                  : ONE_Q31;
+		}
+		else {
+			envelopeQ31 = ONE_Q31;
+		}
+	}
+	else {
+		if (p.envShapeQ31 < (ONE_Q31 / 1000)) {
+			// Fade-out only: (1-gatedPos)^2
+			int32_t oneMinusPos = ONE_Q31 - gatedPosQ31;
+			envelopeQ31 = multiply_32x32_rshift32(oneMinusPos, oneMinusPos) << 1;
+		}
+		else if (p.envShapeQ31 > (ONE_Q31 - ONE_Q31 / 1000)) {
+			// Fade-in only: gatedPos^2
+			envelopeQ31 = multiply_32x32_rshift32(gatedPosQ31, gatedPosQ31) << 1;
+		}
+		else {
+			if (gatedPosQ31 < p.envShapeQ31) {
+				// Attack phase: t = gatedPos / envShape, envelope = t^2
+				int32_t tQ31 = multiply_32x32_rshift32(gatedPosQ31, p.invEnvShape) << 1;
+				envelopeQ31 = multiply_32x32_rshift32(tQ31, tQ31) << 1;
+			}
+			else {
+				// Decay phase: t = (gatedPos - envShape) / (1 - envShape), envelope = (1-t)^2
+				int32_t tQ31 = multiply_32x32_rshift32(gatedPosQ31 - p.envShapeQ31, p.invOneMinusEnvShape) << 1;
+				int32_t oneMinusT = ONE_Q31 - tQ31;
+				envelopeQ31 = multiply_32x32_rshift32(oneMinusT, oneMinusT) << 1;
+			}
+		}
+	}
+
+	// Combine: result = (1 - depth) + depth * envelope
+	// In Q31: result = (ONE_Q31 - depth) + multiply(depth, envelope)
+	int32_t depthEnvQ31 = (ONE_Q31 - p.depthQ31) + (multiply_32x32_rshift32(p.depthQ31, envelopeQ31) << 1);
+
+	// Final: antiClick * depthEnv
+	return multiply_32x32_rshift32(antiClickQ31, depthEnvQ31) << 1;
+}
+
+/**
  * Scatter control parameters from menu/modulation
  * Zone params are unsigned q31 [0, ONE_Q31] from PatchedParamSet/UnpatchedParamSet
  */
@@ -273,14 +673,10 @@ struct ScatterParams {
 	[[gnu::always_inline]] ZoneInfo getZoneBInfo(int32_t numZones = 8) const { return computeZoneQ31(zoneB, numZones); }
 
 	/// Get depth as normalized [0,1]
-	[[gnu::always_inline]] float depthNormalized() const {
-		return static_cast<float>(depth) / static_cast<float>(ONE_Q31);
-	}
+	[[gnu::always_inline]] float depthNormalized() const { return static_cast<float>(depth) * kQ31ToFloat; }
 
 	/// Get gate as normalized [0,1]
-	[[gnu::always_inline]] float gateNormalized() const {
-		return static_cast<float>(gate) / static_cast<float>(ONE_Q31);
-	}
+	[[gnu::always_inline]] float gateNormalized() const { return static_cast<float>(gate) * kQ31ToFloat; }
 };
 
 /**
@@ -393,9 +789,12 @@ struct GrainParams {
 	float filterFreq{0.5f}; ///< Bandpass center [0,1] maps to freq range
 	float delayFeed{0};     ///< Per-grain delay send amount
 	float envShape{0.5f};   ///< Envelope shape (0=percussive, 0.5=hanning, 1=reverse)
+	float envDepth{0};      ///< Envelope depth [0,1]: 0=hard cut, 1=full envelope
+	float panAmount{0};     ///< Crossfeed pan amount [0,1] before direction applied
 
 	// Combined
-	float gateRatio{1.0f}; ///< Gate duty cycle [0.125, 1.0]
+	float gateRatio{1.0f};   ///< Gate duty cycle [0.125, 1.0]
+	int32_t subdivisions{1}; ///< Ratchet subdivisions (1,2,3,4,6,8,12) - play slice start N times
 };
 
 /**
@@ -428,11 +827,12 @@ struct ScatterPhaseOffsets {
  * @param zoneAParam Zone A raw q31 param value [0, ONE_Q31]
  * @param zoneBParam Zone B raw q31 param value [0, ONE_Q31]
  * @param macroConfigParam Macro config raw q31 param value [0, ONE_Q31]
+ * @param macroParam Macro raw q31 param value [0, ONE_Q31]
  * @param sliceIndex Current slice index (converted to phi-based phase internally)
  * @param offsets Phase offsets from secret encoder menus (optional)
  */
-inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t macroConfigParam, int32_t sliceIndex,
-                                      const ScatterPhaseOffsets& offsets = {}) {
+inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t macroConfigParam, q31_t macroParam,
+                                      int32_t sliceIndex, const ScatterPhaseOffsets& offsets = {}) {
 	GrainParams p;
 
 	constexpr int32_t kNumZones = 8;
@@ -445,8 +845,9 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 	double phRawB = static_cast<double>(offsets.zoneB) + kResolution * static_cast<double>(offsets.gamma);
 
 	// Apply macroConfig offset (in normalized units, 0.1 per click)
-	float macroConfig = static_cast<float>(macroConfigParam) / static_cast<float>(ONE_Q31);
-	macroConfig = std::clamp(macroConfig + offsets.macroConfig * 0.1f, 0.0f, 1.0f);
+	float macroConfigNorm = static_cast<float>(macroConfigParam) * kQ31ToFloat;
+	macroConfigNorm = std::clamp(macroConfigNorm + offsets.macroConfig * 0.1f, 0.0f, 1.0f);
+	float macroNorm = static_cast<float>(macroParam) * kQ31ToFloat;
 
 	// Phi triangle deadzone: when triangle output is low, sliceIndex contribution is zeroed
 	// This creates sparse activation - many consecutive slices get identical params → cache hits
@@ -459,7 +860,7 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 		// Full range phi-triangle evolution (like sine shaper when phRaw != 0)
 		// Position is normalized across full range, phi triangles evolve all structural params
 		// slicePhase adds per-grain variation (unlike sine shaper which is continuous)
-		float pos = static_cast<float>(zoneAParam) / static_cast<float>(ONE_Q31);
+		float pos = static_cast<float>(zoneAParam) * kQ31ToFloat;
 		pos = std::clamp(pos, 0.0f, 1.0f);
 
 		// Per-effect frequency modulation using phi triangles (non-monotonic)
@@ -539,7 +940,7 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 	if (phRawB != 0.0) {
 		// Full range phi-triangle evolution (like sine shaper when phRaw != 0)
 		// slicePhase adds per-grain variation
-		float pos = static_cast<float>(zoneBParam) / static_cast<float>(ONE_Q31);
+		float pos = static_cast<float>(zoneBParam) * kQ31ToFloat;
 		pos = std::clamp(pos, 0.0f, 1.0f);
 
 		// Per-effect frequency modulation
@@ -565,6 +966,15 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 
 		// Envelope shape
 		p.envShape = triangleSimpleUnipolar(pos * phi::kPhi200 * fmE + ph200 + slicePhase + 0.750f, 0.8f);
+
+		// Envelope depth: separate phi frequency for independent evolution
+		float phDepth = phi::wrapPhase(phRawB * phi::kPhi050);
+		float fmDepth = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRawB * phi::kPhi050));
+		p.envDepth = triangleSimpleUnipolar(pos * phi::kPhi050 * fmDepth + phDepth + slicePhase, 0.6f);
+
+		// Pan amount: yet another phi frequency
+		float phPan = phi::wrapPhase(phRawB * phi::kPhi125);
+		p.panAmount = triangleSimpleUnipolar(pos * phi::kPhi125 + phPan + slicePhase, 0.25f);
 	}
 	else {
 		// Standard discrete zone behavior (phaseOffset == 0)
@@ -600,10 +1010,55 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 			p.delayFeed = timbral[2] * 0.8f;
 			p.envShape = timbral[3];
 		}
+
+		// Envelope depth and pan from Zone B position (standard mode)
+		p.envDepth = triangleSimpleUnipolar(zoneBInfo.position * phi::kPhi050, 0.6f);
+		p.panAmount = triangleSimpleUnipolar(zoneBInfo.position * phi::kPhi125, 0.25f);
+
+		// Gate from macroConfig only (standard mode)
+		// Range [0.25, 1.0] - macroConfig high = shorter gate
+		p.gateRatio = 0.25f + (1.0f - macroConfigNorm) * 0.75f;
 	}
 
-	// Gate from macroConfig (lower value = more gating for rhythmic effect)
-	p.gateRatio = 0.25f + (1.0f - macroConfig * 0.5f) * 0.75f;
+	// In full evolution mode, Zone B modulates gate via phi triangle
+	if (phRawB != 0.0) {
+		float pos = static_cast<float>(zoneBParam) * kQ31ToFloat;
+		pos = std::clamp(pos, 0.0f, 1.0f);
+		// Gate phi triangle with 50% deadzone - half the time gate is full
+		float phGate = phi::wrapPhase(phRawB * phi::kPhi150);
+		float gateRaw = triangleSimpleUnipolar(pos * phi::kPhi150 + phGate + slicePhase, 0.5f);
+		// Range [0.125, 1.0] - more dramatic gating when active
+		p.gateRatio = 0.125f + (1.0f - gateRaw) * 0.875f;
+	}
+
+	// === Subdivisions (Ratchet) ===
+	// Two triangles determine base subdivision pattern
+	// macro=0 → no subdivisions (=1), macro=max → 2x base subdivisions
+	// macroConfig triangle gates macro's influence (standard pattern)
+	float zoneANorm = static_cast<float>(zoneAParam) * kQ31ToFloat;
+	float subdivInfluence = triangleSimpleUnipolar(macroConfigNorm * phi::kPhi225, 0.5f);
+	float subdivMix = macroNorm * subdivInfluence; // 0 to 1
+
+	// Binary: 80% deadzone, magnitude → 2/4/8
+	float binaryRaw = triangleSimpleUnipolar(zoneANorm * phi::kPhi150 + slicePhase, 0.8f);
+	int32_t binarySub = (binaryRaw > 0.66f) ? 8 : (binaryRaw > 0.33f) ? 4 : (binaryRaw > 0.001f) ? 2 : 1;
+
+	// Triplet: 90% deadzone (sparser), magnitude → 3/6
+	float tripletRaw = triangleSimpleUnipolar(zoneANorm * phi::kPhi200 + slicePhase * phi::kPhi, 0.9f);
+	int32_t tripletSub = (tripletRaw > 0.5f) ? 6 : (tripletRaw > 0.001f) ? 3 : 1;
+
+	// Combine base subdivisions (multiply when both active, cap at 12)
+	int32_t baseSub;
+	if (tripletSub > 1 && binarySub > 1) {
+		baseSub = std::min<int32_t>(binarySub * tripletSub, 12);
+	}
+	else {
+		baseSub = (tripletSub > 1) ? tripletSub : binarySub;
+	}
+
+	// macro scales from 1 (no subdiv) to baseSub*2 (double), capped at 12
+	int32_t targetSub = std::min<int32_t>(baseSub * 2, 12);
+	p.subdivisions = 1 + static_cast<int32_t>(static_cast<float>(targetSub - 1) * subdivMix);
 
 	return p;
 }

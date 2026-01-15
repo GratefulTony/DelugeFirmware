@@ -22,6 +22,7 @@
 #include "memory/memory_allocator_interface.h"
 #include "modulation/params/param_manager.h"
 #include "modulation/params/param_set.h"
+#include "util/cfunctions.h"
 #include "util/functions.h"
 #include <algorithm>
 #include <cstring>
@@ -157,6 +158,8 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 			scatterEnvWidth = 1.0f;
 			scatterGateRatio = 1.0f;
 			scatterPan = 0;
+			scatterSubdivisions = 1;
+			scatterSubdivIndex = 0;
 			status = Status::PLAYING;
 			// Source now owns both buffers
 			playSource = source;
@@ -247,21 +250,40 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 	bool useLooper = (stutterConfig.scatterMode != ScatterMode::Classic);
 	if (useLooper) {
 		if (status == Status::PLAYING && playBuffer != nullptr && playbackLength > 0) {
-			// Benchmark: total scatter processing time
+			// Benchmark: granular scatter processing with dynamic tags
+			// Tag layout: [0]=type, [1]=mode, [2]=extra (slices/subdiv for slice benchmark)
 			FX_BENCH_DECLARE(benchTotal, "scatter", "total");
 			FX_BENCH_DECLARE(benchSlice, "scatter", "slice");
-			FX_BENCH_SET_TAG(benchTotal, 0, kScatterModeNames[static_cast<int>(stutterConfig.scatterMode)]);
-			FX_BENCH_SET_TAG(benchSlice, 0, kScatterModeNames[static_cast<int>(stutterConfig.scatterMode)]);
+			FX_BENCH_DECLARE(benchParams, "scatter", "params");
+			FX_BENCH_DECLARE(benchEnv, "scatter", "env");
+			FX_BENCH_DECLARE(benchPan, "scatter", "pan");
+			FX_BENCH_DECLARE(benchRecord, "scatter", "record");
+			const char* modeName = kScatterModeNames[static_cast<int>(stutterConfig.scatterMode)];
+			FX_BENCH_SET_TAG(benchTotal, 1, modeName);
+			FX_BENCH_SET_TAG(benchSlice, 1, modeName);
+			FX_BENCH_SET_TAG(benchParams, 1, modeName);
+			FX_BENCH_SET_TAG(benchEnv, 1, modeName);
+			FX_BENCH_SET_TAG(benchPan, 1, modeName);
+			FX_BENCH_SET_TAG(benchRecord, 1, modeName);
 			FX_BENCH_START(benchTotal);
+
+			// Sample counter for benchmarking (only first sample per buffer)
+			int32_t sampleIdx = 0;
 
 			for (deluge::dsp::StereoSample<q31_t>& sample : audio) {
 				// Record incoming audio to recordBuffer for re-trigger capability
 				// Only record if playSource also owns recordSource (no takeover in progress)
 				if (recordBuffer != nullptr && recordSource == playSource) {
+					if (sampleIdx == 0) {
+						FX_BENCH_START(benchRecord);
+					}
 					recordBuffer[recordWritePos] = sample;
 					recordWritePos++;
 					if (recordWritePos >= kLooperBufferSize) {
 						recordWritePos = 0;
+					}
+					if (sampleIdx == 0) {
+						FX_BENCH_STOP(benchRecord);
 					}
 				}
 
@@ -269,7 +291,8 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				// This is where each mode determines what to play next.
 				// Slice changes ONLY happen here, ensuring complete playback.
 				// Future modes: advance pattern index, call setSliceByBeat(), etc.
-				if (playbackPos == 0) {
+				// Only setup new slice when ALL subdivisions (ratchets) complete
+				if (playbackPos == 0 && scatterSubdivIndex == 0) {
 					FX_BENCH_START(benchSlice);
 					switch (stutterConfig.scatterMode) {
 					case ScatterMode::Repeat:
@@ -280,13 +303,35 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						break;
 
 					case ScatterMode::Shuffle: {
-						// Rate knob controls number of slices (2-16)
+						// Rate knob controls number of slices - match UI note division labels
+						// UI optionValues: {2, 6, 13, 19, 25, 31, 38, 47} for 0-50 range
+						// Maps to: 1 BAR, 2nds, 4ths, 8ths, 16ths, 32nds, 64ths, 128ths
 						UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
 						int32_t rateParam = unpatchedParams->getValue(params::UNPATCHED_STUTTER_RATE);
 						int32_t knobPos = unpatchedParams->paramValueToKnobPos(rateParam, nullptr);
-						// Map -64..+64 to 2..16 slices
-						scatterNumSlices = 2 + ((knobPos + 64) * 14) / 128;
-						scatterNumSlices = std::clamp(scatterNumSlices, int32_t{2}, int32_t{16});
+						// Convert knobPos (-64..+64) to UI value (0..50) range
+						int32_t uiValue = ((knobPos + 64) * 50) / 128;
+						// Map UI value to note divisions (thresholds at midpoints between optionValues)
+						// Capped at 32 slices max for performance
+						// Thresholds: 4, 9, 16, 22, 28 (midpoints)
+						if (uiValue < 4) {
+							scatterNumSlices = 1; // 1 BAR
+						}
+						else if (uiValue < 9) {
+							scatterNumSlices = 2; // 2nds (half notes)
+						}
+						else if (uiValue < 16) {
+							scatterNumSlices = 4; // 4ths (quarter notes)
+						}
+						else if (uiValue < 22) {
+							scatterNumSlices = 8; // 8ths
+						}
+						else if (uiValue < 28) {
+							scatterNumSlices = 16; // 16ths
+						}
+						else {
+							scatterNumSlices = 32; // 32nds (max)
+						}
 
 						// Read zone params - use patched params for Sound context, unpatched for Song
 						q31_t zoneAParam, zoneBParam, macroConfigParam, macroParam;
@@ -306,8 +351,9 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 
 						// Macro influence on zone phases - macroConfig phi triangles gate macro's effect
 						// Different phi frequencies for independent routing of A vs B
-						float macroConfigNorm = static_cast<float>(macroConfigParam) / static_cast<float>(ONE_Q31);
-						float macroNorm = static_cast<float>(macroParam) / static_cast<float>(ONE_Q31);
+						float macroConfigNorm =
+						    static_cast<float>(macroConfigParam) * deluge::dsp::scatter::kQ31ToFloat;
+						float macroNorm = static_cast<float>(macroParam) * deluge::dsp::scatter::kQ31ToFloat;
 						float zoneAMacroInfluence =
 						    deluge::dsp::triangleSimpleUnipolar(macroConfigNorm * deluge::dsp::phi::kPhi050, 0.5f);
 						float zoneBMacroInfluence =
@@ -326,10 +372,11 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						    stutterConfig.gammaPhase,
 						};
 
-						// Compute grain params using raw q31 values - zone helpers ensure UI/DSP match
-						// Pass 0 for macroConfig (reserved for future use)
-						auto grain = deluge::dsp::scatter::computeGrainParams(zoneAParam, zoneBParam, 0,
-						                                                      scatterSliceIndex, offsets);
+						// Compute grain params (adaptive caching disabled for testing)
+						FX_BENCH_START(benchParams);
+						deluge::dsp::scatter::GrainParams grain = deluge::dsp::scatter::computeGrainParams(
+						    zoneAParam, zoneBParam, macroConfigParam, macroParam, scatterSliceIndex, offsets);
+						FX_BENCH_STOP(benchParams);
 
 						// Calculate target slice from sequential index + offset
 						int32_t targetSlice = scatterSliceIndex;
@@ -347,10 +394,8 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 							}
 						}
 
-						// Set slice parameters
+						// Set slice parameters - timing stays locked to bar
 						currentSliceLength = playbackLength / scatterNumSlices;
-						currentSliceLength =
-						    static_cast<size_t>(currentSliceLength * std::clamp(grain.lengthMult, 0.25f, 2.0f));
 						if (currentSliceLength < 256) {
 							currentSliceLength = 256;
 						}
@@ -372,30 +417,60 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						// Threshold = macro scaled by its influence (0 influence = always grains)
 						scatterDryThreshold = macroNorm * thresholdInfluence;
 
-						// Envelope and gate from Zone B via phi triangles (same for all grains)
-						// Zone B knob position drives depth, shape, and gate through phi frequencies
-						float zoneBNorm = static_cast<float>(zoneBParam) / static_cast<float>(ONE_Q31);
-						// envDepth: slower phi, ramps up as Zone B increases
-						// Anti-click fade is always applied in grainEnvelope, depth controls artistic shape
-						float envRaw = deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi050, 0.6f);
-						scatterEnvDepth = envRaw;
-						// envShape: different phi frequency for non-monotonic evolution
-						scatterEnvShape =
-						    deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi075, 0.7f);
-						// gateRatio: yet another phi frequency, range [0.25, 1.0] to avoid total silence
-						// 60% deadzone (duty 0.4) gives full grains, inverted so Zone B=0 is clean
-						float gateRaw =
-						    deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi100, 0.4f);
-						scatterGateRatio = 0.25f + (1.0f - gateRaw) * 0.75f;
+						// All timbral params from grain (computed with phase offset and gamma in computeGrainParams)
+						scatterEnvShape = grain.envShape;
+						scatterGateRatio = grain.gateRatio;
+						scatterEnvDepth = grain.envDepth;
 
-						// Crossfeed pan: random L/R direction, phi triangle controls amount
-						// Low duty (0.25) = mostly centered, sparse swings
+						// Pan: direction decorrelated from slice content using separate counter
+						// Amount from grain params (incorporates phase offset for evolving stereo field)
 						float panDir =
-						    (deluge::dsp::phi::wrapPhase(static_cast<float>(scatterSliceIndex) * 5.3f) < 0.5f) ? -1.0f
-						                                                                                       : 1.0f;
-						float panAmt =
-						    deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi125, 0.25f);
-						scatterPan = panDir * panAmt;
+						    (deluge::dsp::phi::wrapPhase(static_cast<float>(scatterPanCounter++) * 5.3f) < 0.5f) ? -1.0f
+						                                                                                         : 1.0f;
+						scatterPan = panDir * grain.panAmount;
+
+						// Precompute pan coefficients (Q31, once per slice)
+						float panAbs = (scatterPan > 0) ? scatterPan : -scatterPan;
+						scatterPanActive = (panAbs > 0.001f);
+						scatterPanFadeQ31 = static_cast<int32_t>((1.0f - panAbs) * 2147483647.0f);
+						scatterPanKeepQ31 = static_cast<int32_t>((1.0f - panAbs * 0.5f) * 2147483647.0f);
+						scatterPanCrossQ31 = static_cast<int32_t>((panAbs * 0.5f) * 2147483647.0f);
+						scatterPanRight = (scatterPan > 0);
+
+						// Precompute envelope/gate active flags (once per slice, avoid per-sample checks)
+						scatterEnvActive = (scatterEnvDepth > 0.001f);
+						scatterGateActive = (scatterGateRatio < 0.999f);
+
+						// Subdivisions (ratchet) from grain params - clamp to valid range
+						// Limit subdivisions so sub-slices stay above ~80 Hz (551 samples at 44.1kHz)
+						constexpr int32_t kMinSubSliceSamples = 551;
+						int32_t maxSubdivisions = static_cast<int32_t>(currentSliceLength) / kMinSubSliceSamples;
+						if (maxSubdivisions < 1) {
+							maxSubdivisions = 1;
+						}
+						scatterSubdivisions = std::clamp(grain.subdivisions, int32_t{1}, maxSubdivisions);
+						scatterSubdivIndex = 0; // Reset for new slice
+
+						// Precompute Q31 envelope parameters (once per slice, used for all samples)
+						// Envelope applies per sub-slice for ratchet effect
+						int32_t envSliceLen = static_cast<int32_t>(currentSliceLength) / scatterSubdivisions;
+						scatterEnvPrecomputed = deluge::dsp::scatter::prepareGrainEnvelopeQ31(
+						    envSliceLen, scatterGateRatio, scatterEnvDepth, scatterEnvShape, scatterEnvWidth);
+
+						// Tag slice benchmark with slice count and subdiv (combined in tag[2])
+						// tag[0]="slice", tag[1]=mode, tag[2]="8s/x4" format
+						{
+							static char sliceInfoTag[16];
+							char* p = sliceInfoTag;
+							intToString(scatterNumSlices, p, 1);
+							while (*p)
+								p++;
+							*p++ = 's';
+							*p++ = '/';
+							*p++ = 'x';
+							intToString(scatterSubdivisions, p, 1);
+							FX_BENCH_SET_TAG(benchSlice, 2, sliceInfoTag);
+						}
 
 						// Advance for next slice
 						scatterSliceIndex = (scatterSliceIndex + 1) % scatterNumSlices;
@@ -445,54 +520,99 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					outputR = playBuffer[readPos].r;
 				}
 
-				// Apply grain envelope and gate to whichever signal was selected
-				bool envActive = scatterEnvDepth > 0.001f;
-				bool gateActive = scatterGateRatio < 0.999f;
-				if (stutterConfig.scatterMode == ScatterMode::Shuffle && (envActive || gateActive)) {
-					float envMult = deluge::dsp::scatter::grainEnvelope(
-					    static_cast<int32_t>(playbackPos), static_cast<int32_t>(currentSliceLength), scatterGateRatio,
-					    scatterEnvDepth, scatterEnvShape, scatterEnvWidth);
-					// Convert to q31 multiplier and apply
-					int32_t envQ31 = static_cast<int32_t>(envMult * 2147483647.0f);
-					outputL = multiply_32x32_rshift32(outputL, envQ31) << 1;
-					outputR = multiply_32x32_rshift32(outputR, envQ31) << 1;
+				// Benchmark first sample only to avoid 128x overhead
+				bool benchThisSample = (sampleIdx == 0);
+
+				// Apply grain envelope and gate (using precomputed flags from slice boundary)
+				if (stutterConfig.scatterMode == ScatterMode::Shuffle && (scatterEnvActive || scatterGateActive)) {
+					if (benchThisSample) {
+						FX_BENCH_START(benchEnv);
+					}
+					// Asymmetric linear envelope with depth blending - skip middle samples
+					int32_t pos = static_cast<int32_t>(playbackPos);
+					int32_t attackLen = scatterEnvPrecomputed.attackFadeLen;
+					int32_t decayLen = scatterEnvPrecomputed.decayFadeLen;
+					int32_t gatedLen = scatterEnvPrecomputed.gatedLength;
+
+					if (pos > gatedLen) {
+						// Past gate cutoff - silence
+						outputL = 0;
+						outputR = 0;
+					}
+					else if (pos < attackLen || pos > gatedLen - decayLen) {
+						// In fade region - apply asymmetric linear envelope with depth blending
+						int32_t linearQ31 = deluge::dsp::scatter::grainEnvelopeLinearQ31(pos, scatterEnvPrecomputed);
+						int32_t envQ31;
+#if 0 // PERF TEST: disable depth blend
+						if (scatterEnvPrecomputed.depthIsMax) {
+							// depth >= 0.99: skip blend, use linear directly
+							envQ31 = linearQ31;
+						}
+						else {
+							// Depth blend: (1 - depth) + depth * linear (precomputed oneMinusDepthQ31)
+							envQ31 = scatterEnvPrecomputed.oneMinusDepthQ31
+							         + (multiply_32x32_rshift32(scatterEnvPrecomputed.depthQ31, linearQ31) << 1);
+						}
+#else
+						envQ31 = linearQ31; // PERF TEST: always use linear, no blend
+#endif
+						outputL = multiply_32x32_rshift32(outputL, envQ31) << 1;
+						outputR = multiply_32x32_rshift32(outputR, envQ31) << 1;
+					}
+					// else: flat middle - (1-depth) + depth*1.0 = 1.0, no attenuation needed
+					if (benchThisSample) {
+						FX_BENCH_STOP(benchEnv);
+					}
 				}
 
-				// Apply crossfeed pan (folds stereo to mono on one side at full pan)
+				// Apply crossfeed pan using precomputed Q31 coefficients
 				// At pan=1: L=0, R=(L+R)/2  |  At pan=-1: L=(L+R)/2, R=0
-				if (scatterPan > 0.001f || scatterPan < -0.001f) {
-					float panAbs = (scatterPan > 0) ? scatterPan : -scatterPan;
-					// Fading side: (1 - pan)
-					// Target side: blend from original to mono sum: orig*(1-pan/2) + other*(pan/2)
-					int32_t fadeQ31 = static_cast<int32_t>((1.0f - panAbs) * 2147483647.0f);
-					int32_t keepQ31 = static_cast<int32_t>((1.0f - panAbs * 0.5f) * 2147483647.0f);
-					int32_t crossQ31 = static_cast<int32_t>((panAbs * 0.5f) * 2147483647.0f);
-					if (scatterPan > 0) {
+				if (scatterPanActive) {
+					if (benchThisSample) {
+						FX_BENCH_START(benchPan);
+					}
+					if (scatterPanRight) {
 						// Pan right: L fades to 0, R blends toward (L+R)/2
-						q31_t newL = multiply_32x32_rshift32(outputL, fadeQ31) << 1;
-						q31_t newR = (multiply_32x32_rshift32(outputR, keepQ31) << 1)
-						             + (multiply_32x32_rshift32(outputL, crossQ31) << 1);
+						q31_t newL = multiply_32x32_rshift32(outputL, scatterPanFadeQ31) << 1;
+						q31_t newR = (multiply_32x32_rshift32(outputR, scatterPanKeepQ31) << 1)
+						             + (multiply_32x32_rshift32(outputL, scatterPanCrossQ31) << 1);
 						outputL = newL;
 						outputR = newR;
 					}
 					else {
 						// Pan left: R fades to 0, L blends toward (L+R)/2
-						q31_t newR = multiply_32x32_rshift32(outputR, fadeQ31) << 1;
-						q31_t newL = (multiply_32x32_rshift32(outputL, keepQ31) << 1)
-						             + (multiply_32x32_rshift32(outputR, crossQ31) << 1);
+						q31_t newR = multiply_32x32_rshift32(outputR, scatterPanFadeQ31) << 1;
+						q31_t newL = (multiply_32x32_rshift32(outputL, scatterPanKeepQ31) << 1)
+						             + (multiply_32x32_rshift32(outputR, scatterPanCrossQ31) << 1);
 						outputL = newL;
 						outputR = newR;
+					}
+					if (benchThisSample) {
+						FX_BENCH_STOP(benchPan);
 					}
 				}
 
 				sample.l = outputL;
 				sample.r = outputR;
 
-				// === ADVANCE: move through slice, wrap at boundary ===
+				// === ADVANCE: move through slice with subdivisions (ratchet) ===
+				// When subdivisions > 1, replay start of slice N times
 				playbackPos++;
-				if (playbackPos >= currentSliceLength) {
-					playbackPos = 0; // Triggers next slice selection on next sample
+				// Guard against division by zero (scatterSubdivisions should be 1-12)
+				int32_t safeSubdiv = (scatterSubdivisions >= 1) ? scatterSubdivisions : 1;
+				size_t subSliceLength = currentSliceLength / static_cast<size_t>(safeSubdiv);
+				if (subSliceLength < 64) {
+					subSliceLength = 64; // Minimum for anti-click
 				}
+				if (playbackPos >= subSliceLength) {
+					playbackPos = 0;
+					scatterSubdivIndex++;
+					if (scatterSubdivIndex >= safeSubdiv) {
+						scatterSubdivIndex = 0; // Triggers next slice selection on next sample
+					}
+				}
+
+				sampleIdx++;
 			}
 
 			FX_BENCH_STOP(benchTotal);
