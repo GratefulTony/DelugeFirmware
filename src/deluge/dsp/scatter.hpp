@@ -143,17 +143,19 @@ constexpr std::array<phi::PhiTriConfig, 4> kTimbraBank = {{
 }
 
 /**
- * Compute grain envelope multiplier using parabolic approximation of Hanning
- * Very cheap: 3 multiplies, 1 subtract, no trig
+ * Compute grain envelope multiplier with configurable shape
+ * Very cheap: ~6 multiplies, few branches, no trig
  *
  * @param positionInSlice Current position within slice [0, sliceLength)
  * @param sliceLength Total length of slice in samples
  * @param gateRatio Gate duty cycle [0,1] - audio plays during this portion
  * @param depth Envelope depth [0,1] - 0=hard cut, 1=full smooth envelope
+ * @param envShape Peak position [0,1] - 0=fade-out only, 0.5=symmetric, 1=fade-in only
+ * @param envWidth Envelope region [0,1] - 1=full slice, 0.1=edges only (10% each end)
  * @return Amplitude multiplier [0,1]
  */
 [[gnu::always_inline]] inline float grainEnvelope(int32_t positionInSlice, int32_t sliceLength, float gateRatio,
-                                                  float depth) {
+                                                  float depth, float envShape = 0.5f, float envWidth = 1.0f) {
 	if (sliceLength <= 0) {
 		return 1.0f;
 	}
@@ -169,9 +171,57 @@ constexpr std::array<phi::PhiTriConfig, 4> kTimbraBank = {{
 	// Rescale position to [0,1] within the gated portion
 	float gatedPos = pos / gateRatio;
 
-	// Parabolic envelope: peaks at 0.5, zero at 0 and 1
-	// This approximates Hanning window closely
-	float envelope = gatedPos * (1.0f - gatedPos) * 4.0f;
+	// Edge-only mode: flat middle with envelope only at edges
+	// envWidth=1.0: full envelope, envWidth=0.1: only first/last 10%
+	float envelope;
+	if (envWidth < 1.0f && envWidth > 0.0f) {
+		float edgeSize = envWidth * 0.5f; // Half at each end
+		if (gatedPos < edgeSize) {
+			// Attack region - remap to [0, envShape]
+			float t = gatedPos / edgeSize;
+			// Parabolic attack: t^2 for smooth start
+			float attack = (envShape > 0.001f) ? t * t : 1.0f;
+			envelope = attack;
+		}
+		else if (gatedPos > (1.0f - edgeSize)) {
+			// Decay region - remap to [envShape, 1]
+			float t = (gatedPos - (1.0f - edgeSize)) / edgeSize;
+			// Parabolic decay: (1-t)^2 for smooth end
+			float decay = (envShape < 0.999f) ? (1.0f - t) * (1.0f - t) : 1.0f;
+			envelope = decay;
+		}
+		else {
+			// Flat middle region
+			envelope = 1.0f;
+		}
+	}
+	else {
+		// Full slice envelope with configurable peak position (envShape)
+		// envShape=0: peak at start (fade-out only, preserves attack)
+		// envShape=0.5: peak at middle (symmetric Hanning-like)
+		// envShape=1: peak at end (fade-in only)
+		if (envShape < 0.001f) {
+			// Fade-out only: (1-pos)^2
+			envelope = (1.0f - gatedPos) * (1.0f - gatedPos);
+		}
+		else if (envShape > 0.999f) {
+			// Fade-in only: pos^2
+			envelope = gatedPos * gatedPos;
+		}
+		else {
+			// Asymmetric envelope with peak at envShape position
+			if (gatedPos < envShape) {
+				// Attack phase: parabolic ramp up to peak
+				float t = gatedPos / envShape;
+				envelope = t * t;
+			}
+			else {
+				// Decay phase: parabolic ramp down from peak
+				float t = (gatedPos - envShape) / (1.0f - envShape);
+				envelope = (1.0f - t) * (1.0f - t);
+			}
+		}
+	}
 
 	// Blend between hard gate (1.0) and envelope based on depth
 	// depth=0: return 1.0 (hard gate, no fade)

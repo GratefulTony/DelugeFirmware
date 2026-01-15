@@ -151,6 +151,9 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 			scatterSliceIndex = 0;
 			scatterReversed = false;
 			scatterDryMix = 0;
+			scatterEnvDepth = 0;
+			scatterEnvShape = 0.5f;
+			scatterEnvWidth = 1.0f;
 			status = Status::PLAYING;
 			// Source now owns both buffers
 			playSource = source;
@@ -337,8 +340,18 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						float revRoll = deluge::dsp::phi::wrapPhase(static_cast<float>(scatterSliceIndex) * 3.7f);
 						scatterReversed = (revRoll < grain.reverseProb);
 
-						// Store dryMix for crossfade during playback
+						// Store grain params for playback
 						scatterDryMix = grain.dryMix;
+
+						// Envelope from Zone B via phi triangles (same for all grains)
+						// Zone B knob position drives both depth and shape through phi frequencies
+						float zoneBNorm = static_cast<float>(zoneBParam) / static_cast<float>(ONE_Q31);
+						// envDepth: slower phi, ramps up as Zone B increases
+						scatterEnvDepth =
+						    deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi050, 0.6f);
+						// envShape: different phi frequency for non-monotonic evolution
+						scatterEnvShape =
+						    deluge::dsp::triangleSimpleUnipolar(zoneBNorm * deluge::dsp::phi::kPhi075, 0.7f);
 
 						// Advance for next slice
 						scatterSliceIndex = (scatterSliceIndex + 1) % scatterNumSlices;
@@ -373,6 +386,18 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				}
 				q31_t grainL = playBuffer[readPos].l;
 				q31_t grainR = playBuffer[readPos].r;
+
+				// Apply grain envelope (Shuffle mode only for now)
+				if (stutterConfig.scatterMode == ScatterMode::Shuffle && scatterEnvDepth > 0.001f) {
+					float envMult = deluge::dsp::scatter::grainEnvelope(
+					    static_cast<int32_t>(playbackPos), static_cast<int32_t>(currentSliceLength),
+					    1.0f, // gateRatio (full gate for now)
+					    scatterEnvDepth, scatterEnvShape, scatterEnvWidth);
+					// Convert to q31 multiplier and apply
+					int32_t envQ31 = static_cast<int32_t>(envMult * 2147483647.0f);
+					grainL = multiply_32x32_rshift32(grainL, envQ31) << 1;
+					grainR = multiply_32x32_rshift32(grainR, envQ31) << 1;
+				}
 
 				// Apply density crossfade: blend grain with dry input
 				// dryMix=0: full grain, dryMix=1: full dry
