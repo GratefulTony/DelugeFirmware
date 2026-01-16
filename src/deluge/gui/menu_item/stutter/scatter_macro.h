@@ -21,14 +21,17 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
+#include "gui/menu_item/automation/automation.h"
+#include "gui/menu_item/integer.h"
 #include "gui/menu_item/menu_item_with_cc_learning.h"
-#include "gui/menu_item/patched_param/integer.h"
+#include "gui/menu_item/patch_cable_strength/regular.h"
 #include "gui/menu_item/source_selection/regular.h"
 #include "gui/menu_item/value_scaling.h"
 #include "gui/ui/sound_editor.h"
 #include "model/model_stack.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_set.h"
+#include "modulation/patch/patch_cable_set.h"
 #include <hid/buttons.h>
 #include <hid/display/display.h>
 
@@ -37,15 +40,16 @@ namespace params = deluge::modulation::params;
 namespace deluge::gui::menu_item::stutter {
 
 /// Scatter macro parameter - dual patched/unpatched param for macro control
-/// Uses GLOBAL_SCATTER_MACRO when in Sound context, UNPATCHED_SCATTER_MACRO for GlobalEffectable
+/// Uses GLOBAL_SCATTER_MACRO when in Sound context, UNPATCHED_SCATTER_MACRO for GlobalEffectable (kits, audio clips)
 ///
 /// Secret menu: Push+twist encoder to adjust gammaPhase (multiplier for all zone phase offsets)
-class ScatterMacro final : public patched_param::Integer {
+class ScatterMacro final : public IntegerContinuous, public MenuItemWithCCLearning, public Automation {
 public:
-	using patched_param::Integer::Integer;
+	using IntegerContinuous::IntegerContinuous;
+	/// Compatibility constructor matching patched_param::Integer signature (param ID is always GLOBAL_SCATTER_MACRO)
+	ScatterMacro(l10n::String name, l10n::String title, int32_t /*paramId*/) : IntegerContinuous(name, title) {}
 
-	// Override to use GLOBAL_SCATTER_MACRO
-	[[nodiscard]] int32_t getP() const { return params::GLOBAL_SCATTER_MACRO; }
+	// === Value read/write with dual context support ===
 
 	void readCurrentValue() override {
 		q31_t value;
@@ -59,7 +63,16 @@ public:
 		this->setValue(computeCurrentValueForHalfPrecisionMenuItem(value));
 	}
 
-	ModelStackWithAutoParam* getModelStack(void* memory) override {
+	void writeCurrentValue() override {
+		q31_t value = computeFinalValueForHalfPrecisionMenuItem(this->getValue());
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStackWithAutoParam* modelStackWithParam = getModelStackWithParam(modelStackMemory);
+		modelStackWithParam->autoParam->setCurrentValueInResponseToUserInput(value, modelStackWithParam);
+	}
+
+	// === Automation interface (gold knob) ===
+
+	ModelStackWithAutoParam* getModelStackWithParam(void* memory) override {
 		ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(memory);
 		if (soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
 			return modelStack->getPatchedAutoParamFromId(params::GLOBAL_SCATTER_MACRO);
@@ -67,10 +80,95 @@ public:
 		return modelStack->getUnpatchedAutoParamFromId(params::UNPATCHED_SCATTER_MACRO);
 	}
 
-	int32_t getFinalValue() override {
-		// Use standard half-precision scaling (unipolar 0-1 param)
-		return computeFinalValueForHalfPrecisionMenuItem(this->getValue());
+	// === CC Learning with dual context support ===
+
+	ParamDescriptor getLearningThing() override {
+		ParamDescriptor paramDescriptor;
+		if (!soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+			// Unpatched context (kit, audio clip)
+			paramDescriptor.setToHaveParamOnly(params::UNPATCHED_SCATTER_MACRO + params::UNPATCHED_START);
+		}
+		else {
+			// Patched context (synth, MIDI)
+			paramDescriptor.setToHaveParamOnly(params::GLOBAL_SCATTER_MACRO);
+		}
+		return paramDescriptor;
 	}
+
+	void unlearnAction() final { MenuItemWithCCLearning::unlearnAction(); }
+	bool allowsLearnMode() final { return MenuItemWithCCLearning::allowsLearnMode(); }
+	void learnKnob(MIDICable* cable, int32_t whichKnob, int32_t modKnobMode, int32_t midiChannel) final {
+		MenuItemWithCCLearning::learnKnob(cable, whichKnob, modKnobMode, midiChannel);
+	}
+
+	// === Mod matrix support (patched context only) ===
+
+	MenuItem* selectButtonPress() override {
+		// If shift held down, user wants to delete automation
+		if (Buttons::isShiftButtonPressed()) {
+			return Automation::selectButtonPress();
+		}
+		// In unpatched context (GlobalEffectable), no mod matrix available
+		if (!soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+			return nullptr;
+		}
+		// In patched context (Sound), open mod matrix source selection
+		soundEditor.patchingParamSelected = params::GLOBAL_SCATTER_MACRO;
+		return &source_selection::regularMenu;
+	}
+
+	/// Handle patching source shortcut press (e.g., LFO1, LFO2, envelope shortcuts)
+	MenuItem* patchingSourceShortcutPress(PatchSource s, bool previousPressStillActive = false) override {
+		// In unpatched context, no patching available
+		if (!soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+			return nullptr;
+		}
+		// In patched context, open patch cable strength menu for this source
+		soundEditor.patchingParamSelected = params::GLOBAL_SCATTER_MACRO;
+		source_selection::regularMenu.s = s;
+		return &patch_cable_strength::regularMenu;
+	}
+
+	/// Blink shortcut if this source is patched to scatter macro
+	uint8_t shouldBlinkPatchingSourceShortcut(PatchSource s, uint8_t* colour) override {
+		// In unpatched context, no patching - don't blink
+		if (!soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+			return 255;
+		}
+		// In patched context, check if source is patched to this param
+		ParamDescriptor paramDescriptor{};
+		paramDescriptor.setToHaveParamOnly(params::GLOBAL_SCATTER_MACRO);
+		return soundEditor.currentParamManager->getPatchCableSet()
+		               ->isSourcePatchedToDestinationDescriptorVolumeInspecific(s, paramDescriptor)
+		           ? 3
+		           : 255;
+	}
+
+	/// Show dot on name if any source is patched to scatter macro
+	uint8_t shouldDrawDotOnName() override {
+		// In unpatched context, no patching - no dot
+		if (!soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+			return 255;
+		}
+		// In patched context, check if any source is patched
+		ParamDescriptor paramDescriptor{};
+		paramDescriptor.setToHaveParamOnly(params::GLOBAL_SCATTER_MACRO);
+		return soundEditor.currentParamManager->getPatchCableSet()->isAnySourcePatchedToParamVolumeInspecific(
+		           paramDescriptor)
+		           ? 3
+		           : 255;
+	}
+
+	[[nodiscard]] deluge::modulation::params::Kind getParamKind() {
+		if (!soundEditor.currentParamManager->containsPatchedParamSetCollection()) {
+			return deluge::modulation::params::Kind::UNPATCHED_SOUND;
+		}
+		return deluge::modulation::params::Kind::PATCHED;
+	}
+
+	bool usesAffectEntire() override { return true; }
+
+	// === Encoder action with secret menu ===
 
 	void selectEncoderAction(int32_t offset) override {
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
@@ -86,7 +184,7 @@ public:
 			suppressNotification_ = true;
 		}
 		else {
-			patched_param::Integer::selectEncoderAction(offset);
+			IntegerContinuous::selectEncoderAction(offset);
 		}
 	}
 
@@ -97,6 +195,8 @@ public:
 		}
 		return true;
 	}
+
+	// === Display configuration ===
 
 	[[nodiscard]] int32_t getMinValue() const override { return kMinMenuValue; }
 	[[nodiscard]] int32_t getMaxValue() const override { return kMaxMenuValue; }
