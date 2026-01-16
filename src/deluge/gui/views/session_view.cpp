@@ -935,8 +935,10 @@ midiLearnMelodicInstrumentAction:
 			// If Clip was pressed before...
 			if (isUIModeActive(UI_MODE_CLIP_PRESSED_IN_SONG_VIEW)) {
 
-				// Stop stuttering/scattering if we are
-				if (isUIModeActive(UI_MODE_STUTTERING) || stutterer.isScatterPlaying()) {
+				// Stop stuttering/scattering if we are (but not latched scatter)
+				bool isClassicStuttering = isUIModeActive(UI_MODE_STUTTERING);
+				bool isNonLatchedScatter = stutterer.isScatterPlaying() && !stutterer.isLatched();
+				if (isClassicStuttering || isNonLatchedScatter) {
 					((ModControllableAudio*)view.activeModControllableModelStack.modControllable)
 					    ->endStutter((ParamManagerForTimeline*)view.activeModControllableModelStack.paramManager);
 				}

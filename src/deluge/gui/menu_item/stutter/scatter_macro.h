@@ -20,9 +20,11 @@
  */
 #pragma once
 
+#include "definitions_cxx.hpp"
 #include "gui/menu_item/menu_item_with_cc_learning.h"
 #include "gui/menu_item/patched_param/integer.h"
 #include "gui/menu_item/source_selection/regular.h"
+#include "gui/menu_item/value_scaling.h"
 #include "gui/ui/sound_editor.h"
 #include "model/model_stack.h"
 #include "modulation/params/param.h"
@@ -53,7 +55,8 @@ public:
 		else {
 			value = soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SCATTER_MACRO);
 		}
-		this->setValue(value >> 24); // Convert q31 to 0-127 range
+		// Use standard half-precision scaling (unipolar 0-1 param)
+		this->setValue(computeCurrentValueForHalfPrecisionMenuItem(value));
 	}
 
 	ModelStackWithAutoParam* getModelStack(void* memory) override {
@@ -65,8 +68,8 @@ public:
 	}
 
 	int32_t getFinalValue() override {
-		int32_t value = this->getValue();
-		return value << 24;
+		// Use standard half-precision scaling (unipolar 0-1 param)
+		return computeFinalValueForHalfPrecisionMenuItem(this->getValue());
 	}
 
 	void selectEncoderAction(int32_t offset) override {
@@ -95,8 +98,8 @@ public:
 		return true;
 	}
 
-	[[nodiscard]] int32_t getMinValue() const override { return 0; }
-	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
+	[[nodiscard]] int32_t getMinValue() const override { return kMinMenuValue; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kMaxMenuValue; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
 
 	void getColumnLabel(StringBuf& label) override { label.append("Macro"); }

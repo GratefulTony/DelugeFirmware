@@ -1667,12 +1667,30 @@ void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
 void ModControllableAudio::processStutter(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager) {
 	int32_t magnitude = currentSong->getInputTickMagnitude();
 	uint32_t timePerTickInverse = playbackHandler.getTimePerInternalTickInverse();
+	// Use interpolated tick count for accurate beat boundary detection within audio buffers
+	// (lastSwungTickActioned only updates at discrete tick events, causing up to 1 buffer latency)
+	int64_t currentTick = playbackHandler.getCurrentInternalTickCount();
+	uint32_t barLength = currentSong->getBarLength();
+	uint32_t quarterNoteLength = barLength / 4; // Quarter note for responsive trigger sync
+	if (quarterNoteLength == 0) {
+		quarterNoteLength = 1;
+	}
 
 	// Check if armed trigger should fire
 	if (stutterer.isArmed()) {
-		int64_t currentTick = playbackHandler.getCurrentInternalTickCount();
 		stutterer.checkArmedTrigger(currentTick, paramManager, magnitude, timePerTickInverse);
 	}
+
+	// Check if pending play trigger should fire (quarter-note quantized)
+	if (stutterer.hasPendingTrigger(this)) {
+		stutterer.checkPendingTrigger(this, currentTick, quarterNoteLength, paramManager, magnitude,
+		                              timePerTickInverse);
+	}
+
+	// Always record to standby buffer (during both STANDBY and PLAYING)
+	// This captures clean input BEFORE scatter processing modifies the buffer
+	// Enables instant re-trigger after playback ends (playing->armed->playing flow)
+	stutterer.recordStandby(this, buffer, currentTick, quarterNoteLength);
 
 	if (stutterer.isStuttering(this)) {
 		// Update phase offsets from current config (allows real-time adjustment while playing)
@@ -1680,12 +1698,10 @@ void ModControllableAudio::processStutter(deluge::dsp::StereoBuffer<q31_t> buffe
 			stutterer.updatePhaseOffsets(stutterConfig);
 		}
 		// Note: benchmarking is done inside processStutter() to separate classic vs scatter modes
-		stutterer.processStutter(buffer, paramManager, magnitude, timePerTickInverse);
-	}
-	else {
-		// Feed audio to standby buffer (handles STANDBY and ARMED+startedFromStandby states)
-		// Pass 'this' so only the correct source records to the shared buffer
-		stutterer.recordStandby(this, buffer);
+		// Pass tick timing for bar boundary sync (locks slices to beat grid)
+		uint64_t timePerTickBig = playbackHandler.getTimePerInternalTickBig();
+		stutterer.processStutter(buffer, paramManager, magnitude, timePerTickInverse, currentTick, timePerTickBig,
+		                         barLength);
 	}
 }
 
@@ -1873,7 +1889,10 @@ char const* ModControllableAudio::getHPFModeDisplayName() {
 // This can get called either for hibernation, or because drum now has no active noteRow
 void ModControllableAudio::wontBeRenderedForAWhile() {
 	delay.discardBuffers();
-	endStutter(nullptr);
+	// Don't end latched scatter - it should keep playing when you switch tracks
+	if (!(stutterer.isLatched() && stutterer.isStuttering(this))) {
+		endStutter(nullptr);
+	}
 }
 
 void ModControllableAudio::clearModFXMemory() {

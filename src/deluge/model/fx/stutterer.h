@@ -80,6 +80,8 @@ public:
 	}
 	/// Check if standby recording is active
 	inline bool isInStandby() const { return status == Status::STANDBY; }
+	/// Check if scatter is latched (should keep playing when switching views/tracks)
+	inline bool isLatched() const { return stutterConfig.latch && stutterConfig.scatterMode != ScatterMode::Classic; }
 	/// Check if armed and waiting for beat quantize
 	/// Takeover = PLAYING with a different source recording (preparing to take over)
 	inline bool isArmed() const {
@@ -97,7 +99,8 @@ public:
 	                                 int32_t magnitude, uint32_t timePerTickInverse, size_t loopLengthSamples = 0,
 	                                 bool halfBar = false);
 	void processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamManager* paramManager, int32_t magnitude,
-	                    uint32_t timePerTickInverse);
+	                    uint32_t timePerTickInverse, int64_t currentTick, uint64_t timePerTickBig = 0,
+	                    uint32_t barLengthInTicks = 0);
 	void endStutter(ParamManagerForTimeline* paramManager = nullptr);
 
 	/// Update phase offsets from source's current config (call before processStutter)
@@ -132,7 +135,18 @@ public:
 
 	/// Feed audio to standby buffer (call during audio processing when standby is active)
 	/// Only records if source matches the one that enabled standby
-	void recordStandby(void* source, deluge::dsp::StereoBuffer<q31_t> audio);
+	/// Uses tick-boundary detection for sample-accurate beat-quantized recording start
+	void recordStandby(void* source, deluge::dsp::StereoBuffer<q31_t> audio, int64_t lastSwungTick,
+	                   uint32_t syncLength);
+
+	/// Check if pending play trigger should fire (call from audio processing)
+	/// Uses tick-boundary detection for sample-accurate beat-quantized trigger
+	/// Returns true if playback was started
+	bool checkPendingTrigger(void* source, int64_t lastSwungTick, uint32_t syncLength, ParamManager* paramManager,
+	                         int32_t magnitude, uint32_t timePerTickInverse);
+
+	/// Check if source has a pending trigger waiting
+	inline bool hasPendingTrigger(void* source) const { return pendingPlayTrigger && recordSource == source; }
 
 private:
 	enum class Status {
@@ -168,15 +182,26 @@ private:
 	/// Track if we started from standby mode (to return to it after stutter ends)
 	bool startedFromStandby = false;
 
+	/// Standby timeout: release after N bars of idle standby (no playback)
+	static constexpr size_t kStandbyTimeoutBars = 32; ///< ~64 seconds at 120 BPM
+	size_t standbyIdleSamples = 0;                    ///< Samples since last playback (reset on trigger)
+
 	/// Double buffer system - swap instead of copy on trigger
 	deluge::dsp::StereoSample<q31_t>* bufferA = nullptr;
 	deluge::dsp::StereoSample<q31_t>* bufferB = nullptr;
 	deluge::dsp::StereoSample<q31_t>* recordBuffer = nullptr; ///< Points to buffer being recorded
 	deluge::dsp::StereoSample<q31_t>* playBuffer = nullptr;   ///< Points to buffer being played
 
-	size_t recordWritePos = 0;   ///< Current write position in record buffer (ring buffer style)
-	size_t playbackStartPos = 0; ///< Where captured bar starts in play buffer (ring buffer offset)
-	size_t playbackLength = 0;   ///< Full captured bar length in samples
+	size_t recordWritePos = 0;     ///< Current write position in record buffer (ring buffer style)
+	bool recordBufferFull = false; ///< True once ring buffer has wrapped (full loop available)
+	size_t playbackStartPos = 0;   ///< Where captured bar starts in play buffer (ring buffer offset)
+	size_t playbackLength = 0;     ///< Full captured bar length in samples
+
+	/// Beat quantization for recording and playback
+	bool waitingForRecordBeat = false; ///< In standby, waiting for beat before recording starts
+	int64_t recordStartTick = 0;       ///< Tick to start recording at
+	bool pendingPlayTrigger = false;   ///< User requested trigger, waiting for beat
+	int64_t playTriggerTick = 0;       ///< Tick to trigger playback at
 
 	/// Slice playback system - flexible enough for complex patterns
 	/// A "slice" is a region within the captured bar defined by offset and length.
@@ -233,17 +258,30 @@ private:
 	int32_t scatterPanCounter{0}; ///< Ever-incrementing counter for decorrelated pan (not tied to slice content)
 
 	/// Precomputed pan coefficients (Q31 fixed-point, computed once per slice)
-	int32_t scatterPanFadeQ31{0};      ///< Fading side multiplier: (1 - |pan|)
-	int32_t scatterPanCrossQ31{0};     ///< Crossfeed amount: |pan|/2
-	bool scatterPanRight{false};       ///< Pan direction: true = pan right (L fades), false = pan left (R fades)
-	bool scatterPanActive{false};      ///< Precomputed: pan != 0, skip per-sample check
-	bool scatterEnvActive{false};      ///< Precomputed: depth > 0, envelope applies
-	bool scatterGateActive{false};     ///< Precomputed: gate < 1, truncation applies
-	int32_t scatterSubdivisions{1};    ///< Current subdivision count (1,2,3,4,6,8,12) - ratchet
-	int32_t scatterSubdivIndex{0};     ///< Current subdivision within slice [0, subdivisions-1]
-	size_t scatterSubSliceLength{256}; ///< Precomputed: currentSliceLength / subdivisions (avoid per-sample div)
-	bool needsSliceSetup{true};        ///< Dirty flag: set when slice completes, cleared after setup
-	bool scatterPitchUp{false};        ///< Pitch up via sample decimation (2x = octave up)
+	int32_t scatterPanFadeQ31{0};          ///< Fading side multiplier: (1 - |pan|)
+	int32_t scatterPanCrossQ31{0};         ///< Crossfeed amount: |pan|/2
+	bool scatterPanRight{false};           ///< Pan direction: true = pan right (L fades), false = pan left (R fades)
+	bool scatterPanActive{false};          ///< Precomputed: pan != 0, skip per-sample check
+	bool scatterEnvActive{false};          ///< Precomputed: depth > 0, envelope applies
+	bool scatterGateActive{false};         ///< Precomputed: gate < 1, truncation applies
+	int32_t scatterSubdivisions{1};        ///< Current subdivision count (1,2,3,4,6,8,12) - ratchet
+	int32_t scatterSubdivIndex{0};         ///< Current subdivision within slice [0, subdivisions-1]
+	size_t scatterSubSliceLength{256};     ///< Precomputed: currentSliceLength / subdivisions (avoid per-sample div)
+	size_t scatterLastSubSliceLength{256}; ///< Last subdivision gets remainder to prevent timing drift
+	bool needsSliceSetup{true};            ///< Dirty flag: set when slice completes, cleared after setup
+	bool scatterPitchUp{false};            ///< Pitch up via sample decimation (2x = octave up)
+
+	/// Repeat grain state (inverse of ratchet - hold same grain for N slices)
+	int32_t scatterRepeatCounter{0};                        ///< Countdown for repeat mode (0 = compute new grain)
+	deluge::dsp::scatter::GrainParams scatterCachedGrain{}; ///< Cached grain during repeat (skip computeGrainParams)
+
+	/// Bar counter for multi-bar patterns (0-3, wraps at 4)
+	/// Individual bits used as offsets with Zone B-derived weights to shift Zone A
+	int32_t scatterBarIndex{0};
+
+	/// Tick-based bar boundary detection for grid sync
+	/// When currentTick/barLength crosses to a new bar, we force sync to bar start
+	int64_t lastTickBarIndex{-1}; ///< Last bar index from tick clock (-1 = not initialized)
 
 	/// Precomputed envelope parameters (Q31 fixed-point, computed once per slice, used per-sample)
 	deluge::dsp::scatter::GrainEnvPrecomputedQ31 scatterEnvPrecomputed{};
@@ -268,6 +306,11 @@ private:
 		float subdivInfluence{0};     ///< triangleSimpleUnipolar(macroConfig * kPhi225, 0.5f)
 		float zoneAMacroInfluence{0}; ///< triangleSimpleUnipolar(macroConfig * kPhi050, 0.5f)
 		float zoneBMacroInfluence{0}; ///< triangleSimpleUnipolar(macroConfig * kPhi075, 0.5f)
+
+		// Threshold scales for reverse/pitch/delay probability (bipolar, macro-scaled)
+		float reverseScale{0}; ///< triangleFloat(macroConfig * kPhi125, 0.6f) [-1,1]
+		float pitchScale{0};   ///< triangleFloat(macroConfig * kPhi200, 0.6f) [-1,1]
+		float delayScale{0};   ///< triangleFloat(macroConfig * kPhi075, 0.6f) [-1,1]
 
 		// Outputs: depend only on zoneB (standard mode, not evolution mode)
 		float envDepthBase{0};  ///< triangleSimpleUnipolar(zoneBPos * kPhi050, 0.6f)
