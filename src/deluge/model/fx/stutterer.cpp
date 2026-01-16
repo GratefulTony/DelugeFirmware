@@ -152,6 +152,7 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 			sliceStartOffset = 0;
 			scatterSliceIndex = 0;
 			scatterReversed = false;
+			scatterPitchUp = false;
 			scatterDryMix = 0;
 			scatterDryThreshold = 1.0f;
 			scatterEnvDepth = 0;
@@ -456,6 +457,9 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					// Reverse decision (hash-based bool)
 					scatterReversed = grain.shouldReverse;
 
+					// Pitch-up decision (hash-based bool, 2x via sample decimation)
+					scatterPitchUp = grain.shouldPitchUp;
+
 					// Dry decision (hash-based bool, macro can gate it)
 					// Macro high = more likely to override grain and use dry
 					float thresholdInfluence =
@@ -571,6 +575,7 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			bool loopEnvActive = isShuffle && (scatterEnvActive || scatterGateActive);
 			bool loopPanActive = scatterPanActive;
 			bool loopReversed = scatterReversed && isShuffle;
+			int32_t loopPitchIncrement = (scatterPitchUp && isShuffle) ? 2 : 1;
 
 			// Hoist envelope precomputed values
 			int32_t loopGatedLen = scatterEnvPrecomputed.gatedLength;
@@ -739,7 +744,8 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				}
 				// When subdivisions > 1, replay start of slice N times
 				// Uses precomputed loopSubSliceLength (division done once per slice)
-				playbackPos++;
+				// Pitch-up: increment by 2 (skip samples = octave up via decimation)
+				playbackPos += loopPitchIncrement;
 				if (playbackPos >= loopSubSliceLength) {
 					playbackPos = 0;
 					scatterSubdivIndex++;

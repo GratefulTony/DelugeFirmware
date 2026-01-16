@@ -51,6 +51,7 @@ constexpr uint32_t TripletSubdiv = 0xFEDCBA98u;   // Duty: triplet subdivision l
 constexpr uint32_t SliceOffset = 0xAABBCCDDu;     // Int: offset added to slice index
 constexpr uint32_t LengthMult = 0x55667788u;      // Nibble: length multiplier level
 constexpr uint32_t DelayRatio = 0xDEADBEEFu;      // 2 bits: power-of-2 delay multiplier
+constexpr uint32_t PitchDecision = 0xCAFEBABEu;   // Bool: should pitch up (2x decimation)?
 } // namespace HashSeed
 
 /**
@@ -842,6 +843,7 @@ struct GrainParams {
 
 	// Timbral (from Zone B) - DISCRETE DECISIONS
 	bool shouldReverse{false}; ///< Should reverse this slice?
+	bool shouldPitchUp{false}; ///< Should pitch up (2x via decimation) this slice?
 	float filterFreq{0.5f};    ///< Bandpass center [0,1] maps to freq range
 	uint8_t delaySendBits{0};  ///< 2 bits: 0=off, 1=25%, 2=50%, 3=100% (shift = 3-bits)
 	uint8_t delayRatioBits{0}; ///< 2 bits for power-of-2 delay mult (use with computeDelayTimeRatio)
@@ -958,6 +960,11 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 	// zoneB=0: never reverse, zoneB=1: 50% reverse chance
 	float reverseProb = zoneBNorm * 0.5f;
 	p.shouldReverse = hashCtx.evalBool(HashSeed::ReverseDecision, reverseProb);
+
+	// Pitch-up decision: hash bool with zoneB-scaled probability
+	// zoneB=0: never pitch up, zoneB=1: 30% pitch up chance (octave up via sample decimation)
+	float pitchProb = zoneBNorm * 0.3f;
+	p.shouldPitchUp = hashCtx.evalBool(HashSeed::PitchDecision, pitchProb);
 
 	// Delay ratio: hash-based n/d for rhythmic delay times (changes per-slice)
 	uint32_t delayHash = hash::derive(hashCtx.baseHash, HashSeed::DelayRatio);

@@ -243,6 +243,7 @@ private:
 	int32_t scatterSubdivIndex{0};     ///< Current subdivision within slice [0, subdivisions-1]
 	size_t scatterSubSliceLength{256}; ///< Precomputed: currentSliceLength / subdivisions (avoid per-sample div)
 	bool needsSliceSetup{true};        ///< Dirty flag: set when slice completes, cleared after setup
+	bool scatterPitchUp{false};        ///< Pitch up via sample decimation (2x = octave up)
 
 	/// Precomputed envelope parameters (Q31 fixed-point, computed once per slice, used per-sample)
 	deluge::dsp::scatter::GrainEnvPrecomputedQ31 scatterEnvPrecomputed{};
