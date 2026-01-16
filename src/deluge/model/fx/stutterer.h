@@ -233,18 +233,59 @@ private:
 	int32_t scatterPanCounter{0}; ///< Ever-incrementing counter for decorrelated pan (not tied to slice content)
 
 	/// Precomputed pan coefficients (Q31 fixed-point, computed once per slice)
-	int32_t scatterPanFadeQ31{0};       ///< Fading side multiplier: (1 - |pan|)
-	int32_t scatterPanKeepQ31{ONE_Q31}; ///< Target side keep: (1 - |pan|/2)
-	int32_t scatterPanCrossQ31{0};      ///< Target side crossfeed: |pan|/2
-	bool scatterPanRight{false};        ///< Pan direction: true = pan right (L fades), false = pan left (R fades)
-	bool scatterPanActive{false};       ///< Precomputed: pan != 0, skip per-sample check
-	bool scatterEnvActive{false};       ///< Precomputed: depth > 0, envelope applies
-	bool scatterGateActive{false};      ///< Precomputed: gate < 1, truncation applies
-	int32_t scatterSubdivisions{1};     ///< Current subdivision count (1,2,3,4,6,8,12) - ratchet
-	int32_t scatterSubdivIndex{0};      ///< Current subdivision within slice [0, subdivisions-1]
+	int32_t scatterPanFadeQ31{0};      ///< Fading side multiplier: (1 - |pan|)
+	int32_t scatterPanCrossQ31{0};     ///< Crossfeed amount: |pan|/2
+	bool scatterPanRight{false};       ///< Pan direction: true = pan right (L fades), false = pan left (R fades)
+	bool scatterPanActive{false};      ///< Precomputed: pan != 0, skip per-sample check
+	bool scatterEnvActive{false};      ///< Precomputed: depth > 0, envelope applies
+	bool scatterGateActive{false};     ///< Precomputed: gate < 1, truncation applies
+	int32_t scatterSubdivisions{1};    ///< Current subdivision count (1,2,3,4,6,8,12) - ratchet
+	int32_t scatterSubdivIndex{0};     ///< Current subdivision within slice [0, subdivisions-1]
+	size_t scatterSubSliceLength{256}; ///< Precomputed: currentSliceLength / subdivisions (avoid per-sample div)
+	bool needsSliceSetup{true};        ///< Dirty flag: set when slice completes, cleared after setup
 
 	/// Precomputed envelope parameters (Q31 fixed-point, computed once per slice, used per-sample)
 	deluge::dsp::scatter::GrainEnvPrecomputedQ31 scatterEnvPrecomputed{};
+
+	/// === STATIC vs DYNAMIC PARAM SEPARATION ===
+	/// STATIC params: Only depend on zone knob positions (zoneA, zoneB, macroConfig, macro)
+	///   - Recompute only when knob values change (checked at slice boundary)
+	///   - Includes: macro influence, subdiv influence, base envDepth/pan (standard mode)
+	/// DYNAMIC params: Depend on sliceIndex/slicePhase (changes every slice)
+	///   - Must recompute every slice boundary
+	///   - Includes: sliceOffset, skipProb, reverseProb, filter, delayFeed (in evolution mode)
+
+	/// Static phi triangles - only recompute when knob inputs change
+	/// Saves ~500 cycles/slice when params are static
+	struct StaticTriangles {
+		// Cached input values for change detection
+		q31_t lastZoneBParam{0};
+		q31_t lastMacroConfigParam{0};
+		q31_t lastMacroParam{0};
+
+		// Outputs: depend only on macroConfig (not slicePhase)
+		float subdivInfluence{0};     ///< triangleSimpleUnipolar(macroConfig * kPhi225, 0.5f)
+		float zoneAMacroInfluence{0}; ///< triangleSimpleUnipolar(macroConfig * kPhi050, 0.5f)
+		float zoneBMacroInfluence{0}; ///< triangleSimpleUnipolar(macroConfig * kPhi075, 0.5f)
+
+		// Outputs: depend only on zoneB (standard mode, not evolution mode)
+		float envDepthBase{0};  ///< triangleSimpleUnipolar(zoneBPos * kPhi050, 0.6f)
+		float panAmountBase{0}; ///< triangleSimpleUnipolar(zoneBPos * kPhi125, 0.25f)
+
+		// Delay params: independent phase, not tied to slice index
+		float delayTimeMod{1.0f}; ///< Multiplier around slice length [0.5, 2.0]
+		// Note: feedback is fixed at 50% via bit shift (no variable feedback)
+
+		bool valid{false}; ///< Force recompute on scatter start
+	} staticTriangles;
+
+	/// Delay send/return state (slice-synced delay, fully integer)
+	static constexpr size_t kDelayBufferSize = 32768; ///< ~0.74s at 44.1kHz (256KB) - quarter bar down to ~80 BPM
+	deluge::dsp::StereoSample<q31_t>* delayBuffer{nullptr};
+	size_t delayWritePos{0};
+	size_t delayTime{0};       ///< Delay time in samples (= slice length, capped)
+	uint8_t delaySendShift{0}; ///< Send via bit shift: 2=25%, 1=50%, 0=100%
+	bool delayActive{false};   ///< Skip processing when send=0
 
 	/// Stored config for takeover (when recordSource triggers playback)
 	StutterConfig armedConfig{};

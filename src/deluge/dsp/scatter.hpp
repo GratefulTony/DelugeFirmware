@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include "dsp/hash_random.hpp"
 #include "dsp/phi_triangle.hpp"
 #include "dsp/util.hpp"
 #include "dsp/zone_param.hpp"
@@ -34,6 +35,51 @@ namespace deluge::dsp::scatter {
 
 // Precomputed reciprocal for q31 to float conversion (multiplication is ~10x faster than division on ARM)
 constexpr float kQ31ToFloat = 1.0f / static_cast<float>(ONE_Q31);
+
+// ============================================================================
+// Hash-based random for scatter - uses shared hash utilities
+// ============================================================================
+
+// Scatter-specific param seeds for decorrelated random values
+namespace HashSeed {
+constexpr uint32_t ReverseDecision = 0x12345678u; // Bool: should reverse this slice?
+constexpr uint32_t SkipDecision = 0x9ABCDEF0u;    // Bool: should skip to non-adjacent?
+constexpr uint32_t SkipTarget = 0x11223344u;      // Int: which slice to skip to
+constexpr uint32_t DryMix = 0x2468ACE0u;          // Bool: use dry instead of grain?
+constexpr uint32_t BinarySubdiv = 0x13579BDFu;    // Duty: binary subdivision level
+constexpr uint32_t TripletSubdiv = 0xFEDCBA98u;   // Duty: triplet subdivision level
+constexpr uint32_t SliceOffset = 0xAABBCCDDu;     // Int: offset added to slice index
+constexpr uint32_t LengthMult = 0x55667788u;      // Nibble: length multiplier level
+constexpr uint32_t DelayRatio = 0xDEADBEEFu;      // 2 bits: power-of-2 delay multiplier
+} // namespace HashSeed
+
+/**
+ * Compute delay time as power-of-2 multiple of base time (32nd note grid)
+ * Uses 2 bits from hash: 0=1/4x, 1=1/2x, 2=1x, 3=2x
+ * All bit shifts, no multiply or divide (~1 cycle)
+ */
+[[gnu::always_inline]] inline size_t computeDelayTimeRatio(size_t baseTime, uint32_t hashBits) {
+	// 2 bits select power-of-2 multiplier: 1/4, 1/2, 1, 2
+	switch (hashBits & 0x3) {
+	case 0:
+		return baseTime >> 2; // 1/4x (32nd if slice is 8th)
+	case 1:
+		return baseTime >> 1; // 1/2x (16th if slice is 8th)
+	case 2:
+		return baseTime; // 1x (same as slice)
+	case 3:
+		return baseTime << 1; // 2x (quarter if slice is 8th)
+	default:
+		return baseTime;
+	}
+}
+
+// Length multiplier discrete levels (8 steps from 0.5 to 1.0)
+constexpr float kLengthMultLevels[8] = {0.5f, 0.5625f, 0.625f, 0.6875f, 0.75f, 0.8125f, 0.875f, 1.0f};
+
+// Convenience aliases for scatter
+using HashBits = hash::Bits;
+using HashContext = hash::Context;
 
 /**
  * Phi triangle bank for structural scatter params (Zone A meta)
@@ -364,12 +410,23 @@ prepareGrainEnvelope(int32_t sliceLength, float gateRatio, float depth, float en
 /**
  * Prepare precomputed Q31 envelope parameters at slice boundary
  * All reciprocals in Q31 format for pure integer per-sample math
+ *
+ * Note: For fast ratchets (<30ms), caller should skip envelope entirely
+ * by not setting scatterEnvActive. This function is only called for
+ * slices that actually need envelope processing.
+ *
+ * @param sliceLength Length of slice in samples
+ * @param gateRatio Gate duty cycle [0,1]
+ * @param depth Envelope depth [0,1]
+ * @param envShape Envelope shape [0,1]
+ * @param envWidth Envelope width [0,1]
  */
 [[gnu::always_inline]] inline GrainEnvPrecomputedQ31 prepareGrainEnvelopeQ31(int32_t sliceLength, float gateRatio,
                                                                              float depth, float envShape = 0.5f,
                                                                              float envWidth = 1.0f) {
 	GrainEnvPrecomputedQ31 p;
-	constexpr int32_t kAntiClickSamples = 440;
+	constexpr int32_t kAntiClickSamples = 440; // ~10ms fade at 44.1kHz
+	constexpr int32_t kMinAntiClickBase = 64;  // Absolute minimum for click-free audio
 
 	if (sliceLength <= 0) {
 		return p; // Will return ONE_Q31 for all samples
@@ -413,12 +470,11 @@ prepareGrainEnvelope(int32_t sliceLength, float gateRatio, float depth, float en
 	p.attackFadeLen = static_cast<int32_t>(static_cast<float>(baseFade) * attackScale);
 	p.decayFadeLen = static_cast<int32_t>(static_cast<float>(baseFade) * decayScale);
 	// Ensure minimum anti-click even at extreme shapes
-	constexpr int32_t kMinAntiClick = 64;
-	if (p.attackFadeLen < kMinAntiClick && baseFade >= kMinAntiClick) {
-		p.attackFadeLen = kMinAntiClick;
+	if (p.attackFadeLen < kMinAntiClickBase && baseFade >= kMinAntiClickBase) {
+		p.attackFadeLen = kMinAntiClickBase;
 	}
-	if (p.decayFadeLen < kMinAntiClick && baseFade >= kMinAntiClick) {
-		p.decayFadeLen = kMinAntiClick;
+	if (p.decayFadeLen < kMinAntiClickBase && baseFade >= kMinAntiClickBase) {
+		p.decayFadeLen = kMinAntiClickBase;
 	}
 	p.invAttackLen = (p.attackFadeLen > 0) ? (ONE_Q31 / p.attackFadeLen) : 0;
 	p.invDecayLen = (p.decayFadeLen > 0) ? (ONE_Q31 / p.decayFadeLen) : 0;
@@ -529,7 +585,6 @@ prepareGrainEnvelope(int32_t sliceLength, float gateRatio, float depth, float en
 /**
  * Ultra-fast linear-only Q31 grain envelope - minimal per-sample cost
  * Only computes linear anti-click fades, no parabolic curves or depth blending.
- * Use this when caller has already determined we're in a fade region.
  *
  * @param positionInSlice Current position within slice [0, sliceLength)
  * @param p Precomputed Q31 parameters from prepareGrainEnvelopeQ31()
@@ -775,22 +830,24 @@ struct ScatterState {
 
 /**
  * Computed grain parameters from zone knobs
- * All values normalized [0,1] unless noted
+ * Discrete decisions computed via hash, continuous params still float
  */
 struct GrainParams {
-	// Structural (from Zone A)
-	float sliceOffset{0};   ///< Offset to add to slice selection [0,1] maps to [0,numSlices)
-	float lengthMult{1.0f}; ///< Slice length multiplier [0.25, 2.0]
-	float skipProb{0};      ///< Probability of skipping to non-adjacent slice
-	float dryMix{0};        ///< Crossfade with dry input [0,1]: 0=full grain, 1=full dry
+	// Structural (from Zone A) - DISCRETE
+	int32_t sliceOffset{0}; ///< Offset to add to slice selection [0, numSlices)
+	float lengthMult{1.0f}; ///< Slice length multiplier from kLengthMultLevels
+	bool shouldSkip{false}; ///< Should skip to non-adjacent slice?
+	int32_t skipTarget{0};  ///< Target slice index when skipping [0, numSlices)
+	bool useDry{false};     ///< Use dry signal instead of grain?
 
-	// Timbral (from Zone B)
-	float reverseProb{0};   ///< Probability of reversing slice
-	float filterFreq{0.5f}; ///< Bandpass center [0,1] maps to freq range
-	float delayFeed{0};     ///< Per-grain delay send amount
-	float envShape{0.5f};   ///< Envelope shape (0=percussive, 0.5=hanning, 1=reverse)
-	float envDepth{0};      ///< Envelope depth [0,1]: 0=hard cut, 1=full envelope
-	float panAmount{0};     ///< Crossfeed pan amount [0,1] before direction applied
+	// Timbral (from Zone B) - DISCRETE DECISIONS
+	bool shouldReverse{false}; ///< Should reverse this slice?
+	float filterFreq{0.5f};    ///< Bandpass center [0,1] maps to freq range
+	uint8_t delaySendBits{0};  ///< 2 bits: 0=off, 1=25%, 2=50%, 3=100% (shift = 3-bits)
+	uint8_t delayRatioBits{0}; ///< 2 bits for power-of-2 delay mult (use with computeDelayTimeRatio)
+	float envShape{0.5f};      ///< Envelope shape (0=percussive, 0.5=hanning, 1=reverse)
+	float envDepth{0};         ///< Envelope depth [0,1]: 0=hard cut, 1=full envelope
+	float panAmount{0};        ///< Crossfeed pan amount [0,1] before direction applied
 
 	// Combined
 	float gateRatio{1.0f};   ///< Gate duty cycle [0.125, 1.0]
@@ -844,9 +901,17 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 	double phRawA = static_cast<double>(offsets.zoneA) + kResolution * static_cast<double>(offsets.gamma);
 	double phRawB = static_cast<double>(offsets.zoneB) + kResolution * static_cast<double>(offsets.gamma);
 
-	// Apply macroConfig offset (in normalized units, 0.1 per click)
+	// Single hash context for all hash-based operations (amortize mix() cost)
+	// Incorporate phRawA into seed so gamma/phaseOffset changes Zone A hash patterns
+	// Add 0x12345678 to prevent mix(0)=0 degenerate case when sliceIndex=0 and phRawA=0
+	uint32_t hashSeed = static_cast<uint32_t>(sliceIndex) ^ static_cast<uint32_t>(phRawA * 65536.0f) ^ 0x12345678u;
+	HashContext hashCtx{hashSeed};
+
+	// Apply macroConfig offset (in normalized units, 0.1 per click) + gamma
+	// Gamma adds slow evolution to macroConfig pattern selection
+	float macroConfigOffset = offsets.macroConfig * 0.1f + static_cast<float>(offsets.gamma);
 	float macroConfigNorm = static_cast<float>(macroConfigParam) * kQ31ToFloat;
-	macroConfigNorm = std::clamp(macroConfigNorm + offsets.macroConfig * 0.1f, 0.0f, 1.0f);
+	macroConfigNorm = std::clamp(macroConfigNorm + macroConfigOffset, 0.0f, 1.0f);
 	float macroNorm = static_cast<float>(macroParam) * kQ31ToFloat;
 
 	// Phi triangle deadzone: when triangle output is low, sliceIndex contribution is zeroed
@@ -855,197 +920,135 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 	int32_t effectiveSlice = (sliceWeight > 0.1f) ? sliceIndex : 0;
 	float slicePhase = phi::wrapPhase(static_cast<float>(effectiveSlice) * phi::kPhi);
 
-	// === Zone A: Structural ===
-	if (phRawA != 0.0) {
-		// Full range phi-triangle evolution (like sine shaper when phRaw != 0)
-		// Position is normalized across full range, phi triangles evolve all structural params
-		// slicePhase adds per-grain variation (unlike sine shaper which is continuous)
-		float pos = static_cast<float>(zoneAParam) * kQ31ToFloat;
-		pos = std::clamp(pos, 0.0f, 1.0f);
+	// === Zone A: Structural (all hash-based discrete decisions) ===
+	float zoneANorm = static_cast<float>(zoneAParam) * kQ31ToFloat;
+	zoneANorm = std::clamp(zoneANorm, 0.0f, 1.0f);
 
-		// Per-effect frequency modulation using phi triangles (non-monotonic)
-		float fmO = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRawA * phi::kPhi025));
-		float fmL = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRawA * phi::kPhi033));
-		float fmS = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRawA * phi::kPhi067));
-		float fmD = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRawA * phi::kPhiN025));
+	// Slice offset: hash-based [0-15], caller scales by numSlices/16
+	// Higher zoneA = more offset variation
+	uint8_t maxOffset = static_cast<uint8_t>(zoneANorm * 15.0f);
+	p.sliceOffset = (maxOffset > 0) ? hashCtx.evalInt(HashSeed::SliceOffset, maxOffset + 1) : 0;
 
-		// Scale and wrap ph per-frequency to preserve irrational divergence
-		float ph025 = phi::wrapPhase(phRawA * phi::kPhi025);
-		float ph033 = phi::wrapPhase(phRawA * phi::kPhi033);
-		float ph050 = phi::wrapPhase(phRawA * phi::kPhi050);
-		float ph067 = phi::wrapPhase(phRawA * phi::kPhi067);
-
-		// Slice offset: primary evolution + per-slice variation
-		p.sliceOffset = triangleSimpleUnipolar(pos * phi::kPhi025 * fmO + ph025 + slicePhase + 0.166f, 0.7f);
-
-		// Length mult: [0.5, 1.0] range
-		float lS = triangleSimpleUnipolar(pos * phi::kPhi033 * fmL + ph033 + slicePhase + 0.333f, 0.6f);
-		p.lengthMult = 0.5f + lS * 0.5f;
-
-		// Skip prob: capped at 80%
-		p.skipProb = triangleSimpleUnipolar(pos * phi::kPhi050 * fmS + ph050 + slicePhase + 0.500f, 0.5f) * 0.8f;
-
-		// Dry mix: sparse activation (low duty = mostly wet with occasional dry)
-		p.dryMix = triangleSimpleUnipolar(pos * phi::kPhi067 * fmD + ph067 + slicePhase + 0.667f, 0.3f);
+	// Length multiplier: hash selects from 8 discrete levels, zoneA biases toward shorter
+	// zoneA=0: mostly full length, zoneA=1: full range of lengths
+	uint8_t lengthBits = (hash::derive(hashCtx.baseHash, HashSeed::LengthMult) >> 4) & 0x7;
+	uint8_t minLengthIdx = static_cast<uint8_t>((1.0f - zoneANorm) * 7.0f); // zoneA high = allow shorter
+	uint8_t lengthIdx = minLengthIdx + ((lengthBits * (8 - minLengthIdx)) >> 3);
+	if (lengthIdx > 7) {
+		lengthIdx = 7;
 	}
-	else {
-		// Standard discrete zone behavior (phaseOffset == 0)
-		ZoneInfo zoneAInfo = computeZoneQ31(zoneAParam, kNumZones);
+	p.lengthMult = kLengthMultLevels[lengthIdx];
 
-		// PhiTriContext: slicePhase for per-slice variation, offsets.gamma shifts evolution pattern
-		phi::PhiTriContext ctx{slicePhase, 1.0f, 1.0f, offsets.gamma};
-		constexpr int32_t kZoneADiscreteZones = 5; // Zones 0-4 are discrete, 5-7 are meta
+	// Skip decision: hash bool with zoneA-scaled probability
+	// zoneA=0: never skip, zoneA=1: 80% skip chance
+	float skipProb = zoneANorm * 0.8f;
+	p.shouldSkip = hashCtx.evalBool(HashSeed::SkipDecision, skipProb);
+	p.skipTarget = hashCtx.evalInt(HashSeed::SkipTarget, 16); // [0-15], caller scales
 
-		if (zoneAInfo.index < kZoneADiscreteZones) {
-			// Zones 0-4: Discrete behaviors
-			p.dryMix = 0.0f;
+	// Dry decision: hash bool, sparse (mostly grain, occasional dry)
+	// zoneA modulates probability: higher = more likely to use dry
+	float dryProb = zoneANorm * 0.3f; // Max 30% dry at full zoneA
+	p.useDry = hashCtx.evalBool(HashSeed::DryMix, dryProb);
 
-			switch (zoneAInfo.index) {
-			case 0: // Drift: Sequential with slight offset
-				p.sliceOffset = zoneAInfo.position * 0.25f;
-				break;
-			case 1: // Swap: Adjacent pair swapping
-				p.sliceOffset = (zoneAInfo.position > 0.5f) ? 0.5f : 0.0f;
-				p.skipProb = zoneAInfo.position * 0.5f;
-				break;
-			case 2: // Retro: Reverse order tendency
-				p.sliceOffset = zoneAInfo.position * 0.5f;
-				p.lengthMult = 1.0f - zoneAInfo.position * 0.5f;
-				break;
-			case 3: // Leap: Interleaved skipping
-				p.sliceOffset = zoneAInfo.position * 0.5f;
-				p.skipProb = zoneAInfo.position;
-				break;
-			case 4: { // Density: Per-grain dry crossfade
-				float phiMod = triangleSimpleUnipolar(slicePhase, 0.3f);
-				float maxDry = 1.0f - zoneAInfo.position;
-				p.dryMix = maxDry * phiMod;
-				break;
-			}
-			default:
-				break;
-			}
-		}
-		else {
-			// Zones 5-7: Meta - phi triangle evolution via bank
-			auto structural = ctx.evalBank(kStructuralBank, zoneAInfo.position);
-			p.sliceOffset = structural[0];
-			p.lengthMult = 0.5f + structural[1] * 0.5f;
-			p.skipProb = structural[2] * 0.8f;
-			p.dryMix = 0.0f;
-		}
-	}
+	// === Zone B: Timbral (continuous params keep triangles, reverse is hash bool) ===
+	float zoneBNorm = static_cast<float>(zoneBParam) * kQ31ToFloat;
+	zoneBNorm = std::clamp(zoneBNorm, 0.0f, 1.0f);
 
-	// === Zone B: Timbral ===
+	// Reverse decision: hash bool with zoneB-scaled probability
+	// zoneB=0: never reverse, zoneB=1: 50% reverse chance
+	float reverseProb = zoneBNorm * 0.5f;
+	p.shouldReverse = hashCtx.evalBool(HashSeed::ReverseDecision, reverseProb);
+
+	// Delay ratio: hash-based n/d for rhythmic delay times (changes per-slice)
+	uint32_t delayHash = hash::derive(hashCtx.baseHash, HashSeed::DelayRatio);
+	p.delayRatioBits = static_cast<uint8_t>(delayHash & 0xF);
+
+	// Continuous timbral params (keep triangle-based for smooth audio evolution)
 	if (phRawB != 0.0) {
-		// Full range phi-triangle evolution (like sine shaper when phRaw != 0)
-		// slicePhase adds per-grain variation
-		float pos = static_cast<float>(zoneBParam) * kQ31ToFloat;
-		pos = std::clamp(pos, 0.0f, 1.0f);
+		// Full range phi-triangle evolution
+		float pos = zoneBNorm;
 
 		// Per-effect frequency modulation
-		float fmR = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRawB * phi::kPhiN050));
 		float fmF = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRawB * phi::kPhi067));
 		float fmD = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRawB * phi::kPhi125));
 		float fmE = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRawB * phi::kPhi200));
 
-		// Scale and wrap ph per-frequency
-		float phN050 = phi::wrapPhase(phRawB * phi::kPhiN050);
 		float ph067 = phi::wrapPhase(phRawB * phi::kPhi067);
 		float ph125 = phi::wrapPhase(phRawB * phi::kPhi125);
 		float ph200 = phi::wrapPhase(phRawB * phi::kPhi200);
 
-		// Reverse prob + per-slice variation
-		p.reverseProb = triangleSimpleUnipolar(pos * phi::kPhiN050 * fmR + phN050 + slicePhase + 0.000f, 0.5f);
-
-		// Filter freq
 		p.filterFreq = triangleSimpleUnipolar(pos * phi::kPhi067 * fmF + ph067 + slicePhase + 0.250f, 0.7f);
-
-		// Delay feed: capped at 80%
-		p.delayFeed = triangleSimpleUnipolar(pos * phi::kPhi125 * fmD + ph125 + slicePhase + 0.500f, 0.6f) * 0.8f;
-
-		// Envelope shape
+		// Delay send: triangle [0,0.6] → 2 bits [0-3] (0=off, 1=25%, 2=50%, 3=100%)
+		float delayRaw = triangleSimpleUnipolar(pos * phi::kPhi125 * fmD + ph125 + slicePhase + 0.500f, 0.6f);
+		p.delaySendBits = static_cast<uint8_t>(delayRaw * 5.0f); // [0,0.6]*5 = [0,3]
 		p.envShape = triangleSimpleUnipolar(pos * phi::kPhi200 * fmE + ph200 + slicePhase + 0.750f, 0.8f);
 
-		// Envelope depth: separate phi frequency for independent evolution
 		float phDepth = phi::wrapPhase(phRawB * phi::kPhi050);
 		float fmDepth = 1.0f + pos * (0.25f + 0.25f * phi::wrapPhase(phRawB * phi::kPhi050));
 		p.envDepth = triangleSimpleUnipolar(pos * phi::kPhi050 * fmDepth + phDepth + slicePhase, 0.6f);
 
-		// Pan amount: yet another phi frequency
 		float phPan = phi::wrapPhase(phRawB * phi::kPhi125);
 		p.panAmount = triangleSimpleUnipolar(pos * phi::kPhi125 + phPan + slicePhase, 0.25f);
+
+		// Gate phi triangle with 50% deadzone
+		float phGate = phi::wrapPhase(phRawB * phi::kPhi150);
+		float gateRaw = triangleSimpleUnipolar(pos * phi::kPhi150 + phGate + slicePhase, 0.5f);
+		p.gateRatio = 0.125f + (1.0f - gateRaw) * 0.875f;
 	}
 	else {
-		// Standard discrete zone behavior (phaseOffset == 0)
+		// Standard discrete zone behavior
 		ZoneInfo zoneBInfo = computeZoneQ31(zoneBParam, kNumZones);
-
-		// PhiTriContext: slicePhase for per-slice variation, offsets.gamma shifts evolution pattern
 		phi::PhiTriContext ctx{slicePhase, 1.0f, 1.0f, offsets.gamma};
-		constexpr int32_t kZoneBDiscreteZones = 4; // Zones 0-3 are discrete, 4-7 are meta
+		constexpr int32_t kZoneBDiscreteZones = 4;
 
 		if (zoneBInfo.index < kZoneBDiscreteZones) {
-			// Zones 0-3: Individual effects
 			switch (zoneBInfo.index) {
-			case 0: // Flip: Reverse probability
-				p.reverseProb = zoneBInfo.position;
+			case 0: // Flip: boost reverse probability further
+				reverseProb = zoneBInfo.position;
+				p.shouldReverse = hashCtx.evalBool(HashSeed::ReverseDecision, reverseProb);
 				break;
-			case 1: // Filter: Bandpass sweep
+			case 1: // Filter
 				p.filterFreq = zoneBInfo.position;
 				break;
-			case 2: // Echo: Delay feed
-				p.delayFeed = zoneBInfo.position * 0.8f;
+			case 2:                                                                // Echo
+				p.delaySendBits = static_cast<uint8_t>(zoneBInfo.position * 3.0f); // [0,1] → [0,3]
 				break;
-			case 3: // Shape: Envelope shape
+			case 3: // Shape
 			default:
 				p.envShape = zoneBInfo.position;
 				break;
 			}
 		}
 		else {
-			// Zones 4-7: Meta - phi triangle evolution via bank
+			// Zones 4-7: Meta
 			auto timbral = ctx.evalBank(kTimbraBank, zoneBInfo.position);
-			p.reverseProb = timbral[0];
+			// Reverse still hash-based but with triangle-modulated probability
+			reverseProb = timbral[0];
+			p.shouldReverse = hashCtx.evalBool(HashSeed::ReverseDecision, reverseProb);
 			p.filterFreq = timbral[1];
-			p.delayFeed = timbral[2] * 0.8f;
+			p.delaySendBits = static_cast<uint8_t>(timbral[2] * 3.0f); // [0,1] → [0,3]
 			p.envShape = timbral[3];
 		}
 
-		// Envelope depth and pan from Zone B position (standard mode)
 		p.envDepth = triangleSimpleUnipolar(zoneBInfo.position * phi::kPhi050, 0.6f);
 		p.panAmount = triangleSimpleUnipolar(zoneBInfo.position * phi::kPhi125, 0.25f);
-
-		// Gate from macroConfig only (standard mode)
-		// Range [0.25, 1.0] - macroConfig high = shorter gate
 		p.gateRatio = 0.25f + (1.0f - macroConfigNorm) * 0.75f;
 	}
 
-	// In full evolution mode, Zone B modulates gate via phi triangle
-	if (phRawB != 0.0) {
-		float pos = static_cast<float>(zoneBParam) * kQ31ToFloat;
-		pos = std::clamp(pos, 0.0f, 1.0f);
-		// Gate phi triangle with 50% deadzone - half the time gate is full
-		float phGate = phi::wrapPhase(phRawB * phi::kPhi150);
-		float gateRaw = triangleSimpleUnipolar(pos * phi::kPhi150 + phGate + slicePhase, 0.5f);
-		// Range [0.125, 1.0] - more dramatic gating when active
-		p.gateRatio = 0.125f + (1.0f - gateRaw) * 0.875f;
-	}
+	// === Subdivisions (Ratchet) - Pure integer, no floats ===
+	// zoneAParam is q31 [0, 2^31). Scale to threshold range using bit shifts.
+	// Binary: threshold [51, 102] = 51 + 51*(zoneA/ONE_Q31)  [~20-40% duty]
+	// = 51 + ((zoneAParam >> 24) * 51) >> 7  [safe: max 127*51=6477, >>7=50]
+	uint8_t binaryThresh = 51 + static_cast<uint8_t>(((zoneAParam >> 24) * 51) >> 7);
+	uint8_t binaryMag = hashCtx.evalDutyU8(HashSeed::BinarySubdiv, binaryThresh);
+	// Magnitude [0-15] → subdivisions: 0-4=2, 5-10=4, 11-15=8, 16=inactive
+	int32_t binarySub = (binaryMag >= 16) ? 1 : (binaryMag >= 11) ? 8 : (binaryMag >= 5) ? 4 : 2;
 
-	// === Subdivisions (Ratchet) ===
-	// Two triangles determine base subdivision pattern
-	// macro=0 → no subdivisions (=1), macro=max → 2x base subdivisions
-	// macroConfig triangle gates macro's influence (standard pattern)
-	float zoneANorm = static_cast<float>(zoneAParam) * kQ31ToFloat;
-	float subdivInfluence = triangleSimpleUnipolar(macroConfigNorm * phi::kPhi225, 0.5f);
-	float subdivMix = macroNorm * subdivInfluence; // 0 to 1
-
-	// Binary: 80% deadzone, magnitude → 2/4/8
-	float binaryRaw = triangleSimpleUnipolar(zoneANorm * phi::kPhi150 + slicePhase, 0.8f);
-	int32_t binarySub = (binaryRaw > 0.66f) ? 8 : (binaryRaw > 0.33f) ? 4 : (binaryRaw > 0.001f) ? 2 : 1;
-
-	// Triplet: 90% deadzone (sparser), magnitude → 3/6
-	float tripletRaw = triangleSimpleUnipolar(zoneANorm * phi::kPhi200 + slicePhase * phi::kPhi, 0.9f);
-	int32_t tripletSub = (tripletRaw > 0.5f) ? 6 : (tripletRaw > 0.001f) ? 3 : 1;
+	// Triplet: threshold [26, 51] = 26 + 25*(zoneA/ONE_Q31)  [~10-20% duty]
+	uint8_t tripletThresh = 26 + static_cast<uint8_t>(((zoneAParam >> 24) * 25) >> 7);
+	uint8_t tripletMag = hashCtx.evalDutyU8(HashSeed::TripletSubdiv, tripletThresh);
+	// Magnitude [0-15] → subdivisions: 0-7=3, 8-15=6, 16=inactive
+	int32_t tripletSub = (tripletMag >= 16) ? 1 : (tripletMag >= 8) ? 6 : 3;
 
 	// Combine base subdivisions (multiply when both active, cap at 12)
 	int32_t baseSub;
@@ -1056,7 +1059,13 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 		baseSub = (tripletSub > 1) ? tripletSub : binarySub;
 	}
 
-	// macro scales from 1 (no subdiv) to baseSub*2 (double), capped at 12
+	// macro + macroConfig influence on final subdivision intensity
+	// subdivInfluence from triangle gates macro's effect
+	float subdivInfluence = triangleSimpleUnipolar(macroConfigNorm * phi::kPhi225, 0.5f);
+	// No base floor - macro gates ratchet entirely (original behavior)
+	float subdivMix = macroNorm * subdivInfluence;
+
+	// Scale from 1 to baseSub*2 (double), capped at 12
 	int32_t targetSub = std::min<int32_t>(baseSub * 2, 12);
 	p.subdivisions = 1 + static_cast<int32_t>(static_cast<float>(targetSub - 1) * subdivMix);
 
