@@ -936,11 +936,14 @@ midiLearnMelodicInstrumentAction:
 			if (isUIModeActive(UI_MODE_CLIP_PRESSED_IN_SONG_VIEW)) {
 
 				// Stop stuttering/scattering if we are (but not latched scatter)
-				bool isClassicStuttering = isUIModeActive(UI_MODE_STUTTERING);
-				bool isNonLatchedScatter = stutterer.isScatterPlaying() && !stutterer.isLatched();
-				if (isClassicStuttering || isNonLatchedScatter) {
-					((ModControllableAudio*)view.activeModControllableModelStack.modControllable)
-					    ->endStutter((ParamManagerForTimeline*)view.activeModControllableModelStack.paramManager);
+				// Note: using block scope for variables to avoid goto initialization crossing
+				{
+					bool isClassicStuttering = isUIModeActive(UI_MODE_STUTTERING);
+					bool isNonLatchedScatter = stutterer.isScatterPlaying() && !stutterer.isLatched();
+					if (isClassicStuttering || isNonLatchedScatter) {
+						((ModControllableAudio*)view.activeModControllableModelStack.modControllable)
+						    ->endStutter((ParamManagerForTimeline*)view.activeModControllableModelStack.paramManager);
+					}
 				}
 
 				if (performActionOnPadRelease && xDisplay == selectedClipPressXDisplay
