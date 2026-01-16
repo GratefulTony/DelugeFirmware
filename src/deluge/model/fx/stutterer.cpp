@@ -65,43 +65,6 @@ int32_t Stutterer::getStutterRate(ParamManager* paramManager, int32_t magnitude,
 	return rate;
 }
 
-/// Calculate slice length for Repeat mode based on rate knob
-/// Higher rate = smaller slice = faster repeats (from end of buffer)
-size_t Stutterer::getRepeatSliceLength(ParamManager* paramManager, size_t maxLength) {
-	UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
-	int32_t paramValue = unpatchedParams->getValue(params::UNPATCHED_STUTTER_RATE);
-	int32_t knobPos = unpatchedParams->paramValueToKnobPos(paramValue, nullptr);
-	// knobPos ranges from -64 to +64
-	// Map to slice length: -64 = full bar, +64 = minimum slice
-	// Use exponential curve for musical divisions
-
-	// Normalize knobPos to 0-128 range, then to 0.0-1.0
-	// Higher knobPos = smaller slice
-	int32_t normalized = 64 - knobPos; // 0 at +64, 128 at -64
-	if (normalized < 0) {
-		normalized = 0;
-	}
-	if (normalized > 128) {
-		normalized = 128;
-	}
-
-	// Exponential mapping: slice = maxLength * (normalized/128)^2
-	// This gives finer control over small slices
-	// At normalized=128 (knob=-64): full length
-	// At normalized=64 (knob=0): 1/4 length
-	// At normalized=0 (knob=+64): minimum
-	constexpr size_t kMinSlice = 256; // ~6ms minimum to avoid clicks
-
-	size_t sliceLength = (maxLength * normalized * normalized) / (128 * 128);
-	if (sliceLength < kMinSlice) {
-		sliceLength = kMinSlice;
-	}
-	if (sliceLength > maxLength) {
-		sliceLength = maxLength;
-	}
-	return sliceLength;
-}
-
 Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManager, StutterConfig sc, int32_t magnitude,
                               uint32_t timePerTickInverse, size_t loopLengthSamples, bool halfBar) {
 	stutterConfig = sc;
@@ -296,28 +259,41 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			// Sample counter for benchmarking (only first sample per buffer)
 			int32_t sampleIdx = 0;
 
+			// Flag for Repeat mode: bar boundary triggers grain param update without position reset
+			bool repeatBarBoundaryUpdate = false;
+
 			// === TICK-BASED BAR SYNC: Lock to grid at every bar boundary ===
 			// When the tick clock shows we've entered a new bar, force reset to bar start.
 			// This corrects accumulated drift and keeps slices aligned with the beat grid.
+			// Repeat mode skips position reset (loops continuously) but still tracks bar for hash evolution
 			if (barLengthInTicks > 0 && currentTick >= 0) {
 				int64_t tickBarIndex = currentTick / static_cast<int64_t>(barLengthInTicks);
 				if (lastTickBarIndex >= 0 && tickBarIndex != lastTickBarIndex) {
-					// Bar boundary crossed - force sync to bar start
-					scatterSliceIndex = 0;
-					playbackPos = 0;
-					scatterSubdivIndex = 0;
-					scatterLinearBarPos = 0; // Reset linear position for leaky writes
-					needsSliceSetup = true;
-					scatterRepeatCounter = 0; // Fresh params for new bar
+					// Bar boundary crossed - increment bar index for hash evolution
 					scatterBarIndex = (scatterBarIndex + 1) & 0x3;
-					// Also resync playbackLength
-					if (timePerTickBig != 0) {
-						size_t newLoopLength = ((uint64_t)barLengthInTicks * timePerTickBig) >> 32;
-						newLoopLength = std::min(newLoopLength, kLooperBufferSize);
-						playbackLength = newLoopLength;
+
+					// Repeat mode: trigger new grain params but skip position reset (continuous loop)
+					if (stutterConfig.scatterMode == ScatterMode::Repeat) {
+						needsSliceSetup = true;         // Recompute grain params with new bar index
+						repeatBarBoundaryUpdate = true; // Flag to skip playbackPos reset
 					}
-					// Leaky mode: no buffer swap - writes go directly to playBuffer
-					// Single buffer tape-loop with immediate feedback
+					else {
+						// Force sync to bar start
+						scatterSliceIndex = 0;
+						playbackPos = 0;
+						scatterSubdivIndex = 0;
+						scatterLinearBarPos = 0; // Reset linear position for leaky writes
+						needsSliceSetup = true;
+						scatterRepeatCounter = 0; // Fresh params for new bar
+						// Also resync playbackLength
+						if (timePerTickBig != 0) {
+							size_t newLoopLength = ((uint64_t)barLengthInTicks * timePerTickBig) >> 32;
+							newLoopLength = std::min(newLoopLength, kLooperBufferSize);
+							playbackLength = newLoopLength;
+						}
+						// Leaky mode: no buffer swap - writes go directly to playBuffer
+						// Single buffer tape-loop with immediate feedback
+					}
 				}
 				lastTickBarIndex = tickBarIndex;
 			}
@@ -327,20 +303,156 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			// This eliminates per-sample boundary checks for significant performance gain
 			if (needsSliceSetup) {
 				needsSliceSetup = false;
-				playbackPos = 0; // Snap to slice start, accept jitter
+				// Save flag before clearing - Repeat mode uses it to skip loop counter increment
+				bool wasBarBoundaryUpdate = repeatBarBoundaryUpdate;
+				// Reset playbackPos unless this is a Repeat bar-boundary update (continuous loop)
+				if (!repeatBarBoundaryUpdate) {
+					playbackPos = 0; // Snap to slice start, accept jitter
+				}
+				repeatBarBoundaryUpdate = false; // Clear flag after use
 				FX_BENCH_START(benchSlice);
 				switch (stutterConfig.scatterMode) {
-				case ScatterMode::Repeat:
-					// Rate knob controls slice length from END of captured bar
-					currentSliceLength = getRepeatSliceLength(paramManager, playbackLength);
-					sliceStartOffset = playbackLength - currentSliceLength;
-					scatterDryMix = 0; // No density crossfade in Repeat mode
-					// Repeat mode: no subdivisions, play full slice each time
+				case ScatterMode::Repeat: {
+					// Repeat mode: continuous slice length, continuous offset
+					// Rate controls how much of recent buffer to loop (exponential curve)
+					// Zone A offset shifts position continuously within buffer
+					FX_BENCH_START(benchParamRead);
+					UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
+					int32_t rateParam = unpatchedParams->getValue(params::UNPATCHED_STUTTER_RATE);
+					int32_t knobPos = unpatchedParams->paramValueToKnobPos(rateParam, nullptr);
+
+					// Continuous slice length: exponential curve from full bar to minimum
+					// knobPos -64 to +64 → normalized 128 to 0
+					int32_t normalized = 64 - knobPos;
+					if (normalized < 0) {
+						normalized = 0;
+					}
+					if (normalized > 128) {
+						normalized = 128;
+					}
+					// Exponential: sliceLength = maxLength * (normalized/128)^2
+					constexpr size_t kMinSlice = 256; // ~6ms minimum
+					currentSliceLength = (playbackLength * normalized * normalized) / (128 * 128);
+					if (currentSliceLength < kMinSlice) {
+						currentSliceLength = kMinSlice;
+					}
+					if (currentSliceLength > playbackLength) {
+						currentSliceLength = playbackLength;
+					}
+
+					// Loop counter: increment on natural loop completion (not bar boundary updates)
+					// Wraps at number of slices that fit in the bar (1/rate)
+					int32_t slicesPerBar =
+					    std::max(int32_t{1}, static_cast<int32_t>(playbackLength / currentSliceLength));
+					if (!wasBarBoundaryUpdate) {
+						scatterRepeatLoopIndex = (scatterRepeatLoopIndex + 1) % slicesPerBar;
+					}
+
+					// Read zone params for modifiers
+					q31_t zoneAParam, zoneBParam, macroConfigParam, macroParam;
+					if (modulatedValues && paramManager->containsPatchedParamSetCollection()) {
+						constexpr int32_t kCableScale = 4;
+						PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
+						zoneAParam =
+						    patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_A) + modulatedValues[0] / kCableScale;
+						zoneBParam =
+						    patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_B) + modulatedValues[1] / kCableScale;
+						macroConfigParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO_CONFIG)
+						                   + modulatedValues[2] / kCableScale;
+						macroParam = modulatedValues[3];
+					}
+					else if (paramManager->containsPatchedParamSetCollection()) {
+						PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
+						zoneAParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_A);
+						zoneBParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_B);
+						macroConfigParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO_CONFIG);
+						macroParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO);
+					}
+					else {
+						zoneAParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_A);
+						zoneBParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_B);
+						macroConfigParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_MACRO_CONFIG);
+						macroParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_MACRO);
+					}
+					FX_BENCH_STOP(benchParamRead);
+
+					// Compute grain params for modifiers (use loop index for per-iteration evolution)
+					float macroConfigNorm = static_cast<float>(macroConfigParam) * deluge::dsp::scatter::kQ31ToFloat;
+					float macroNorm = static_cast<float>(macroParam) * deluge::dsp::scatter::kQ31ToFloat;
+					deluge::dsp::scatter::ScatterPhaseOffsets offsets{
+					    stutterConfig.zoneAPhaseOffset,
+					    stutterConfig.zoneBPhaseOffset,
+					    stutterConfig.macroConfigPhaseOffset,
+					    stutterConfig.gammaPhase,
+					    0.0f,
+					    0.0f,
+					    0.0f, // threshold scales not used for Repeat
+					    scatterBarIndex,
+					};
+					FX_BENCH_START(benchParams);
+					deluge::dsp::scatter::GrainParams grain = deluge::dsp::scatter::computeGrainParams(
+					    zoneAParam, zoneBParam, macroConfigParam, macroParam, scatterRepeatLoopIndex, &offsets);
+					FX_BENCH_STOP(benchParams);
+
+					// Continuous offset: shift start position within available buffer range
+					// grain.sliceOffset [0-15] → fraction of (bufferLength - sliceLength)
+					size_t availableRange = playbackLength - currentSliceLength;
+					size_t offsetAmount = (grain.sliceOffset * availableRange) >> 4;
+					// Skip overrides to different position
+					if (grain.shouldSkip) {
+						offsetAmount = (grain.skipTarget * availableRange) >> 4;
+					}
+					// Start from end of buffer, offset moves earlier
+					sliceStartOffset = playbackLength - currentSliceLength - offsetAmount;
+
+					// Timbral modifiers from Zone B
+					scatterReversed = grain.shouldReverse;
+					scatterPitchUp = grain.shouldPitchUp;
+					scatterDryMix = 0.0f; // Always 100% wet
+					scatterEnvShape = grain.envShape;
+					scatterGateRatio = grain.gateRatio;
+					scatterEnvDepth = grain.envDepth;
+
+					// Pan (evolves with bar index)
+					float panDir =
+					    (deluge::dsp::phi::wrapPhase(static_cast<float>(scatterBarIndex) * 1.3f) < 0.5f) ? -1.0f : 1.0f;
+					scatterPan = panDir * grain.panAmount;
+					float panAbs = (scatterPan > 0) ? scatterPan : -scatterPan;
+					scatterPanActive = (panAbs > 0.001f);
+					scatterPanFadeQ31 = static_cast<int32_t>((1.0f - panAbs) * 2147483647.0f);
+					scatterPanCrossQ31 = static_cast<int32_t>((panAbs * 0.5f) * 2147483647.0f);
+					scatterPanRight = (scatterPan > 0);
+
+					// No subdivisions for Repeat - continuous chunk
 					scatterSubdivisions = 1;
 					scatterSubdivIndex = 0;
 					scatterSubSliceLength = currentSliceLength;
 					scatterLastSubSliceLength = currentSliceLength;
+
+					// Envelope/gate setup
+					scatterEnvActive = (scatterEnvDepth > 0.001f);
+					scatterGateActive = (scatterGateRatio < 0.999f);
+					if (scatterEnvActive) {
+						int32_t envSliceLen = static_cast<int32_t>(currentSliceLength);
+						scatterEnvPrecomputed = deluge::dsp::scatter::prepareGrainEnvelopeQ31(
+						    envSliceLen, scatterGateRatio, scatterEnvDepth, scatterEnvShape, scatterEnvWidth);
+					}
+					else if (scatterGateActive) {
+						scatterEnvPrecomputed.gatedLength =
+						    static_cast<int32_t>(static_cast<float>(currentSliceLength) * scatterGateRatio);
+						scatterEnvPrecomputed.attackFadeLen = 0;
+						scatterEnvPrecomputed.decayFadeLen = 0;
+					}
+					else {
+						scatterEnvPrecomputed.gatedLength = static_cast<int32_t>(currentSliceLength);
+						scatterEnvPrecomputed.attackFadeLen = 0;
+						scatterEnvPrecomputed.decayFadeLen = 0;
+					}
+
+					// No delay for Repeat
+					delayActive = false;
 					break;
+				}
 
 				case ScatterMode::Leaky: // Leaky uses Shuffle processing but writes output back to buffer
 				case ScatterMode::Shuffle: {

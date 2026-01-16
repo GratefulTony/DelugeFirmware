@@ -175,7 +175,6 @@ private:
 		PLAYING,
 	};
 	int32_t getStutterRate(ParamManager* paramManager, int32_t magnitude, uint32_t timePerTickInverse);
-	size_t getRepeatSliceLength(ParamManager* paramManager, size_t maxLength);
 
 	/// Trigger playback immediately (used by Repeat mode which bypasses beat quantization)
 	/// Transitions from STANDBY to PLAYING, swaps buffers, resets playback state
@@ -268,17 +267,18 @@ private:
 	bool halfBarMode = false;
 
 	/// Scatter/Shuffle state
-	int32_t scatterSliceIndex{0}; ///< Current sequential slice (0 to numSlices-1)
-	int32_t scatterNumSlices{8};  ///< Number of slices to divide bar into
-	bool scatterReversed{false};  ///< Whether current slice is playing reversed
-	float scatterDryMix{0};       ///< Per-grain dry value [0,1] compared against threshold
-	float scatterDryThreshold{1}; ///< Threshold for dry cut [0,1]: higher = more grains, lower = more dry
-	float scatterEnvDepth{0};     ///< Envelope depth [0,1]: 0=hard cut, 1=full envelope
-	float scatterEnvShape{0.5f};  ///< Envelope shape [0,1]: 0=fade-out, 0.5=symmetric, 1=fade-in
-	float scatterEnvWidth{1.0f};  ///< Envelope region [0,1]: 1=full slice, smaller=edges only
-	float scatterGateRatio{1.0f}; ///< Gate duty cycle [0,1]: 1=full slice, smaller=truncated with silence
-	float scatterPan{0};          ///< Crossfeed pan [-1,1]: 0=center, +1=L→R, -1=R→L
-	int32_t scatterPanCounter{0}; ///< Ever-incrementing counter for decorrelated pan (not tied to slice content)
+	int32_t scatterSliceIndex{0};      ///< Current sequential slice (0 to numSlices-1)
+	int32_t scatterRepeatLoopIndex{0}; ///< Repeat mode: loop iteration counter (wraps at slices-per-bar)
+	int32_t scatterNumSlices{8};       ///< Number of slices to divide bar into
+	bool scatterReversed{false};       ///< Whether current slice is playing reversed
+	float scatterDryMix{0};            ///< Per-grain dry value [0,1] compared against threshold
+	float scatterDryThreshold{1};      ///< Threshold for dry cut [0,1]: higher = more grains, lower = more dry
+	float scatterEnvDepth{0};          ///< Envelope depth [0,1]: 0=hard cut, 1=full envelope
+	float scatterEnvShape{0.5f};       ///< Envelope shape [0,1]: 0=fade-out, 0.5=symmetric, 1=fade-in
+	float scatterEnvWidth{1.0f};       ///< Envelope region [0,1]: 1=full slice, smaller=edges only
+	float scatterGateRatio{1.0f};      ///< Gate duty cycle [0,1]: 1=full slice, smaller=truncated with silence
+	float scatterPan{0};               ///< Crossfeed pan [-1,1]: 0=center, +1=L→R, -1=R→L
+	int32_t scatterPanCounter{0};      ///< Ever-incrementing counter for decorrelated pan (not tied to slice content)
 
 	/// Precomputed pan coefficients (Q31 fixed-point, computed once per slice)
 	int32_t scatterPanFadeQ31{0};          ///< Fading side multiplier: (1 - |pan|)
