@@ -1137,7 +1137,11 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 
 		p.envDepth = triangleSimpleUnipolar(zoneBInfo.position * phi::kPhi050, 0.6f);
 		p.panAmount = triangleSimpleUnipolar(zoneBInfo.position * phi::kPhi125, 0.25f);
-		p.gateRatio = 0.25f + (1.0f - macroConfigNorm) * 0.75f;
+		// Gate only activates when Zone B is above deadzone - at default (0), no gate
+		if (zoneBInfo.position > 0.02f) {
+			p.gateRatio = 0.25f + (1.0f - macroConfigNorm) * 0.75f;
+		}
+		// else: gateRatio stays at default 1.0 (no gate)
 	}
 
 	// === Repeat vs Ratchet (mutually exclusive) + Long Grain (orthogonal) ===
@@ -1146,60 +1150,68 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 	// Long grain: combine N consecutive slices into one continuous grain (can combine with either)
 	// Repeat/longGrain probability falls as effectiveZoneANorm rises, ratchet probability rises
 
-	// Long grain: evaluated independently (orthogonal to repeat/ratchet)
-	// Threshold decreases as effectiveZoneANorm increases: ~102 at 0, ~26 at 1
-	// Uses effectiveZoneA8 so probability cycles with gamma/phaseOffset
-	uint8_t longThresh = 102 - static_cast<uint8_t>((effectiveZoneA8 * 76) >> 7);
-	uint8_t longMag = hashCtx.evalDutyU8(HashSeed::LongGrain, longThresh);
-	// Magnitude [0-15] → grain length: 0-5=2, 6-11=4, 12-15=8 (full bar), 16=inactive
-	// Note: caller must cap grainLength to not exceed bar/buffer boundary
-	p.grainLength = (longMag >= 16) ? 1 : (longMag >= 12) ? 8 : (longMag >= 6) ? 4 : 2;
-
-	// Repeat threshold DECREASES as effectiveZoneANorm increases (inverse of ratchet)
-	// effectiveZoneANorm=0: threshold ~128 (~50% probability)
-	// effectiveZoneANorm=1: threshold ~26 (~10% probability)
-	// Uses effectiveZoneA8 so probability cycles with gamma/phaseOffset
-	uint8_t repeatThresh = 128 - static_cast<uint8_t>((effectiveZoneA8 * 102) >> 7);
-	uint8_t repeatMag = hashCtx.evalDutyU8(HashSeed::RepeatSlice, repeatThresh);
-	// Magnitude [0-15] → repeat slices: 0-4=2, 5-10=4, 11-15=8, 16=inactive
-	p.repeatSlices = (repeatMag >= 16) ? 1 : (repeatMag >= 11) ? 8 : (repeatMag >= 5) ? 4 : 2;
-
-	// Repeat and ratchet are mutually exclusive
-	if (p.repeatSlices > 1) {
+	// === Structural modifiers: ALL require Zone A > 0 to activate ===
+	// At Zone A = 0 (default), slices play in order with no repeat/ratchet/longGrain
+	// This ensures "clean" default behavior - just straight playback
+	if (effectiveZoneA8 < 2) {
+		// Zone A essentially at zero - disable all structural modifiers
+		p.grainLength = 1;
+		p.repeatSlices = 1;
 		p.subdivisions = 1;
 	}
 	else {
-		// === Subdivisions (Ratchet) - Uses effectiveZoneA8 for cycling with phase offset ===
-		// Binary: threshold [51, 102] = 51 + 51*(effectiveZoneA/127)  [~20-40% duty]
-		uint8_t binaryThresh = 51 + static_cast<uint8_t>((effectiveZoneA8 * 51) >> 7);
-		uint8_t binaryMag = hashCtx.evalDutyU8(HashSeed::BinarySubdiv, binaryThresh);
-		// Magnitude [0-15] → subdivisions: 0-4=2, 5-10=4, 11-15=8, 16=inactive
-		int32_t binarySub = (binaryMag >= 16) ? 1 : (binaryMag >= 11) ? 8 : (binaryMag >= 5) ? 4 : 2;
+		// Long grain: evaluated independently (orthogonal to repeat/ratchet)
+		// Threshold decreases as effectiveZoneANorm increases: ~102 at low, ~26 at high
+		uint8_t longThresh = 102 - static_cast<uint8_t>((effectiveZoneA8 * 76) >> 7);
+		uint8_t longMag = hashCtx.evalDutyU8(HashSeed::LongGrain, longThresh);
+		// Magnitude [0-15] → grain length: 0-5=2, 6-11=4, 12-15=8 (full bar), 16=inactive
+		// Note: caller must cap grainLength to not exceed bar/buffer boundary
+		p.grainLength = (longMag >= 16) ? 1 : (longMag >= 12) ? 8 : (longMag >= 6) ? 4 : 2;
 
-		// Triplet: threshold [26, 51] = 26 + 25*(effectiveZoneA/127)  [~10-20% duty]
-		uint8_t tripletThresh = 26 + static_cast<uint8_t>((effectiveZoneA8 * 25) >> 7);
-		uint8_t tripletMag = hashCtx.evalDutyU8(HashSeed::TripletSubdiv, tripletThresh);
-		// Magnitude [0-15] → subdivisions: 0-7=3, 8-15=6, 16=inactive
-		int32_t tripletSub = (tripletMag >= 16) ? 1 : (tripletMag >= 8) ? 6 : 3;
+		// Repeat threshold scales with Zone A: 0 at low, ~128 at high
+		// Higher Zone A = more repeat probability
+		uint8_t repeatThresh = static_cast<uint8_t>((effectiveZoneA8 * 128) >> 7);
+		uint8_t repeatMag = hashCtx.evalDutyU8(HashSeed::RepeatSlice, repeatThresh);
+		// Magnitude [0-15] → repeat slices: 0-4=2, 5-10=4, 11-15=8, 16=inactive
+		p.repeatSlices = (repeatMag >= 16) ? 1 : (repeatMag >= 11) ? 8 : (repeatMag >= 5) ? 4 : 2;
 
-		// Combine base subdivisions (multiply when both active, cap at 12)
-		int32_t baseSub;
-		if (tripletSub > 1 && binarySub > 1) {
-			baseSub = std::min<int32_t>(binarySub * tripletSub, 12);
+		// Repeat and ratchet are mutually exclusive
+		if (p.repeatSlices > 1) {
+			p.subdivisions = 1;
 		}
 		else {
-			baseSub = (tripletSub > 1) ? tripletSub : binarySub;
+			// === Subdivisions (Ratchet) - scales with Zone A ===
+			// Binary: threshold scales 0→102 as Zone A increases
+			uint8_t binaryThresh = static_cast<uint8_t>((effectiveZoneA8 * 102) >> 7);
+			uint8_t binaryMag = hashCtx.evalDutyU8(HashSeed::BinarySubdiv, binaryThresh);
+			// Magnitude [0-15] → subdivisions: 0-4=2, 5-10=4, 11-15=8, 16=inactive
+			int32_t binarySub = (binaryMag >= 16) ? 1 : (binaryMag >= 11) ? 8 : (binaryMag >= 5) ? 4 : 2;
+
+			// Triplet: threshold scales 0→51 as Zone A increases
+			uint8_t tripletThresh = static_cast<uint8_t>((effectiveZoneA8 * 51) >> 7);
+			uint8_t tripletMag = hashCtx.evalDutyU8(HashSeed::TripletSubdiv, tripletThresh);
+			// Magnitude [0-15] → subdivisions: 0-7=3, 8-15=6, 16=inactive
+			int32_t tripletSub = (tripletMag >= 16) ? 1 : (tripletMag >= 8) ? 6 : 3;
+
+			// Combine base subdivisions (multiply when both active, cap at 12)
+			int32_t baseSub;
+			if (tripletSub > 1 && binarySub > 1) {
+				baseSub = std::min<int32_t>(binarySub * tripletSub, 12);
+			}
+			else {
+				baseSub = (tripletSub > 1) ? tripletSub : binarySub;
+			}
+
+			// macro + macroConfig influence on final subdivision intensity
+			// subdivInfluence from triangle gates macro's effect
+			float subdivInfluence = triangleSimpleUnipolar(macroConfigNorm * phi::kPhi225, 0.5f);
+			// No base floor - macro gates ratchet entirely (original behavior)
+			float subdivMix = macroNorm * subdivInfluence;
+
+			// Scale from 1 to baseSub*2 (double), capped at 12
+			int32_t targetSub = std::min<int32_t>(baseSub * 2, 12);
+			p.subdivisions = 1 + static_cast<int32_t>(static_cast<float>(targetSub - 1) * subdivMix);
 		}
-
-		// macro + macroConfig influence on final subdivision intensity
-		// subdivInfluence from triangle gates macro's effect
-		float subdivInfluence = triangleSimpleUnipolar(macroConfigNorm * phi::kPhi225, 0.5f);
-		// No base floor - macro gates ratchet entirely (original behavior)
-		float subdivMix = macroNorm * subdivInfluence;
-
-		// Scale from 1 to baseSub*2 (double), capped at 12
-		int32_t targetSub = std::min<int32_t>(baseSub * 2, 12);
-		p.subdivisions = 1 + static_cast<int32_t>(static_cast<float>(targetSub - 1) * subdivMix);
 	}
 
 	// Update cache if in cacheable condition (both deadzones active)

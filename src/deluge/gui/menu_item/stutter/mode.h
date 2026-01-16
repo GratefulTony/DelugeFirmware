@@ -39,7 +39,7 @@ public:
 		return {
 		    l10n::getView(String::STRING_FOR_SCATTER_CLASSIC), l10n::getView(String::STRING_FOR_SCATTER_REPEAT),
 		    l10n::getView(String::STRING_FOR_SCATTER_REVERSE), l10n::getView(String::STRING_FOR_SCATTER_CHOP),
-		    l10n::getView(String::STRING_FOR_SCATTER_SHUFFLE), l10n::getView(String::STRING_FOR_SCATTER_TAPE),
+		    l10n::getView(String::STRING_FOR_SCATTER_SHUFFLE), l10n::getView(String::STRING_FOR_SCATTER_LEAKY),
 		    l10n::getView(String::STRING_FOR_SCATTER_PITCH),   l10n::getView(String::STRING_FOR_SCATTER_FILTER),
 		};
 	}

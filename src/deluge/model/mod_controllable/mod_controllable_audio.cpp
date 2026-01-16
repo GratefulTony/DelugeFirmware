@@ -1598,6 +1598,8 @@ void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
 	// For scatter modes, also use local settings (scatter is per-sound feature)
 	if (config.scatterMode != ScatterMode::Classic) {
 		config.quantized = stutterConfig.quantized;
+		config.latch = stutterConfig.latch;                   // Latch is per-sound for scatter
+		config.leakyWriteProb = stutterConfig.leakyWriteProb; // Leaky pWrite is per-sound
 		// Phase offsets are set via secret encoder menus on local config
 		config.zoneAPhaseOffset = stutterConfig.zoneAPhaseOffset;
 		config.zoneBPhaseOffset = stutterConfig.zoneBPhaseOffset;
@@ -1628,8 +1630,9 @@ void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
 
 	// For scatter modes with quantize, arm trigger to start on next beat
 	// Only arm if we DON'T already own the stutter - if we do, fall through to beginStutter (trigger)
-	if (config.scatterMode != ScatterMode::Classic && config.quantized && playbackHandler.isEitherClockActive()
-	    && !stutterer.ownsStutter(this)) {
+	// Repeat mode never uses quantization - it triggers immediately for responsive performance
+	if (config.scatterMode != ScatterMode::Classic && config.scatterMode != ScatterMode::Repeat && config.quantized
+	    && playbackHandler.isEitherClockActive() && !stutterer.ownsStutter(this)) {
 		// Calculate next beat boundary (16th note = bar / 16)
 		int64_t currentTick = playbackHandler.getCurrentInternalTickCount();
 		uint32_t barLength = currentSong->getBarLength();
@@ -1694,9 +1697,9 @@ void ModControllableAudio::processStutter(deluge::dsp::StereoBuffer<q31_t> buffe
 	stutterer.recordStandby(this, buffer, currentTick, quarterNoteLength);
 
 	if (stutterer.isStuttering(this)) {
-		// Update phase offsets from current config (allows real-time adjustment while playing)
+		// Update live params from current config (allows real-time adjustment while playing)
 		if (stutterer.isScatterPlaying()) {
-			stutterer.updatePhaseOffsets(stutterConfig);
+			stutterer.updateLiveParams(stutterConfig);
 		}
 		// Note: benchmarking is done inside processStutter() to separate classic vs scatter modes
 		// Pass tick timing for bar boundary sync (locks slices to beat grid)

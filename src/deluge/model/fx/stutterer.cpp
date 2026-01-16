@@ -29,6 +29,7 @@
 #include <cstring>
 
 namespace params = deluge::modulation::params;
+namespace hash = deluge::dsp::hash;
 
 Stutterer stutterer{};
 
@@ -138,6 +139,12 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 			// If waitingForRecordBeat is still true, we allow trigger anyway - by the time
 			// the beat-quantized trigger fires, we'll have recorded enough
 
+			// Repeat mode triggers immediately (no beat quantization)
+			if (stutterConfig.scatterMode == ScatterMode::Repeat && hasEnoughSamples) {
+				triggerPlaybackNow(source);
+				return Error::NONE;
+			}
+
 			// Set pending trigger - actual transition happens in checkPendingTrigger on next beat
 			pendingPlayTrigger = true;
 			playTriggerTick = 0; // Will be computed in checkPendingTrigger
@@ -175,13 +182,13 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 		recordBuffer = bufferA;
 		playBuffer = bufferB;
 		recordWritePos = 0;
-		recordBufferFull = false;    // Fresh buffer, not full yet
-		waitingForRecordBeat = true; // Wait for next beat before recording
-		recordStartTick = 0;         // Will be computed in recordStandby
-		pendingPlayTrigger = false;  // No pending trigger yet
-		// Clear record buffer
-		// EXPERIMENT: commented out to test if memset causes audio glitch
-		// memset(recordBuffer, 0, kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
+		recordBufferFull = false; // Fresh buffer, not full yet
+		// Repeat mode records immediately; other modes wait for beat
+		waitingForRecordBeat = (stutterConfig.scatterMode != ScatterMode::Repeat);
+		recordStartTick = 0;        // Will be computed in recordStandby
+		pendingPlayTrigger = false; // No pending trigger yet
+		// Clear record buffer to prevent stale data reads
+		memset(recordBuffer, 0, kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
 
 		// Source claims recordBuffer, starts recording in STANDBY
 		// If someone else was playing, they keep playSource
@@ -232,7 +239,7 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 
 /// Mode name tags for benchmarking
 static constexpr const char* kScatterModeNames[] = {
-    "classic", "repeat", "reverse", "chop", "shuffle", "tape", "pitch", "filter",
+    "classic", "repeat", "reverse", "chop", "shuffle", "leaky", "pitch", "filter",
 };
 
 // === SCATTER PERFORMANCE BENCHMARKS (128-sample buffer, 44.1kHz) ===
@@ -299,6 +306,7 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					scatterSliceIndex = 0;
 					playbackPos = 0;
 					scatterSubdivIndex = 0;
+					scatterLinearBarPos = 0; // Reset linear position for leaky writes
 					needsSliceSetup = true;
 					scatterRepeatCounter = 0; // Fresh params for new bar
 					scatterBarIndex = (scatterBarIndex + 1) & 0x3;
@@ -308,6 +316,8 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						newLoopLength = std::min(newLoopLength, kLooperBufferSize);
 						playbackLength = newLoopLength;
 					}
+					// Leaky mode: no buffer swap - writes go directly to playBuffer
+					// Single buffer tape-loop with immediate feedback
 				}
 				lastTickBarIndex = tickBarIndex;
 			}
@@ -325,8 +335,14 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					currentSliceLength = getRepeatSliceLength(paramManager, playbackLength);
 					sliceStartOffset = playbackLength - currentSliceLength;
 					scatterDryMix = 0; // No density crossfade in Repeat mode
+					// Repeat mode: no subdivisions, play full slice each time
+					scatterSubdivisions = 1;
+					scatterSubdivIndex = 0;
+					scatterSubSliceLength = currentSliceLength;
+					scatterLastSubSliceLength = currentSliceLength;
 					break;
 
+				case ScatterMode::Leaky: // Leaky uses Shuffle processing but writes output back to buffer
 				case ScatterMode::Shuffle: {
 					FX_BENCH_START(benchParamRead);
 					// Rate knob controls number of slices - match UI note division labels
@@ -564,12 +580,15 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 
 					// Precompute sub-slice length, floor at 24ms (truncates at slice boundary)
 					// Last subdivision gets remainder to prevent accumulated timing drift
+					// IMPORTANT: Floor must not exceed currentSliceLength or reverse mode underflows
 					constexpr float kMinSubSliceMs = 24.0f;
 					constexpr size_t kMinSubSliceSamples = static_cast<size_t>(kMinSubSliceMs * 44.1f);
 					scatterSubSliceLength = currentSliceLength / static_cast<size_t>(scatterSubdivisions);
 					if (scatterSubSliceLength < kMinSubSliceSamples) {
-						scatterSubSliceLength = kMinSubSliceSamples;
-						scatterLastSubSliceLength = kMinSubSliceSamples;
+						// Clamp floor to slice length to prevent playbackPos > currentSliceLength
+						size_t effectiveFloor = std::min(kMinSubSliceSamples, currentSliceLength);
+						scatterSubSliceLength = effectiveFloor;
+						scatterLastSubSliceLength = effectiveFloor;
 					}
 					else {
 						// Last subdivision plays remaining samples (base + truncation remainder)
@@ -593,9 +612,18 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						    envSliceLen, scatterGateRatio, scatterEnvDepth, scatterEnvShape, scatterEnvWidth);
 					}
 					else if (scatterGateActive) {
-						// Fast ratchet with gate: just set gatedLength for hard chop (no fades)
+						// Gate only (no envelope): hard cutoff, no fades
 						scatterEnvPrecomputed.gatedLength =
 						    static_cast<int32_t>(static_cast<float>(scatterSubSliceLength) * scatterGateRatio);
+						// Explicitly zero fade lengths to prevent stale values causing fades
+						scatterEnvPrecomputed.attackFadeLen = 0;
+						scatterEnvPrecomputed.decayFadeLen = 0;
+					}
+					else {
+						// No envelope, no gate: full passthrough (no fades, no cutoff)
+						scatterEnvPrecomputed.gatedLength = static_cast<int32_t>(scatterSubSliceLength);
+						scatterEnvPrecomputed.attackFadeLen = 0;
+						scatterEnvPrecomputed.decayFadeLen = 0;
 					}
 					FX_BENCH_STOP(benchEnvPrep);
 
@@ -645,6 +673,11 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					currentSliceLength = playbackLength;
 					sliceStartOffset = 0;
 					scatterDryMix = 0; // No density crossfade in default mode
+					// Default: no subdivisions, play full bar
+					scatterSubdivisions = 1;
+					scatterSubdivIndex = 0;
+					scatterSubSliceLength = currentSliceLength;
+					scatterLastSubSliceLength = currentSliceLength;
 					break;
 				}
 				FX_BENCH_STOP(benchSlice);
@@ -657,9 +690,39 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			size_t loopSubSliceLength = scatterSubSliceLength;
 			size_t loopLastSubSliceLength = scatterLastSubSliceLength;
 			int32_t loopLastSubdivIndex = scatterSubdivisions - 1;
+			size_t loopPlaybackLength = playbackLength;    // For leaky write wrapping
+			size_t loopLinearBarPos = scatterLinearBarPos; // Linear position for leaky writes
 
 			// Hoist mode check and envelope params (constant during loop)
-			bool isShuffle = (stutterConfig.scatterMode == ScatterMode::Shuffle);
+			bool isShuffle =
+			    (stutterConfig.scatterMode == ScatterMode::Shuffle || stutterConfig.scatterMode == ScatterMode::Leaky);
+			bool isLeaky = (stutterConfig.scatterMode == ScatterMode::Leaky);
+			// Leaky grain decision: made per-slice (not per-sample) to avoid discontinuities
+			// Hash of slice index determines if this grain writes wet or dry
+			// Duck entire grain if read/write regions overlap (prevents feedback artifacts)
+			bool leakyGrainIsWet = false;
+			if (isLeaky && recordSource == playSource) {
+				uint8_t leakyThreshold = static_cast<uint8_t>(stutterConfig.leakyWriteProb * 16.0f);
+				hash::Bits sliceBits(static_cast<uint32_t>(scatterSliceIndex) ^ (scatterBarIndex << 16) ^ 0xDEADBEEFu);
+				leakyGrainIsWet = sliceBits.threshold4(0, leakyThreshold);
+
+				// Check for read/write region overlap - duck grain if they intersect
+				// Read region: [sliceStartOffset, sliceStartOffset + sliceLength)
+				// Write region: [linearBarPos, linearBarPos + sliceLength)
+				// In circular buffer, overlap if either start is within the other's range
+				if (leakyGrainIsWet && playbackLength > 0) {
+					size_t readStart = sliceStartOffset;
+					size_t writeStart = scatterLinearBarPos;
+					size_t len = currentSliceLength;
+					// Check: is writeStart within [readStart, readStart+len)?
+					size_t writeInRead = (writeStart + playbackLength - readStart) % playbackLength;
+					// Check: is readStart within [writeStart, writeStart+len)?
+					size_t readInWrite = (readStart + playbackLength - writeStart) % playbackLength;
+					if (writeInRead < len || readInWrite < len) {
+						leakyGrainIsWet = false; // Duck this grain - regions overlap
+					}
+				}
+			}
 			bool loopEnvActive = isShuffle && (scatterEnvActive || scatterGateActive);
 			bool loopPanActive = scatterPanActive;
 			bool loopReversed = scatterReversed && isShuffle;
@@ -702,17 +765,18 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				q31_t dryL = sample.l;
 				q31_t dryR = sample.r;
 
-				size_t readPos;
+				size_t playReadPos;
 				if (loopReversed) {
 					// Reverse: read from end of slice going backward
-					readPos = loopPlaybackStartPos + loopSliceStartOffset + (loopCurrentSliceLength - 1 - playbackPos);
+					playReadPos =
+					    loopPlaybackStartPos + loopSliceStartOffset + (loopCurrentSliceLength - 1 - playbackPos);
 				}
 				else {
-					readPos = loopPlaybackStartPos + loopSliceStartOffset + playbackPos;
+					playReadPos = loopPlaybackStartPos + loopSliceStartOffset + playbackPos;
 				}
-				// Wrap around circular buffer
-				if (readPos >= kLooperBufferSize) {
-					readPos -= kLooperBufferSize;
+				// Wrap around circular buffer (handle potential double-wrap edge cases)
+				while (playReadPos >= kLooperBufferSize) {
+					playReadPos -= kLooperBufferSize;
 				}
 				// Density threshold: hard cut between grain and dry (not a blend)
 				// dryMix > threshold = use dry signal for this grain, else use buffer grain
@@ -730,8 +794,8 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					if (benchThisSample) {
 						FX_BENCH_START(benchRead);
 					}
-					outputL = playBuffer[readPos].l;
-					outputR = playBuffer[readPos].r;
+					outputL = playBuffer[playReadPos].l;
+					outputR = playBuffer[playReadPos].r;
 					if (benchThisSample) {
 						FX_BENCH_STOP(benchRead);
 					}
@@ -820,6 +884,19 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					}
 				}
 
+				// === LEAKY: write wet grains directly to play buffer ===
+				// Single buffer tape-loop: read from shuffled position, write to linear position
+				// Entire grain is ducked at slice setup if read/write regions overlap
+				// pWrite=0 means no writes → content persists indefinitely
+				// pWrite>0 means wet grains overwrite → delayed feedback accumulation
+				if (isLeaky && playBuffer != nullptr && leakyGrainIsWet) {
+					size_t leakyWritePos = loopPlaybackStartPos + loopLinearBarPos;
+					while (leakyWritePos >= kLooperBufferSize) {
+						leakyWritePos -= kLooperBufferSize;
+					}
+					playBuffer[leakyWritePos] = {outputL, outputR};
+				}
+
 				sample.l = outputL;
 				sample.r = outputR;
 
@@ -845,12 +922,22 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						needsSliceSetup = true; // Mark for next buffer boundary
 					}
 				}
+
+				// Advance linear bar position for leaky writes (always 1:1 with real time)
+				loopLinearBarPos++;
+				if (loopLinearBarPos >= loopPlaybackLength) {
+					loopLinearBarPos = 0;
+				}
+
 				if (benchThisSample) {
 					FX_BENCH_STOP(benchAdvance);
 				}
 
 				sampleIdx++;
 			}
+
+			// Write back linear bar position for next buffer
+			scatterLinearBarPos = loopLinearBarPos;
 
 			FX_BENCH_STOP(benchTotal);
 		}
@@ -1118,6 +1205,14 @@ void Stutterer::recordStandby(void* source, deluge::dsp::StereoBuffer<q31_t> aud
 			}
 		}
 
+		// In Leaky mode during PLAYING with exclusive ownership, skip normal recording
+		// Leaky writes happen during playback (process() function) - writes wet OR dry per sample
+		// TWEAKY: Would not skip - allow dry recording to mix with leaky cross-track writes
+		if (status == Status::PLAYING && stutterConfig.scatterMode == ScatterMode::Leaky
+		    && recordSource == playSource) {
+			return;
+		}
+
 		for (deluge::dsp::StereoSample<q31_t> sample : audio) {
 			recordBuffer[recordWritePos] = sample;
 			recordWritePos++;
@@ -1167,10 +1262,9 @@ Error Stutterer::armStutter(void* source, ParamManagerForTimeline* paramManager,
 		recordSource = source;
 		recordWritePos = 0;
 		// Clear buffer to start fresh
-		// EXPERIMENT: commented out to test if memset causes audio glitch
-		// if (recordBuffer != nullptr) {
-		// 	memset(recordBuffer, 0, kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
-		// }
+		if (recordBuffer != nullptr) {
+			memset(recordBuffer, 0, kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
+		}
 		return Error::NONE;
 	}
 
@@ -1216,7 +1310,12 @@ bool Stutterer::checkPendingTrigger(void* source, int64_t lastSwungTick, uint32_
 		return false;
 	}
 
-	// Beat boundary crossed with enough audio - trigger NOW (sample-accurate)
+	// Beat boundary crossed with enough audio - trigger NOW
+	triggerPlaybackNow(source);
+	return true;
+}
+
+void Stutterer::triggerPlaybackNow(void* source) {
 	pendingPlayTrigger = false;
 
 	// Calculate where loop starts in the record buffer (which becomes play buffer)
@@ -1228,15 +1327,17 @@ bool Stutterer::checkPendingTrigger(void* source, int64_t lastSwungTick, uint32_
 		playbackStartPos = kLooperBufferSize - (playbackLength - recordWritePos);
 	}
 
-	// Swap buffers - no copy needed!
+	// Swap buffers
 	std::swap(recordBuffer, playBuffer);
-	recordBufferFull = false;    // New recordBuffer starts empty
-	waitingForRecordBeat = true; // Wait for next beat before recording into new buffer
-	recordStartTick = 0;         // Will be computed in recordStandby
+	recordBufferFull = false; // New recordBuffer starts empty
+	// Repeat mode records immediately; other modes wait for beat
+	waitingForRecordBeat = (stutterConfig.scatterMode != ScatterMode::Repeat);
+	recordStartTick = 0; // Will be computed in recordStandby
 
 	// Reset for playback and new recording
 	playbackPos = 0;
 	recordWritePos = 0;
+	scatterLinearBarPos = 0; // Reset linear position for leaky writes
 	currentSliceLength = playbackLength;
 	sliceStartOffset = 0;
 	scatterSliceIndex = 0;
@@ -1263,7 +1364,6 @@ bool Stutterer::checkPendingTrigger(void* source, int64_t lastSwungTick, uint32_
 	// Source now owns both buffers
 	playSource = source;
 	recordSource = source;
-	return true;
 }
 
 void Stutterer::cancelArmed() {

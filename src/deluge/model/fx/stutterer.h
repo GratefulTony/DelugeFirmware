@@ -32,9 +32,13 @@ enum class ScatterMode : uint8_t {
 	Reverse,     ///< Segment reversal
 	Chop,        ///< Beat slicing with gate
 	Shuffle,     ///< Phi-based segment reordering
-	Tape,        ///< Tape stop/start speed effect
-	Pitch,       ///< Pitch manipulation
-	Filter,      ///< Filter sweep
+	Leaky,       ///< Shuffle with probabilistic write-back to buffer (exclusive ownership)
+	// FUTURE: Tweaky - Leaky without ownership check, allows cross-track chaos
+	// Both tracks can write to recordBuffer simultaneously, creating unpredictable
+	// contamination where A's processed output bleeds into B's recording and vice versa.
+	// Implementation: remove `recordSource == playSource` check from leaky write logic.
+	Pitch,  ///< Pitch manipulation
+	Filter, ///< Filter sweep
 	NUM_MODES
 };
 
@@ -51,6 +55,10 @@ struct StutterConfig {
 	float zoneBPhaseOffset{0};       ///< Zone B timbral phase offset (push Zone B encoder)
 	float macroConfigPhaseOffset{0}; ///< Macro config phase offset (push Macro Config encoder)
 	float gammaPhase{0};             ///< Gamma multiplier for macro (push Macro encoder)
+
+	// Leaky mode: probability of writing processed output back to buffer
+	// 0 = never write (no leak), 1 = always write (max leak)
+	float leakyWriteProb{0.2f}; ///< pWrite: write probability [0,1], default 20%
 };
 
 class Stutterer {
@@ -105,13 +113,21 @@ public:
 	                    uint32_t barLengthInTicks = 0, const q31_t* modulatedValues = nullptr);
 	void endStutter(ParamManagerForTimeline* paramManager = nullptr);
 
-	/// Update phase offsets from source's current config (call before processStutter)
-	/// This allows real-time adjustment of offsets while scatter is playing
-	inline void updatePhaseOffsets(const StutterConfig& sourceConfig) {
+	/// Update live-adjustable params from source's current config (call before processStutter)
+	/// This allows real-time adjustment of phase offsets and leaky write prob while scatter is playing
+	/// Also allows seamless Shuffle <-> Leaky transitions without stopping/clearing
+	inline void updateLiveParams(const StutterConfig& sourceConfig) {
 		stutterConfig.zoneAPhaseOffset = sourceConfig.zoneAPhaseOffset;
 		stutterConfig.zoneBPhaseOffset = sourceConfig.zoneBPhaseOffset;
 		stutterConfig.macroConfigPhaseOffset = sourceConfig.macroConfigPhaseOffset;
 		stutterConfig.gammaPhase = sourceConfig.gammaPhase;
+		stutterConfig.leakyWriteProb = sourceConfig.leakyWriteProb;
+		// Allow seamless mode switching between compatible modes (Shuffle <-> Leaky)
+		// Both use same shuffle processing, Leaky just adds write-back
+		if ((stutterConfig.scatterMode == ScatterMode::Shuffle || stutterConfig.scatterMode == ScatterMode::Leaky)
+		    && (sourceConfig.scatterMode == ScatterMode::Shuffle || sourceConfig.scatterMode == ScatterMode::Leaky)) {
+			stutterConfig.scatterMode = sourceConfig.scatterMode;
+		}
 	}
 
 	/// Arm stutter for quantized trigger (starts on next beat)
@@ -160,6 +176,10 @@ private:
 	};
 	int32_t getStutterRate(ParamManager* paramManager, int32_t magnitude, uint32_t timePerTickInverse);
 	size_t getRepeatSliceLength(ParamManager* paramManager, size_t maxLength);
+
+	/// Trigger playback immediately (used by Repeat mode which bypasses beat quantization)
+	/// Transitions from STANDBY to PLAYING, swaps buffers, resets playback state
+	void triggerPlaybackNow(void* source);
 	bool currentReverse;
 	deluge::dsp::DelayBuffer buffer;
 	Status status = Status::OFF;
@@ -214,9 +234,10 @@ private:
 	///
 	/// For Repeat mode: single slice from end of bar, length controlled by rate knob
 	/// For future modes: sliceStartOffset/currentSliceLength set by pattern sequencer
-	size_t playbackPos = 0;        ///< Current read offset within current slice
-	size_t sliceStartOffset = 0;   ///< Offset from bar start to current slice (in samples)
-	size_t currentSliceLength = 0; ///< Length of current slice (in samples)
+	size_t playbackPos = 0;         ///< Current read offset within current slice
+	size_t sliceStartOffset = 0;    ///< Offset from bar start to current slice (in samples)
+	size_t currentSliceLength = 0;  ///< Length of current slice (in samples)
+	size_t scatterLinearBarPos = 0; ///< Linear position in bar for leaky writes (grid-aligned)
 
 	/// Convert beat position to sample offset within captured bar
 	/// Supports fractional beats (e.g., 2.5 = halfway through beat 3)
