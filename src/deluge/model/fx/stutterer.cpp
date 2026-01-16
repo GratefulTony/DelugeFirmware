@@ -249,7 +249,7 @@ static constexpr const char* kScatterModeNames[] = {
 
 void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamManager* paramManager, int32_t magnitude,
                                uint32_t timePerTickInverse, int64_t currentTick, uint64_t timePerTickBig,
-                               uint32_t barLengthInTicks) {
+                               uint32_t barLengthInTicks, const q31_t* modulatedValues) {
 
 	// Non-Classic modes: double buffer - play from playBuffer, record to recordBuffer
 	// Core loop: play current slice fully, then get next slice at boundary
@@ -359,9 +359,29 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						scatterNumSlices = 32; // 32nds (max)
 					}
 
-					// Read zone params - use patched params for Sound context, unpatched for Song
+					// Read zone params - preset from param set, cables from modulatedValues
+					// Zone params: paramFinalValues contains ONLY cable modulation, DSP combines with preset
+					// Hybrid params (SCATTER_MACRO): paramFinalValues already includes preset
+					// Pattern follows disperser: preset + scaled cables (like combinePresetAndCables)
+					// modulatedValues order: [ZONE_A, ZONE_B, MACRO_CONFIG, MACRO]
 					q31_t zoneAParam, zoneBParam, macroConfigParam, macroParam;
-					if (paramManager->containsPatchedParamSetCollection()) {
+					if (modulatedValues && paramManager->containsPatchedParamSetCollection()) {
+						// Sound context: combine preset + cable modulation for ZONE params
+						// Scale cables: full modulation = 1 zone (8 zones, so divide by 4)
+						constexpr int32_t kCableScale = 4;
+						PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
+						// Zone params need preset added (paramFinalValues has cables only)
+						zoneAParam =
+						    patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_A) + modulatedValues[0] / kCableScale;
+						zoneBParam =
+						    patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_B) + modulatedValues[1] / kCableScale;
+						macroConfigParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO_CONFIG)
+						                   + modulatedValues[2] / kCableScale;
+						// SCATTER_MACRO is hybrid param - paramFinalValues already includes preset
+						macroParam = modulatedValues[3];
+					}
+					else if (paramManager->containsPatchedParamSetCollection()) {
+						// Fallback: patched preset values (no modulation)
 						PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
 						zoneAParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_A);
 						zoneBParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_B);
@@ -369,6 +389,7 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						macroParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO);
 					}
 					else {
+						// GlobalEffectable context: use unpatched values (no mod matrix available)
 						zoneAParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_A);
 						zoneBParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_B);
 						macroConfigParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_MACRO_CONFIG);

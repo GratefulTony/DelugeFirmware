@@ -98,9 +98,11 @@ public:
 	[[nodiscard]] Error beginStutter(void* source, ParamManagerForTimeline* paramManager, StutterConfig stutterConfig,
 	                                 int32_t magnitude, uint32_t timePerTickInverse, size_t loopLengthSamples = 0,
 	                                 bool halfBar = false);
+	/// Optional modulatedValues array indexed as [SCATTER_ZONE_A, SCATTER_ZONE_B, SCATTER_MACRO_CONFIG, SCATTER_MACRO]
+	/// If nullptr, preset values are used. If provided, these modulated values override the param preset.
 	void processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamManager* paramManager, int32_t magnitude,
 	                    uint32_t timePerTickInverse, int64_t currentTick, uint64_t timePerTickBig = 0,
-	                    uint32_t barLengthInTicks = 0);
+	                    uint32_t barLengthInTicks = 0, const q31_t* modulatedValues = nullptr);
 	void endStutter(ParamManagerForTimeline* paramManager = nullptr);
 
 	/// Update phase offsets from source's current config (call before processStutter)

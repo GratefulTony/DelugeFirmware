@@ -1664,7 +1664,8 @@ void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
 	}
 }
 
-void ModControllableAudio::processStutter(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager) {
+void ModControllableAudio::processStutter(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager,
+                                          const q31_t* modulatedScatterValues) {
 	int32_t magnitude = currentSong->getInputTickMagnitude();
 	uint32_t timePerTickInverse = playbackHandler.getTimePerInternalTickInverse();
 	// Use interpolated tick count for accurate beat boundary detection within audio buffers
@@ -1701,7 +1702,7 @@ void ModControllableAudio::processStutter(deluge::dsp::StereoBuffer<q31_t> buffe
 		// Pass tick timing for bar boundary sync (locks slices to beat grid)
 		uint64_t timePerTickBig = playbackHandler.getTimePerInternalTickBig();
 		stutterer.processStutter(buffer, paramManager, magnitude, timePerTickInverse, currentTick, timePerTickBig,
-		                         barLength);
+		                         barLength, modulatedScatterValues);
 	}
 }
 

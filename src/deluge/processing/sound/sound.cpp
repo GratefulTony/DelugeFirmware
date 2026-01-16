@@ -2610,7 +2610,15 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, deluge::dsp::Stere
 		          !voices_.empty(), reverbSendAmount >> 1);
 	}
 
-	processStutter(sound_stereo, paramManager);
+	// Scatter modulation support: pass modulated values from paramFinalValues
+	// Array order: [ZONE_A, ZONE_B, MACRO_CONFIG, MACRO]
+	q31_t modulatedScatterValues[4] = {
+	    paramFinalValues[params::GLOBAL_SCATTER_ZONE_A - params::FIRST_GLOBAL],
+	    paramFinalValues[params::GLOBAL_SCATTER_ZONE_B - params::FIRST_GLOBAL],
+	    paramFinalValues[params::GLOBAL_SCATTER_MACRO_CONFIG - params::FIRST_GLOBAL],
+	    paramFinalValues[params::GLOBAL_SCATTER_MACRO - params::FIRST_GLOBAL],
+	};
+	processStutter(sound_stereo, paramManager, modulatedScatterValues);
 
 	// DOTT (multiband compressor) - runs after stutter
 	if (dottEnabled) {

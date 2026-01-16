@@ -424,16 +424,20 @@ static bool isMultibandCompressorParam(int32_t paramId) {
 	return paramId >= params::UNPATCHED_MB_COMPRESSOR_CHARACTER && paramId <= params::UNPATCHED_MB_COMPRESSOR_VIBE;
 }
 
-// Helper to check if an unpatched param is a high-resolution zone-based param (unipolar, 1024-step)
+// Helper to check if an unpatched param is a unipolar zone-based param (0 to INT32_MAX)
 static bool isHighResZoneParam(int32_t paramId) {
 	return paramId == params::UNPATCHED_SINE_SHAPER_HARMONIC || paramId == params::UNPATCHED_SINE_SHAPER_TWIST
-	       || paramId == params::UNPATCHED_DISPERSER_TOPO || paramId == params::UNPATCHED_DISPERSER_TWIST;
+	       || paramId == params::UNPATCHED_DISPERSER_TOPO || paramId == params::UNPATCHED_DISPERSER_TWIST
+	       || paramId == params::UNPATCHED_SCATTER_ZONE_A || paramId == params::UNPATCHED_SCATTER_ZONE_B
+	       || paramId == params::UNPATCHED_SCATTER_MACRO_CONFIG || paramId == params::UNPATCHED_SCATTER_MACRO;
 }
 
-// Helper to check if a patched param is a high-resolution zone-based param (unipolar, 1024-step)
+// Helper to check if a patched param is a unipolar zone-based param (0 to INT32_MAX)
 static bool isPatchedHighResZoneParam(int32_t paramId) {
 	return paramId == params::LOCAL_SINE_SHAPER_TWIST || paramId == params::LOCAL_SINE_SHAPER_HARMONIC
-	       || paramId == params::GLOBAL_DISPERSER_TOPO || paramId == params::GLOBAL_DISPERSER_TWIST;
+	       || paramId == params::GLOBAL_DISPERSER_TOPO || paramId == params::GLOBAL_DISPERSER_TWIST
+	       || paramId == params::GLOBAL_SCATTER_ZONE_A || paramId == params::GLOBAL_SCATTER_ZONE_B
+	       || paramId == params::GLOBAL_SCATTER_MACRO_CONFIG || paramId == params::GLOBAL_SCATTER_MACRO;
 }
 
 int32_t UnpatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWithAutoParam* modelStack) {
