@@ -150,8 +150,9 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 		waitingForRecordBeat = (stutterConfig.scatterMode != ScatterMode::Repeat);
 		recordStartTick = 0;        // Will be computed in recordStandby
 		pendingPlayTrigger = false; // No pending trigger yet
-		// Clear record buffer to prevent stale data reads
-		memset(recordBuffer, 0, kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
+		// Clear both buffers to prevent stale data reads
+		memset(bufferA, 0, kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
+		memset(bufferB, 0, kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
 
 		// Source claims recordBuffer, starts recording in STANDBY
 		// If someone else was playing, they keep playSource
@@ -278,11 +279,15 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						repeatBarBoundaryUpdate = true; // Flag to skip playbackPos reset
 					}
 					else {
-						// Force sync to bar start
+						// Force sync to bar start (bar-level ZC mute already happened)
 						scatterSliceIndex = 0;
 						playbackPos = 0;
+						waitingForZeroCross = true; // Anti-click: mute until zero crossing
+						releaseMuted = false;
+						// Keep prevOutputL to detect ZC at the cut point (don't reset to 0)
 						scatterSubdivIndex = 0;
-						scatterLinearBarPos = 0; // Reset linear position for leaky writes
+						scatterPitchUpLoopCount = 0; // Reset pitch up loop state
+						scatterLinearBarPos = 0;     // Reset linear position for leaky writes
 						needsSliceSetup = true;
 						scatterRepeatCounter = 0; // Fresh params for new bar
 						// Also resync playbackLength
@@ -301,161 +306,27 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			// === SLICE BOUNDARY (buffer-level): check once per buffer, accept ~3ms jitter ===
 			// Dirty flag set when slice completes mid-buffer, checked here at buffer start
 			// This eliminates per-sample boundary checks for significant performance gain
-			if (needsSliceSetup) {
+			// Throttle param updates to max once per 10 buffers (~30ms) to reduce CPU load
+			// Bypass throttle if currentSliceLength == 0 (first run needs immediate setup)
+			scatterParamThrottle++;
+			if (needsSliceSetup && (scatterParamThrottle >= 10 || currentSliceLength == 0)) {
 				needsSliceSetup = false;
-				// Save flag before clearing - Repeat mode uses it to skip loop counter increment
-				bool wasBarBoundaryUpdate = repeatBarBoundaryUpdate;
+				scatterParamThrottle = 0;
 				// Reset playbackPos unless this is a Repeat bar-boundary update (continuous loop)
 				if (!repeatBarBoundaryUpdate) {
 					playbackPos = 0; // Snap to slice start, accept jitter
 				}
+				// Always ZC protect when params change, even for continuous loop
+				waitingForZeroCross = true;
+				releaseMuted = false;
+				prevOutputL = 0;
 				repeatBarBoundaryUpdate = false; // Clear flag after use
 				FX_BENCH_START(benchSlice);
 				switch (stutterConfig.scatterMode) {
-				case ScatterMode::Repeat: {
-					// Repeat mode: continuous slice length, continuous offset
-					// Rate controls how much of recent buffer to loop (exponential curve)
-					// Zone A offset shifts position continuously within buffer
-					FX_BENCH_START(benchParamRead);
-					UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
-					int32_t rateParam = unpatchedParams->getValue(params::UNPATCHED_STUTTER_RATE);
-					int32_t knobPos = unpatchedParams->paramValueToKnobPos(rateParam, nullptr);
-
-					// Continuous slice length: exponential curve from full bar to minimum
-					// knobPos -64 to +64 → normalized 128 to 0
-					int32_t normalized = 64 - knobPos;
-					if (normalized < 0) {
-						normalized = 0;
-					}
-					if (normalized > 128) {
-						normalized = 128;
-					}
-					// Exponential: sliceLength = maxLength * (normalized/128)^2
-					constexpr size_t kMinSlice = 256; // ~6ms minimum
-					currentSliceLength = (playbackLength * normalized * normalized) / (128 * 128);
-					if (currentSliceLength < kMinSlice) {
-						currentSliceLength = kMinSlice;
-					}
-					if (currentSliceLength > playbackLength) {
-						currentSliceLength = playbackLength;
-					}
-
-					// Loop counter: increment on natural loop completion (not bar boundary updates)
-					// Wraps at number of slices that fit in the bar (1/rate)
-					int32_t slicesPerBar =
-					    std::max(int32_t{1}, static_cast<int32_t>(playbackLength / currentSliceLength));
-					if (!wasBarBoundaryUpdate) {
-						scatterRepeatLoopIndex = (scatterRepeatLoopIndex + 1) % slicesPerBar;
-					}
-
-					// Read zone params for modifiers
-					q31_t zoneAParam, zoneBParam, macroConfigParam, macroParam;
-					if (modulatedValues && paramManager->containsPatchedParamSetCollection()) {
-						constexpr int32_t kCableScale = 4;
-						PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
-						zoneAParam =
-						    patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_A) + modulatedValues[0] / kCableScale;
-						zoneBParam =
-						    patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_B) + modulatedValues[1] / kCableScale;
-						macroConfigParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO_CONFIG)
-						                   + modulatedValues[2] / kCableScale;
-						macroParam = modulatedValues[3];
-					}
-					else if (paramManager->containsPatchedParamSetCollection()) {
-						PatchedParamSet* patchedParams = paramManager->getPatchedParamSet();
-						zoneAParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_A);
-						zoneBParam = patchedParams->getValue(params::GLOBAL_SCATTER_ZONE_B);
-						macroConfigParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO_CONFIG);
-						macroParam = patchedParams->getValue(params::GLOBAL_SCATTER_MACRO);
-					}
-					else {
-						zoneAParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_A);
-						zoneBParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_ZONE_B);
-						macroConfigParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_MACRO_CONFIG);
-						macroParam = unpatchedParams->getValue(params::UNPATCHED_SCATTER_MACRO);
-					}
-					FX_BENCH_STOP(benchParamRead);
-
-					// Compute grain params for modifiers (use loop index for per-iteration evolution)
-					float macroConfigNorm = static_cast<float>(macroConfigParam) * deluge::dsp::scatter::kQ31ToFloat;
-					float macroNorm = static_cast<float>(macroParam) * deluge::dsp::scatter::kQ31ToFloat;
-					deluge::dsp::scatter::ScatterPhaseOffsets offsets{
-					    stutterConfig.zoneAPhaseOffset,
-					    stutterConfig.zoneBPhaseOffset,
-					    stutterConfig.macroConfigPhaseOffset,
-					    stutterConfig.gammaPhase,
-					    0.0f,
-					    0.0f,
-					    0.0f, // threshold scales not used for Repeat
-					    scatterBarIndex,
-					};
-					FX_BENCH_START(benchParams);
-					deluge::dsp::scatter::GrainParams grain = deluge::dsp::scatter::computeGrainParams(
-					    zoneAParam, zoneBParam, macroConfigParam, macroParam, scatterRepeatLoopIndex, &offsets);
-					FX_BENCH_STOP(benchParams);
-
-					// Continuous offset: shift start position within available buffer range
-					// grain.sliceOffset [0-15] → fraction of (bufferLength - sliceLength)
-					size_t availableRange = playbackLength - currentSliceLength;
-					size_t offsetAmount = (grain.sliceOffset * availableRange) >> 4;
-					// Skip overrides to different position
-					if (grain.shouldSkip) {
-						offsetAmount = (grain.skipTarget * availableRange) >> 4;
-					}
-					// Start from end of buffer, offset moves earlier
-					sliceStartOffset = playbackLength - currentSliceLength - offsetAmount;
-
-					// Timbral modifiers from Zone B
-					scatterReversed = grain.shouldReverse;
-					scatterPitchUp = grain.shouldPitchUp;
-					scatterDryMix = 0.0f; // Always 100% wet
-					scatterEnvShape = grain.envShape;
-					scatterGateRatio = grain.gateRatio;
-					scatterEnvDepth = grain.envDepth;
-
-					// Pan (evolves with bar index)
-					float panDir =
-					    (deluge::dsp::phi::wrapPhase(static_cast<float>(scatterBarIndex) * 1.3f) < 0.5f) ? -1.0f : 1.0f;
-					scatterPan = panDir * grain.panAmount;
-					float panAbs = (scatterPan > 0) ? scatterPan : -scatterPan;
-					scatterPanActive = (panAbs > 0.001f);
-					scatterPanFadeQ31 = static_cast<int32_t>((1.0f - panAbs) * 2147483647.0f);
-					scatterPanCrossQ31 = static_cast<int32_t>((panAbs * 0.5f) * 2147483647.0f);
-					scatterPanRight = (scatterPan > 0);
-
-					// No subdivisions for Repeat - continuous chunk
-					scatterSubdivisions = 1;
-					scatterSubdivIndex = 0;
-					scatterSubSliceLength = currentSliceLength;
-					scatterLastSubSliceLength = currentSliceLength;
-
-					// Envelope/gate setup
-					scatterEnvActive = (scatterEnvDepth > 0.001f);
-					scatterGateActive = (scatterGateRatio < 0.999f);
-					if (scatterEnvActive) {
-						int32_t envSliceLen = static_cast<int32_t>(currentSliceLength);
-						scatterEnvPrecomputed = deluge::dsp::scatter::prepareGrainEnvelopeQ31(
-						    envSliceLen, scatterGateRatio, scatterEnvDepth, scatterEnvShape, scatterEnvWidth);
-					}
-					else if (scatterGateActive) {
-						scatterEnvPrecomputed.gatedLength =
-						    static_cast<int32_t>(static_cast<float>(currentSliceLength) * scatterGateRatio);
-						scatterEnvPrecomputed.attackFadeLen = 0;
-						scatterEnvPrecomputed.decayFadeLen = 0;
-					}
-					else {
-						scatterEnvPrecomputed.gatedLength = static_cast<int32_t>(currentSliceLength);
-						scatterEnvPrecomputed.attackFadeLen = 0;
-						scatterEnvPrecomputed.decayFadeLen = 0;
-					}
-
-					// No delay for Repeat
-					delayActive = false;
-					break;
-				}
-
-				case ScatterMode::Leaky: // Leaky uses Shuffle processing but writes output back to buffer
+				case ScatterMode::Repeat: // Falls through to Shuffle with isRepeat flag
+				case ScatterMode::Leaky:  // Leaky uses Shuffle processing but writes output back to buffer
 				case ScatterMode::Shuffle: {
+					bool isRepeat = (stutterConfig.scatterMode == ScatterMode::Repeat);
 					FX_BENCH_START(benchParamRead);
 					// Rate knob controls number of slices - match UI note division labels
 					// UI optionValues: {2, 6, 13, 19, 25, 31, 38, 47} for 0-50 range
@@ -463,28 +334,52 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
 					int32_t rateParam = unpatchedParams->getValue(params::UNPATCHED_STUTTER_RATE);
 					int32_t knobPos = unpatchedParams->paramValueToKnobPos(rateParam, nullptr);
-					// Convert knobPos (-64..+64) to UI value (0..50) range
-					int32_t uiValue = ((knobPos + 64) * 50) / 128;
-					// Map UI value to note divisions (thresholds at midpoints between optionValues)
-					// Capped at 32 slices max for performance
-					// Thresholds: 4, 9, 16, 22, 28 (midpoints)
-					if (uiValue < 4) {
-						scatterNumSlices = 1; // 1 BAR
-					}
-					else if (uiValue < 9) {
-						scatterNumSlices = 2; // 2nds (half notes)
-					}
-					else if (uiValue < 16) {
-						scatterNumSlices = 4; // 4ths (quarter notes)
-					}
-					else if (uiValue < 22) {
-						scatterNumSlices = 8; // 8ths
-					}
-					else if (uiValue < 28) {
-						scatterNumSlices = 16; // 16ths
+
+					if (isRepeat) {
+						// Repeat: continuous exponential curve from full bar to minimum
+						// knobPos -64 to +64 → normalized 128 to 0
+						int32_t normalized = 64 - knobPos;
+						if (normalized < 0) {
+							normalized = 0;
+						}
+						if (normalized > 128) {
+							normalized = 128;
+						}
+						constexpr size_t kMinSlice = 256; // ~6ms minimum
+						currentSliceLength = (playbackLength * normalized * normalized) / (128 * 128);
+						if (currentSliceLength < kMinSlice) {
+							currentSliceLength = kMinSlice;
+						}
+						if (currentSliceLength > playbackLength) {
+							currentSliceLength = playbackLength;
+						}
+						scatterNumSlices = 1; // Not used for Repeat but keep consistent
+						// Loop counter: increment and wrap at 8 for bounded hash variation
+						scatterRepeatLoopIndex = (scatterRepeatLoopIndex + 1) & 0x7;
 					}
 					else {
-						scatterNumSlices = 32; // 32nds (max)
+						// Shuffle: discrete note divisions from rate knob
+						// Convert knobPos (-64..+64) to UI value (0..50) range
+						int32_t uiValue = ((knobPos + 64) * 50) / 128;
+						// Map UI value to note divisions (thresholds at midpoints)
+						if (uiValue < 4) {
+							scatterNumSlices = 1; // 1 BAR
+						}
+						else if (uiValue < 9) {
+							scatterNumSlices = 2; // 2nds (half notes)
+						}
+						else if (uiValue < 16) {
+							scatterNumSlices = 4; // 4ths (quarter notes)
+						}
+						else if (uiValue < 22) {
+							scatterNumSlices = 8; // 8ths
+						}
+						else if (uiValue < 28) {
+							scatterNumSlices = 16; // 16ths
+						}
+						else {
+							scatterNumSlices = 32; // 32nds (max)
+						}
 					}
 
 					// Read zone params - preset from param set, cables from modulatedValues
@@ -587,65 +482,70 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					    stutterConfig.gammaPhase,
 					    staticTriangles.reverseScale,
 					    staticTriangles.pitchScale,
-					    staticTriangles.delayScale,
+					    isRepeat ? 0.0f : staticTriangles.delayScale, // No delay for Repeat
 					    scatterBarIndex,
 					};
 
-					// Compute grain params with repeat optimization
-					// When repeating, reuse cached grain (skip ~2200 cycles of computeGrainParams)
+					// Compute grain params - Repeat uses loop index for evolution, Shuffle uses slice index
 					deluge::dsp::scatter::GrainParams grain;
-					if (scatterRepeatCounter > 0) {
-						// Repeating: use cached grain, decrement counter
+					if (!isRepeat && scatterRepeatCounter > 0) {
+						// Shuffle: repeating, reuse cached grain (skip ~2200 cycles)
 						grain = scatterCachedGrain;
 						scatterRepeatCounter--;
 					}
 					else {
 						// Fresh slice: compute new grain
 						FX_BENCH_START(benchParams);
+						int32_t grainIndex = isRepeat ? scatterRepeatLoopIndex : scatterSliceIndex;
 						grain = deluge::dsp::scatter::computeGrainParams(zoneAParam, zoneBParam, macroConfigParam,
-						                                                 macroParam, scatterSliceIndex, &offsets);
+						                                                 macroParam, grainIndex, &offsets);
 						FX_BENCH_STOP(benchParams);
-						// Cache for repeat and set counter
-						scatterCachedGrain = grain;
-						scatterRepeatCounter = grain.repeatSlices - 1; // 0 if no repeat
+						if (!isRepeat) {
+							// Cache for repeat and set counter (Shuffle only)
+							scatterCachedGrain = grain;
+							scatterRepeatCounter = grain.repeatSlices - 1;
+						}
 					}
 
-					// Calculate target slice from sequential index + offset
-					int32_t targetSlice = scatterSliceIndex;
-
-					// Apply slice offset (hash-based, [0-15] scaled by numSlices)
-					int32_t offsetSlices = (grain.sliceOffset * scatterNumSlices) >> 4;
-					targetSlice = (targetSlice + offsetSlices) % scatterNumSlices;
-
-					// Skip decision (hash-based bool + target)
-					if (grain.shouldSkip) {
-						targetSlice = (grain.skipTarget * scatterNumSlices) >> 4;
-						targetSlice = targetSlice % scatterNumSlices;
+					// Slice offset computation: Repeat=continuous, Shuffle=discrete
+					int32_t effectiveGrainLength = 1;
+					if (isRepeat) {
+						// Continuous offset: shift start position within available buffer range
+						size_t availableRange = playbackLength - currentSliceLength;
+						size_t offsetAmount = (grain.sliceOffset * availableRange) >> 4;
+						if (grain.shouldSkip) {
+							offsetAmount = (grain.skipTarget * availableRange) >> 4;
+						}
+						// Start from end of buffer, offset moves earlier
+						sliceStartOffset = playbackLength - currentSliceLength - offsetAmount;
 					}
-
-					// Set slice parameters - timing stays locked to bar
-					// Long grain: combine consecutive slices into one continuous chunk
-					// Cap grainLength to BOTH:
-					//   1. Bar timing boundary (don't exceed remaining bar time)
-					//   2. Buffer read boundary (don't read past buffer based on targetSlice)
-					// Floor at 1 to prevent freeze if all boundaries somehow converge to 0
-					int32_t remainingTimeSlices = scatterNumSlices - scatterSliceIndex;
-					int32_t remainingBufferSlices = scatterNumSlices - targetSlice;
-					int32_t effectiveGrainLength =
-					    std::max(int32_t{1}, std::min({grain.grainLength, remainingTimeSlices, remainingBufferSlices}));
-					size_t baseSliceLength = playbackLength / scatterNumSlices;
-					currentSliceLength = baseSliceLength * static_cast<size_t>(effectiveGrainLength);
-					// If this grain ends the bar, add remainder to prevent rushing
-					// (integer truncation in baseSliceLength causes accumulated drift)
-					if (scatterSliceIndex + effectiveGrainLength >= scatterNumSlices) {
-						size_t expectedTotal = baseSliceLength * static_cast<size_t>(scatterNumSlices);
-						size_t remainder = playbackLength - expectedTotal;
-						currentSliceLength += remainder;
+					else {
+						// Discrete slice offset: calculate target slice from sequential index
+						int32_t targetSlice = scatterSliceIndex;
+						int32_t offsetSlices = (grain.sliceOffset * scatterNumSlices) >> 4;
+						targetSlice = (targetSlice + offsetSlices) % scatterNumSlices;
+						if (grain.shouldSkip) {
+							targetSlice = (grain.skipTarget * scatterNumSlices) >> 4;
+							targetSlice = targetSlice % scatterNumSlices;
+						}
+						// Long grain: combine consecutive slices into one continuous chunk
+						int32_t remainingTimeSlices = scatterNumSlices - scatterSliceIndex;
+						int32_t remainingBufferSlices = scatterNumSlices - targetSlice;
+						effectiveGrainLength = std::max(
+						    int32_t{1}, std::min({grain.grainLength, remainingTimeSlices, remainingBufferSlices}));
+						size_t baseSliceLength = playbackLength / scatterNumSlices;
+						currentSliceLength = baseSliceLength * static_cast<size_t>(effectiveGrainLength);
+						// If this grain ends the bar, add remainder to prevent rushing
+						if (scatterSliceIndex + effectiveGrainLength >= scatterNumSlices) {
+							size_t expectedTotal = baseSliceLength * static_cast<size_t>(scatterNumSlices);
+							size_t remainder = playbackLength - expectedTotal;
+							currentSliceLength += remainder;
+						}
+						if (currentSliceLength < 256) {
+							currentSliceLength = 256;
+						}
+						sliceStartOffset = targetSlice * baseSliceLength;
 					}
-					if (currentSliceLength < 256) {
-						currentSliceLength = 256;
-					}
-					sliceStartOffset = targetSlice * baseSliceLength;
 
 					// Reverse decision (hash-based bool)
 					scatterReversed = grain.shouldReverse;
@@ -666,10 +566,14 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					scatterGateRatio = grain.gateRatio;
 					scatterEnvDepth = grain.envDepth;
 
-					// Pan: direction decorrelated from slice content using separate counter
-					// Amount from grain params (incorporates phase offset for evolving stereo field)
-					// Disable pan for long grains - stereo movement sounds unnatural on extended chunks
-					if (effectiveGrainLength > 1) {
+					// Pan: Repeat=bar-indexed direction, Shuffle=counter-indexed (disable for long grains)
+					if (isRepeat) {
+						float panDir = (deluge::dsp::phi::wrapPhase(static_cast<float>(scatterBarIndex) * 1.3f) < 0.5f)
+						                   ? -1.0f
+						                   : 1.0f;
+						scatterPan = panDir * grain.panAmount;
+					}
+					else if (effectiveGrainLength > 1) {
 						scatterPan = 0;
 					}
 					else {
@@ -709,8 +613,8 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					}
 
 					// Precompute envelope/gate active flags (once per slice, avoid per-sample checks)
-					// Fast ratchets (<80ms) skip envelope but keep gate (hard chop adds punch)
-					constexpr size_t kFastRatchetThreshold = 3528; // ~80ms at 44.1kHz
+					// Fast ratchets (<60ms) skip envelope but keep gate (hard chop adds punch)
+					constexpr size_t kFastRatchetThreshold = 2646; // ~60ms at 44.1kHz
 					bool isFastRatchet = (scatterSubdivisions > 1 && scatterSubSliceLength < kFastRatchetThreshold);
 					scatterEnvActive = !isFastRatchet && (scatterEnvDepth > 0.001f);
 					scatterGateActive = (scatterGateRatio < 0.999f);
@@ -755,7 +659,7 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 
 					// Tag slice benchmark with slice count and subdiv (combined in tag[2])
 					// tag[0]="slice", tag[1]=mode, tag[2]="8s/x4" format
-					{
+					if (!isRepeat) {
 						static char sliceInfoTag[16];
 						char* p = sliceInfoTag;
 						intToString(scatterNumSlices, p, 1);
@@ -766,17 +670,17 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						*p++ = 'x';
 						intToString(scatterSubdivisions, p, 1);
 						FX_BENCH_SET_TAG(benchSlice, 2, sliceInfoTag);
-					}
 
-					// Advance for next slice (skip by effectiveGrainLength for long grains)
-					// Note: bar boundary handling (scatterBarIndex, resync) is done by tick-based sync
-					// This sample-based advance just wraps the slice index
-					int32_t nextSliceIndex = scatterSliceIndex + effectiveGrainLength;
-					if (nextSliceIndex >= scatterNumSlices) {
-						// Cancel repeat at bar boundary - compute fresh params for new bar
-						scatterRepeatCounter = 0;
+						// Advance for next slice (skip by effectiveGrainLength for long grains)
+						// Note: bar boundary handling (scatterBarIndex, resync) is done by tick-based sync
+						// This sample-based advance just wraps the slice index
+						int32_t nextSliceIndex = scatterSliceIndex + effectiveGrainLength;
+						if (nextSliceIndex >= scatterNumSlices) {
+							// Cancel repeat at bar boundary - compute fresh params for new bar
+							scatterRepeatCounter = 0;
+						}
+						scatterSliceIndex = nextSliceIndex % scatterNumSlices;
 					}
-					scatterSliceIndex = nextSliceIndex % scatterNumSlices;
 					break;
 				}
 
@@ -798,16 +702,28 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			// Hoist slice-constant values to locals (avoid member access in hot loop)
 			size_t loopPlaybackStartPos = playbackStartPos;
 			size_t loopSliceStartOffset = sliceStartOffset;
-			size_t loopCurrentSliceLength = currentSliceLength;
+			// Safety floor to prevent underflow in reverse read calculation
+			size_t loopCurrentSliceLength = (currentSliceLength > 0) ? currentSliceLength : 256;
 			size_t loopSubSliceLength = scatterSubSliceLength;
 			size_t loopLastSubSliceLength = scatterLastSubSliceLength;
 			int32_t loopLastSubdivIndex = scatterSubdivisions - 1;
+			// Hoist effective sub-length (update only on subdivision change, not every sample)
+			// Safety: ensure minimum to prevent audio-rate looping artifacts
+			size_t loopEffectiveSubLen =
+			    (scatterSubdivIndex == loopLastSubdivIndex) ? loopLastSubSliceLength : loopSubSliceLength;
+			if (loopEffectiveSubLen < kMinGrainSize) {
+				loopEffectiveSubLen = kMinGrainSize;
+			}
+			// Pitch up plays grain twice - track which loop we're on (persists across buffers)
+			int loopPitchUpLoopCount = scatterPitchUpLoopCount;
 			size_t loopPlaybackLength = playbackLength;    // For leaky write wrapping
 			size_t loopLinearBarPos = scatterLinearBarPos; // Linear position for leaky writes
 
 			// Hoist mode check and envelope params (constant during loop)
+			// Repeat shares processing with Shuffle (unified code path)
 			bool isShuffle =
-			    (stutterConfig.scatterMode == ScatterMode::Shuffle || stutterConfig.scatterMode == ScatterMode::Leaky);
+			    (stutterConfig.scatterMode == ScatterMode::Shuffle || stutterConfig.scatterMode == ScatterMode::Leaky
+			     || stutterConfig.scatterMode == ScatterMode::Repeat);
 			bool isLeaky = (stutterConfig.scatterMode == ScatterMode::Leaky);
 			// Leaky grain decision: made per-slice (not per-sample) to avoid discontinuities
 			// Hash of slice index determines if this grain writes wet or dry
@@ -847,27 +763,20 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			int32_t loopInvAttackLen = scatterEnvPrecomputed.invAttackLen;
 			int32_t loopInvDecayLen = scatterEnvPrecomputed.invDecayLen;
 
+			// Release zone: last 1/4 of effective length (respects gate cutoff)
+			size_t effectiveEnd =
+			    std::min(loopEffectiveSubLen, loopGatedLen > 0 ? size_t(loopGatedLen) : loopEffectiveSubLen);
+			size_t loopReleaseThreshold = effectiveEnd * 3 / 4;
+
 			// Hoist pan coefficients
 			int32_t loopPanFadeQ31 = scatterPanFadeQ31;
 			int32_t loopPanCrossQ31 = scatterPanCrossQ31;
 			bool loopPanRight = scatterPanRight;
 
 			for (deluge::dsp::StereoSample<q31_t>& sample : audio) {
-				// Record incoming audio to recordBuffer for re-trigger capability
-				// Only record if playSource also owns recordSource (no takeover in progress)
-				if (recordBuffer != nullptr && recordSource == playSource) {
-					if (sampleIdx == 0) {
-						FX_BENCH_START(benchRecord);
-					}
-					recordBuffer[recordWritePos] = sample;
-					recordWritePos++;
-					if (recordWritePos >= kLooperBufferSize) {
-						recordWritePos = 0;
-					}
-					if (sampleIdx == 0) {
-						FX_BENCH_STOP(benchRecord);
-					}
-				}
+				// NOTE: Recording for re-trigger is handled by recordStandby() which is called
+				// BEFORE processStutter(). Recording here would double-record, causing
+				// recordWritePos to advance at 2x speed and corrupt re-trigger playback.
 
 				// Benchmark first sample only to avoid 128x overhead
 				bool benchThisSample = (sampleIdx == 0);
@@ -878,13 +787,15 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				q31_t dryR = sample.r;
 
 				size_t playReadPos;
+				// Clamp playbackPos to valid range (safety for throttle/param change races)
+				size_t safePlaybackPos = (playbackPos < loopCurrentSliceLength) ? playbackPos : 0;
 				if (loopReversed) {
 					// Reverse: read from end of slice going backward
 					playReadPos =
-					    loopPlaybackStartPos + loopSliceStartOffset + (loopCurrentSliceLength - 1 - playbackPos);
+					    loopPlaybackStartPos + loopSliceStartOffset + (loopCurrentSliceLength - 1 - safePlaybackPos);
 				}
 				else {
-					playReadPos = loopPlaybackStartPos + loopSliceStartOffset + playbackPos;
+					playReadPos = loopPlaybackStartPos + loopSliceStartOffset + safePlaybackPos;
 				}
 				// Wrap around circular buffer (handle potential double-wrap edge cases)
 				while (playReadPos >= kLooperBufferSize) {
@@ -896,6 +807,8 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				bool useDry = (scatterDryMix > scatterDryThreshold);
 
 				q31_t outputL, outputR;
+				bool bufferZeroCrossing = false; // ZC detected in buffer (before processing)
+
 				if (useDry) {
 					// Use dry input signal
 					outputL = dryL;
@@ -908,6 +821,15 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					}
 					outputL = playBuffer[playReadPos].l;
 					outputR = playBuffer[playReadPos].r;
+
+					// Pitch up: check ZC on skipped sample (increment=2 skips every other sample)
+					if (loopPitchIncrement == 2 && playbackPos > 0) {
+						size_t skippedPos = loopReversed ? (playReadPos + 1) % kLooperBufferSize
+						                                 : (playReadPos > 0 ? playReadPos - 1 : kLooperBufferSize - 1);
+						q31_t skippedL = playBuffer[skippedPos].l;
+						bufferZeroCrossing = (skippedL != 0) && ((outputL ^ skippedL) < 0);
+					}
+
 					if (benchThisSample) {
 						FX_BENCH_STOP(benchRead);
 					}
@@ -921,10 +843,14 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					}
 					int32_t pos = static_cast<int32_t>(playbackPos);
 
+					// Gate cutoff: don't hard-cut, let ZC system mute at zero crossing
+					// The release threshold is set based on gatedLen, so ZC search starts before cutoff
 					if (pos >= loopGatedLen) {
-						// Past gate cutoff - silence
-						outputL = 0;
-						outputR = 0;
+						// Past gate - releaseMuted should be true by now (set by ZC check)
+						// If not, force it to avoid playing past intended cutoff
+						if (!releaseMuted) {
+							releaseMuted = true;
+						}
 					}
 					else if (pos < loopAttackLen) {
 						// Attack fade-in: linear ramp 0→1
@@ -966,6 +892,32 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 					if (benchThisSample) {
 						FX_BENCH_STOP(benchPan);
 					}
+				}
+
+				// === ANTI-CLICK: zero-crossing based muting ===
+				bool zc = ((prevOutputL != 0) && ((outputL ^ prevOutputL) < 0)) || bufferZeroCrossing;
+				prevOutputL = outputL;
+
+				// Attack: mute until ZC found, then unmute
+				if (waitingForZeroCross) {
+					if (zc) {
+						waitingForZeroCross = false;
+					}
+					else {
+						outputL = 0;
+						outputR = 0;
+					}
+				}
+				// Release: mute at ZC when in release zone (grain/gate end or bar end)
+				bool inReleaseZone =
+				    (playbackPos > loopReleaseThreshold)
+				    || (loopPlaybackLength > kBarEndZone && loopLinearBarPos > loopPlaybackLength - kBarEndZone);
+				if (!releaseMuted && inReleaseZone && zc) {
+					releaseMuted = true;
+				}
+				if (releaseMuted) {
+					outputL = 0;
+					outputR = 0;
 				}
 
 				// Apply delay send/return (slice-synced echo with feedback)
@@ -1019,20 +971,35 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				if (benchThisSample) {
 					FX_BENCH_START(benchAdvance);
 				}
-				// When subdivisions > 1, replay start of slice N times
-				// Uses precomputed loopSubSliceLength (division done once per slice)
-				// Last subdivision uses loopLastSubSliceLength to absorb truncation remainder
+				// When subdivisions > 1, replay start of slice N times (ratchet)
+				// Uses hoisted loopEffectiveSubLen (updated only on subdivision change, not every sample)
 				// Pitch-up: increment by 2 (skip samples = octave up via decimation)
 				playbackPos += loopPitchIncrement;
-				size_t effectiveSubLen =
-				    (scatterSubdivIndex == loopLastSubdivIndex) ? loopLastSubSliceLength : loopSubSliceLength;
-				if (playbackPos >= effectiveSubLen) {
+				if (playbackPos >= loopEffectiveSubLen) {
 					playbackPos = 0;
-					scatterSubdivIndex++;
-					if (scatterSubdivIndex >= scatterSubdivisions) {
-						scatterSubdivIndex = 0;
-						needsSliceSetup = true; // Mark for next buffer boundary
+					waitingForZeroCross = true;
+					releaseMuted = false;
+					// Pitch up: internal loop (first pass) vs real boundary (second pass)
+					bool isInternalLoop = (loopPitchIncrement == 2 && loopPitchUpLoopCount == 0);
+					if (isInternalLoop) {
+						loopPitchUpLoopCount = 1; // Keep prevOutputL to catch end→start discontinuity
 					}
+					else {
+						loopPitchUpLoopCount = 0;
+						prevOutputL = 0;
+						// Advance subdivision only on real boundary
+						if (++scatterSubdivIndex >= scatterSubdivisions) {
+							scatterSubdivIndex = 0;
+							needsSliceSetup = true;
+						}
+					}
+					// Update lengths for next subdivision
+					loopEffectiveSubLen =
+					    std::max(kMinGrainSize, scatterSubdivIndex == loopLastSubdivIndex ? loopLastSubSliceLength
+					                                                                      : loopSubSliceLength);
+					effectiveEnd =
+					    std::min(loopEffectiveSubLen, loopGatedLen > 0 ? size_t(loopGatedLen) : loopEffectiveSubLen);
+					loopReleaseThreshold = effectiveEnd * 3 / 4;
 				}
 
 				// Advance linear bar position for leaky writes (always 1:1 with real time)
@@ -1048,8 +1015,9 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				sampleIdx++;
 			}
 
-			// Write back linear bar position for next buffer
+			// Write back state for next buffer
 			scatterLinearBarPos = loopLinearBarPos;
+			scatterPitchUpLoopCount = loopPitchUpLoopCount;
 
 			FX_BENCH_STOP(benchTotal);
 		}
@@ -1164,6 +1132,7 @@ void Stutterer::endStutter(ParamManagerForTimeline* paramManager) {
 
 	if (isScatterMode) {
 		// Non-Classic modes: return to standby for continuous recording
+		// Zero-crossing flags set by triggerPlaybackNow on next trigger
 		playbackPos = 0;
 
 		// Keep the playing source as the new recorder (ready for re-trigger)
@@ -1432,6 +1401,11 @@ void Stutterer::triggerPlaybackNow(void* source) {
 
 	// Calculate where loop starts in the record buffer (which becomes play buffer)
 	// recordWritePos is where we WOULD write next, so loop ends there
+	// FIX: If we haven't recorded enough and buffer hasn't wrapped, clamp to what we have
+	// This prevents reading from uninitialized/stale buffer regions on quick re-triggers
+	if (!recordBufferFull && recordWritePos < playbackLength && recordWritePos > 0) {
+		playbackLength = recordWritePos; // Use only what we've actually recorded
+	}
 	if (recordWritePos >= playbackLength) {
 		playbackStartPos = recordWritePos - playbackLength;
 	}
@@ -1446,8 +1420,28 @@ void Stutterer::triggerPlaybackNow(void* source) {
 	waitingForRecordBeat = (stutterConfig.scatterMode != ScatterMode::Repeat);
 	recordStartTick = 0; // Will be computed in recordStandby
 
+	// Apply fade at buffer wrap boundary (position 0) to eliminate ring buffer discontinuity
+	// Position 0 and bufSize-1 were recorded ~4s apart - fade once here instead of per-sample
+	if (playBuffer != nullptr) {
+		for (size_t i = 0; i < kBufferWrapFadeLen; i++) {
+			// Fade in at start of buffer
+			q31_t fadeIn = static_cast<q31_t>((static_cast<int64_t>(i) << 31) / kBufferWrapFadeLen);
+			playBuffer[i].l = multiply_32x32_rshift32(playBuffer[i].l, fadeIn) << 1;
+			playBuffer[i].r = multiply_32x32_rshift32(playBuffer[i].r, fadeIn) << 1;
+			// Fade out at end of buffer
+			size_t endIdx = kLooperBufferSize - kBufferWrapFadeLen + i;
+			q31_t fadeOut =
+			    static_cast<q31_t>((static_cast<int64_t>(kBufferWrapFadeLen - 1 - i) << 31) / kBufferWrapFadeLen);
+			playBuffer[endIdx].l = multiply_32x32_rshift32(playBuffer[endIdx].l, fadeOut) << 1;
+			playBuffer[endIdx].r = multiply_32x32_rshift32(playBuffer[endIdx].r, fadeOut) << 1;
+		}
+	}
+
 	// Reset for playback and new recording
 	playbackPos = 0;
+	waitingForZeroCross = true; // Anti-click: mute until zero crossing
+	releaseMuted = false;
+	prevOutputL = 0; // Reset for fresh zero crossing detection
 	recordWritePos = 0;
 	scatterLinearBarPos = 0; // Reset linear position for leaky writes
 	currentSliceLength = playbackLength;
@@ -1465,10 +1459,13 @@ void Stutterer::triggerPlaybackNow(void* source) {
 	scatterPan = 0;
 	scatterSubdivisions = 1;
 	scatterSubdivIndex = 0;
+	scatterPitchUpLoopCount = 0;
 	scatterRepeatCounter = 0;
+	scatterRepeatLoopIndex = 1;                 // Start at 1 for non-zero hash seed
 	scatterSubSliceLength = playbackLength;     // No subdivisions initially
 	scatterLastSubSliceLength = playbackLength; // Same when no subdivisions
 	needsSliceSetup = true;                     // Force slice setup on first buffer
+	scatterParamThrottle = 10;                  // Bypass throttle for first setup
 	staticTriangles.valid = false;              // Force recompute on first slice
 	standbyIdleSamples = 0;                     // Reset timeout counter
 	lastTickBarIndex = -1;                      // Reset bar boundary tracking

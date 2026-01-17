@@ -293,6 +293,8 @@ private:
 	size_t scatterLastSubSliceLength{256}; ///< Last subdivision gets remainder to prevent timing drift
 	bool needsSliceSetup{true};            ///< Dirty flag: set when slice completes, cleared after setup
 	bool scatterPitchUp{false};            ///< Pitch up via sample decimation (2x = octave up)
+	int32_t scatterPitchUpLoopCount{0};    ///< Which loop of pitch-up grain (0=first, 1=second)
+	int32_t scatterParamThrottle{0};       ///< Buffers since last param update (throttle to 1 per 10 buffers)
 
 	/// Repeat grain state (inverse of ratchet - hold same grain for N slices)
 	int32_t scatterRepeatCounter{0};                        ///< Countdown for repeat mode (0 = compute new grain)
@@ -308,6 +310,17 @@ private:
 
 	/// Precomputed envelope parameters (Q31 fixed-point, computed once per slice, used per-sample)
 	deluge::dsp::scatter::GrainEnvPrecomputedQ31 scatterEnvPrecomputed{};
+
+	/// Anti-click: mute at zero crossings for attack/release
+	bool waitingForZeroCross{true};              ///< Attack: mute until zero crossing detected
+	bool releaseMuted{false};                    ///< Release: mute after zero crossing found
+	q31_t prevOutputL{0};                        ///< Previous output for zero crossing detection
+	static constexpr size_t kMinGrainSize = 256; ///< Minimum grain size in samples (~5.8ms)
+	static constexpr size_t kBarEndZone = 2205;  ///< ~50ms silent window before bar end (ZC mute)
+
+	/// Buffer wrap fade: destructive fade at ring buffer boundary (position 0)
+	/// Applied once when buffer is captured, not per-sample during playback
+	static constexpr size_t kBufferWrapFadeLen = 220; ///< ~5ms fade at buffer boundary
 
 	/// === STATIC vs DYNAMIC PARAM SEPARATION ===
 	/// STATIC params: Only depend on zone knob positions (zoneA, zoneB, macroConfig, macro)
