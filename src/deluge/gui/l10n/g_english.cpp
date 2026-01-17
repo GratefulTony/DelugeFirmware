@@ -907,7 +907,7 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_SCATTER_CLASSIC, "Classic"},
         {STRING_FOR_SCATTER_REPEAT, "Repeat"},
         {STRING_FOR_SCATTER_REVERSE, "Reverse"},
-        {STRING_FOR_SCATTER_CHOP, "Chop"},
+        {STRING_FOR_SCATTER_TIME, "Time"},
         {STRING_FOR_SCATTER_SHUFFLE, "Shuffle"},
         {STRING_FOR_SCATTER_LEAKY, "Leaky"},
         {STRING_FOR_SCATTER_PWRITE, "pWrite"},

@@ -30,7 +30,7 @@ enum class ScatterMode : uint8_t {
 	Classic = 0, ///< Original stutter behavior (passthrough)
 	Repeat,      ///< Beat repeat with count control
 	Reverse,     ///< Segment reversal
-	Chop,        ///< Beat slicing with gate
+	Time,        ///< Zone A=combine (grain length), Zone B=repeat (hold same slice)
 	Shuffle,     ///< Phi-based segment reordering
 	Leaky,       ///< Shuffle with probabilistic write-back to buffer (exclusive ownership)
 	// FUTURE: Tweaky - Leaky without ownership check, allows cross-track chaos
@@ -293,6 +293,7 @@ private:
 	size_t scatterLastSubSliceLength{256}; ///< Last subdivision gets remainder to prevent timing drift
 	bool needsSliceSetup{true};            ///< Dirty flag: set when slice completes, cleared after setup
 	bool scatterPitchUp{false};            ///< Pitch up via sample decimation (2x = octave up)
+	bool scatterConsecutive{false};        ///< Slices are sequential (skip ZC when env=0)
 	int32_t scatterPitchUpLoopCount{0};    ///< Which loop of pitch-up grain (0=first, 1=second)
 	int32_t scatterParamThrottle{0};       ///< Buffers since last param update (throttle to 1 per 10 buffers)
 
@@ -300,8 +301,9 @@ private:
 	int32_t scatterRepeatCounter{0};                        ///< Countdown for repeat mode (0 = compute new grain)
 	deluge::dsp::scatter::GrainParams scatterCachedGrain{}; ///< Cached grain during repeat (skip computeGrainParams)
 
-	/// Bar counter for multi-bar patterns (0-3, wraps at 4)
+	/// Bar counter for multi-bar patterns (0 to kBarIndexWrap-1)
 	/// Individual bits used as offsets with Zone B-derived weights to shift Zone A
+	static constexpr int32_t kBarIndexWrap = 16; ///< Bar counter wraps at 16 (supports phrases up to 16 bars)
 	int32_t scatterBarIndex{0};
 
 	/// Tick-based bar boundary detection for grid sync
@@ -311,12 +313,17 @@ private:
 	/// Precomputed envelope parameters (Q31 fixed-point, computed once per slice, used per-sample)
 	deluge::dsp::scatter::GrainEnvPrecomputedQ31 scatterEnvPrecomputed{};
 
-	/// Anti-click: mute at zero crossings for attack/release
-	bool waitingForZeroCross{true};              ///< Attack: mute until zero crossing detected
-	bool releaseMuted{false};                    ///< Release: mute after zero crossing found
-	q31_t prevOutputL{0};                        ///< Previous output for zero crossing detection
-	static constexpr size_t kMinGrainSize = 256; ///< Minimum grain size in samples (~5.8ms)
-	static constexpr size_t kBarEndZone = 2205;  ///< ~50ms silent window before bar end (ZC mute)
+	/// Anti-click: mute at zero crossings for attack/release (per-channel)
+	bool waitingForZeroCrossL{true};                 ///< Attack L: mute until zero crossing detected
+	bool waitingForZeroCrossR{true};                 ///< Attack R: mute until zero crossing detected
+	bool releaseMutedL{false};                       ///< Release L: mute after zero crossing found
+	bool releaseMutedR{false};                       ///< Release R: mute after zero crossing found
+	q31_t prevOutputL{0};                            ///< Previous L output for zero crossing detection
+	q31_t prevOutputR{0};                            ///< Previous R output for zero crossing detection
+	static constexpr size_t kMinGrainSize = 256;     ///< Minimum grain size in samples (~5.8ms)
+	static constexpr size_t kGrainReleaseZone = 662; ///< ~15ms release window before grain end (ZC search, 33Hz min)
+	static constexpr size_t kBarEndZone = 2205;      ///< ~50ms silent window before bar/phrase end (slop)
+	static constexpr int32_t kTimePhraseLength = 4;  ///< Time mode phrase length in bars (reset every N bars)
 
 	/// Buffer wrap fade: destructive fade at ring buffer boundary (position 0)
 	/// Applied once when buffer is captured, not per-sample during playback
