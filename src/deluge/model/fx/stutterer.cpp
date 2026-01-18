@@ -130,19 +130,20 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 			// Use full loop length for correct timing
 			playbackLength = std::min(loopLengthSamples, kLooperBufferSize);
 
-			// Allow trigger once we have at least one bar of audio recorded
-			// OR if buffer has wrapped (recordBufferFull). The pending trigger is beat-quantized,
-			// so we'll have more time to record before playback actually starts.
+			// Allow trigger if:
+			// 1. We have enough fresh samples in recordBuffer, OR
+			// 2. playBuffer exists with stale audio (retrigger - tape loop style)
+			// On trigger, we swap buffers. If recordBuffer wasn't fully overwritten,
+			// playBuffer will have a mix of new + old audio - this is fine (musical).
 			bool hasEnoughSamples = recordBufferFull || recordWritePos >= playbackLength;
-			if (!hasEnoughSamples && !waitingForRecordBeat) {
-				// Still recording but not enough yet - wait for more
+			bool hasStaleAudio = playBuffer != nullptr; // Old audio from previous playback
+			if (!hasEnoughSamples && !hasStaleAudio && !waitingForRecordBeat) {
+				// No fresh samples and no stale audio - wait for more
 				return Error::NONE;
 			}
-			// If waitingForRecordBeat is still true, we allow trigger anyway - by the time
-			// the beat-quantized trigger fires, we'll have recorded enough
 
 			// Repeat mode triggers immediately (no beat quantization)
-			if (stutterConfig.scatterMode == ScatterMode::Repeat && hasEnoughSamples) {
+			if (stutterConfig.scatterMode == ScatterMode::Repeat && (hasEnoughSamples || hasStaleAudio)) {
 				triggerPlaybackNow(source);
 				return Error::NONE;
 			}
@@ -1669,11 +1670,7 @@ void Stutterer::triggerPlaybackNow(void* source) {
 
 	// Calculate where loop starts in the record buffer (which becomes play buffer)
 	// recordWritePos is where we WOULD write next, so loop ends there
-	// FIX: If we haven't recorded enough and buffer hasn't wrapped, clamp to what we have
-	// This prevents reading from uninitialized/stale buffer regions on quick re-triggers
-	if (!recordBufferFull && recordWritePos < playbackLength && recordWritePos > 0) {
-		playbackLength = recordWritePos; // Use only what we've actually recorded
-	}
+	// If we haven't fully overwritten the buffer, we'll play a mix of new + stale audio (tape loop style)
 	if (recordWritePos >= playbackLength) {
 		playbackStartPos = recordWritePos - playbackLength;
 	}
@@ -1681,9 +1678,9 @@ void Stutterer::triggerPlaybackNow(void* source) {
 		playbackStartPos = kLooperBufferSize - (playbackLength - recordWritePos);
 	}
 
-	// Swap buffers
+	// Swap buffers - always swap, stale audio in new playBuffer is fine
 	std::swap(recordBuffer, playBuffer);
-	recordBufferFull = false; // New recordBuffer starts empty
+	recordBufferFull = false; // New recordBuffer hasn't wrapped yet
 	// Repeat mode records immediately; other modes wait for beat
 	waitingForRecordBeat = (stutterConfig.scatterMode != ScatterMode::Repeat);
 	recordStartTick = 0; // Will be computed in recordStandby
@@ -1705,8 +1702,9 @@ void Stutterer::triggerPlaybackNow(void* source) {
 		}
 	}
 
-	// Reset for playback and new recording
+	// Reset for playback
 	playbackPos = 0;
+	recordWritePos = 0;
 	waitingForZeroCrossL = waitingForZeroCrossR = true;
 	releaseMutedL = releaseMutedR = false;
 	prevOutputL = prevOutputR = 0; // Reset for fresh zero crossing detection

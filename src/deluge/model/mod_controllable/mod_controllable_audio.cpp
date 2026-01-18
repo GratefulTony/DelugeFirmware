@@ -1664,6 +1664,10 @@ void ModControllableAudio::beginStutter(ParamManagerForTimeline* paramManager) {
 		if (config.scatterMode == ScatterMode::Classic) {
 			enterUIMode(UI_MODE_STUTTERING);
 		}
+		// Show Armed notification for retrigger case (was in standby, now pending trigger)
+		else if (stutterer.hasPendingTrigger(this)) {
+			display->displayPopup("Armed");
+		}
 	}
 }
 
