@@ -67,14 +67,15 @@ class ScatterModeParam final : public IntegerContinuous {
 public:
 	using IntegerContinuous::IntegerContinuous;
 
-	// Scale names for Pitch mode
+	// Scale names for Pitch mode (scales + triads)
 	static constexpr const char* kScaleNames[] = {
-	    "Chromatic", "Major", "Minor", "MajPent", "MinPent", "Blues", "Dorian", "Mixolyd",
+	    "Chromatic", "Major",   "Minor",  "MajPent", "MinPent", "Blues",
+	    "Dorian",    "Mixolyd", "MajTri", "MinTri",  "Sus4",    "Dim",
 	};
 	static constexpr const char* kScaleShort[] = {
-	    "Chr", "Maj", "Min", "M5", "m5", "Blu", "Dor", "Mix",
+	    "Chr", "Maj", "Min", "Ma5", "Mi5", "Blu", "Dor", "Mix", "MAJ", "MIN", "Su4", "Dim",
 	};
-	static constexpr int32_t kNumScales = 8;
+	static constexpr int32_t kNumScales = 12;
 
 	/// Get current scatter mode
 	ScatterMode currentMode() const { return soundEditor.currentModControllable->stutterConfig.scatterMode; }

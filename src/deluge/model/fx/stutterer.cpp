@@ -32,9 +32,10 @@ namespace params = deluge::modulation::params;
 namespace hash = deluge::dsp::hash;
 
 // Pitch mode: semitone offsets with tonic bias (duplicates increase probability)
-// Each scale biases toward tonic (0) and important chord tones
+// Each scale/triad biases toward tonic (0) and important chord tones
 // Scales: Chromatic, Major, Minor, MajPent, MinPent, Blues, Dorian, Mixolydian
-static constexpr int8_t kScaleSemitones[8][8] = {
+// Triads: MajTri, MinTri, Sus4, Dim
+static constexpr int8_t kScaleSemitones[12][8] = {
     {0, 0, 0, 3, 5, 7, 7, 12},  // Chromatic: tonic-heavy with 5th and octave
     {0, 0, 4, 4, 7, 7, 0, 12},  // Major: tonic (3x), 3rd (2x), 5th (2x), octave
     {0, 0, 3, 3, 7, 7, 0, 12},  // Minor: tonic (3x), m3rd (2x), 5th (2x), octave
@@ -43,6 +44,10 @@ static constexpr int8_t kScaleSemitones[8][8] = {
     {0, 0, 3, 6, 7, 7, 0, 12},  // Blues: tonic (3x), m3rd, b5, 5th (2x), octave
     {0, 0, 3, 5, 7, 7, 9, 12},  // Dorian: tonic (2x), m3rd, 4th, 5th (2x), 6th, octave
     {0, 0, 4, 5, 7, 7, 10, 12}, // Mixolydian: tonic (2x), 3rd, 4th, 5th (2x), b7, octave
+    {0, 0, 0, 4, 4, 7, 7, 12},  // MajTri: tonic (3x), 3rd (2x), 5th (2x), octave
+    {0, 0, 0, 3, 3, 7, 7, 12},  // MinTri: tonic (3x), m3rd (2x), 5th (2x), octave
+    {0, 0, 0, 5, 5, 7, 7, 12},  // Sus4: tonic (3x), 4th (2x), 5th (2x), octave
+    {0, 0, 0, 3, 3, 6, 6, 12},  // Dim: tonic (3x), m3rd (2x), b5 (2x), octave
 };
 
 // Pitch ratios as 16.16 fixed-point for semitone offsets 0-17
@@ -670,7 +675,7 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 
 							// Get semitone offset from scale table
 							uint8_t scaleIdx = stutterConfig.pitchScale;
-							if (scaleIdx > 7)
+							if (scaleIdx > 11)
 								scaleIdx = 0;
 							int8_t semitones = kScaleSemitones[scaleIdx][degreeIdx];
 							if (semitones < 0)
