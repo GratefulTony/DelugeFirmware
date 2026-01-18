@@ -28,8 +28,8 @@ class ParamManager;
 /// Scatter mode determines how the stutter buffer is manipulated during playback
 enum class ScatterMode : uint8_t {
 	Classic = 0, ///< Original stutter behavior (passthrough)
+	Burst,       ///< Gated stutter: play grain (rate/2), silence until next trigger
 	Repeat,      ///< Beat repeat with count control
-	Reverse,     ///< Segment reversal
 	Time,        ///< Zone A=combine (grain length), Zone B=repeat (hold same slice)
 	Shuffle,     ///< Phi-based segment reordering
 	Leaky,       ///< Shuffle with probabilistic write-back to buffer (exclusive ownership)
@@ -37,8 +37,8 @@ enum class ScatterMode : uint8_t {
 	// Both tracks can write to recordBuffer simultaneously, creating unpredictable
 	// contamination where A's processed output bleeds into B's recording and vice versa.
 	// Implementation: remove `recordSource == playSource` check from leaky write logic.
-	Pitch,  ///< Pitch manipulation
-	Filter, ///< Filter sweep
+	Pattern, ///< Zone A selects slice pattern + phi offset: seq/weave/skip/mirror/pairs
+	Pitch,   ///< Pitch manipulation
 	NUM_MODES
 };
 
@@ -59,6 +59,10 @@ struct StutterConfig {
 	// Leaky mode: probability of writing processed output back to buffer
 	// 0 = never write (no leak), 1 = always write (max leak)
 	float leakyWriteProb{0.2f}; ///< pWrite: write probability [0,1], default 20%
+
+	// Pitch mode: scale selection
+	// 0=Chromatic, 1=Major, 2=Minor, 3=MajPent, 4=MinPent, 5=Blues, 6=Dorian, 7=Mixolyd
+	uint8_t pitchScale{0};
 };
 
 class Stutterer {
@@ -122,6 +126,8 @@ public:
 		stutterConfig.macroConfigPhaseOffset = sourceConfig.macroConfigPhaseOffset;
 		stutterConfig.gammaPhase = sourceConfig.gammaPhase;
 		stutterConfig.leakyWriteProb = sourceConfig.leakyWriteProb;
+		stutterConfig.pitchScale = sourceConfig.pitchScale;
+		stutterConfig.latch = sourceConfig.latch;
 		// Allow mode switching between all looper-based modes (all except Classic)
 		// Classic uses different buffer system, can't switch to/from it during playback
 		// Changes take effect on next slice boundary
@@ -129,6 +135,11 @@ public:
 			stutterConfig.scatterMode = sourceConfig.scatterMode;
 		}
 	}
+
+	/// Direct setters for live params (for menu access)
+	inline void setLivePitchScale(uint8_t scale) { stutterConfig.pitchScale = scale; }
+	inline void setLiveLeakyWriteProb(float prob) { stutterConfig.leakyWriteProb = prob; }
+	inline void setLiveLatch(bool latch) { stutterConfig.latch = latch; }
 
 	/// Arm stutter for quantized trigger (starts on next beat)
 	/// Returns Error::NONE if armed successfully
@@ -238,6 +249,14 @@ private:
 	size_t currentSliceLength = 0;  ///< Length of current slice (in samples)
 	size_t scatterLinearBarPos = 0; ///< Linear position in bar for leaky writes (grid-aligned)
 
+	/// Gated stutter (Reverse mode): fixed grain length captured at trigger time
+	/// Rate knob changes trigger spacing, not grain size (no pitch change)
+	size_t gatedGrainLength = 0;   ///< Fixed grain size in samples (set at trigger)
+	size_t gatedGrainReadPos = 0;  ///< Position within grain being read
+	size_t gatedCyclePos = 0;      ///< Position within current gated cycle
+	uint32_t gatedInitialRate = 0; ///< Rate at trigger time (for cycle length scaling)
+	size_t gatedInitialCycle = 0;  ///< Initial cycle length (buffer.size() at trigger)
+
 	/// Convert beat position to sample offset within captured bar
 	/// Supports fractional beats (e.g., 2.5 = halfway through beat 3)
 	/// @param beat Beat number (0-based, can be fractional)
@@ -295,6 +314,8 @@ private:
 	bool scatterPitchUp{false};            ///< Pitch up via sample decimation (2x = octave up)
 	bool scatterConsecutive{false};        ///< Slices are sequential (skip ZC when env=0)
 	int32_t scatterPitchUpLoopCount{0};    ///< Which loop of pitch-up grain (0=first, 1=second)
+	uint32_t scatterPitchRatioFP{65536};   ///< Pitch ratio (16.16 fixed-point), 65536 = 1.0 (unison)
+	uint32_t scatterPitchPosFP{0};         ///< Fixed-point position accumulator for pitch shifting
 	int32_t scatterParamThrottle{0};       ///< Buffers since last param update (throttle to 1 per 10 buffers)
 
 	/// Repeat grain state (inverse of ratchet - hold same grain for N slices)

@@ -50,24 +50,30 @@ class ScatterZoneA final : public ZoneBasedDualParam<params::GLOBAL_SCATTER_ZONE
 public:
 	using ZoneBasedDualParam::ZoneBasedDualParam;
 
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		// Not relevant for Classic or Burst (gated stutter) modes
+		auto mode = soundEditor.currentModControllable->stutterConfig.scatterMode;
+		return mode != ScatterMode::Classic && mode != ScatterMode::Burst;
+	}
+
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
 		case 0:
 			return "Drift";
 		case 1:
-			return "Swap";
+			return "Echo";
 		case 2:
-			return "Retro";
+			return "Fold";
 		case 3:
 			return "Leap";
 		case 4:
-			return "Density";
+			return "Weave";
 		case 5:
-			return "Meta1";
+			return "Spiral";
 		case 6:
-			return "Meta2";
+			return "Bloom";
 		case 7:
-			return "Meta3";
+			return "Void";
 		default:
 			return "?";
 		}
@@ -78,15 +84,21 @@ public:
 		case 0:
 			return "DR";
 		case 1:
-			return "SW";
+			return "EC";
 		case 2:
-			return "RE";
+			return "FO";
 		case 3:
 			return "LP";
 		case 4:
-			return "DN";
+			return "WV";
+		case 5:
+			return "SP";
+		case 6:
+			return "BL";
+		case 7:
+			return "VD";
 		default:
-			return "MT";
+			return "??";
 		}
 	}
 
@@ -174,24 +186,30 @@ class ScatterZoneB final : public ZoneBasedDualParam<params::GLOBAL_SCATTER_ZONE
 public:
 	using ZoneBasedDualParam::ZoneBasedDualParam;
 
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		// Not relevant for Classic or Burst (gated stutter) modes
+		auto mode = soundEditor.currentModControllable->stutterConfig.scatterMode;
+		return mode != ScatterMode::Classic && mode != ScatterMode::Burst;
+	}
+
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
 		case 0:
-			return "Flip";
+			return "Rose";
 		case 1:
-			return "Filter";
+			return "Blue";
 		case 2:
-			return "Echo";
+			return "Indigo";
 		case 3:
-			return "Shape";
+			return "Green";
 		case 4:
-			return "Meta1";
+			return "Lotus";
 		case 5:
-			return "Meta2";
+			return "White";
 		case 6:
-			return "Meta3";
+			return "Grey";
 		case 7:
-			return "Meta4";
+			return "Black";
 		default:
 			return "?";
 		}
@@ -200,15 +218,23 @@ public:
 	[[nodiscard]] const char* getShortZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
 		case 0:
-			return "FL";
+			return "RS";
 		case 1:
-			return "FI";
+			return "BL";
 		case 2:
-			return "EC";
+			return "IN";
 		case 3:
-			return "SH";
+			return "GR";
+		case 4:
+			return "LO";
+		case 5:
+			return "WH";
+		case 6:
+			return "GY";
+		case 7:
+			return "BK";
 		default:
-			return "MT";
+			return "??";
 		}
 	}
 
@@ -290,6 +316,12 @@ private:
 class ScatterMacroConfig final : public ZoneBasedDualParam<params::GLOBAL_SCATTER_MACRO_CONFIG> {
 public:
 	using ZoneBasedDualParam::ZoneBasedDualParam;
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		// Not relevant for Classic or Burst (gated stutter) modes
+		auto mode = soundEditor.currentModControllable->stutterConfig.scatterMode;
+		return mode != ScatterMode::Classic && mode != ScatterMode::Burst;
+	}
 
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {

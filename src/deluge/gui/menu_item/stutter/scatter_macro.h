@@ -28,6 +28,7 @@
 #include "gui/menu_item/source_selection/regular.h"
 #include "gui/menu_item/value_scaling.h"
 #include "gui/ui/sound_editor.h"
+#include "model/fx/stutterer.h"
 #include "model/model_stack.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_set.h"
@@ -48,6 +49,12 @@ public:
 	using IntegerContinuous::IntegerContinuous;
 	/// Compatibility constructor matching patched_param::Integer signature (param ID is always GLOBAL_SCATTER_MACRO)
 	ScatterMacro(l10n::String name, l10n::String title, int32_t /*paramId*/) : IntegerContinuous(name, title) {}
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		// Not relevant for Classic or Burst (gated stutter) modes
+		auto mode = soundEditor.currentModControllable->stutterConfig.scatterMode;
+		return mode != ScatterMode::Classic && mode != ScatterMode::Burst;
+	}
 
 	// === Value read/write with dual context support ===
 

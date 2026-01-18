@@ -19,7 +19,7 @@
  * in all copies or substantial portions of this file.
  */
 #pragma once
-#include "gui/menu_item/selection.h"
+#include "gui/menu_item/toggle.h"
 #include "gui/ui/sound_editor.h"
 #include "model/drum/drum.h"
 #include "model/fx/stutterer.h"
@@ -29,48 +29,46 @@
 
 namespace deluge::gui::menu_item::stutter {
 
-class ScatterModeMenu final : public Selection {
+/// Toggle for scatter latch mode (momentary vs latched)
+class ScatterLatch final : public Toggle {
 public:
-	using Selection::Selection;
+	using Toggle::Toggle;
 
-	deluge::vector<std::string_view> getOptions(OptType optType = OptType::FULL) override {
-		using namespace deluge::l10n;
-
-		return {
-		    l10n::getView(String::STRING_FOR_SCATTER_CLASSIC), l10n::getView(String::STRING_FOR_SCATTER_BURST),
-		    l10n::getView(String::STRING_FOR_SCATTER_REPEAT),  l10n::getView(String::STRING_FOR_SCATTER_TIME),
-		    l10n::getView(String::STRING_FOR_SCATTER_SHUFFLE), l10n::getView(String::STRING_FOR_SCATTER_LEAKY),
-		    l10n::getView(String::STRING_FOR_SCATTER_PATTERN), l10n::getView(String::STRING_FOR_SCATTER_PITCH),
-		};
-	}
-
-	void readCurrentValue() override {
-		// Scatter mode is always per-sound (independent of useSongStutter)
-		setValue(static_cast<int32_t>(soundEditor.currentModControllable->stutterConfig.scatterMode));
-	}
-
-	bool usesAffectEntire() override { return true; }
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->stutterConfig.latch); }
 
 	void writeCurrentValue() override {
-		auto mode = static_cast<ScatterMode>(Selection::getValue());
+		bool latch = this->getValue();
 
-		// If affect-entire button held, apply to whole kit
 		if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
 			Kit* kit = getCurrentKit();
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->stutterConfig.scatterMode = mode;
+					soundDrum->stutterConfig.latch = latch;
+					// Switching to momentary while scattering should end scatter
+					if (!latch && stutterer.isStuttering(soundDrum)) {
+						soundDrum->endStutter(nullptr);
+					}
 				}
 			}
 		}
 		else {
-			soundEditor.currentModControllable->stutterConfig.scatterMode = mode;
+			soundEditor.currentModControllable->stutterConfig.latch = latch;
+			// Switching to momentary while scattering should end scatter
+			if (!latch && stutterer.isStuttering(soundEditor.currentModControllable)) {
+				soundEditor.currentModControllable->endStutter(nullptr);
+			}
 		}
+		// Also update global stutterer for live changes
+		stutterer.setLiveLatch(latch);
 	}
 
-	void getNotificationValue(StringBuf& valueBuf) override {
-		valueBuf.append(getOptions(OptType::SHORT)[Selection::getValue()]);
+	bool usesAffectEntire() override { return true; }
+
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		// Only relevant for scatter modes (not Classic or Burst)
+		auto mode = soundEditor.currentModControllable->stutterConfig.scatterMode;
+		return mode != ScatterMode::Classic && mode != ScatterMode::Burst;
 	}
 };
 

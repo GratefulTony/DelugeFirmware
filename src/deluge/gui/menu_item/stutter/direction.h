@@ -91,8 +91,14 @@ public:
 
 	bool usesAffectEntire() override { return true; }
 
+	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
+		// Only relevant for Classic and Burst modes
+		auto mode = soundEditor.currentModControllable->stutterConfig.scatterMode;
+		return mode == ScatterMode::Classic || mode == ScatterMode::Burst;
+	}
+
 	void writeCurrentValue() override {
-		// Scatter mode: write latch state
+		// Scatter mode: write latch state (shouldn't happen with isRelevant, but keep for safety)
 		if (isScatterMode()) {
 			bool latch = (Selection::getValue() == LATCH);
 

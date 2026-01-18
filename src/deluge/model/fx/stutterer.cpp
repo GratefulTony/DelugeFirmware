@@ -31,6 +31,43 @@
 namespace params = deluge::modulation::params;
 namespace hash = deluge::dsp::hash;
 
+// Pitch mode: semitone offsets with tonic bias (duplicates increase probability)
+// Each scale biases toward tonic (0) and important chord tones
+// Scales: Chromatic, Major, Minor, MajPent, MinPent, Blues, Dorian, Mixolydian
+static constexpr int8_t kScaleSemitones[8][8] = {
+    {0, 0, 0, 3, 5, 7, 7, 12},  // Chromatic: tonic-heavy with 5th and octave
+    {0, 0, 4, 4, 7, 7, 0, 12},  // Major: tonic (3x), 3rd (2x), 5th (2x), octave
+    {0, 0, 3, 3, 7, 7, 0, 12},  // Minor: tonic (3x), m3rd (2x), 5th (2x), octave
+    {0, 0, 4, 7, 7, 0, 12, 12}, // MajPent: tonic (3x), 3rd, 5th (2x), octave (2x)
+    {0, 0, 3, 7, 7, 0, 10, 12}, // MinPent: tonic (3x), m3rd, 5th (2x), b7, octave
+    {0, 0, 3, 6, 7, 7, 0, 12},  // Blues: tonic (3x), m3rd, b5, 5th (2x), octave
+    {0, 0, 3, 5, 7, 7, 9, 12},  // Dorian: tonic (2x), m3rd, 4th, 5th (2x), 6th, octave
+    {0, 0, 4, 5, 7, 7, 10, 12}, // Mixolydian: tonic (2x), 3rd, 4th, 5th (2x), b7, octave
+};
+
+// Pitch ratios as 16.16 fixed-point for semitone offsets 0-17
+// ratio = 2^(semitones/12) * 65536
+static constexpr uint32_t kPitchRatioFP[18] = {
+    65536,  // 0: 1.0000
+    69433,  // 1: 1.0595
+    73562,  // 2: 1.1225
+    77936,  // 3: 1.1892
+    82570,  // 4: 1.2599
+    87480,  // 5: 1.3348
+    92682,  // 6: 1.4142
+    98193,  // 7: 1.4983
+    104032, // 8: 1.5874
+    110218, // 9: 1.6818
+    116772, // 10: 1.7818
+    123715, // 11: 1.8877
+    131072, // 12: 2.0000 (octave)
+    138866, // 13: 2.1189
+    147123, // 14: 2.2449
+    155872, // 15: 2.3784
+    165140, // 16: 2.5198
+    174959, // 17: 2.6697
+};
+
 Stutterer stutterer{};
 
 void Stutterer::initParams(ParamManager* paramManager) {
@@ -71,8 +108,10 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 	currentReverse = stutterConfig.reversed;
 	halfBarMode = halfBar;
 
-	// Non-Classic modes: double buffer system (swap instead of copy)
-	bool useLooper = (stutterConfig.scatterMode != ScatterMode::Classic);
+	// Non-Classic/Burst modes: double buffer system (swap instead of copy)
+	// Classic and Burst use the simple DelayBuffer, others use the looper system
+	bool useLooper =
+	    (stutterConfig.scatterMode != ScatterMode::Classic && stutterConfig.scatterMode != ScatterMode::Burst);
 	if (useLooper) {
 		// Check if this is a takeover trigger (source was recording, now wants to play)
 		bool isTakeoverTrigger = (recordSource == source && playSource != source && status == Status::PLAYING);
@@ -203,7 +242,7 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 
 /// Mode name tags for benchmarking
 static constexpr const char* kScatterModeNames[] = {
-    "classic", "repeat", "reverse", "time", "shuffle", "leaky", "pitch", "filter",
+    "classic", "repeat", "burst", "time", "shuffle", "leaky", "pitch", "pattern",
 };
 
 // === SCATTER PERFORMANCE BENCHMARKS (128-sample buffer, 44.1kHz) ===
@@ -222,10 +261,11 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
                                uint32_t timePerTickInverse, int64_t currentTick, uint64_t timePerTickBig,
                                uint32_t barLengthInTicks, const q31_t* modulatedValues) {
 
-	// Non-Classic modes: double buffer - play from playBuffer, record to recordBuffer
+	// Non-Classic/Burst modes: double buffer - play from playBuffer, record to recordBuffer
 	// Core loop: play current slice fully, then get next slice at boundary
 	constexpr bool kEnableDelay = true;
-	bool useLooper = (stutterConfig.scatterMode != ScatterMode::Classic);
+	bool useLooper =
+	    (stutterConfig.scatterMode != ScatterMode::Classic && stutterConfig.scatterMode != ScatterMode::Burst);
 	if (useLooper) {
 		if (status == Status::PLAYING && playBuffer != nullptr && playbackLength > 0) {
 			// Benchmark: granular scatter processing with dynamic tags
@@ -342,12 +382,16 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				repeatBarBoundaryUpdate = false; // Clear flag after use
 				FX_BENCH_START(benchSlice);
 				switch (stutterConfig.scatterMode) {
-				case ScatterMode::Repeat: // Falls through to Shuffle with isRepeat flag
-				case ScatterMode::Time:   // Time uses Shuffle but overrides stretch/sparse from zones
-				case ScatterMode::Leaky:  // Leaky uses Shuffle processing but writes output back to buffer
+				case ScatterMode::Repeat:  // Falls through to Shuffle with isRepeat flag
+				case ScatterMode::Time:    // Time uses Shuffle but overrides stretch/sparse from zones
+				case ScatterMode::Leaky:   // Leaky uses Shuffle processing but writes output back to buffer
+				case ScatterMode::Pattern: // Pattern mode: Zone A selects slice reordering pattern
+				case ScatterMode::Pitch:   // Pitch mode: Zone A selects scale degree for transposition
 				case ScatterMode::Shuffle: {
 					bool isRepeat = (stutterConfig.scatterMode == ScatterMode::Repeat);
 					bool isTime = (stutterConfig.scatterMode == ScatterMode::Time);
+					bool isPattern = (stutterConfig.scatterMode == ScatterMode::Pattern);
+					bool isPitch = (stutterConfig.scatterMode == ScatterMode::Pitch);
 					FX_BENCH_START(benchParamRead);
 					// Rate knob controls number of slices - match UI note division labels
 					// UI optionValues: {2, 6, 13, 19, 25, 31, 38, 47} for 0-50 range
@@ -400,6 +444,10 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						}
 						else {
 							scatterNumSlices = 32; // 32nds (max)
+						}
+						// Pitch mode: halve slices for longer grains (pitch needs time to be heard)
+						if (isPitch && scatterNumSlices > 1) {
+							scatterNumSlices /= 2;
 						}
 					}
 
@@ -557,6 +605,83 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 						// Time mode: stretch by dividing slice index by repeatSlices (1111,2222,3333)
 						int32_t baseSliceIdx = isTime && grain.repeatSlices > 1 ? scatterSliceIndex / grain.repeatSlices
 						                                                        : scatterSliceIndex;
+						// Pattern/Pitch mode: Zone A selects pattern (8 zones), phi offset still applies on top
+						// 0:Seq, 1:Weave, 2:Skip, 3:Mirror, 4:Pairs, 5:Reverse, 6:Thirds, 7:Spiral
+						if ((isPattern || isPitch) && scatterNumSlices > 1) {
+							float zoneANorm = static_cast<float>(zoneAParam) * deluge::dsp::scatter::kQ31ToFloat;
+							int32_t patternIdx = static_cast<int32_t>(zoneANorm * 8.0f); // 0-7
+							if (patternIdx < 0)
+								patternIdx = 0;
+							if (patternIdx > 7)
+								patternIdx = 7;
+							int32_t half = scatterNumSlices / 2;
+							int32_t n = scatterNumSlices;
+							switch (patternIdx) {
+							case 1: // Weave: 0,N-1,1,N-2,2,N-3...
+								baseSliceIdx = (baseSliceIdx & 1) ? (n - 1 - baseSliceIdx / 2) : (baseSliceIdx / 2);
+								break;
+							case 2: // Skip: evens then odds (0,2,4,6,1,3,5,7)
+								baseSliceIdx =
+								    (baseSliceIdx < half) ? (baseSliceIdx * 2) : ((baseSliceIdx - half) * 2 + 1);
+								break;
+							case 3: // Mirror: forward then backward (0,1,2,3,3,2,1,0)
+								baseSliceIdx = (baseSliceIdx >= half) ? (n - 1 - baseSliceIdx) : baseSliceIdx;
+								break;
+							case 4: // Pairs: swap adjacent (1,0,3,2,5,4,7,6)
+								baseSliceIdx ^= 1;
+								break;
+							case 5: // Reverse: N-1,N-2,N-3...0
+								baseSliceIdx = n - 1 - baseSliceIdx;
+								break;
+							case 6: // Thirds: interleave by 3 (0,3,6,1,4,7,2,5,8)
+							{
+								int32_t third = (n + 2) / 3;
+								baseSliceIdx = (baseSliceIdx % third) * 3 + (baseSliceIdx / third);
+								if (baseSliceIdx >= n)
+									baseSliceIdx = n - 1;
+							} break;
+							case 7: // Spiral: middle outward (3,4,2,5,1,6,0,7)
+							{
+								int32_t mid = half;
+								int32_t offset = (baseSliceIdx + 1) / 2;
+								int32_t spiralIdx = (baseSliceIdx & 1) ? (mid + offset) : (mid - offset);
+								if (spiralIdx < 0)
+									spiralIdx = 0;
+								if (spiralIdx >= n)
+									spiralIdx = n - 1;
+								baseSliceIdx = spiralIdx;
+							} break;
+							default: // Sequential: no remapping
+								break;
+							}
+						}
+						// Pitch mode: Zone A provides deterministic random offset for degree selection
+						if (isPitch) {
+							// Hash slice index with Zone A to get deterministic pseudo-random degree
+							uint32_t zoneASeed = static_cast<uint32_t>(zoneAParam >> 16); // Use upper bits
+							uint32_t hashInput = (zoneASeed ^ (scatterSliceIndex * 2654435761u));
+							uint32_t hashVal = hash::mix(hashInput);
+							int32_t degreeIdx = static_cast<int32_t>(hashVal & 0x7); // 0-7
+							if (degreeIdx < 0)
+								degreeIdx = 0;
+							if (degreeIdx > 7)
+								degreeIdx = 7;
+
+							// Get semitone offset from scale table
+							uint8_t scaleIdx = stutterConfig.pitchScale;
+							if (scaleIdx > 7)
+								scaleIdx = 0;
+							int8_t semitones = kScaleSemitones[scaleIdx][degreeIdx];
+							if (semitones < 0)
+								semitones = 0;
+							if (semitones > 17)
+								semitones = 17;
+							scatterPitchRatioFP = kPitchRatioFP[semitones];
+							scatterPitchPosFP = 0; // Reset position accumulator for new slice
+						}
+						else {
+							scatterPitchRatioFP = 65536; // 1.0 = no pitch shift
+						}
 						int32_t targetSlice = baseSliceIdx;
 						int32_t offsetSlices = (grain.sliceOffset * scatterNumSlices) >> 4;
 						targetSlice = (targetSlice + offsetSlices) % scatterNumSlices;
@@ -763,9 +888,12 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			// Repeat shares processing with Shuffle (unified code path)
 			bool isShuffle =
 			    (stutterConfig.scatterMode == ScatterMode::Shuffle || stutterConfig.scatterMode == ScatterMode::Leaky
-			     || stutterConfig.scatterMode == ScatterMode::Repeat || stutterConfig.scatterMode == ScatterMode::Time);
+			     || stutterConfig.scatterMode == ScatterMode::Repeat || stutterConfig.scatterMode == ScatterMode::Time
+			     || stutterConfig.scatterMode == ScatterMode::Pattern
+			     || stutterConfig.scatterMode == ScatterMode::Pitch);
 			bool isLeaky = (stutterConfig.scatterMode == ScatterMode::Leaky);
 			bool isTime = (stutterConfig.scatterMode == ScatterMode::Time);
+			bool isPitch = (stutterConfig.scatterMode == ScatterMode::Pitch);
 			// Leaky grain decision: made per-slice (not per-sample) to avoid discontinuities
 			// Hash of slice index determines if this grain writes wet or dry
 			// Duck entire grain if read/write regions overlap (prevents feedback artifacts)
@@ -817,6 +945,9 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			bool loopPanRight = scatterPanRight;
 			// Time mode: only bar-end silence before phrase reset, not every bar
 			bool loopBarEndSilenceEnabled = !isTime || ((scatterBarIndex % kTimePhraseLength) == kTimePhraseLength - 1);
+			// Pitch mode: fixed-point pitch ratio (65536 = 1.0)
+			uint32_t loopPitchRatioFP = isPitch ? scatterPitchRatioFP : 65536;
+			uint32_t loopPitchPosFP = scatterPitchPosFP;
 
 			for (deluge::dsp::StereoSample<q31_t>& sample : audio) {
 				// NOTE: Recording for re-trigger is handled by recordStandby() which is called
@@ -833,7 +964,9 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 
 				size_t playReadPos;
 				// Clamp playbackPos to valid range (safety for throttle/param change races)
-				size_t safePlaybackPos = (playbackPos < loopCurrentSliceLength) ? playbackPos : 0;
+				// Pitch mode: use fixed-point position >> 16 to get integer position
+				size_t effectivePos = (loopPitchRatioFP != 65536) ? (loopPitchPosFP >> 16) : playbackPos;
+				size_t safePlaybackPos = (effectivePos < loopCurrentSliceLength) ? effectivePos : 0;
 				if (loopReversed) {
 					// Reverse: read from end of slice going backward
 					playReadPos =
@@ -1035,25 +1168,42 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 				}
 				// When subdivisions > 1, replay start of slice N times (ratchet)
 				// Uses hoisted loopEffectiveSubLen (updated only on subdivision change, not every sample)
-				// Pitch-up: increment by 2 (skip samples = octave up via decimation)
-				playbackPos += loopPitchIncrement;
-				if (playbackPos >= loopEffectiveSubLen) {
-					playbackPos = 0;
+				// Pitch mode: use fixed-point accumulation, octave-up: increment by 2
+				bool sliceBoundary = false;
+				if (loopPitchRatioFP != 65536) {
+					// Pitch mode: fixed-point position tracking
+					loopPitchPosFP += loopPitchRatioFP;
+					size_t newPos = loopPitchPosFP >> 16;
+					if (newPos >= loopEffectiveSubLen) {
+						loopPitchPosFP = 0;
+						sliceBoundary = true;
+					}
+					playbackPos = newPos; // Keep integer pos in sync for other code
+				}
+				else {
+					// Standard: integer increment (1 or 2 for octave-up)
+					playbackPos += loopPitchIncrement;
+					if (playbackPos >= loopEffectiveSubLen) {
+						playbackPos = 0;
+						// Pitch up: internal loop (first pass) vs real boundary (second pass)
+						bool isInternalLoop = (loopPitchIncrement == 2 && loopPitchUpLoopCount == 0);
+						if (isInternalLoop) {
+							loopPitchUpLoopCount = 1; // Keep prevOutput to catch end→start discontinuity
+						}
+						else {
+							sliceBoundary = true;
+						}
+					}
+				}
+				if (sliceBoundary) {
 					waitingForZeroCrossL = waitingForZeroCrossR = true;
 					releaseMutedL = releaseMutedR = false;
-					// Pitch up: internal loop (first pass) vs real boundary (second pass)
-					bool isInternalLoop = (loopPitchIncrement == 2 && loopPitchUpLoopCount == 0);
-					if (isInternalLoop) {
-						loopPitchUpLoopCount = 1; // Keep prevOutput to catch end→start discontinuity
-					}
-					else {
-						loopPitchUpLoopCount = 0;
-						prevOutputL = prevOutputR = 0;
-						// Advance subdivision only on real boundary
-						if (++scatterSubdivIndex >= scatterSubdivisions) {
-							scatterSubdivIndex = 0;
-							needsSliceSetup = true;
-						}
+					loopPitchUpLoopCount = 0;
+					prevOutputL = prevOutputR = 0;
+					// Advance subdivision only on real boundary
+					if (++scatterSubdivIndex >= scatterSubdivisions) {
+						scatterSubdivIndex = 0;
+						needsSliceSetup = true;
 					}
 					// Update lengths for next subdivision
 					loopEffectiveSubLen =
@@ -1080,6 +1230,7 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			// Write back state for next buffer
 			scatterLinearBarPos = loopLinearBarPos;
 			scatterPitchUpLoopCount = loopPitchUpLoopCount;
+			scatterPitchPosFP = loopPitchPosFP;
 
 			FX_BENCH_STOP(benchTotal);
 		}
@@ -1121,79 +1272,134 @@ void Stutterer::processStutter(deluge::dsp::StereoBuffer<q31_t> audio, ParamMana
 			else {
 				buffer.setCurrent(buffer.begin());
 			}
+			// Gated stutter: capture grain length and rate at trigger time
+			if (stutterConfig.scatterMode == ScatterMode::Burst) {
+				gatedGrainLength = buffer.size() / 2;
+				gatedInitialCycle = buffer.size();
+				gatedInitialRate = rate;
+				gatedGrainReadPos = 0;
+				gatedCyclePos = 0;
+			}
 			status = Status::PLAYING;
 		}
 	}
 	else { // PLAYING
-		for (deluge::dsp::StereoSample<q31_t>& sample : audio) {
-			int32_t strength1;
-			int32_t strength2;
+		bool isGatedStutter = (stutterConfig.scatterMode == ScatterMode::Burst);
 
-			if (buffer.isNative()) {
-				if (currentReverse) {
-					buffer.moveBack();
-				}
-				else {
-					buffer.moveOn();
-				}
-				sample.l = buffer.current().l;
-				sample.r = buffer.current().r;
+		if (isGatedStutter && gatedInitialRate > 0) {
+			// Gated stutter: play fixed grain at 1:1 (no pitch change), rate controls spacing
+			// currentCycleLength = initialCycle * (initialRate / currentRate)
+			// Higher rate = shorter cycle = more frequent triggers
+			size_t currentCycleLength =
+			    static_cast<size_t>((uint64_t)gatedInitialCycle * gatedInitialRate / (uint32_t)rate);
+			if (currentCycleLength < 64) {
+				currentCycleLength = 64; // Minimum to prevent audio-rate chaos
 			}
-			else {
-				if (currentReverse) {
-					strength2 = buffer.retreat([&] { buffer.moveBack(); });
-				}
-				else {
-					strength2 = buffer.advance([&] { buffer.moveOn(); });
-				}
-
-				strength1 = 65536 - strength2;
-
-				if (currentReverse) {
-					deluge::dsp::StereoSample<q31_t>* prevPos = &buffer.current() - 1;
-					if (prevPos < buffer.begin()) {
-						prevPos = buffer.end() - 1;
-					}
-					deluge::dsp::StereoSample<q31_t>& fromDelay1 = buffer.current();
-					deluge::dsp::StereoSample<q31_t>& fromDelay2 = *prevPos;
-					sample.l = (multiply_32x32_rshift32(fromDelay1.l, strength1 << 14)
-					            + multiply_32x32_rshift32(fromDelay2.l, strength2 << 14))
-					           << 2;
-					sample.r = (multiply_32x32_rshift32(fromDelay1.r, strength1 << 14)
-					            + multiply_32x32_rshift32(fromDelay2.r, strength2 << 14))
-					           << 2;
-				}
-				else {
-					deluge::dsp::StereoSample<q31_t>* nextPos = &buffer.current() + 1;
-					if (nextPos == buffer.end()) {
-						nextPos = buffer.begin();
-					}
-					deluge::dsp::StereoSample<q31_t>& fromDelay1 = buffer.current();
-					deluge::dsp::StereoSample<q31_t>& fromDelay2 = *nextPos;
-					sample.l = (multiply_32x32_rshift32(fromDelay1.l, strength1 << 14)
-					            + multiply_32x32_rshift32(fromDelay2.l, strength2 << 14))
-					           << 2;
-					sample.r = (multiply_32x32_rshift32(fromDelay1.r, strength1 << 14)
-					            + multiply_32x32_rshift32(fromDelay2.r, strength2 << 14))
-					           << 2;
-				}
+			// Clamp grain to fit in cycle (with some headroom for silence)
+			size_t effectiveGrainLength = gatedGrainLength;
+			if (effectiveGrainLength > currentCycleLength * 9 / 10) {
+				effectiveGrainLength = currentCycleLength * 9 / 10; // Max 90% duty cycle
+			}
+			if (effectiveGrainLength < 32) {
+				effectiveGrainLength = 32;
 			}
 
-			// Ping-pong
-			if (stutterConfig.pingPong
-			    && ((currentReverse && &buffer.current() == buffer.begin())
-			        || (!currentReverse && &buffer.current() == buffer.end() - 1))) {
-				currentReverse = !currentReverse;
+			for (deluge::dsp::StereoSample<q31_t>& sample : audio) {
+				if (gatedCyclePos < effectiveGrainLength) {
+					// In grain: read at native speed (no pitch change)
+					sample.l = buffer.begin()[gatedGrainReadPos].l;
+					sample.r = buffer.begin()[gatedGrainReadPos].r;
+					gatedGrainReadPos++;
+					if (gatedGrainReadPos >= effectiveGrainLength) {
+						gatedGrainReadPos = 0; // Wrap grain read for next cycle
+					}
+				}
+				else {
+					// After grain: silence until cycle completes
+					sample.l = 0;
+					sample.r = 0;
+				}
+
+				gatedCyclePos++;
+				if (gatedCyclePos >= currentCycleLength) {
+					gatedCyclePos = 0;
+					gatedGrainReadPos = 0; // Reset grain read for next trigger
+				}
+			}
+		}
+		else {
+			// Classic mode: normal interpolated playback
+			for (deluge::dsp::StereoSample<q31_t>& sample : audio) {
+				int32_t strength1;
+				int32_t strength2;
+
+				if (buffer.isNative()) {
+					if (currentReverse) {
+						buffer.moveBack();
+					}
+					else {
+						buffer.moveOn();
+					}
+					sample.l = buffer.current().l;
+					sample.r = buffer.current().r;
+				}
+				else {
+					if (currentReverse) {
+						strength2 = buffer.retreat([&] { buffer.moveBack(); });
+					}
+					else {
+						strength2 = buffer.advance([&] { buffer.moveOn(); });
+					}
+
+					strength1 = 65536 - strength2;
+
+					if (currentReverse) {
+						deluge::dsp::StereoSample<q31_t>* prevPos = &buffer.current() - 1;
+						if (prevPos < buffer.begin()) {
+							prevPos = buffer.end() - 1;
+						}
+						deluge::dsp::StereoSample<q31_t>& fromDelay1 = buffer.current();
+						deluge::dsp::StereoSample<q31_t>& fromDelay2 = *prevPos;
+						sample.l = (multiply_32x32_rshift32(fromDelay1.l, strength1 << 14)
+						            + multiply_32x32_rshift32(fromDelay2.l, strength2 << 14))
+						           << 2;
+						sample.r = (multiply_32x32_rshift32(fromDelay1.r, strength1 << 14)
+						            + multiply_32x32_rshift32(fromDelay2.r, strength2 << 14))
+						           << 2;
+					}
+					else {
+						deluge::dsp::StereoSample<q31_t>* nextPos = &buffer.current() + 1;
+						if (nextPos == buffer.end()) {
+							nextPos = buffer.begin();
+						}
+						deluge::dsp::StereoSample<q31_t>& fromDelay1 = buffer.current();
+						deluge::dsp::StereoSample<q31_t>& fromDelay2 = *nextPos;
+						sample.l = (multiply_32x32_rshift32(fromDelay1.l, strength1 << 14)
+						            + multiply_32x32_rshift32(fromDelay2.l, strength2 << 14))
+						           << 2;
+						sample.r = (multiply_32x32_rshift32(fromDelay1.r, strength1 << 14)
+						            + multiply_32x32_rshift32(fromDelay2.r, strength2 << 14))
+						           << 2;
+					}
+				}
+
+				// Ping-pong
+				if (stutterConfig.pingPong
+				    && ((currentReverse && &buffer.current() == buffer.begin())
+				        || (!currentReverse && &buffer.current() == buffer.end() - 1))) {
+					currentReverse = !currentReverse;
+				}
 			}
 		}
 	}
 }
 
 void Stutterer::endStutter(ParamManagerForTimeline* paramManager) {
-	bool isScatterMode = (stutterConfig.scatterMode != ScatterMode::Classic);
+	bool isScatterMode =
+	    (stutterConfig.scatterMode != ScatterMode::Classic && stutterConfig.scatterMode != ScatterMode::Burst);
 
 	if (isScatterMode) {
-		// Non-Classic modes: return to standby for continuous recording
+		// Non-Classic/Burst modes: return to standby for continuous recording
 		// Zero-crossing flags set by triggerPlaybackNow on next trigger
 		playbackPos = 0;
 
