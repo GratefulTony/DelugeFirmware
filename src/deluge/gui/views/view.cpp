@@ -39,6 +39,7 @@
 #include "gui/views/instrument_clip_view.h"
 #include "gui/views/performance_view.h"
 #include "gui/views/session_view.h"
+#include "hid/button.h"
 #include "hid/buttons.h"
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
@@ -854,6 +855,30 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 	ModelStackWithThreeMainThings* tempModelStack = (ModelStackWithThreeMainThings*)modelStackTempMemory;
 
 	params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
+
+	// Push+twist on gold knob for scatter params: adjust gamma instead of param value
+	hid::Button modEncButton = (whichModEncoder == 0) ? hid::button::MOD_ENCODER_0 : hid::button::MOD_ENCODER_1;
+	if (Buttons::isButtonPressed(modEncButton)) {
+		int32_t paramId = modelStackWithParam->paramId;
+		bool isScatterParam =
+		    (kind == params::Kind::PATCHED
+		     && (paramId == params::GLOBAL_SCATTER_MACRO || paramId == params::GLOBAL_SCATTER_ZONE_A
+		         || paramId == params::GLOBAL_SCATTER_ZONE_B || paramId == params::GLOBAL_SCATTER_MACRO_CONFIG))
+		    || (kind == params::Kind::UNPATCHED_SOUND
+		        && (paramId == params::UNPATCHED_SCATTER_MACRO || paramId == params::UNPATCHED_SCATTER_ZONE_A
+		            || paramId == params::UNPATCHED_SCATTER_ZONE_B
+		            || paramId == params::UNPATCHED_SCATTER_MACRO_CONFIG));
+		if (isScatterParam && activeModControllableModelStack.modControllable) {
+			// Adjust gamma phase instead of the param
+			auto* mca = static_cast<ModControllableAudio*>(activeModControllableModelStack.modControllable);
+			float& gamma = mca->stutterConfig.gammaPhase;
+			gamma = std::max(0.0f, gamma + static_cast<float>(offset) * 0.1f);
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "gamma:%d", static_cast<int32_t>(gamma * 10.0f));
+			display->displayPopup(buffer);
+			return;
+		}
+	}
 
 	// Apply zone-based scaling for fine control within zones
 	int32_t numZones = params::getZoneParamInfo(kind, modelStackWithParam->paramId).zoneCount;
