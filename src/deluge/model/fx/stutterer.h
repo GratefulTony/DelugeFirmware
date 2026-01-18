@@ -115,17 +115,17 @@ public:
 
 	/// Update live-adjustable params from source's current config (call before processStutter)
 	/// This allows real-time adjustment of phase offsets and leaky write prob while scatter is playing
-	/// Also allows seamless Shuffle <-> Leaky transitions without stopping/clearing
+	/// Also allows seamless mode switching between looper modes without stopping/clearing
 	inline void updateLiveParams(const StutterConfig& sourceConfig) {
 		stutterConfig.zoneAPhaseOffset = sourceConfig.zoneAPhaseOffset;
 		stutterConfig.zoneBPhaseOffset = sourceConfig.zoneBPhaseOffset;
 		stutterConfig.macroConfigPhaseOffset = sourceConfig.macroConfigPhaseOffset;
 		stutterConfig.gammaPhase = sourceConfig.gammaPhase;
 		stutterConfig.leakyWriteProb = sourceConfig.leakyWriteProb;
-		// Allow seamless mode switching between compatible modes (Shuffle <-> Leaky)
-		// Both use same shuffle processing, Leaky just adds write-back
-		if ((stutterConfig.scatterMode == ScatterMode::Shuffle || stutterConfig.scatterMode == ScatterMode::Leaky)
-		    && (sourceConfig.scatterMode == ScatterMode::Shuffle || sourceConfig.scatterMode == ScatterMode::Leaky)) {
+		// Allow mode switching between all looper-based modes (all except Classic)
+		// Classic uses different buffer system, can't switch to/from it during playback
+		// Changes take effect on next slice boundary
+		if (stutterConfig.scatterMode != ScatterMode::Classic && sourceConfig.scatterMode != ScatterMode::Classic) {
 			stutterConfig.scatterMode = sourceConfig.scatterMode;
 		}
 	}

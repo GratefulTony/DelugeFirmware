@@ -214,31 +214,8 @@ constexpr std::array<phi::PhiTriConfig, 4> kTimbraBank = {{
 		return 1.0f;
 	}
 
-	// Anti-click fade: always fade to 0 at grain edges (~10ms = 440 samples at 44.1kHz)
-	// This is independent of depth and happens at the raw slice boundaries
-	constexpr int32_t kAntiClickSamples = 440;
-	float antiClick = 1.0f;
-	int32_t gatedLength = static_cast<int32_t>(static_cast<float>(sliceLength) * gateRatio);
-	if (gatedLength > kAntiClickSamples * 2) {
-		if (positionInSlice < kAntiClickSamples) {
-			antiClick = static_cast<float>(positionInSlice) / static_cast<float>(kAntiClickSamples);
-		}
-		else if (positionInSlice > gatedLength - kAntiClickSamples) {
-			antiClick = static_cast<float>(gatedLength - positionInSlice) / static_cast<float>(kAntiClickSamples);
-		}
-	}
-	else if (gatedLength > 0) {
-		// Very short slice: use half the length for fade
-		int32_t fadeLen = gatedLength / 2;
-		if (fadeLen > 0) {
-			if (positionInSlice < fadeLen) {
-				antiClick = static_cast<float>(positionInSlice) / static_cast<float>(fadeLen);
-			}
-			else if (positionInSlice > gatedLength - fadeLen) {
-				antiClick = static_cast<float>(gatedLength - positionInSlice) / static_cast<float>(fadeLen);
-			}
-		}
-	}
+	// Anti-click now handled by zero-crossing mute in stutterer.cpp
+	// Attack: mute until zero crossing, Release: mute after zero crossing
 
 	// Normalized position within slice [0,1]
 	float pos = static_cast<float>(positionInSlice) / static_cast<float>(sliceLength);
@@ -303,11 +280,10 @@ constexpr std::array<phi::PhiTriConfig, 4> kTimbraBank = {{
 		}
 	}
 
-	// Combine: anti-click always applied, depth-controlled envelope on top
-	// depth=0: just anti-click fade at edges
+	// Depth-controlled envelope
+	// depth=0: no envelope (passthrough)
 	// depth=1: full envelope shape
-	float depthEnv = 1.0f + depth * (envelope - 1.0f);
-	return antiClick * depthEnv;
+	return 1.0f + depth * (envelope - 1.0f);
 }
 
 /**
@@ -517,24 +493,7 @@ prepareGrainEnvelope(int32_t sliceLength, float gateRatio, float depth, float en
 		return 1.0f;
 	}
 
-	// Anti-click fade (multiplication instead of division)
-	float antiClick = 1.0f;
-	if (!p.useShortFade) {
-		if (positionInSlice < p.fadeLen) {
-			antiClick = static_cast<float>(positionInSlice) * p.invFadeLen;
-		}
-		else if (positionInSlice > p.gatedLength - p.fadeLen) {
-			antiClick = static_cast<float>(p.gatedLength - positionInSlice) * p.invFadeLen;
-		}
-	}
-	else if (p.fadeLen > 0) {
-		if (positionInSlice < p.fadeLen) {
-			antiClick = static_cast<float>(positionInSlice) * p.invFadeLen;
-		}
-		else if (positionInSlice > p.gatedLength - p.fadeLen) {
-			antiClick = static_cast<float>(p.gatedLength - positionInSlice) * p.invFadeLen;
-		}
-	}
+	// Anti-click now handled by zero-crossing mute in stutterer.cpp
 
 	// Normalized position (multiplication instead of division)
 	float pos = static_cast<float>(positionInSlice) * p.invSliceLength;
@@ -581,9 +540,8 @@ prepareGrainEnvelope(int32_t sliceLength, float gateRatio, float depth, float en
 		}
 	}
 
-	// Combine anti-click with depth-controlled envelope
-	float depthEnv = 1.0f + p.depth * (envelope - 1.0f);
-	return antiClick * depthEnv;
+	// Depth-controlled envelope
+	return 1.0f + p.depth * (envelope - 1.0f);
 }
 
 /**
@@ -626,26 +584,7 @@ prepareGrainEnvelope(int32_t sliceLength, float gateRatio, float depth, float en
 		return ONE_Q31;
 	}
 
-	// Anti-click fade in Q31
-	// t = pos * invFadeLen gives Q31 result directly since pos is int and invFadeLen is Q31/len
-	int32_t antiClickQ31 = ONE_Q31;
-	if (!p.useShortFade) {
-		if (positionInSlice < p.fadeLen) {
-			// antiClick = position / fadeLen = position * invFadeLen
-			antiClickQ31 = positionInSlice * p.invFadeLen;
-		}
-		else if (positionInSlice > p.gatedLength - p.fadeLen) {
-			antiClickQ31 = (p.gatedLength - positionInSlice) * p.invFadeLen;
-		}
-	}
-	else if (p.fadeLen > 0) {
-		if (positionInSlice < p.fadeLen) {
-			antiClickQ31 = positionInSlice * p.invFadeLen;
-		}
-		else if (positionInSlice > p.gatedLength - p.fadeLen) {
-			antiClickQ31 = (p.gatedLength - positionInSlice) * p.invFadeLen;
-		}
-	}
+	// Anti-click now handled by zero-crossing mute in stutterer.cpp
 
 	// Normalized position in Q31: pos = positionInSlice * invSliceLength
 	int32_t posQ31 = positionInSlice * p.invSliceLength;
@@ -707,12 +646,8 @@ prepareGrainEnvelope(int32_t sliceLength, float gateRatio, float depth, float en
 		}
 	}
 
-	// Combine: result = (1 - depth) + depth * envelope
-	// In Q31: result = (ONE_Q31 - depth) + multiply(depth, envelope)
-	int32_t depthEnvQ31 = (ONE_Q31 - p.depthQ31) + (multiply_32x32_rshift32(p.depthQ31, envelopeQ31) << 1);
-
-	// Final: antiClick * depthEnv
-	return multiply_32x32_rshift32(antiClickQ31, depthEnvQ31) << 1;
+	// Depth-controlled envelope: result = (1 - depth) + depth * envelope
+	return (ONE_Q31 - p.depthQ31) + (multiply_32x32_rshift32(p.depthQ31, envelopeQ31) << 1);
 }
 
 /**
@@ -1137,9 +1072,11 @@ inline GrainParams computeGrainParams(q31_t zoneAParam, q31_t zoneBParam, q31_t 
 
 		p.envDepth = triangleSimpleUnipolar(zoneBInfo.position * phi::kPhi050, 0.6f);
 		p.panAmount = triangleSimpleUnipolar(zoneBInfo.position * phi::kPhi125, 0.25f);
-		// Gate only activates when Zone B is above deadzone - at default (0), no gate
+		// Gate: macroConfig triangle selects sensitivity, macro controls intensity
+		// At macro=0, gateRatio stays at 1.0 (no gate)
 		if (zoneBInfo.position > 0.02f) {
-			p.gateRatio = 0.25f + (1.0f - macroConfigNorm) * 0.75f;
+			float gateInfluence = triangleSimpleUnipolar(macroConfigNorm * phi::kPhi100, 0.6f);
+			p.gateRatio = 1.0f - macroNorm * gateInfluence * 0.75f;
 		}
 		// else: gateRatio stays at default 1.0 (no gate)
 	}
