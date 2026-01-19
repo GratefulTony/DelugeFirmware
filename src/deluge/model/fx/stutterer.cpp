@@ -160,9 +160,10 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 		}
 
 		// No buffers yet - allocate both and start standby recording
+		// Use allocSdram() to go directly to SDRAM - these buffers are too large for the external region
 		if (bufferA == nullptr) {
 			bufferA = static_cast<deluge::dsp::StereoSample<q31_t>*>(
-			    allocLowSpeed(kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
+			    allocSdram(kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
 			if (bufferA == nullptr) {
 				status = Status::OFF;
 				return Error::INSUFFICIENT_RAM;
@@ -170,7 +171,7 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 		}
 		if (bufferB == nullptr) {
 			bufferB = static_cast<deluge::dsp::StereoSample<q31_t>*>(
-			    allocLowSpeed(kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
+			    allocSdram(kLooperBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
 			if (bufferB == nullptr) {
 				status = Status::OFF;
 				return Error::INSUFFICIENT_RAM;
@@ -179,7 +180,7 @@ Error Stutterer::beginStutter(void* source, ParamManagerForTimeline* paramManage
 		// Allocate delay send buffer (small, for slice-synced echo)
 		if (delayBuffer == nullptr) {
 			delayBuffer = static_cast<deluge::dsp::StereoSample<q31_t>*>(
-			    allocLowSpeed(kDelayBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
+			    allocSdram(kDelayBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>)));
 			if (delayBuffer != nullptr) {
 				memset(delayBuffer, 0, kDelayBufferSize * sizeof(deluge::dsp::StereoSample<q31_t>));
 			}

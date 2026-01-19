@@ -56,6 +56,12 @@ public:
 	void dealloc(void* address);
 	void verifyMemoryNotFree(void* address, uint32_t spaceSize);
 
+	// Memory stats getters
+	uint32_t getNumAllocations() const { return numAllocations_; }
+	uint32_t getTotalFreeSpace();
+	uint32_t getLargestFreeBlock();
+	uint32_t getRegionSize() const { return end - start; }
+
 	uint32_t start;
 	uint32_t end;
 

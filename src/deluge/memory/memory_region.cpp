@@ -858,3 +858,21 @@ void MemoryRegion::dealloc(void* address) {
 	numAllocations--;
 #endif
 }
+
+uint32_t MemoryRegion::getTotalFreeSpace() {
+	uint32_t total = 0;
+	for (int32_t i = 0; i < emptySpaces.getNumElements(); i++) {
+		auto* record = static_cast<EmptySpaceRecord*>(emptySpaces.getElementAddress(i));
+		total += record->length;
+	}
+	return total;
+}
+
+uint32_t MemoryRegion::getLargestFreeBlock() {
+	if (emptySpaces.getNumElements() == 0) {
+		return 0;
+	}
+	// emptySpaces is sorted by size (largest first)
+	auto* record = static_cast<EmptySpaceRecord*>(emptySpaces.getElementAddress(0));
+	return record->length;
+}
