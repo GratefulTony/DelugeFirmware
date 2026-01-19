@@ -226,6 +226,9 @@ void init() {
 
 	sampleForPreview->sideChainSendLevel = 2147483647;
 
+	// Allocate reverb buffers from SDRAM (must be after memory allocator init)
+	(void)reverb.allocate();
+
 	i2sTXBufferPos = (uint32_t)getTxBufferStart();
 
 	i2sRXBufferPos = (uint32_t)getRxBufferStart()
@@ -837,7 +840,9 @@ void renderReverb(size_t numSamples) {
 		// Mix reverb into main render
 		reverb.setPanLevels(reverbAmplitudeL, reverbAmplitudeR);
 		{
+			static constexpr const char* modelNames[] = {"feather", "freeverb", "mutable", "digital"};
 			FX_BENCH_DECLARE(bench, "reverb");
+			FX_BENCH_SET_TAG(bench, 0, modelNames[static_cast<int>(reverb.getModel())]);
 			FX_BENCH_SCOPE(bench);
 			reverb.process(reverbBuffer, renderingBuffer);
 		}

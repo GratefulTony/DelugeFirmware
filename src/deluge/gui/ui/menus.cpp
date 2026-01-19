@@ -171,6 +171,7 @@
 #include "gui/menu_item/reverb/amount.h"
 #include "gui/menu_item/reverb/amount_unpatched.h"
 #include "gui/menu_item/reverb/damping.h"
+#include "gui/menu_item/reverb/featherverb.h"
 #include "gui/menu_item/reverb/hpf.h"
 #include "gui/menu_item/reverb/lpf.h"
 #include "gui/menu_item/reverb/model.h"
@@ -610,6 +611,12 @@ reverb::Model reverbModelMenu{STRING_FOR_MODEL};
 reverb::HPF reverbHPFMenu{STRING_FOR_HPF};
 reverb::LPF reverbLPFMenu{STRING_FOR_LPF};
 
+// Featherverb-specific menus (only visible when Featherverb model is active)
+reverb::FeatherZone1 reverbFeatherZone1Menu{STRING_FOR_FEATHER_ZONE1};
+reverb::FeatherZone2 reverbFeatherZone2Menu{STRING_FOR_FEATHER_ZONE2};
+reverb::FeatherZone3 reverbFeatherZone3Menu{STRING_FOR_FEATHER_ZONE3};
+reverb::FeatherPredelay reverbFeatherPredelayMenu{STRING_FOR_PREDELAY};
+
 HorizontalMenu reverbMenu{
     STRING_FOR_REVERB,
     {
@@ -621,13 +628,18 @@ HorizontalMenu reverbMenu{
         &reverbPanMenu,
         &reverbHPFMenu,
         &reverbLPFMenu,
+        &reverbFeatherZone1Menu,
+        &reverbFeatherZone2Menu,
+        &reverbFeatherZone3Menu,
+        &reverbFeatherPredelayMenu,
         &reverbSidechainMenu,
     },
 };
 HorizontalMenu reverbMenuWithoutSidechain{
     STRING_FOR_REVERB,
     {&reverbAmountMenu, &reverbRoomSizeMenu, &reverbDampingMenu, &reverbWidthMenu, &reverbModelMenu, &reverbPanMenu,
-     &reverbHPFMenu, &reverbLPFMenu},
+     &reverbHPFMenu, &reverbLPFMenu, &reverbFeatherZone1Menu, &reverbFeatherZone2Menu, &reverbFeatherZone3Menu,
+     &reverbFeatherPredelayMenu},
 };
 HorizontalMenuGroup reverbMenuGroup{{&reverbMenuWithoutSidechain, &reverbSidechainMenu}};
 
@@ -833,6 +845,10 @@ HorizontalMenu globalReverbMenu{
         &reverbPanMenu,
         &reverbHPFMenu,
         &reverbLPFMenu,
+        &reverbFeatherZone1Menu,
+        &reverbFeatherZone2Menu,
+        &reverbFeatherZone3Menu,
+        &reverbFeatherPredelayMenu,
         &reverbSidechainMenu,
     },
 };
@@ -848,6 +864,10 @@ HorizontalMenu globalReverbMenuWithoutSidechain{
         &reverbPanMenu,
         &reverbHPFMenu,
         &reverbLPFMenu,
+        &reverbFeatherZone1Menu,
+        &reverbFeatherZone2Menu,
+        &reverbFeatherZone3Menu,
+        &reverbFeatherPredelayMenu,
     },
 };
 HorizontalMenuGroup globalReverbMenuGroup{{&globalReverbMenuWithoutSidechain, &reverbSidechainMenu}};
