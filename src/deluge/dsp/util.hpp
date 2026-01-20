@@ -91,6 +91,8 @@ inline FloatSmoothingContext prepareSmoothingFloat(float state, float target, [[
 
 /// Float version of buffer-rate smoothing for coefficient smoothing
 /// Uses slow rate to avoid zipper noise from triangle weight jumps
+/// NOTE: Alpha assumes 128 samples/buffer. If used with adaptive sizing,
+/// pass numSamples and scale: alpha = 0.015f * (numSamples / 128.0f)
 [[gnu::always_inline]] inline float smoothParamFloat(float* state, float target) {
 	constexpr float kCoeffAlpha = 0.015f; // ~200ms to reach 95% at 128 samples/buffer
 	*state = *state + (target - *state) * kCoeffAlpha;

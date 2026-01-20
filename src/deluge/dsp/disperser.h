@@ -538,7 +538,8 @@ public:
 	void updateCoefficientsSmoothed(q31_t freq, q31_t spread, q31_t* smoothedFreq, q31_t* smoothedSpread,
 	                                float lrOffset = 0.0f, float q = kDefaultQ, uint8_t activeStages = kMaxStages,
 	                                float spreadCurve = 1.0f, float qTilt = 0.0f, float bimodalSeparation = 0.0f,
-	                                float detuning = 0.0f, float emphasis = 0.0f, float lfoRateScale = 1.0f) {
+	                                float detuning = 0.0f, float emphasis = 0.0f, float lfoRateScale = 1.0f,
+	                                size_t numSamples = 128) {
 		// Always smooth parameters (cheap, runs every buffer)
 		constexpr q31_t smoothingAlpha = static_cast<q31_t>(kParamSmoothingAlpha * ONE_Q31);
 		*smoothedFreq = *smoothedFreq + (multiply_32x32_rshift32(freq - *smoothedFreq, smoothingAlpha) << 1);
@@ -553,7 +554,7 @@ public:
 		uint32_t freqU = static_cast<uint32_t>(*smoothedFreq) + 0x80000000u;
 		uint32_t spreadU = static_cast<uint32_t>(*smoothedSpread) + 0x80000000u;
 		updateCoefficients(freqU >> 25, spreadU >> 25, lrOffset, q, activeStages, spreadCurve, qTilt, bimodalSeparation,
-		                   detuning, emphasis, lfoRateScale);
+		                   detuning, emphasis, lfoRateScale, numSamples);
 	}
 
 	/**
@@ -581,7 +582,7 @@ public:
 	void updateCoefficients(uint8_t freq, uint8_t spread, float lrOffset = 0.0f, float q = kDefaultQ,
 	                        uint8_t activeStages = kMaxStages, float spreadCurve = 1.0f, float qTilt = 0.0f,
 	                        float bimodalSeparation = 0.0f, float detuning = 0.0f, float emphasis = 0.0f,
-	                        float lfoRateScale = 1.0f) {
+	                        float lfoRateScale = 1.0f, size_t numSamples = 128) {
 		// Force recalc if any parameter changed
 		bool lrChanged = std::abs(lrOffset - lastLrOffset_) > 0.01f;
 		bool qChanged = std::abs(q - lastQ_) > 0.05f;
@@ -617,8 +618,10 @@ public:
 		// Slow width LFO for organic stereo movement (~0.06 Hz = 16 sec cycle)
 		// Rate scaled by lfoRateScale from twist meta zones (0.25× to 2×)
 		// Fixed small depth (±0.06 oct) to avoid beating from large coefficient changes
+		// LFO increment scales with actual buffer size for consistent timing
 		constexpr float kWidthLfoBaseRate = 0.06f;
-		constexpr float kWidthLfoBaseInc = kWidthLfoBaseRate * 128.0f * kCoeffUpdateStride / 44100.0f;
+		const float kWidthLfoBaseInc =
+		    kWidthLfoBaseRate * static_cast<float>(numSamples) * kCoeffUpdateStride / 44100.0f;
 		constexpr float kWidthLfoDepth = 0.06f;
 
 		widthLfoPhase_ += kWidthLfoBaseInc * lfoRateScale;
@@ -641,7 +644,7 @@ public:
 		// Separate detuning LFO at φ^0.33 relative rate (incommensurate with width LFO)
 		// Creates independent stereo movement that doesn't correlate with width
 		constexpr float kDetuneLfoRateRatio = 1.1746627f; // φ^0.33
-		constexpr float kDetuneLfoBaseInc = kWidthLfoBaseInc * kDetuneLfoRateRatio;
+		const float kDetuneLfoBaseInc = kWidthLfoBaseInc * kDetuneLfoRateRatio;
 		constexpr float kDetuneLfoDepth = 0.04f; // Slightly smaller than width LFO
 
 		detuneLfoPhase_ += kDetuneLfoBaseInc * lfoRateScale;
@@ -1167,11 +1170,11 @@ public:
 	 * @param rateScale LFO rate multiplier from twist meta zones (0.25× to 2×)
 	 * @return Bipolar LFO value (-1 to +1) for width modulation
 	 */
-	[[nodiscard]] float updateWidthLfo(float rateScale = 1.0f) {
+	[[nodiscard]] float updateWidthLfo(float rateScale = 1.0f, size_t numSamples = 128) {
 		// Base rate: ~0.06 Hz (one cycle per ~16 seconds)
-		// Called every buffer (~2.9ms at 128 samples/44100Hz)
-		constexpr float kBaseLfoRate = 0.06f;                       // Hz
-		constexpr float kLfoInc = kBaseLfoRate * 128.0f / 44100.0f; // phase increment per buffer
+		// LFO increment scales with actual buffer size for consistent timing
+		constexpr float kBaseLfoRate = 0.06f; // Hz
+		const float kLfoInc = kBaseLfoRate * static_cast<float>(numSamples) / 44100.0f;
 
 		widthLfoPhase_ += kLfoInc * rateScale;
 		if (widthLfoPhase_ >= 1.0f) {
@@ -1566,10 +1569,11 @@ inline void processDisperser(StereoBuffer<q31_t> buffer, Disperser& dsp, Dispers
 	float bimodalSeparation = (topoParams.zone == 2) ? topoParams.param0 : 0.0f;
 
 	// Update coefficients with smoothing (lrOffset creates stereo width, Q from topo zone)
+	// Pass buffer.size() for adaptive timing (LFO rates scale with actual buffer size)
 	uint8_t stages = params.getStages();
 	dsp.updateCoefficientsSmoothed(dispFreq, dispSpread, &params.smoothedFreq, &params.smoothedSpread, lrSpreadOffset,
 	                               topoParams.q, stages, twistParams.spreadCurve, twistParams.qTilt, bimodalSeparation,
-	                               topoParams.detuning, topoParams.emphasis, twistParams.lfoRateScale);
+	                               topoParams.detuning, topoParams.emphasis, twistParams.lfoRateScale, buffer.size());
 
 	// Cross mix amount for Cross topology (zone 3)
 	float crossMix = (topoParams.zone == 3) ? (0.3f + topoParams.param0 * 0.5f) : 0.0f;
