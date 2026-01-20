@@ -79,6 +79,22 @@ struct FloatSmoothingContext {
 /// With τ = 0.04s: α ≈ 0.0005
 constexpr float kPerSampleAlpha = 0.0005f;
 
+/// Strided smoothing: update every N samples instead of every sample
+/// Reduces CPU by ~4x for smoothing while maintaining perceptually smooth transitions
+/// Alpha is scaled up by stride to maintain same convergence rate
+constexpr int32_t kSmoothingStride = 4;
+constexpr float kStridedAlpha = kPerSampleAlpha * kSmoothingStride;
+
+/// Convergence epsilon for coefficient smoothing
+/// When |current - target| < epsilon, smoothing can be skipped entirely
+/// 1e-6 is ~-120dB below unity - inaudible difference
+constexpr float kSmoothingConvergenceEpsilon = 1e-6f;
+
+/// Check if a FloatSmoothingContext has converged (current ≈ target)
+[[gnu::always_inline]] inline bool isConverged(const FloatSmoothingContext& ctx) {
+	return std::abs(ctx.current - ctx.target) < kSmoothingConvergenceEpsilon;
+}
+
 /// Prepare float smoothing for per-sample IIR coefficient interpolation
 /// @param state Current smoothed state value
 /// @param target Target coefficient value

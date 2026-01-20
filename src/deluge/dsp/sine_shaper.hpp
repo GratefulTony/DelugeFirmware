@@ -82,6 +82,20 @@ prepareNeonSmoothing(float c0, float c1, float c2, float c3, float t0, float t1,
 	return vgetq_lane_f32(v, 3);
 }
 
+/// Check if all 4 NEON coefficients have converged (|current - target| < epsilon)
+/// ARMv7 compatible - no vminvq (ARMv8 only)
+[[gnu::always_inline]] inline bool isNeonConverged(const NeonSmoothingContext& ctx) {
+	float32x4_t diff = vabdq_f32(ctx.current, ctx.target); // |current - target|
+	float32x4_t eps = vdupq_n_f32(kSmoothingConvergenceEpsilon);
+	uint32x4_t cmp = vcltq_f32(diff, eps); // diff < epsilon (all bits set if true)
+	// ARMv7: AND all lanes together, then check if result is all 1s
+	uint32x2_t low = vget_low_u32(cmp);
+	uint32x2_t high = vget_high_u32(cmp);
+	uint32x2_t anded = vand_u32(low, high); // AND lanes [0,1] with [2,3]
+	uint32_t final = vget_lane_u32(anded, 0) & vget_lane_u32(anded, 1);
+	return final == 0xFFFFFFFF;
+}
+
 /// Zone count derived from param definition (single source of truth)
 constexpr int32_t kNumHarmonicZones =
     modulation::params::getZoneParamInfo(modulation::params::LOCAL_SINE_SHAPER_HARMONIC).zoneCount;
@@ -1295,6 +1309,11 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 
 	shaperWeights = {c1Ctx.current, c3Ctx.current, c5Ctx.current, c7Ctx.current, c9Ctx.current};
 
+	// Check if all coefficients have converged - if so, skip per-sample smoothing entirely
+	// This saves ~1000 cycles/buffer when harmonic/twist params are static (common case)
+	bool coeffsConverged =
+	    isConverged(c1Ctx) && isConverged(c3Ctx) && isConverged(c5Ctx) && isConverged(c7Ctx) && isConverged(c9Ctx);
+
 	// Local copy of state for efficient per-sample update
 	// If voiceState is null, use local zeros (no persistent state across buffers)
 	q31_t dcState = voiceState ? voiceState->dcBlockerL : 0;
@@ -1343,6 +1362,9 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 	float currentDriveGain = computeDriveGain(driveCtx.current);
 	float targetDriveGain = computeDriveGain(driveCtx.target);
 
+	// Sample counter for strided coefficient updates (only used when not converged)
+	int32_t strideCounter = 0;
+
 	for (auto& sample : buffer) {
 		// Apply feedback to input (before shaping)
 		// Pre-boost for subtractive mode to normalize operating point with FM
@@ -1369,17 +1391,24 @@ inline void sineShapeBuffer(std::span<q31_t> buffer, q31_t drive, q31_t* smoothe
 		// Also update q31 drive for state persistence (written back to smoothedDrive)
 		currentDrive += multiply_32x32_rshift32(driveCtx.target - currentDrive, driveCtx.alpha) * 2;
 
-		// Update weights for next sample (per-sample IIR, unified path)
-		c1Ctx.current += (c1Ctx.target - c1Ctx.current) * c1Ctx.alpha;
-		c3Ctx.current += (c3Ctx.target - c3Ctx.current) * c3Ctx.alpha;
-		c5Ctx.current += (c5Ctx.target - c5Ctx.current) * c5Ctx.alpha;
-		c7Ctx.current += (c7Ctx.target - c7Ctx.current) * c7Ctx.alpha;
-		c9Ctx.current += (c9Ctx.target - c9Ctx.current) * c9Ctx.alpha;
-		shaperWeights.c1 = c1Ctx.current;
-		shaperWeights.c3 = c3Ctx.current;
-		shaperWeights.c5 = c5Ctx.current;
-		shaperWeights.c7 = c7Ctx.current;
-		shaperWeights.c9 = c9Ctx.current;
+		// Update weights: skip entirely when converged, otherwise stride every 4 samples
+		// Saves ~1000 cycles/buffer when params are static (common case)
+		if (!coeffsConverged) {
+			if (++strideCounter >= kSmoothingStride) {
+				strideCounter = 0;
+				// Strided update (alpha already scaled 4x via kStridedAlpha)
+				c1Ctx.current += (c1Ctx.target - c1Ctx.current) * kStridedAlpha;
+				c3Ctx.current += (c3Ctx.target - c3Ctx.current) * kStridedAlpha;
+				c5Ctx.current += (c5Ctx.target - c5Ctx.current) * kStridedAlpha;
+				c7Ctx.current += (c7Ctx.target - c7Ctx.current) * kStridedAlpha;
+				c9Ctx.current += (c9Ctx.target - c9Ctx.current) * kStridedAlpha;
+				shaperWeights.c1 = c1Ctx.current;
+				shaperWeights.c3 = c3Ctx.current;
+				shaperWeights.c5 = c5Ctx.current;
+				shaperWeights.c7 = c7Ctx.current;
+				shaperWeights.c9 = c9Ctx.current;
+			}
+		}
 
 		// 100Hz HPF on wet signal only - removes sub-bass rumble without affecting dry
 		dcState += multiply_32x32_rshift32(shaped - dcState, kOutputHpfAlpha) * 2;
@@ -1609,14 +1638,19 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	shaperWeightsR = {c1Ctx.current, c3RCtx.current, c5RCtx.current, c7RCtx.current, c9RCtx.current};
 
 	// NEON vectorized smoothing for L/R coefficients (more efficient than 8 scalar updates)
+	// Use strided alpha (4x) since we only update every kSmoothingStride samples
 	// Left: c3L, c5L, c7L, c9L
 	NeonSmoothingContext neonCtxL =
 	    prepareNeonSmoothing(c3LCtx.current, c5LCtx.current, c7LCtx.current, c9LCtx.current, c3LCtx.target,
-	                         c5LCtx.target, c7LCtx.target, c9LCtx.target, c3LCtx.alpha);
+	                         c5LCtx.target, c7LCtx.target, c9LCtx.target, kStridedAlpha);
 	// Right: c3R, c5R, c7R, c9R
 	NeonSmoothingContext neonCtxR =
 	    prepareNeonSmoothing(c3RCtx.current, c5RCtx.current, c7RCtx.current, c9RCtx.current, c3RCtx.target,
-	                         c5RCtx.target, c7RCtx.target, c9RCtx.target, c3RCtx.alpha);
+	                         c5RCtx.target, c7RCtx.target, c9RCtx.target, kStridedAlpha);
+
+	// Check if all coefficients have converged - if so, skip per-sample smoothing entirely
+	// This saves ~2000 cycles/buffer when harmonic/twist params are static (common case)
+	bool coeffsConverged = isConverged(c1Ctx) && isNeonConverged(neonCtxL) && isNeonConverged(neonCtxR);
 
 	// Poly zone (7) stereo: modulate drive bipolar (L gets +, R gets -)
 	// Time-based LFO with frequency modulated by stereoFreqMult
@@ -1699,6 +1733,9 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 	float currentDriveGain = computeDriveGain(driveCtx.current);
 	float targetDriveGain = computeDriveGain(driveCtx.target);
 
+	// Sample counter for strided coefficient updates (only used when not converged)
+	int32_t strideCounter = 0;
+
 	for (auto& sample : buffer) {
 		// Compute per-channel drive gains (only differs when stereoDriveOffset != 0)
 		float driveGainL, driveGainR;
@@ -1743,22 +1780,29 @@ inline void sineShapeBuffer(StereoBuffer<q31_t> buffer, q31_t drive, q31_t* smoo
 		currentDriveGain += (targetDriveGain - currentDriveGain) * kPerSampleAlpha;
 		currentDrive += multiply_32x32_rshift32(driveCtx.target - currentDrive, driveCtx.alpha) * 2;
 
-		// Update weights for next sample: c1 scalar, L/R vectorized via NEON
-		c1Ctx.current += (c1Ctx.target - c1Ctx.current) * c1Ctx.alpha;
-		updateNeonSmoothing(neonCtxL);
-		updateNeonSmoothing(neonCtxR);
+		// Update weights: skip entirely when converged, otherwise stride every 4 samples
+		// Saves ~2000 cycles/buffer when params are static (common case)
+		if (!coeffsConverged) {
+			if (++strideCounter >= kSmoothingStride) {
+				strideCounter = 0;
+				// Strided update: c1 scalar, L/R vectorized via NEON (alpha already scaled 4x)
+				c1Ctx.current += (c1Ctx.target - c1Ctx.current) * kStridedAlpha;
+				updateNeonSmoothing(neonCtxL);
+				updateNeonSmoothing(neonCtxR);
 
-		// Extract smoothed values to weights
-		shaperWeightsL.c1 = c1Ctx.current;
-		shaperWeightsL.c3 = getNeonLane0(neonCtxL.current);
-		shaperWeightsL.c5 = getNeonLane1(neonCtxL.current);
-		shaperWeightsL.c7 = getNeonLane2(neonCtxL.current);
-		shaperWeightsL.c9 = getNeonLane3(neonCtxL.current);
-		shaperWeightsR.c1 = c1Ctx.current;
-		shaperWeightsR.c3 = getNeonLane0(neonCtxR.current);
-		shaperWeightsR.c5 = getNeonLane1(neonCtxR.current);
-		shaperWeightsR.c7 = getNeonLane2(neonCtxR.current);
-		shaperWeightsR.c9 = getNeonLane3(neonCtxR.current);
+				// Extract smoothed values to weights
+				shaperWeightsL.c1 = c1Ctx.current;
+				shaperWeightsL.c3 = getNeonLane0(neonCtxL.current);
+				shaperWeightsL.c5 = getNeonLane1(neonCtxL.current);
+				shaperWeightsL.c7 = getNeonLane2(neonCtxL.current);
+				shaperWeightsL.c9 = getNeonLane3(neonCtxL.current);
+				shaperWeightsR.c1 = c1Ctx.current;
+				shaperWeightsR.c3 = getNeonLane0(neonCtxR.current);
+				shaperWeightsR.c5 = getNeonLane1(neonCtxR.current);
+				shaperWeightsR.c7 = getNeonLane2(neonCtxR.current);
+				shaperWeightsR.c9 = getNeonLane3(neonCtxR.current);
+			}
+		}
 
 		// 100Hz HPF on wet signal only - removes sub-bass rumble without affecting dry
 		dcStateL += multiply_32x32_rshift32(shapedL - dcStateL, kOutputHpfAlpha) * 2;
