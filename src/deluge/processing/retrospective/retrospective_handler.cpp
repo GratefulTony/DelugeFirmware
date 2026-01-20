@@ -32,6 +32,7 @@
 #include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
 #include "modulation/params/param_manager.h"
+#include "playback/playback_handler.h"
 #include "processing/sound/sound.h"
 #include "processing/sound/sound_drum.h"
 #include "processing/source.h"
@@ -77,8 +78,24 @@ static SoundDrum* createNewDrumForKit(Kit* kit) {
 }
 
 void handleRetrospectiveSave() {
+	// Check if we're in bar mode and transport is running
+	if (retrospectiveBuffer.isBarMode() && playbackHandler.isEitherClockActive()) {
+		// Bar-synced save - will wait for next downbeat
+		display->displayPopup("WAIT");
+
+		// Use static string to persist across the async save
+		static String filePath;
+		Error error = retrospectiveBuffer.requestBarSyncedSave(&filePath);
+
+		if (error != Error::NONE) {
+			display->displayPopup("FAIL");
+		}
+		// Note: completion display happens in executePendingSave()
+		return;
+	}
+
+	// Time-based mode or transport stopped - immediate save
 	// Show feedback so user knows something is happening
-	// If normalization is enabled, show that popup since it takes longer
 	if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RetrospectiveSamplerNormalize)) {
 		display->displayPopup(l10n::getView(l10n::String::STRING_FOR_RETRO_NORMALIZING));
 	}

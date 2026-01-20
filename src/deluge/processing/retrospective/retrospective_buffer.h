@@ -50,7 +50,10 @@ public:
 	/// Must be lock-free and fast for real-time safety.
 	/// @param samples Pointer to stereo samples to record
 	/// @param numSamples Number of samples to record
-	void feedAudio(const deluge::dsp::StereoSample<q31_t>* samples, size_t numSamples);
+	/// @param skipPendingSaveCheck If true, skip checking for pending bar-synced saves.
+	///        Set this when calling from interrupt-disabled context (e.g., focused track path).
+	void feedAudio(const deluge::dsp::StereoSample<q31_t>* samples, size_t numSamples,
+	               bool skipPendingSaveCheck = false);
 
 	/// Feed mono audio samples into the buffer (will be duplicated to stereo if buffer is stereo).
 	/// @param samples Pointer to mono samples to record
@@ -85,6 +88,32 @@ public:
 
 	/// Get the configured duration in seconds.
 	[[nodiscard]] uint8_t getDurationSeconds() const;
+
+	/// Check if current mode is bar-synced (vs time-based).
+	[[nodiscard]] bool isBarMode() const;
+
+	/// Get number of bars for bar mode (1, 2, or 4). Returns 0 if not in bar mode.
+	[[nodiscard]] uint8_t getBarCount() const;
+
+	/// Check if focused track mode is active.
+	[[nodiscard]] bool isFocusedTrackMode() const;
+
+	/// Request a bar-synced save. Sets up pending state and returns immediately.
+	/// When transport is running, save happens at next downbeat.
+	/// When transport is stopped, falls back to immediate save.
+	/// @param filePath Output parameter to receive the saved file path
+	/// @return Error::NONE if save scheduled/completed, error code otherwise
+	Error requestBarSyncedSave(String* filePath);
+
+	/// Check if a bar-synced save is pending
+	[[nodiscard]] bool hasPendingSave() const { return pendingSave_.load(std::memory_order_relaxed); }
+
+	/// Cancel any pending bar-synced save
+	void cancelPendingSave();
+
+	/// Check for pending save and execute if downbeat reached.
+	/// Called from audio thread during feedAudio().
+	void checkAndExecutePendingSave();
 
 	/// Clear the buffer contents without deallocating.
 	void clear();
@@ -122,6 +151,25 @@ private:
 	uint8_t bytesPerSample_ = 2;                           ///< Bytes per sample: 2 (16-bit) or 3 (24-bit)
 	uint8_t numChannels_ = 2;                              ///< Number of channels: 1 (mono) or 2 (stereo)
 	AudioInputChannel source_ = AudioInputChannel::STEREO; ///< Audio source
+
+	// Bar-sync pending save state
+	std::atomic<bool> pendingSave_{false};   ///< True when waiting for downbeat to save
+	std::atomic<int64_t> saveTargetTick_{0}; ///< Tick position of target downbeat
+	std::atomic<float> savedBPM_{0.0f};      ///< BPM captured when save triggered
+	String* pendingFilePath_{nullptr};       ///< File path output pointer for pending save
+
+	/// Execute the pending save (called when downbeat reached)
+	void executePendingSave();
+
+	/// Calculate number of samples for bar-synced save based on current tempo
+	size_t calculateBarSyncedSamples() const;
+
+	/// Save to file with BPM tag and trimmed to specified sample count
+	/// @param filePath Output parameter to receive the saved file path
+	/// @param maxSamples Maximum samples to save (trims buffer to this)
+	/// @param bpm BPM value to include in filename
+	/// @return Error::NONE on success, or an error code on failure
+	Error saveToFileWithBPM(String* filePath, size_t maxSamples, float bpm);
 };
 
 /// Global instance of the retrospective buffer
