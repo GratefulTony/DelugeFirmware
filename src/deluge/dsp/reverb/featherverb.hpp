@@ -56,18 +56,19 @@ class Featherverb : public Base {
 	static constexpr size_t kD2MaxLength = 1039; // ~23.5ms
 
 	// 4-stage allpass cascade for tail density (replaces long D3)
-	// Each stage splits impulses → exponential density growth (2^4 = 16 reflections per input)
+	// Each stage splits impulses → exponential density growth
+	// C3 can run parallel (from cascadeIn) or series (from c2) via cascadeSeriesMix_
 	// Prime lengths for good diffusion, scalable by Zone 2
-	// With single-write undersampling, effective lengths are 2x these values
-	// C3 is extra large for spacious tail (memory from reduced predelay)
+	// With 2x undersampling, effective lengths are 2x these values
+	// Vast mode (Zone 2 > 80%): C2+C3 get 4x undersample for extended tails
 	static constexpr size_t kNumCascade = 4;
-	static constexpr size_t kC0BaseLength = 773;  // ~17ms base, ~35ms effective - prime (+10%)
-	static constexpr size_t kC1BaseLength = 997;  // ~23ms base, ~45ms effective - prime (+10%)
-	static constexpr size_t kC2BaseLength = 1231; // ~28ms base, ~56ms effective - prime (+10%)
-	static constexpr size_t kC3BaseLength = 5303; // ~120ms base, ~240ms effective - prime (+50%)
-	static constexpr size_t kCascadeBaseTotal = kC0BaseLength + kC1BaseLength + kC2BaseLength + kC3BaseLength; // 8304
-	static constexpr float kCascadeMaxScale = 1.5f; // Zone 2 can scale cascade up to 1.5x
-	static constexpr size_t kCascadeMaxTotal = static_cast<size_t>(kCascadeBaseTotal * kCascadeMaxScale); // ~12456
+	static constexpr size_t kC0BaseLength = 773;  // ~17.5ms base, ~35ms effective - prime
+	static constexpr size_t kC1BaseLength = 997;  // ~22.6ms base, ~45ms effective - prime
+	static constexpr size_t kC2BaseLength = 1231; // ~27.9ms base, ~56ms effective - prime
+	static constexpr size_t kC3BaseLength = 4001; // ~90ms base, ~181ms @2x, ~362ms @4x, ~724ms @8x - prime
+	static constexpr size_t kCascadeBaseTotal = kC0BaseLength + kC1BaseLength + kC2BaseLength + kC3BaseLength; // 7002
+	static constexpr float kCascadeMaxScale = 1.8f; // Zone 2 can scale cascade up to 1.8x for vast rooms
+	static constexpr size_t kCascadeMaxTotal = static_cast<size_t>(kCascadeBaseTotal * kCascadeMaxScale); // ~12604
 
 	// Buffer layout: FDN delays + cascade + predelay + diffusers
 	static constexpr size_t kFdnMaxSamples = kD0MaxLength + kD1MaxLength + kD2MaxLength; // 2339
@@ -139,8 +140,9 @@ private:
 	float cascadeScale_{1.0f};        // Current scale factor from Zone 2
 	float earlyMixGain_{0.3f};        // Early reflection gain (scales inverse with Zone 2: smaller = more early)
 	float tailMixGain_{0.6f};         // Tail output gain (scales with Zone 2: bigger room = more tail)
+	float directEarlyGain_{0.15f};    // Direct early tap (bypasses output LPF for brightness)
 	float cascadeLpState_{0.0f};      // LP filter state for cascade output
-	float cascadeSeriesMix_{0.5f};    // 0=parallel (sparse), 1=series (dense) - how much c2 feeds c3
+	float cascadeSeriesMix_{0.6f};    // 0=parallel (C3 from cascadeIn), 1=series (C3 from c2)
 	float cascadeFeedbackMult_{0.7f}; // How much cascade feeds back into FDN (controlled by Zone 3)
 	float cascadeNestFeedback_{0.0f}; // Nested feedback: C3 → C0 for extended tails (controlled by Zone 3)
 	float prevC3Out_{0.0f};           // Previous C3 output for nested feedback delay
@@ -194,9 +196,11 @@ private:
 
 	// LFO for modulation
 	float lfoPhase_{0.0f};
-	float modDepth_{0.0f};    // LFO pitch wobble depth (controlled by Zone 3)
-	float widthBreath_{0.0f}; // Width breathing amount (controlled by Zone 3)
-	float crossBleed_{0.0f};  // L↔R cross-channel bleed in FDN (controlled by Zone 3)
+	float modDepth_{0.0f};        // LFO pitch wobble depth for FDN (controlled by Zone 3)
+	float cascadeModDepth_{0.0f}; // LFO pitch wobble depth for C2/C3 in vast mode
+	float cascadeAmpMod_{0.0f};   // LFO amplitude modulation depth for C2/C3 diffusion contour
+	float widthBreath_{0.0f};     // Width breathing amount (controlled by Zone 3)
+	float crossBleed_{0.0f};      // L↔R cross-channel bleed in FDN (controlled by Zone 3)
 
 	// Envelope followers
 	float inputEnvelope_{0.0f};
@@ -208,6 +212,20 @@ private:
 	float prevOutR_{0.0f};
 	float currOutL_{0.0f};
 	float currOutR_{0.0f};
+
+	// C2/C3 extra undersampling for vast rooms
+	// Normal: 2x, Double (vast): 4x total
+	bool cascadeDoubleUndersample_{false}; // When true, C2+C3 run at 4x undersample (Zone 2 > 80%)
+	uint8_t c2Phase_{0};                   // Phase counter for C2 undersampling
+	float c2Accum_{0.0f};                  // Accumulated input for C2
+	float c2Prev_{0.0f};                   // Previous C2 output for interpolation
+	uint8_t c3Phase_{0};                   // Phase counter for C3 undersampling
+	float c3Accum_{0.0f};                  // Accumulated input for C3
+	float c3Prev_{0.0f};                   // Previous C3 output for interpolation
+
+	// Direct early tap (bypasses output LPF for brightness)
+	float directEarlyL_{0.0f};
+	float directEarlyR_{0.0f};
 
 	// Update functions
 	void updateMatrix();

@@ -93,11 +93,22 @@ bool Featherverb::allocate() {
 	lpStateR_ = 0.0f;
 	lfoPhase_ = 0.0f;
 	prevOutputMono_ = 0.0f;
+	cascadeModDepth_ = 0.0f;
+	cascadeAmpMod_ = 0.0f;
 
 	// Reset undersampling
 	undersamplePhase_ = false;
 	accumIn_ = 0.0f;
 	prevOutL_ = prevOutR_ = currOutL_ = currOutR_ = 0.0f;
+
+	// Reset C2/C3 extra undersampling
+	cascadeDoubleUndersample_ = false;
+	c2Phase_ = 0;
+	c2Accum_ = 0.0f;
+	c2Prev_ = 0.0f;
+	c3Phase_ = 0;
+	c3Accum_ = 0.0f;
+	c3Prev_ = 0.0f;
 
 	return true;
 }
@@ -115,7 +126,8 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 	}
 
 	constexpr float kInputScale = 1.0f / static_cast<float>(std::numeric_limits<int32_t>::max());
-	constexpr float kOutputScale = static_cast<float>(std::numeric_limits<int32_t>::max()) * 16.0f;
+	constexpr float kOutputScale =
+	    static_cast<float>(std::numeric_limits<int32_t>::max()) * 32.0f; // 2x boost vs original
 
 	const float hpCoeff = 0.995f - hpCutoff_ * 0.09f;
 	const float outLpCoeff = 0.1f + lpCutoff_ * 0.85f;
@@ -156,8 +168,8 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 				float fdnIn = accumIn_ * 0.5f;
 				accumIn_ = 0.0f;
 
-				// LFO
-				lfoPhase_ += 0.0000068f;
+				// LFO (slower rate for smoother modulation)
+				lfoPhase_ += 0.0000034f;
 				if (lfoPhase_ >= 1.0f)
 					lfoPhase_ -= 1.0f;
 				float lfoTri = lfoPhase_ < 0.5f ? (4.0f * lfoPhase_ - 1.0f) : (3.0f - 4.0f * lfoPhase_);
@@ -202,22 +214,86 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 				h1 -= dcBlockState_;
 				h2 -= dcBlockState_;
 
-				// === Cascade: variable series/parallel density with nested feedback ===
-				// c0→c1→c2 always series, c3 input blends between parallel and series
-				// Tail feedback uses squared room control for more aggressive decay shaping
+				// === Cascade: 4-stage with parallel/series blend ===
+				// c0→c1→c2 always series, c3 input blends between cascadeIn (parallel) and c2 (series)
+				// seriesMix=0 → 9 paths (sparse), seriesMix=1 → 16 paths (dense)
 				float tailFeedback = feedback_ * feedback_; // Tail decays faster than early at low room
 				float cascadeIn = (d0 + d1 + d2) * 0.4f + prevC3Out_ * cascadeNestFeedback_ * tailFeedback;
 
-				// Series chain for density
+				// c0→c1 series chain (always at base rate)
 				float c0 = processCascadeStage(0, cascadeIn);
 				float c1 = processCascadeStage(1, c0);
-				float c2 = processCascadeStage(2, c1);
+
+				// C2 with optional 4x undersample for vast rooms
+				float c2;
+				if (cascadeDoubleUndersample_) {
+					c2Accum_ += c1;
+					if (c2Phase_ == 1) {
+						float avgIn = c2Accum_ * 0.5f;
+						constexpr float kC2UndersampleCoeff = 0.35f;
+						// Pitch modulation: read from offset position for chorus-like smearing
+						size_t c2ModOffset = static_cast<size_t>(std::max(0.0f, lfoTri * cascadeModDepth_));
+						size_t readPos = (cascadeWritePos_[2] + c2ModOffset) % cascadeLengths_[2];
+						size_t idx = cascadeOffsets_[2] + readPos;
+						float delayed = buffer_[idx];
+						float output = -kC2UndersampleCoeff * avgIn + delayed;
+						float writeVal = avgIn + kC2UndersampleCoeff * output;
+						buffer_[cascadeOffsets_[2] + cascadeWritePos_[2]] = writeVal;
+						if (++cascadeWritePos_[2] >= cascadeLengths_[2])
+							cascadeWritePos_[2] = 0;
+						buffer_[cascadeOffsets_[2] + cascadeWritePos_[2]] = writeVal;
+						if (++cascadeWritePos_[2] >= cascadeLengths_[2])
+							cascadeWritePos_[2] = 0;
+						c2Prev_ = output;
+						c2Accum_ = 0.0f;
+					}
+					c2Phase_ = (c2Phase_ + 1) & 1;
+					c2 = c2Prev_;
+				}
+				else {
+					c2 = processCascadeStage(2, c1);
+				}
 
 				// C3 input: blend parallel (cascadeIn) ↔ series (c2)
-				// seriesMix=0 → 9 paths (sparse), seriesMix=1 → 16 paths (dense)
 				float c3In = cascadeIn + (c2 - cascadeIn) * cascadeSeriesMix_;
-				float c3 = processCascadeStage(3, c3In);
+
+				// C3 with optional 4x undersample for vast rooms (Zone 2 > 80%)
+				float c3;
+				if (cascadeDoubleUndersample_) {
+					c3Accum_ += c3In;
+					if (c3Phase_ == 1) {
+						float avgIn = c3Accum_ * 0.5f;
+						constexpr float kC3UndersampleCoeff = 0.3f;
+						// Pitch modulation: inverted phase from C2 for decorrelation
+						size_t c3ModOffset = static_cast<size_t>(std::max(0.0f, -lfoTri * cascadeModDepth_));
+						size_t readPos = (cascadeWritePos_[3] + c3ModOffset) % cascadeLengths_[3];
+						size_t idx = cascadeOffsets_[3] + readPos;
+						float delayed = buffer_[idx];
+						float output = -kC3UndersampleCoeff * avgIn + delayed;
+						float writeVal = avgIn + kC3UndersampleCoeff * output;
+						buffer_[cascadeOffsets_[3] + cascadeWritePos_[3]] = writeVal;
+						if (++cascadeWritePos_[3] >= cascadeLengths_[3])
+							cascadeWritePos_[3] = 0;
+						buffer_[cascadeOffsets_[3] + cascadeWritePos_[3]] = writeVal;
+						if (++cascadeWritePos_[3] >= cascadeLengths_[3])
+							cascadeWritePos_[3] = 0;
+						c3Prev_ = output;
+						c3Accum_ = 0.0f;
+					}
+					c3Phase_ = (c3Phase_ + 1) & 1;
+					c3 = c3Prev_;
+				}
+				else {
+					c3 = processCascadeStage(3, c3In);
+				}
 				prevC3Out_ = c3; // Store for nested feedback next sample
+
+				// Amplitude modulation on C2/C3 for diffusion contour (opposite phases)
+				// Creates stereo movement as the balance shifts between stages
+				if (cascadeAmpMod_ > 0.0f) {
+					c2 *= (1.0f + lfoTri * cascadeAmpMod_);
+					c3 *= (1.0f - lfoTri * cascadeAmpMod_);
+				}
 
 				// Width breathing: expand stereo as signal decays
 				float dynamicWidth = width_ + (1.0f - std::min(inputEnvelope_ * 100.0f, 1.0f)) * widthBreath_;
@@ -249,6 +325,10 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 				float earlyL = earlyMid + earlySide;
 				float earlyR = earlyMid - earlySide;
 
+				// Save direct early for brightness tap (bypasses output LPF)
+				directEarlyL_ = earlyL * directEarlyGain_;
+				directEarlyR_ = earlyR * directEarlyGain_;
+
 				float newOutL = earlyL + cascadeOutL * tailMixGain_;
 				float newOutR = earlyR + cascadeOutR * tailMixGain_;
 
@@ -277,7 +357,7 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 		}
 		else {
 			// === Full-rate mode ===
-			lfoPhase_ += 0.0000034f;
+			lfoPhase_ += 0.0000017f;
 			if (lfoPhase_ >= 1.0f)
 				lfoPhase_ -= 1.0f;
 			float lfoTri = lfoPhase_ < 0.5f ? (4.0f * lfoPhase_ - 1.0f) : (3.0f - 4.0f * lfoPhase_);
@@ -317,22 +397,85 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 			h1 -= dcBlockState_;
 			h2 -= dcBlockState_;
 
-			// === Cascade: variable series/parallel density with nested feedback ===
-			// c0→c1→c2 always series, c3 input blends between parallel and series
-			// Tail feedback uses squared room control for more aggressive decay shaping
+			// === Cascade: 4-stage with parallel/series blend ===
+			// c0→c1→c2 always series, c3 input blends between cascadeIn (parallel) and c2 (series)
+			// seriesMix=0 → 9 paths (sparse), seriesMix=1 → 16 paths (dense)
 			float tailFeedback = feedback_ * feedback_;
 			float cascadeIn = (d0 + d1 + d2) * 0.4f + prevC3Out_ * cascadeNestFeedback_ * tailFeedback;
 
-			// Series chain for density
+			// c0→c1 series chain (always at base rate)
 			float c0 = processCascadeStage(0, cascadeIn);
 			float c1 = processCascadeStage(1, c0);
-			float c2 = processCascadeStage(2, c1);
+
+			// C2 with optional 2x undersample for vast rooms
+			float c2;
+			if (cascadeDoubleUndersample_) {
+				c2Accum_ += c1;
+				if (c2Phase_ == 1) {
+					float avgIn = c2Accum_ * 0.5f;
+					constexpr float kC2UndersampleCoeff = 0.35f;
+					// Pitch modulation: read from offset position for chorus-like smearing
+					size_t c2ModOffset = static_cast<size_t>(std::max(0.0f, lfoTri * cascadeModDepth_));
+					size_t readPos = (cascadeWritePos_[2] + c2ModOffset) % cascadeLengths_[2];
+					size_t idx = cascadeOffsets_[2] + readPos;
+					float delayed = buffer_[idx];
+					float output = -kC2UndersampleCoeff * avgIn + delayed;
+					float writeVal = avgIn + kC2UndersampleCoeff * output;
+					buffer_[cascadeOffsets_[2] + cascadeWritePos_[2]] = writeVal;
+					if (++cascadeWritePos_[2] >= cascadeLengths_[2])
+						cascadeWritePos_[2] = 0;
+					buffer_[cascadeOffsets_[2] + cascadeWritePos_[2]] = writeVal;
+					if (++cascadeWritePos_[2] >= cascadeLengths_[2])
+						cascadeWritePos_[2] = 0;
+					c2Prev_ = output;
+					c2Accum_ = 0.0f;
+				}
+				c2Phase_ = (c2Phase_ + 1) & 1;
+				c2 = c2Prev_;
+			}
+			else {
+				c2 = processCascadeStage(2, c1);
+			}
 
 			// C3 input: blend parallel (cascadeIn) ↔ series (c2)
-			// seriesMix=0 → 9 paths (sparse), seriesMix=1 → 16 paths (dense)
 			float c3In = cascadeIn + (c2 - cascadeIn) * cascadeSeriesMix_;
-			float c3 = processCascadeStage(3, c3In);
+
+			// C3 with optional 2x undersample for vast rooms (Zone 2 > 80%)
+			float c3;
+			if (cascadeDoubleUndersample_) {
+				c3Accum_ += c3In;
+				if (c3Phase_ == 1) {
+					float avgIn = c3Accum_ * 0.5f;
+					constexpr float kC3UndersampleCoeff = 0.3f;
+					// Pitch modulation: inverted phase from C2 for decorrelation
+					size_t c3ModOffset = static_cast<size_t>(std::max(0.0f, -lfoTri * cascadeModDepth_));
+					size_t readPos = (cascadeWritePos_[3] + c3ModOffset) % cascadeLengths_[3];
+					size_t idx = cascadeOffsets_[3] + readPos;
+					float delayed = buffer_[idx];
+					float output = -kC3UndersampleCoeff * avgIn + delayed;
+					float writeVal = avgIn + kC3UndersampleCoeff * output;
+					buffer_[cascadeOffsets_[3] + cascadeWritePos_[3]] = writeVal;
+					if (++cascadeWritePos_[3] >= cascadeLengths_[3])
+						cascadeWritePos_[3] = 0;
+					buffer_[cascadeOffsets_[3] + cascadeWritePos_[3]] = writeVal;
+					if (++cascadeWritePos_[3] >= cascadeLengths_[3])
+						cascadeWritePos_[3] = 0;
+					c3Prev_ = output;
+					c3Accum_ = 0.0f;
+				}
+				c3Phase_ = (c3Phase_ + 1) & 1;
+				c3 = c3Prev_;
+			}
+			else {
+				c3 = processCascadeStage(3, c3In);
+			}
 			prevC3Out_ = c3; // Store for nested feedback next sample
+
+			// Amplitude modulation on C2/C3 for diffusion contour (opposite phases)
+			if (cascadeAmpMod_ > 0.0f) {
+				c2 *= (1.0f + lfoTri * cascadeAmpMod_);
+				c3 *= (1.0f - lfoTri * cascadeAmpMod_);
+			}
 
 			// Width breathing: expand stereo as signal decays
 			float dynamicWidth = width_ + (1.0f - std::min(inputEnvelope_ * 100.0f, 1.0f)) * widthBreath_;
@@ -360,6 +503,10 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 			float earlyL = earlyMid + earlySide;
 			float earlyR = earlyMid - earlySide;
 
+			// Save direct early for brightness tap (bypasses output LPF)
+			directEarlyL_ = earlyL * directEarlyGain_;
+			directEarlyR_ = earlyR * directEarlyGain_;
+
 			float rawOutL = earlyL + cascadeOutL * tailMixGain_;
 			float rawOutR = earlyR + cascadeOutR * tailMixGain_;
 
@@ -376,6 +523,10 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 		// Output LPF
 		outL = onepole(outL, lpStateL_, outLpCoeff);
 		outR = onepole(outR, lpStateR_, outLpCoeff);
+
+		// Add direct early brightness tap (bypasses LPF for crisp transients)
+		outL += directEarlyL_;
+		outR += directEarlyR_;
 
 		// Clamp and output
 		constexpr float kMaxFloat = 0.06f;
@@ -397,7 +548,8 @@ void Featherverb::setRoomSize(float value) {
 void Featherverb::setDamping(float value) {
 	damping_ = value;
 	dampCoeff_ = 0.1f + (1.0f - value) * 0.85f;
-	cascadeDamping_ = 0.05f + (1.0f - value) * 0.6f; // Darker in cascade
+	// cascadeDamping_ is computed in updateSizes() with vast mode modifier
+	updateSizes();
 }
 
 void Featherverb::setWidth(float value) {
@@ -531,9 +683,36 @@ void Featherverb::updateSizes() {
 
 	// Early/tail balance: inverse relationship for room character
 	// Tiny rooms: punchy early reflections, minimal tail (0.4 early, 0.25 tail)
-	// Vast rooms: spacious tails, subtle early (0.2 early, 1.1 tail)
-	earlyMixGain_ = 0.4f - t * 0.2f;  // 0.4 → 0.2
-	tailMixGain_ = 0.25f + t * 0.85f; // 0.25 → 1.1
+	// Vast rooms: spacious tails, subtle early (0.15 early, 1.3 tail)
+	earlyMixGain_ = 0.4f - t * 0.25f;   // 0.4 → 0.15
+	tailMixGain_ = 0.25f + t * 1.05f;   // 0.25 → 1.3
+	directEarlyGain_ = 0.2f - t * 0.1f; // 0.2 → 0.1 (more direct brightness at small, less at vast)
+
+	// Vast rooms get more nested feedback for extended tails (adds to Zone 3 control)
+	// This kicks in gradually above 50% Zone 2
+	float vastBoost = std::max(0.0f, (t - 0.5f) * 0.3f); // 0 → 0.15 for vast rooms
+	cascadeNestFeedback_ = std::clamp(cascadeNestFeedback_ + vastBoost, 0.0f, 0.45f);
+
+	// C2+C3 get 4x undersample at vast (Zone 2 > 80%) for extended tails
+	// C2: ~112ms effective, C3: ~362ms effective
+	cascadeDoubleUndersample_ = (t > 0.8f);
+
+	// Vast mode enhancements (Zone 2 > 80%)
+	// Recompute cascade damping from base damping_ value to avoid compounding
+	float baseCascadeDamping = 0.05f + (1.0f - damping_) * 0.6f;
+	if (t > 0.8f) {
+		// Softer cascade damping - let highs ring longer for lusher shimmer
+		cascadeDamping_ = baseCascadeDamping * 0.5f;
+		// Pitch modulation on C2/C3 for chorus-like smearing
+		cascadeModDepth_ = 14.0f; // More wobble for lush shimmer
+		// Amplitude modulation on C2/C3 for diffusion contour
+		cascadeAmpMod_ = 0.25f; // Subtle balance shift between stages
+	}
+	else {
+		cascadeDamping_ = baseCascadeDamping;
+		cascadeModDepth_ = 0.0f;
+		cascadeAmpMod_ = 0.0f;
+	}
 
 	cascadeLengths_[0] = static_cast<size_t>(kC0BaseLength * cascadeScale_);
 	cascadeLengths_[1] = static_cast<size_t>(kC1BaseLength * cascadeScale_);
@@ -586,6 +765,7 @@ void Featherverb::updateFeedbackPattern() {
 
 	// Cascade series mix - 10 periods for fine density control
 	// Triangle wave: 10 complete cycles over yNorm 0→1
+	// seriesMix=0 → C3 parallel (9 paths, sparse), seriesMix=1 → C3 series (16 paths, dense)
 	float phase10 = yNorm * 10.0f;
 	float tri10 = 1.0f - 4.0f * std::abs(phase10 - std::floor(phase10) - 0.5f);
 	// Map -1..1 to 0.35..0.85 range (biased toward series/dense)

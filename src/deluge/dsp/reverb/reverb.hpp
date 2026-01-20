@@ -25,8 +25,9 @@ public:
 	    : base_(&std::get<0>(reverb_)),     //<
 	      room_size_(base_->getRoomSize()), //<
 	      damping_(base_->getDamping()),    //<
-	      lpf_(base_->getLPF()),            //<
-	      width_(base_->getWidth()) {
+	      width_(base_->getWidth()),        //<
+	      hpf_(base_->getHPF()),            //<
+	      lpf_(base_->getLPF()) {
 		// Note: allocate() must be called after memory allocator is initialized
 		// This is done in AudioEngine::init()
 	}
@@ -60,7 +61,15 @@ public:
 	// a cooldown/debounce or mutex if this becomes a user-facing issue
 	void setModel(Model m) { pendingModel_.store(static_cast<int8_t>(m), std::memory_order_release); }
 
-	Model getModel() { return model_; }
+	Model getModel() {
+		// Return pending model if one is queued, otherwise return current
+		// This ensures UI shows the user's selection even before audio thread applies it
+		int8_t pending = pendingModel_.load(std::memory_order_acquire);
+		if (pending >= 0) {
+			return static_cast<Model>(pending);
+		}
+		return model_;
+	}
 
 	void process(std::span<int32_t> input, StereoBuffer<q31_t> output) override {
 		// Check for pending model change and apply it (in audio thread context)
@@ -79,6 +88,15 @@ private:
 	// Actually perform the model switch - called from audio thread only
 	void applyModelChange(Model m) {
 		using namespace reverb;
+
+		// Save Featherverb params before deallocating (if switching away)
+		if (model_ == Model::FEATHERVERB) {
+			auto& fv = reverb_as<Featherverb>();
+			featherZone1_ = fv.getZone1();
+			featherZone2_ = fv.getZone2();
+			featherZone3_ = fv.getZone3();
+			featherPredelay_ = fv.getPredelay();
+		}
 
 		// Deallocate current model's buffer
 		switch (model_) {
@@ -102,6 +120,11 @@ private:
 			reverb_.emplace<Featherverb>();
 			base_ = &std::get<Featherverb>(reverb_);
 			(void)std::get<Featherverb>(reverb_).allocate();
+			// Restore Featherverb-specific params
+			std::get<Featherverb>(reverb_).setZone1(featherZone1_);
+			std::get<Featherverb>(reverb_).setZone2(featherZone2_);
+			std::get<Featherverb>(reverb_).setZone3(featherZone3_);
+			std::get<Featherverb>(reverb_).setPredelay(featherPredelay_);
 			break;
 		case Model::FREEVERB:
 			reverb_.emplace<Freeverb>();
@@ -171,6 +194,7 @@ public:
 	// === Featherverb-specific parameters (only valid when model == FEATHERVERB) ===
 
 	void setFeatherZone1(int32_t value) {
+		featherZone1_ = value;
 		if (model_ == Model::FEATHERVERB) {
 			reverb_as<reverb::Featherverb>().setZone1(value);
 		}
@@ -179,10 +203,11 @@ public:
 		if (model_ == Model::FEATHERVERB) {
 			return std::get<reverb::Featherverb>(reverb_).getZone1();
 		}
-		return 0;
+		return featherZone1_;
 	}
 
 	void setFeatherZone2(int32_t value) {
+		featherZone2_ = value;
 		if (model_ == Model::FEATHERVERB) {
 			reverb_as<reverb::Featherverb>().setZone2(value);
 		}
@@ -191,10 +216,11 @@ public:
 		if (model_ == Model::FEATHERVERB) {
 			return std::get<reverb::Featherverb>(reverb_).getZone2();
 		}
-		return 0;
+		return featherZone2_;
 	}
 
 	void setFeatherZone3(int32_t value) {
+		featherZone3_ = value;
 		if (model_ == Model::FEATHERVERB) {
 			reverb_as<reverb::Featherverb>().setZone3(value);
 		}
@@ -203,10 +229,11 @@ public:
 		if (model_ == Model::FEATHERVERB) {
 			return std::get<reverb::Featherverb>(reverb_).getZone3();
 		}
-		return 0;
+		return featherZone3_;
 	}
 
 	void setFeatherPredelay(float value) {
+		featherPredelay_ = value;
 		if (model_ == Model::FEATHERVERB) {
 			reverb_as<reverb::Featherverb>().setPredelay(value);
 		}
@@ -215,7 +242,7 @@ public:
 		if (model_ == Model::FEATHERVERB) {
 			return std::get<reverb::Featherverb>(reverb_).getPredelay();
 		}
-		return 0.0f;
+		return featherPredelay_;
 	}
 
 	template <typename T>
@@ -246,5 +273,11 @@ public:
 	float lpf_;
 	int32_t panLeft_{0};
 	int32_t panRight_{0};
+
+	// Featherverb-specific parameter storage (persisted across model switches)
+	int32_t featherZone1_{0};
+	int32_t featherZone2_{512}; // Default to mid-size
+	int32_t featherZone3_{0};
+	float featherPredelay_{0.0f};
 };
 } // namespace deluge::dsp
