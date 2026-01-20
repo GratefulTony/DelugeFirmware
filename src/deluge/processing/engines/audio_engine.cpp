@@ -840,10 +840,15 @@ void renderReverb(size_t numSamples) {
 		// Mix reverb into main render
 		reverb.setPanLevels(reverbAmplitudeL, reverbAmplitudeR);
 		{
-			static constexpr const char* modelNames[] = {"feather", "freeverb", "mutable", "digital"};
-			FX_BENCH_DECLARE(bench, "reverb");
-			FX_BENCH_SET_TAG(bench, 0, modelNames[static_cast<int>(reverb.getModel())]);
-			FX_BENCH_SCOPE(bench);
+#if ENABLE_FX_BENCHMARK
+			// Separate benchmarks per reverb model for distinct comparison
+			static Debug::FxBenchmark benchFeather("reverb_feather");
+			static Debug::FxBenchmark benchFreeverb("reverb_freeverb");
+			static Debug::FxBenchmark benchMutable("reverb_mutable");
+			static Debug::FxBenchmark benchDigital("reverb_digital");
+			static Debug::FxBenchmark* benches[] = {&benchFeather, &benchFreeverb, &benchMutable, &benchDigital};
+			Debug::FxBenchmarkScope scope(*benches[static_cast<int>(reverb.getModel())]);
+#endif
 			reverb.process(reverbBuffer, renderingBuffer);
 		}
 		logAction("Reverb complete");
