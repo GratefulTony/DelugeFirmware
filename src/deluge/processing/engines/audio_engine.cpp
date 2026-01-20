@@ -19,6 +19,8 @@
 #include "definitions.h"
 #include "definitions_cxx.hpp"
 #include "dsp/reverb/reverb.hpp"
+#include "dsp/shaper_buffer.h"
+#include "dsp/sine_shaper.hpp"
 #include "dsp/timestretch/time_stretcher.h"
 #include "extern.h"
 #include "gui/context_menu/sample_browser/kit.h"
@@ -878,6 +880,36 @@ void renderSongFX(size_t numSamples) { // LPF and stutter for song (must happen 
 	// 167763968 is 134217728 made a bit bigger so that default filter resonance doesn't reduce volume overall
 
 	if (currentSong) {
+		UnpatchedParamSet* unpatchedParams = currentSong->paramManager.getUnpatchedParamSet();
+
+		// Sine Shaper - runs before filters (matching clip processing order)
+		if (currentSong->globalEffectable.sineShaper.isEnabled()) {
+			q31_t sineDrive = unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_DRIVE);
+			q31_t harmonic = unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_HARMONIC);
+			q31_t twist = unpatchedParams->getValue(params::UNPATCHED_SINE_SHAPER_TWIST);
+			dsp::processSineShaper(renderingBuffer, &currentSong->globalEffectable.sineShaper,
+			                       &currentSong->globalEffectable.sineShaperState, sineDrive, harmonic, harmonic, twist,
+			                       twist, 0, false);
+		}
+
+		// Table Shaper - runs before filters (matching clip processing order)
+		if (currentSong->globalEffectable.shaper.isEnabled()) {
+			q31_t satDrive = unpatchedParams->getValue(params::UNPATCHED_TABLE_SHAPER_DRIVE);
+			q31_t satMix = unpatchedParams->getValue(params::UNPATCHED_TABLE_SHAPER_MIX);
+			dsp::shapeBufferInt32(
+			    renderingBuffer, currentSong->globalEffectable.shaperDsp, satDrive,
+			    &currentSong->globalEffectable.shaper.driveLast, satMix,
+			    &currentSong->globalEffectable.shaper.threshold32Last,
+			    &currentSong->globalEffectable.shaper.blendSlopeLast_Q8, 0, false,
+			    &currentSong->globalEffectable.shaper.prevScaledInputL,
+			    &currentSong->globalEffectable.shaper.prevScaledInputR,
+			    &currentSong->globalEffectable.shaper.prevSampleL, &currentSong->globalEffectable.shaper.prevSampleR,
+			    &currentSong->globalEffectable.shaper.zcCountL, &currentSong->globalEffectable.shaper.zcCountR,
+			    &currentSong->globalEffectable.shaper.subSignL, &currentSong->globalEffectable.shaper.subSignR,
+			    currentSong->globalEffectable.shaper.extrasMask, currentSong->globalEffectable.shaper.gammaPhase,
+			    &currentSong->globalEffectable.shaper.slewedL, &currentSong->globalEffectable.shaper.slewedR);
+		}
+
 		currentSong->globalEffectable.setupFilterSetConfig(&masterVolumeAdjustmentL, &currentSong->paramManager);
 		currentSong->globalEffectable.processFilters(renderingBuffer);
 		currentSong->globalEffectable.processSRRAndBitcrushing(renderingBuffer, &masterVolumeAdjustmentL,

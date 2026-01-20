@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "dsp/sine_shaper.hpp"
 #include "model/global_effectable/global_effectable.h"
 
 class GlobalEffectableForSong final : public GlobalEffectable {
@@ -26,6 +27,9 @@ public:
 	uint8_t* getModKnobMode() override { return &modKnobMode; }
 
 	uint8_t modKnobMode;
+
+	// Per-song sine shaper state (DC blocker, feedback, feedback LPF, stereo LFO)
+	deluge::dsp::SineShaperVoiceState sineShaperState;
 
 protected:
 	bool isSong() override { return true; }
