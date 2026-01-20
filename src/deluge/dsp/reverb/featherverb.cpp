@@ -26,35 +26,47 @@
 
 namespace deluge::dsp::reverb {
 
-// Pi constant for angle calculations
-static constexpr float kPi = 3.14159265358979323846f;
-static constexpr float kTwoPi = 2.0f * kPi;
-
 using namespace deluge::dsp;
-
-// Note: D2/D3 min/max lengths are defined in featherverb.hpp
 
 Featherverb::Featherverb() {
 	// Compute buffer offsets for contiguous layout
 	size_t offset = 0;
-	for (size_t i = 0; i < kNumDelays; ++i) {
-		delayOffsets_[i] = offset;
-		offset += kDelayLengths[i];
+
+	// FDN delays (3 delays)
+	for (size_t i = 0; i < kNumFdnDelays; ++i) {
+		fdnOffsets_[i] = offset;
+		offset += (i == 0) ? kD0MaxLength : (i == 1) ? kD1MaxLength : kD2MaxLength;
 	}
 
-	// Initialize default parameters
+	// Cascade stages (4 allpass delays) - allocate max size
+	size_t cascadeMaxLengths[kNumCascade] = {
+	    static_cast<size_t>(kC0BaseLength * kCascadeMaxScale), static_cast<size_t>(kC1BaseLength * kCascadeMaxScale),
+	    static_cast<size_t>(kC2BaseLength * kCascadeMaxScale), static_cast<size_t>(kC3BaseLength * kCascadeMaxScale)};
+	for (size_t i = 0; i < kNumCascade; ++i) {
+		cascadeOffsets_[i] = offset;
+		offset += cascadeMaxLengths[i];
+	}
+
+	// Predelay
+	predelayOffset_ = offset;
+	offset += kPredelayMaxLength;
+
+	// Diffusers
+	diffuserOffsets_[0] = offset;
+	offset += kDiffuser0Length;
+	diffuserOffsets_[1] = offset;
+
+	// Initialize defaults
 	setRoomSize(0.5f);
 	setDamping(0.5f);
-
-	// Initialize zone parameters to sensible defaults
 	updateMatrix();
-	updateDelayLengths();
+	updateSizes();
 	updateFeedbackPattern();
 }
 
 bool Featherverb::allocate() {
 	if (buffer_ != nullptr) {
-		return true; // Already allocated
+		return true;
 	}
 
 	buffer_ = static_cast<float*>(
@@ -64,15 +76,28 @@ bool Featherverb::allocate() {
 		return false;
 	}
 
-	// Zero the buffer
 	std::memset(buffer_, 0, kBufferBytes);
 
-	// Reset write positions and filter states
-	writePos_.fill(0);
-	lpState_.fill(0.0f);
+	// Reset state
+	fdnWritePos_.fill(0);
+	fdnLpState_.fill(0.0f);
+	cascadeWritePos_.fill(0);
+	cascadeLpState_ = 0.0f;
+	prevC3Out_ = 0.0f;
+	diffuserWritePos_.fill(0);
+	predelayWritePos_ = 0;
+	dcBlockState_ = 0.0f;
+	inputEnvelope_ = 0.0f;
 	hpState_ = 0.0f;
 	lpStateL_ = 0.0f;
 	lpStateR_ = 0.0f;
+	lfoPhase_ = 0.0f;
+	prevOutputMono_ = 0.0f;
+
+	// Reset undersampling
+	undersamplePhase_ = false;
+	accumIn_ = 0.0f;
+	prevOutL_ = prevOutR_ = currOutL_ = currOutR_ = 0.0f;
 
 	return true;
 }
@@ -85,76 +110,277 @@ void Featherverb::deallocate() {
 }
 
 void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) {
-	// Safety check
 	if (buffer_ == nullptr) {
 		return;
 	}
 
 	constexpr float kInputScale = 1.0f / static_cast<float>(std::numeric_limits<int32_t>::max());
-	// Match Mutable's output level
 	constexpr float kOutputScale = static_cast<float>(std::numeric_limits<int32_t>::max()) * 16.0f;
 
-	// HPF coefficient for input (removes DC)
 	const float hpCoeff = 0.995f - hpCutoff_ * 0.09f;
-
-	// Output LPF coefficient
 	const float outLpCoeff = 0.1f + lpCutoff_ * 0.85f;
 
-	// Cache matrix locally for faster access
+	// Cache matrix
 	const auto& m = matrix_;
 
 	for (size_t frame = 0; frame < input.size(); ++frame) {
-		// Convert input to float and apply HPF
+		// === Full-rate: HPF, envelope, predelay ===
 		float in = static_cast<float>(input[frame]) * kInputScale;
 		float hpOut = in - hpState_;
 		hpState_ += (1.0f - hpCoeff) * hpOut;
 		in = hpOut;
 
-		// Read from all delay lines
-		float d0 = read(0);
-		float d1 = read(1);
-		float d2 = read(2);
-		float d3 = read(3);
+		// Input envelope for auto-decay
+		float inAbs = std::fabs(in);
+		if (inAbs > inputEnvelope_) {
+			inputEnvelope_ = inAbs;
+		}
+		else {
+			float releaseRate = 0.0001f + (1023 - zone2_) * 0.0002f / 1023.0f;
+			inputEnvelope_ += releaseRate * (inAbs - inputEnvelope_);
+		}
 
-		// Apply 4x4 mixing matrix (phi-rotated orthogonal matrix)
-		float h0 = m[0][0] * d0 + m[0][1] * d1 + m[0][2] * d2 + m[0][3] * d3;
-		float h1 = m[1][0] * d0 + m[1][1] * d1 + m[1][2] * d2 + m[1][3] * d3;
-		float h2 = m[2][0] * d0 + m[2][1] * d1 + m[2][2] * d2 + m[2][3] * d3;
-		float h3 = m[3][0] * d0 + m[3][1] * d1 + m[3][2] * d2 + m[3][3] * d3;
+		// Predelay (single tap)
+		if (predelayLength_ > 0) {
+			writePredelay(in);
+			in = readPredelay(predelayLength_);
+		}
 
-		// Apply feedback with damping (lowpass in feedback path)
-		// Near delays (D0-D1): brighter early reflections
-		// Far delays (D2-D3): darker tail (scaled by room size)
-		// Per-delay feedback multipliers add character variation
-		h0 = onepole(h0, lpState_[0], dampCoeffNear_) * feedback_ * feedbackMult_[0];
-		h1 = onepole(h1, lpState_[1], dampCoeffNear_) * feedback_ * feedbackMult_[1];
-		h2 = onepole(h2, lpState_[2], dampCoeffFar_) * feedback_ * feedbackMult_[2];
-		h3 = onepole(h3, lpState_[3], dampCoeffFar_) * feedback_ * feedbackMult_[3];
+		float outL, outR;
 
-		// Inject input into first delay line
-		h0 += in;
+		if constexpr (kUndersample) {
+			// === 2x Undersampling ===
+			accumIn_ += in;
 
-		// Write back to delay lines
-		write(0, h0);
-		write(1, h1);
-		write(2, h2);
-		write(3, h3);
+			if (undersamplePhase_) {
+				float fdnIn = accumIn_ * 0.5f;
+				accumIn_ = 0.0f;
 
-		// Extra taps from D3 for increased density (early reflections)
-		float tap1 = readAt(3, kTap1Offset);
-		float tap2 = readAt(3, kTap2Offset);
+				// LFO
+				lfoPhase_ += 0.0000068f;
+				if (lfoPhase_ >= 1.0f)
+					lfoPhase_ -= 1.0f;
+				float lfoTri = lfoPhase_ < 0.5f ? (4.0f * lfoPhase_ - 1.0f) : (3.0f - 4.0f * lfoPhase_);
+				size_t d0Mod = static_cast<size_t>(std::max(0.0f, lfoTri * modDepth_));
+				size_t d1Mod = static_cast<size_t>(std::max(0.0f, -lfoTri * modDepth_));
 
-		// Output mix: base taps + density taps cross-mixed for stereo width
-		// Base: d0+d2 (L), d1+d3 (R) with width control
-		// Density: tap1/tap2 cross-mixed at lower levels
-		float outL = d0 + d2 * width_ + tap1 * 0.25f + tap2 * 0.12f;
-		float outR = d1 + d3 * width_ + tap2 * 0.25f + tap1 * 0.12f;
+				// Read FDN delays
+				float d0 = fdnReadAt(0, d0Mod);
+				float d1 = fdnReadAt(1, d1Mod);
+				float d2 = fdnRead(2);
 
-		// Apply output lowpass
+				// 3x3 matrix multiply
+				float h0 = m[0][0] * d0 + m[0][1] * d1 + m[0][2] * d2;
+				float h1 = m[1][0] * d0 + m[1][1] * d1 + m[1][2] * d2;
+				float h2 = m[2][0] * d0 + m[2][1] * d1 + m[2][2] * d2;
+
+				// Cross-channel bleed: L↔R mixing for stereo complexity
+				if (crossBleed_ > 0.0f) {
+					float h0Orig = h0;
+					h0 += h1 * crossBleed_;
+					h1 += h0Orig * crossBleed_;
+				}
+
+				// Feedback with auto-decay
+				float effectiveFeedback = feedback_;
+				constexpr float kEnvReference = 0.001f;
+				constexpr float kMinFeedbackMult = 0.6f;
+				float feedbackFloor = kMinFeedbackMult + (zone2_ * (1.0f - kMinFeedbackMult)) / 1023.0f;
+				float envNorm = std::min(inputEnvelope_ / kEnvReference, 1.0f);
+				float feedbackMod = feedbackFloor + envNorm * (1.0f - feedbackFloor);
+				effectiveFeedback *= feedbackMod;
+
+				// Damping + feedback
+				h0 = onepole(h0, fdnLpState_[0], dampCoeff_) * effectiveFeedback * feedbackMult_[0];
+				h1 = onepole(h1, fdnLpState_[1], dampCoeff_) * effectiveFeedback * feedbackMult_[1];
+				h2 = onepole(h2, fdnLpState_[2], dampCoeff_) * effectiveFeedback * feedbackMult_[2];
+
+				// DC blocking on FDN
+				float dcSum = (h0 + h1 + h2) * 0.333f;
+				dcBlockState_ += 0.007f * (dcSum - dcBlockState_);
+				h0 -= dcBlockState_;
+				h1 -= dcBlockState_;
+				h2 -= dcBlockState_;
+
+				// === Cascade: variable series/parallel density with nested feedback ===
+				// c0→c1→c2 always series, c3 input blends between parallel and series
+				// Tail feedback uses squared room control for more aggressive decay shaping
+				float tailFeedback = feedback_ * feedback_; // Tail decays faster than early at low room
+				float cascadeIn = (d0 + d1 + d2) * 0.4f + prevC3Out_ * cascadeNestFeedback_ * tailFeedback;
+
+				// Series chain for density
+				float c0 = processCascadeStage(0, cascadeIn);
+				float c1 = processCascadeStage(1, c0);
+				float c2 = processCascadeStage(2, c1);
+
+				// C3 input: blend parallel (cascadeIn) ↔ series (c2)
+				// seriesMix=0 → 9 paths (sparse), seriesMix=1 → 16 paths (dense)
+				float c3In = cascadeIn + (c2 - cascadeIn) * cascadeSeriesMix_;
+				float c3 = processCascadeStage(3, c3In);
+				prevC3Out_ = c3; // Store for nested feedback next sample
+
+				// Width breathing: expand stereo as signal decays
+				float dynamicWidth = width_ + (1.0f - std::min(inputEnvelope_ * 100.0f, 1.0f)) * widthBreath_;
+
+				// Mix outputs - stereo tail from cascade (mid/side)
+				// c2+c3 = dense tail (both channels), c0-c1 = stereo spread scaled by width
+				float cascadeMono = (c2 + c3) * 0.5f;
+				float cascadeSide = (c0 - c1) * 0.2f * dynamicWidth;
+
+				// Apply damping to mono component
+				cascadeMono = onepole(cascadeMono, cascadeLpState_, cascadeDamping_);
+				float cascadeOutL = cascadeMono + cascadeSide;
+				float cascadeOutR = cascadeMono - cascadeSide;
+
+				// Inject input + cascade feedback into FDN (tail uses squared feedback)
+				h0 += fdnIn + cascadeMono * tailFeedback * cascadeFeedbackMult_;
+
+				// Write FDN (double write for undersampling)
+				fdnWrite(0, h0);
+				fdnWrite(1, h1);
+				fdnWrite(2, h2);
+				fdnWrite(0, h0);
+				fdnWrite(1, h1);
+				fdnWrite(2, h2);
+
+				// Output: mix early (FDN) + late (cascade)
+				float earlyMid = (d0 + d1) * earlyMixGain_;
+				float earlySide = (d0 - d1) * earlyMixGain_ * dynamicWidth;
+				float earlyL = earlyMid + earlySide;
+				float earlyR = earlyMid - earlySide;
+
+				float newOutL = earlyL + cascadeOutL * tailMixGain_;
+				float newOutR = earlyR + cascadeOutR * tailMixGain_;
+
+				// Global wet side boost from width knob (mid/side)
+				// width=0: normal stereo, width=1: 2x side boost
+				float wetMid = (newOutL + newOutR) * 0.5f;
+				float wetSide = (newOutL - newOutR) * 0.5f * (1.0f + width_);
+				newOutL = wetMid + wetSide;
+				newOutR = wetMid - wetSide;
+
+				prevOutL_ = currOutL_;
+				prevOutR_ = currOutR_;
+				currOutL_ = newOutL;
+				currOutR_ = newOutR;
+
+				outL = currOutL_;
+				outR = currOutR_;
+			}
+			else {
+				// Interpolate
+				outL = (prevOutL_ + currOutL_) * 0.5f;
+				outR = (prevOutR_ + currOutR_) * 0.5f;
+			}
+
+			undersamplePhase_ = !undersamplePhase_;
+		}
+		else {
+			// === Full-rate mode ===
+			lfoPhase_ += 0.0000034f;
+			if (lfoPhase_ >= 1.0f)
+				lfoPhase_ -= 1.0f;
+			float lfoTri = lfoPhase_ < 0.5f ? (4.0f * lfoPhase_ - 1.0f) : (3.0f - 4.0f * lfoPhase_);
+			size_t d0Mod = static_cast<size_t>(std::max(0.0f, lfoTri * modDepth_));
+			size_t d1Mod = static_cast<size_t>(std::max(0.0f, -lfoTri * modDepth_));
+
+			float d0 = fdnReadAt(0, d0Mod);
+			float d1 = fdnReadAt(1, d1Mod);
+			float d2 = fdnRead(2);
+
+			float h0 = m[0][0] * d0 + m[0][1] * d1 + m[0][2] * d2;
+			float h1 = m[1][0] * d0 + m[1][1] * d1 + m[1][2] * d2;
+			float h2 = m[2][0] * d0 + m[2][1] * d1 + m[2][2] * d2;
+
+			// Cross-channel bleed: L↔R mixing for stereo complexity
+			if (crossBleed_ > 0.0f) {
+				float h0Orig = h0;
+				h0 += h1 * crossBleed_;
+				h1 += h0Orig * crossBleed_;
+			}
+
+			float effectiveFeedback = feedback_;
+			constexpr float kEnvReference = 0.001f;
+			constexpr float kMinFeedbackMult = 0.6f;
+			float feedbackFloor = kMinFeedbackMult + (zone2_ * (1.0f - kMinFeedbackMult)) / 1023.0f;
+			float envNorm = std::min(inputEnvelope_ / kEnvReference, 1.0f);
+			float feedbackMod = feedbackFloor + envNorm * (1.0f - feedbackFloor);
+			effectiveFeedback *= feedbackMod;
+
+			h0 = onepole(h0, fdnLpState_[0], dampCoeff_) * effectiveFeedback * feedbackMult_[0];
+			h1 = onepole(h1, fdnLpState_[1], dampCoeff_) * effectiveFeedback * feedbackMult_[1];
+			h2 = onepole(h2, fdnLpState_[2], dampCoeff_) * effectiveFeedback * feedbackMult_[2];
+
+			float dcSum = (h0 + h1 + h2) * 0.333f;
+			dcBlockState_ += 0.007f * (dcSum - dcBlockState_);
+			h0 -= dcBlockState_;
+			h1 -= dcBlockState_;
+			h2 -= dcBlockState_;
+
+			// === Cascade: variable series/parallel density with nested feedback ===
+			// c0→c1→c2 always series, c3 input blends between parallel and series
+			// Tail feedback uses squared room control for more aggressive decay shaping
+			float tailFeedback = feedback_ * feedback_;
+			float cascadeIn = (d0 + d1 + d2) * 0.4f + prevC3Out_ * cascadeNestFeedback_ * tailFeedback;
+
+			// Series chain for density
+			float c0 = processCascadeStage(0, cascadeIn);
+			float c1 = processCascadeStage(1, c0);
+			float c2 = processCascadeStage(2, c1);
+
+			// C3 input: blend parallel (cascadeIn) ↔ series (c2)
+			// seriesMix=0 → 9 paths (sparse), seriesMix=1 → 16 paths (dense)
+			float c3In = cascadeIn + (c2 - cascadeIn) * cascadeSeriesMix_;
+			float c3 = processCascadeStage(3, c3In);
+			prevC3Out_ = c3; // Store for nested feedback next sample
+
+			// Width breathing: expand stereo as signal decays
+			float dynamicWidth = width_ + (1.0f - std::min(inputEnvelope_ * 100.0f, 1.0f)) * widthBreath_;
+
+			// Mix outputs - stereo tail from cascade (mid/side)
+			// c2+c3 = dense tail (both channels), c0-c1 = stereo spread scaled by width
+			float cascadeMono = (c2 + c3) * 0.5f;
+			float cascadeSide = (c0 - c1) * 0.2f * dynamicWidth;
+
+			// Apply damping to mono component
+			cascadeMono = onepole(cascadeMono, cascadeLpState_, cascadeDamping_);
+			float cascadeOutL = cascadeMono + cascadeSide;
+			float cascadeOutR = cascadeMono - cascadeSide;
+
+			// Inject input + cascade feedback into FDN (tail uses squared feedback)
+			h0 += in + cascadeMono * tailFeedback * cascadeFeedbackMult_;
+
+			fdnWrite(0, h0);
+			fdnWrite(1, h1);
+			fdnWrite(2, h2);
+
+			// Output: mix early (FDN) + late (cascade)
+			float earlyMid = (d0 + d1) * earlyMixGain_;
+			float earlySide = (d0 - d1) * earlyMixGain_ * dynamicWidth;
+			float earlyL = earlyMid + earlySide;
+			float earlyR = earlyMid - earlySide;
+
+			float rawOutL = earlyL + cascadeOutL * tailMixGain_;
+			float rawOutR = earlyR + cascadeOutR * tailMixGain_;
+
+			// Global wet side boost from width knob (mid/side)
+			// width=0: normal stereo, width=1: 2x side boost
+			float wetMid = (rawOutL + rawOutR) * 0.5f;
+			float wetSide = (rawOutL - rawOutR) * 0.5f * (1.0f + width_);
+			outL = wetMid + wetSide;
+			outR = wetMid - wetSide;
+		}
+
+		prevOutputMono_ = (outL + outR) * 0.5f;
+
+		// Output LPF
 		outL = onepole(outL, lpStateL_, outLpCoeff);
 		outR = onepole(outR, lpStateR_, outLpCoeff);
 
-		// Convert to fixed point and mix into output
+		// Clamp and output
+		constexpr float kMaxFloat = 0.06f;
+		outL = std::clamp(outL, -kMaxFloat, kMaxFloat);
+		outR = std::clamp(outR, -kMaxFloat, kMaxFloat);
 		int32_t outLq31 = static_cast<int32_t>(outL * kOutputScale);
 		int32_t outRq31 = static_cast<int32_t>(outR * kOutputScale);
 
@@ -165,20 +391,13 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 
 void Featherverb::setRoomSize(float value) {
 	roomSize_ = value;
-	// Map 0-1 to feedback range ~0.75-0.995 for natural decay
-	// Higher range gives longer sustain at max settings
-	feedback_ = 0.75f + value * 0.245f;
+	feedback_ = 0.75f + value * 0.24f;
 }
 
 void Featherverb::setDamping(float value) {
 	damping_ = value;
-	// Map 0-1 to LP coefficient (higher coeff = less damping = brighter)
-	// Inverted: high damping value = more filtering = darker sound
-	dampCoeffNear_ = 0.1f + (1.0f - value) * 0.85f;
-
-	// Far damping is darker - will be further scaled by room size in updateDelayLengths()
-	// Base: 20% darker than near (multiply coeff by 0.8)
-	dampCoeffFar_ = dampCoeffNear_ * 0.8f;
+	dampCoeff_ = 0.1f + (1.0f - value) * 0.85f;
+	cascadeDamping_ = 0.05f + (1.0f - value) * 0.6f; // Darker in cascade
 }
 
 void Featherverb::setWidth(float value) {
@@ -193,34 +412,24 @@ void Featherverb::setLPF(float f) {
 	lpCutoff_ = f;
 }
 
-// === Zone 1: Matrix generation using 16 phi triangles ===
-// 16 phi triangles generate raw matrix values, then Gram-Schmidt orthonormalization
-// produces a valid orthogonal mixing matrix. This gives maximum flexibility.
+void Featherverb::setPredelay(float value) {
+	predelay_ = value;
+	predelayLength_ = static_cast<size_t>(value * kPredelayMaxLength);
+}
 
-// Phi triangle bank for 16 matrix entries (4 rows × 4 cols)
-// Each entry has unique φ^n frequency for non-repeating evolution
-// Phase offsets spread entries evenly
-static constexpr std::array<phi::PhiTriConfig, 16> kMatrixTriBank = {{
-    // Row 0
-    {phi::kPhi025, 0.7f, 0.000f, true},  // m[0][0]
-    {phi::kPhi050, 0.7f, 0.0625f, true}, // m[0][1]
-    {phi::kPhi075, 0.7f, 0.125f, true},  // m[0][2]
-    {phi::kPhi100, 0.7f, 0.1875f, true}, // m[0][3]
-    // Row 1
-    {phi::kPhi125, 0.7f, 0.250f, true},  // m[1][0]
-    {phi::kPhi150, 0.7f, 0.3125f, true}, // m[1][1]
-    {phi::kPhi175, 0.7f, 0.375f, true},  // m[1][2]
-    {phi::kPhi200, 0.7f, 0.4375f, true}, // m[1][3]
-    // Row 2
-    {phi::kPhi033, 0.7f, 0.500f, true},   // m[2][0]
-    {phi::kPhi067, 0.7f, 0.5625f, true},  // m[2][1]
-    {phi::kPhiN025, 0.7f, 0.625f, true},  // m[2][2]
-    {phi::kPhiN050, 0.7f, 0.6875f, true}, // m[2][3]
-    // Row 3
-    {phi::kPhi225, 0.7f, 0.750f, true},  // m[3][0]
-    {phi::kPhi250, 0.7f, 0.8125f, true}, // m[3][1]
-    {phi::kPhi275, 0.7f, 0.875f, true},  // m[3][2]
-    {phi::kPhi300, 0.7f, 0.9375f, true}, // m[3][3]
+// === Zone 1: Matrix morphing ===
+// Simplified 3x3 matrix with phi triangle modulation
+
+static constexpr std::array<phi::PhiTriConfig, 9> kMatrix3TriBank = {{
+    {phi::kPhi025, 0.7f, 0.000f, true},
+    {phi::kPhi050, 0.7f, 0.111f, true},
+    {phi::kPhi075, 0.7f, 0.222f, true},
+    {phi::kPhi100, 0.7f, 0.333f, true},
+    {phi::kPhi125, 0.7f, 0.444f, true},
+    {phi::kPhi150, 0.7f, 0.555f, true},
+    {phi::kPhi175, 0.7f, 0.666f, true},
+    {phi::kPhi200, 0.7f, 0.777f, true},
+    {phi::kPhi033, 0.7f, 0.888f, true},
 }};
 
 void Featherverb::setZone1(int32_t value) {
@@ -228,34 +437,26 @@ void Featherverb::setZone1(int32_t value) {
 	updateMatrix();
 }
 
-/// Gram-Schmidt orthonormalization of 4x4 matrix (in-place)
-/// Returns false if matrix is degenerate (shouldn't happen with phi triangles)
-static bool gramSchmidt4x4(std::array<std::array<float, 4>, 4>& m) {
-	// Process each column
-	for (int col = 0; col < 4; ++col) {
-		// Subtract projections onto previous columns
+// Simple Gram-Schmidt for 3x3
+static bool gramSchmidt3x3(std::array<std::array<float, 3>, 3>& m) {
+	for (int col = 0; col < 3; ++col) {
 		for (int prev = 0; prev < col; ++prev) {
-			// Compute dot product with previous column
 			float dot = 0.0f;
-			for (int row = 0; row < 4; ++row) {
+			for (int row = 0; row < 3; ++row) {
 				dot += m[row][col] * m[row][prev];
 			}
-			// Subtract projection
-			for (int row = 0; row < 4; ++row) {
+			for (int row = 0; row < 3; ++row) {
 				m[row][col] -= dot * m[row][prev];
 			}
 		}
-
-		// Normalize this column
 		float norm = 0.0f;
-		for (int row = 0; row < 4; ++row) {
+		for (int row = 0; row < 3; ++row) {
 			norm += m[row][col] * m[row][col];
 		}
 		norm = std::sqrt(norm);
-		if (norm < 0.0001f) {
-			return false; // Degenerate matrix
-		}
-		for (int row = 0; row < 4; ++row) {
+		if (norm < 0.0001f)
+			return false;
+		for (int row = 0; row < 3; ++row) {
 			m[row][col] /= norm;
 		}
 	}
@@ -265,103 +466,94 @@ static bool gramSchmidt4x4(std::array<std::array<float, 4>, 4>& m) {
 void Featherverb::updateMatrix() {
 	using namespace phi;
 
-	// Map zone1 to yNorm and gammaPhase for phi triangle evaluation
 	const float yNorm = static_cast<float>(zone1_) / 1023.0f;
-	const int32_t zone = zone1_ >> 7;       // 0-7
-	const double gammaPhase = zone * 0.125; // Each zone shifts phase by 1/8
+	const int32_t zone = zone1_ >> 7;
+	const double gammaPhase = zone * 0.125;
 
-	// Create phi triangle context
 	const PhiTriContext ctx{yNorm, 1.0f, 1.0f, gammaPhase};
+	std::array<float, 9> vals = ctx.evalBank(kMatrix3TriBank);
 
-	// Evaluate all 16 phi triangles
-	std::array<float, 16> vals = ctx.evalBank(kMatrixTriBank);
+	// Base 3x3 Hadamard-like matrix
+	static constexpr std::array<std::array<float, 3>, 3> kH3Base = {
+	    {{1.0f, 1.0f, 1.0f}, {1.0f, -1.0f, 0.0f}, {1.0f, 0.0f, -1.0f}}};
 
-	// Start with Hadamard as base (well-conditioned, no degenerate risk)
-	// Then add phi triangle modulation
-	static constexpr std::array<std::array<float, 4>, 4> kHadamard = {
-	    {{1.0f, 1.0f, 1.0f, 1.0f}, {1.0f, -1.0f, 1.0f, -1.0f}, {1.0f, 1.0f, -1.0f, -1.0f}, {1.0f, -1.0f, -1.0f, 1.0f}}};
-
-	// Blend factor: how much phi triangles influence the matrix
-	// Zone determines blend intensity
-	static constexpr std::array<float, 8> kZoneBlend = {
-	    0.0f,  // Zone 0: Pure Hadamard
-	    0.15f, // Zone 1: Subtle variation
-	    0.3f,  // Zone 2: Moderate
-	    0.45f, // Zone 3: More varied
-	    0.6f,  // Zone 4: Significant
-	    0.75f, // Zone 5: Strong
-	    0.85f, // Zone 6: Very morphed
-	    0.95f  // Zone 7: Nearly full phi control
-	};
-
+	static constexpr std::array<float, 8> kZoneBlend = {0.0f, 0.15f, 0.3f, 0.45f, 0.6f, 0.75f, 0.85f, 0.95f};
 	const float blend = kZoneBlend[zone];
 
-	// Build matrix: Hadamard + blend * phi_triangles
-	for (int row = 0; row < 4; ++row) {
-		for (int col = 0; col < 4; ++col) {
-			float base = kHadamard[row][col];
-			float mod = vals[row * 4 + col]; // -1 to +1 from bipolar phi triangle
+	for (int row = 0; row < 3; ++row) {
+		for (int col = 0; col < 3; ++col) {
+			float base = kH3Base[row][col];
+			float mod = vals[row * 3 + col];
 			matrix_[row][col] = base + blend * mod * 0.5f;
 		}
 	}
 
-	// Orthonormalize to ensure energy preservation
-	// After Gram-Schmidt, matrix is already orthonormal (no additional scaling needed)
-	if (!gramSchmidt4x4(matrix_)) {
-		// Fallback to normalized Hadamard if degenerate (shouldn't happen)
-		for (int row = 0; row < 4; ++row) {
-			for (int col = 0; col < 4; ++col) {
-				matrix_[row][col] = kHadamard[row][col] * 0.5f;
+	if (!gramSchmidt3x3(matrix_)) {
+		// Fallback
+		for (int row = 0; row < 3; ++row) {
+			for (int col = 0; col < 3; ++col) {
+				matrix_[row][col] = kH3Base[row][col] * kH3Norm;
 			}
+		}
+	}
+
+	modDepth_ = blend * 25.0f;
+
+	// Update D0/D1 lengths from phi triangles
+	float d0Tri = (vals[0] + 1.0f) * 0.5f;
+	float d1Tri = (vals[3] + 1.0f) * 0.5f;
+	fdnLengths_[0] = kD0MinLength + static_cast<size_t>(d0Tri * (kD0MaxLength - kD0MinLength));
+	fdnLengths_[1] = kD1MinLength + static_cast<size_t>(d1Tri * (kD1MaxLength - kD1MinLength));
+
+	if (fdnWritePos_[0] >= fdnLengths_[0])
+		fdnWritePos_[0] = 0;
+	if (fdnWritePos_[1] >= fdnLengths_[1])
+		fdnWritePos_[1] = 0;
+}
+
+// === Zone 2: Size (D2 + cascade scaling) ===
+
+void Featherverb::setZone2(int32_t value) {
+	zone2_ = value;
+	updateSizes();
+}
+
+void Featherverb::updateSizes() {
+	const float t = static_cast<float>(zone2_) / 1023.0f;
+
+	// D2 scales from min to max
+	fdnLengths_[2] = kD2MinLength + static_cast<size_t>(t * (kD2MaxLength - kD2MinLength));
+	if (fdnWritePos_[2] >= fdnLengths_[2])
+		fdnWritePos_[2] = 0;
+
+	// Cascade scales uniformly from 1x to 1.5x
+	cascadeScale_ = 1.0f + t * (kCascadeMaxScale - 1.0f);
+
+	// Early/tail balance: inverse relationship for room character
+	// Tiny rooms: punchy early reflections, minimal tail (0.4 early, 0.25 tail)
+	// Vast rooms: spacious tails, subtle early (0.2 early, 1.1 tail)
+	earlyMixGain_ = 0.4f - t * 0.2f;  // 0.4 → 0.2
+	tailMixGain_ = 0.25f + t * 0.85f; // 0.25 → 1.1
+
+	cascadeLengths_[0] = static_cast<size_t>(kC0BaseLength * cascadeScale_);
+	cascadeLengths_[1] = static_cast<size_t>(kC1BaseLength * cascadeScale_);
+	cascadeLengths_[2] = static_cast<size_t>(kC2BaseLength * cascadeScale_);
+	cascadeLengths_[3] = static_cast<size_t>(kC3BaseLength * cascadeScale_);
+
+	// Clamp write positions
+	for (size_t i = 0; i < kNumCascade; ++i) {
+		if (cascadeWritePos_[i] >= cascadeLengths_[i]) {
+			cascadeWritePos_[i] = 0;
 		}
 	}
 }
 
-// === Zone 2: Size control (D2 + D3) ===
-// D2 scales slowly (texture), D3 scales fast (tail)
-// At zone2=0 (Tiny):  D2=650 (~15ms), D3=1297 (~29ms) - tight room
-// At zone2=1023 (Vast): D2=1039 (~24ms), D3=6553 (~148ms) - cathedral
+// === Zone 3: Feedback pattern ===
 
-void Featherverb::setZone2(int32_t value) {
-	zone2_ = value;
-	updateDelayLengths();
-}
-
-void Featherverb::updateDelayLengths() {
-	const float t = static_cast<float>(zone2_) / 1023.0f;
-
-	// D2: scales 1.6x (650 → 1039)
-	actualDelayLengths_[2] = kD2MinLength + static_cast<size_t>(t * (kD2MaxLength - kD2MinLength));
-
-	// D3: scales 5x (1297 → 6553)
-	actualDelayLengths_[3] = kD3MinLength + static_cast<size_t>(t * (kD3MaxLength - kD3MinLength));
-
-	// Scale far damping based on room size
-	// Tiny room: far = near * 0.8 (subtle difference)
-	// Vast room: far = near * 0.5 (40% darker tail)
-	// This models increased HF absorption in larger spaces
-	const float farDampScale = 0.8f - t * 0.3f; // 0.8 at tiny → 0.5 at vast
-	dampCoeffFar_ = dampCoeffNear_ * farDampScale;
-
-	// Clamp write positions if they exceed new lengths
-	if (writePos_[2] >= actualDelayLengths_[2]) {
-		writePos_[2] = 0;
-	}
-	if (writePos_[3] >= actualDelayLengths_[3]) {
-		writePos_[3] = 0;
-	}
-}
-
-// === Zone 3: Feedback pattern control using phi triangles ===
-// 4 phi triangles modulate per-delay feedback multipliers.
-// Creates different decay characters that evolve smoothly.
-
-// Phi triangle bank for 4 feedback multipliers
-static constexpr std::array<phi::PhiTriConfig, 4> kFeedbackTriBank = {{
-    {phi::kPhi033, 0.6f, 0.00f, true}, // D0 feedback - slow, bipolar
-    {phi::kPhi067, 0.6f, 0.25f, true}, // D1 feedback
-    {phi::kPhi100, 0.6f, 0.50f, true}, // D2 feedback
-    {phi::kPhi125, 0.6f, 0.75f, true}, // D3 feedback - fastest
+static constexpr std::array<phi::PhiTriConfig, 3> kFeedback3TriBank = {{
+    {phi::kPhi033, 0.6f, 0.00f, true},
+    {phi::kPhi067, 0.6f, 0.33f, true},
+    {phi::kPhi100, 0.6f, 0.66f, true},
 }};
 
 void Featherverb::setZone3(int32_t value) {
@@ -372,37 +564,64 @@ void Featherverb::setZone3(int32_t value) {
 void Featherverb::updateFeedbackPattern() {
 	using namespace phi;
 
-	// Map zone3 to yNorm and gammaPhase
 	const float yNorm = static_cast<float>(zone3_) / 1023.0f;
-	const int32_t zone = zone3_ >> 7; // 0-7
+	const int32_t zone = zone3_ >> 7;
 	const double gammaPhase = zone * 0.125;
 
-	// Zone-specific character: base multiplier patterns
-	// Each zone emphasizes different decay characteristics
-	static constexpr std::array<std::array<float, 4>, 8> kZoneBias = {{
-	    {1.00f, 1.00f, 1.00f, 1.00f}, // Zone 0: Balanced
-	    {1.05f, 1.00f, 0.98f, 0.95f}, // Zone 1: Front-heavy
-	    {0.95f, 0.98f, 1.00f, 1.05f}, // Zone 2: Tail-heavy
-	    {1.02f, 0.95f, 1.02f, 0.95f}, // Zone 3: Alternating
-	    {0.90f, 1.05f, 1.05f, 0.90f}, // Zone 4: Scooped
-	    {1.05f, 0.90f, 0.90f, 1.05f}, // Zone 5: Humped
-	    {0.88f, 1.00f, 1.00f, 1.08f}, // Zone 6: Sparse early
-	    {1.08f, 1.00f, 1.00f, 0.88f}  // Zone 7: Dense early
-	}};
+	static constexpr std::array<std::array<float, 3>, 8> kZoneBias = {{{1.00f, 1.00f, 1.00f},
+	                                                                   {1.05f, 1.00f, 0.95f},
+	                                                                   {0.95f, 1.00f, 1.05f},
+	                                                                   {1.02f, 0.96f, 1.02f},
+	                                                                   {0.92f, 1.08f, 0.92f},
+	                                                                   {1.06f, 0.94f, 1.00f},
+	                                                                   {0.90f, 1.00f, 1.10f},
+	                                                                   {1.08f, 1.00f, 0.92f}}};
 
-	// Create phi triangle context with smaller range (±0.15)
 	const PhiTriContext ctx{yNorm, 1.0f, 1.0f, gammaPhase};
+	std::array<float, 3> mods = ctx.evalBank(kFeedback3TriBank);
 
-	// Evaluate phi triangles for modulation
-	std::array<float, 4> mods = ctx.evalBank(kFeedbackTriBank);
-
-	// Combine zone bias with phi triangle modulation
-	// Modulation range: ±0.15 around zone bias
-	for (size_t i = 0; i < 4; ++i) {
-		feedbackMult_[i] = kZoneBias[zone][i] + mods[i] * 0.15f;
-		// Clamp to safe range [0.75, 1.25]
-		feedbackMult_[i] = std::clamp(feedbackMult_[i], 0.75f, 1.25f);
+	for (size_t i = 0; i < 3; ++i) {
+		feedbackMult_[i] = std::clamp(kZoneBias[zone][i] + mods[i] * 0.15f, 0.75f, 1.25f);
 	}
+
+	// Cascade series mix - 10 periods for fine density control
+	// Triangle wave: 10 complete cycles over yNorm 0→1
+	float phase10 = yNorm * 10.0f;
+	float tri10 = 1.0f - 4.0f * std::abs(phase10 - std::floor(phase10) - 0.5f);
+	// Map -1..1 to 0.35..0.85 range (biased toward series/dense)
+	cascadeSeriesMix_ = 0.6f + tri10 * 0.25f;
+
+	// Cascade feedback - 7 periods, clockwise = more feedback
+	// Base increases with yNorm (0.4 to 0.85), triangle adds ±0.1 texture
+	float phase7 = yNorm * 7.0f;
+	float tri7 = 1.0f - 4.0f * std::abs(phase7 - std::floor(phase7) - 0.5f);
+	float baseFeedback = 0.4f + yNorm * 0.45f; // 0.4 to 0.85 as yNorm increases
+	cascadeFeedbackMult_ = std::clamp(baseFeedback + tri7 * 0.1f, 0.3f, 0.95f);
+
+	// Nested cascade feedback (C3→C0) - 5 periods, clockwise = more recirculation
+	// Kicks in at higher yNorm values; scaled by room feedback in processing
+	float phase5 = yNorm * 5.0f;
+	float tri5 = 1.0f - 4.0f * std::abs(phase5 - std::floor(phase5) - 0.5f);
+	float baseNest = std::max(0.0f, (yNorm - 0.4f) * 0.4f); // 0 until yNorm>0.4, then 0 to 0.24
+	cascadeNestFeedback_ = std::clamp(baseNest + tri5 * 0.06f, 0.0f, 0.3f);
+
+	// LFO pitch wobble depth - 13 periods (fast), adds subtle chorus/shimmer
+	float phase13 = yNorm * 13.0f;
+	float tri13 = 1.0f - 4.0f * std::abs(phase13 - std::floor(phase13) - 0.5f);
+	modDepth_ = std::clamp(0.3f + tri13 * 0.25f, 0.0f, 0.6f); // 0.05 to 0.55 range
+
+	// Width breathing - 11 periods (fast), expands stereo as signal decays
+	// Mid/side: dynamicWidth > 1 = wider than normal, higher values = dramatic expansion
+	float phase11 = yNorm * 11.0f;
+	float tri11 = 1.0f - 4.0f * std::abs(phase11 - std::floor(phase11) - 0.5f);
+	widthBreath_ = std::clamp(0.5f + tri11 * 0.4f, 0.0f, 1.2f); // 0.1 to 0.9 range
+
+	// Cross-channel bleed - 9 periods, L↔R mixing in FDN feedback for stereo complexity
+	// Subtle effect: 0.0 to 0.25 range adds correlation without smearing stereo image
+	float phase9 = yNorm * 9.0f;
+	float tri9 = 1.0f - 4.0f * std::abs(phase9 - std::floor(phase9) - 0.5f);
+	float baseBleed = yNorm * 0.15f; // Increases with zone position
+	crossBleed_ = std::clamp(baseBleed + tri9 * 0.1f, 0.0f, 0.25f);
 }
 
 } // namespace deluge::dsp::reverb

@@ -33,172 +33,244 @@
 
 namespace deluge::dsp::reverb {
 
-/// Featherverb: A lightweight 4-tap FDN reverb with continuous matrix morphing
-/// - Memory: ~48KB (vs Freeverb 93KB, Mutable 128KB)
-/// - CPU: ~5-6K cycles (vs Mutable 13K, Freeverb 28K)
-/// - Uses phi triangle bank for orthogonal matrix morphing via Gram-Schmidt
-/// - Asymmetric delays: short D0-D2 for texture, long D3 for tail/scale
-/// - Multi-tap output from D3 for increased reflection density
+/// Featherverb: Lightweight FDN reverb with allpass cascade for dense tails
+/// Architecture: 3-delay FDN (early reflections) → 4-stage allpass cascade (tail density)
+/// - Memory: ~68KB (vs Freeverb 93KB, Mutable 128KB)
+/// - CPU: ~9K cycles with 2x undersampling
+/// - 3x3 Hadamard matrix with phi triangle morphing for early character
+/// - 4-stage allpass cascade replaces long D3 delay - exponential density buildup
+/// - Zone 2 scales both FDN D2 and cascade lengths for room size
 class Featherverb : public Base {
-	static constexpr size_t kNumDelays = 4;
-	static constexpr size_t kNumPlanes = 6; // Rotation planes in SO(4)
+	// === Undersampling toggle (set to false for full-rate operation) ===
+	static constexpr bool kUndersample = true;
 
-	// Asymmetric delays: D0-D1 fixed for early texture, D2-D3 variable for size
-	// D0-D1 use phi-related ratios for non-resonant diffusion
-	// D2 scales slowly (texture), D3 scales fast (tail) - both controlled by Zone 2
-	// D3 is 50% larger than needed to provide headroom for multi-tap output
-	// Total ~48KB at max size
-	static constexpr size_t kD0Length = 397;     // ~9ms - fixed, small prime
-	static constexpr size_t kD1Length = 643;     // ~14.6ms - fixed, φ ratio from D0
-	static constexpr size_t kD2MinLength = 650;  // ~14.7ms - min, just above D1
-	static constexpr size_t kD2MaxLength = 1039; // ~23.5ms - max, φ ratio from D1
-	static constexpr size_t kD3MinLength = 1297; // ~29ms - min, tight room
-	static constexpr size_t kD3MaxLength = 9830; // ~223ms - max, cathedral (50% larger for multi-tap density)
+	// 3 FDN delays for early reflections (D0, D1, D2)
+	static constexpr size_t kNumFdnDelays = 3;
 
-	// Fixed delays (D0-D1) + variable (D2-D3)
-	static constexpr size_t kFixedSamples = kD0Length + kD1Length;                          // 1040
-	static constexpr size_t kMaxTotalSamples = kFixedSamples + kD2MaxLength + kD3MaxLength; // 11909
+	// FDN delay lengths (D0/D1 variable from Zone 1, D2 variable from Zone 2)
+	static constexpr size_t kD0MinLength = 350;  // ~7.9ms
+	static constexpr size_t kD0MaxLength = 450;  // ~10.2ms
+	static constexpr size_t kD1MinLength = 580;  // ~13.2ms
+	static constexpr size_t kD1MaxLength = 850;  // ~19.3ms
+	static constexpr size_t kD2MinLength = 650;  // ~14.7ms
+	static constexpr size_t kD2MaxLength = 1039; // ~23.5ms
 
-	// Multi-tap output offsets into D3 for increased density (always < kD3MinLength)
-	static constexpr size_t kTap1Offset = 311;                               // ~7ms - early reflection
-	static constexpr size_t kTap2Offset = 643;                               // ~14.6ms - mid reflection (φ related)
-	static constexpr size_t kBufferBytes = kMaxTotalSamples * sizeof(float); // ~48KB
+	// 4-stage allpass cascade for tail density (replaces long D3)
+	// Each stage splits impulses → exponential density growth (2^4 = 16 reflections per input)
+	// Prime lengths for good diffusion, scalable by Zone 2
+	// With single-write undersampling, effective lengths are 2x these values
+	// C3 is extra large for spacious tail (memory from reduced predelay)
+	static constexpr size_t kNumCascade = 4;
+	static constexpr size_t kC0BaseLength = 773;  // ~17ms base, ~35ms effective - prime (+10%)
+	static constexpr size_t kC1BaseLength = 997;  // ~23ms base, ~45ms effective - prime (+10%)
+	static constexpr size_t kC2BaseLength = 1231; // ~28ms base, ~56ms effective - prime (+10%)
+	static constexpr size_t kC3BaseLength = 5303; // ~120ms base, ~240ms effective - prime (+50%)
+	static constexpr size_t kCascadeBaseTotal = kC0BaseLength + kC1BaseLength + kC2BaseLength + kC3BaseLength; // 8304
+	static constexpr float kCascadeMaxScale = 1.5f; // Zone 2 can scale cascade up to 1.5x
+	static constexpr size_t kCascadeMaxTotal = static_cast<size_t>(kCascadeBaseTotal * kCascadeMaxScale); // ~12456
 
-	static constexpr std::array<size_t, kNumDelays> kDelayLengths = {kD0Length, kD1Length, kD2MaxLength, kD3MaxLength};
+	// Buffer layout: FDN delays + cascade + predelay + diffusers
+	static constexpr size_t kFdnMaxSamples = kD0MaxLength + kD1MaxLength + kD2MaxLength; // 2339
+	static constexpr size_t kPredelayMaxLength = 2205;                                   // 50ms at 44.1kHz (single tap)
+	static constexpr size_t kNumDiffusers = 2;
+	static constexpr size_t kDiffuser0Length = 137;
+	static constexpr size_t kDiffuser1Length = 211;
+	static constexpr size_t kDiffuserTotal = kDiffuser0Length + kDiffuser1Length; // 348
+
+	static constexpr size_t kTotalMaxSamples = kFdnMaxSamples + kCascadeMaxTotal + kPredelayMaxLength + kDiffuserTotal;
+	static constexpr size_t kBufferBytes = kTotalMaxSamples * sizeof(float); // ~68KB
 
 public:
 	Featherverb();
 	~Featherverb() override { deallocate(); }
 
-	/// Allocate delay buffer from SDRAM
 	[[nodiscard]] bool allocate();
 	void deallocate();
 	[[nodiscard]] bool isAllocated() const { return buffer_ != nullptr; }
 
-	/// Process audio through FDN reverb
 	void process(std::span<int32_t> input, StereoBuffer<q31_t> output) override;
 
-	/// RoomSize maps to feedback amount (decay time)
 	void setRoomSize(float value) override;
 	[[nodiscard]] float getRoomSize() const override { return roomSize_; }
 
-	/// Damping controls lowpass filter cutoff in feedback path
 	void setDamping(float value) override;
 	[[nodiscard]] float getDamping() const override { return damping_; }
 
-	/// Width controls stereo spread of output
 	void setWidth(float value) override;
 	[[nodiscard]] float getWidth() const override { return width_; }
 
-	/// High-pass filter on input (removes DC/rumble)
 	void setHPF(float f) override;
 	[[nodiscard]] float getHPF() const override { return hpCutoff_; }
 
-	/// Low-pass filter on output
 	void setLPF(float f) override;
 	[[nodiscard]] float getLPF() const override { return lpCutoff_; }
 
-	// === Featherverb-specific zone parameters ===
+	// === Zone parameters ===
 
-	/// Zone 1 - Matrix: Controls feedback matrix rotation through orthogonal space
-	/// 8 zones select rotation planes, position within zone = rotation angle
-	/// Uses Givens rotations for continuous morphing while preserving energy
+	/// Zone 1 - Matrix: 3x3 matrix morphing via phi triangles
 	void setZone1(int32_t value);
 	[[nodiscard]] int32_t getZone1() const { return zone1_; }
 
-	/// Zone 2 - Size: Controls D2+D3 delay lengths for room size (small room → cathedral)
-	/// D2 scales slowly (15-24ms), D3 scales fast (29-148ms) for proportional growth
+	/// Zone 2 - Size: Scales D2 + cascade lengths (room size)
 	void setZone2(int32_t value);
 	[[nodiscard]] int32_t getZone2() const { return zone2_; }
 
-	/// Zone 3 - Feedback: Per-delay feedback multipliers for decay character
-	/// 8 zones select different feedback patterns (balanced, front-heavy, tail-heavy, etc.)
+	/// Zone 3 - Decay: Per-delay feedback character
 	void setZone3(int32_t value);
 	[[nodiscard]] int32_t getZone3() const { return zone3_; }
 
-	/// Pre-delay: Delay before reverb onset (0-50ms)
-	void setPredelay(float value) { predelay_ = value; }
+	/// Pre-delay: 0-100ms with multi-taps
+	void setPredelay(float value);
 	[[nodiscard]] float getPredelay() const { return predelay_; }
 
 private:
 	float* buffer_{nullptr};
 
-	// Write positions for each delay line (circular buffer indices)
-	std::array<size_t, kNumDelays> writePos_{};
+	// FDN delay state (3 delays)
+	std::array<size_t, kNumFdnDelays> fdnWritePos_{};
+	std::array<size_t, kNumFdnDelays> fdnOffsets_{};
+	std::array<size_t, kNumFdnDelays> fdnLengths_{kD0MaxLength, kD1MaxLength, kD2MaxLength};
+	std::array<float, kNumFdnDelays> fdnLpState_{};
 
-	// Offsets into contiguous buffer for each delay line
-	std::array<size_t, kNumDelays> delayOffsets_{};
+	// Cascade state (4 allpass stages)
+	std::array<size_t, kNumCascade> cascadeWritePos_{};
+	std::array<size_t, kNumCascade> cascadeOffsets_{};
+	std::array<size_t, kNumCascade> cascadeLengths_{kC0BaseLength, kC1BaseLength, kC2BaseLength, kC3BaseLength};
+	float cascadeScale_{1.0f};        // Current scale factor from Zone 2
+	float earlyMixGain_{0.3f};        // Early reflection gain (scales inverse with Zone 2: smaller = more early)
+	float tailMixGain_{0.6f};         // Tail output gain (scales with Zone 2: bigger room = more tail)
+	float cascadeLpState_{0.0f};      // LP filter state for cascade output
+	float cascadeSeriesMix_{0.5f};    // 0=parallel (sparse), 1=series (dense) - how much c2 feeds c3
+	float cascadeFeedbackMult_{0.7f}; // How much cascade feeds back into FDN (controlled by Zone 3)
+	float cascadeNestFeedback_{0.0f}; // Nested feedback: C3 → C0 for extended tails (controlled by Zone 3)
+	float prevC3Out_{0.0f};           // Previous C3 output for nested feedback delay
+	static constexpr float kCascadeCoeff = 0.4f; // Allpass coefficient for cascade (lower = less dense)
 
-	// Actual delay lengths (D2 and D3 are variable based on Zone 2)
-	std::array<size_t, kNumDelays> actualDelayLengths_{kD0Length, kD1Length, kD2MaxLength, kD3MaxLength};
+	// Diffuser state
+	std::array<size_t, kNumDiffusers> diffuserOffsets_{};
+	std::array<size_t, kNumDiffusers> diffuserWritePos_{};
+	static constexpr float kDiffuserCoeff = 0.5f;
 
-	// Lowpass filter states for damping in feedback path
-	std::array<float, kNumDelays> lpState_{};
+	// Predelay state (single tap, 50ms max)
+	size_t predelayOffset_{0};
+	size_t predelayWritePos_{0};
+	size_t predelayLength_{0};
+	float prevOutputMono_{0.0f};
 
 	// Parameters
-	float roomSize_{0.5f}; // 0-1, maps to feedback
-	float damping_{0.5f};  // 0-1, maps to LP coefficient
-	float width_{1.0f};    // 0-1, stereo spread
-	float hpCutoff_{0.0f}; // 0-1, input HPF
-	float lpCutoff_{1.0f}; // 0-1, output LPF
+	float roomSize_{0.5f};
+	float damping_{0.5f};
+	float width_{1.0f};
+	float hpCutoff_{0.0f};
+	float lpCutoff_{1.0f};
 
 	// Zone parameters
-	int32_t zone1_{0};     // 0-1023, matrix rotation
-	int32_t zone2_{512};   // 0-1023, D3 size (default mid)
-	int32_t zone3_{0};     // 0-1023, feedback pattern
-	float predelay_{0.0f}; // 0-1, pre-delay time
+	int32_t zone1_{0};
+	int32_t zone2_{512};
+	int32_t zone3_{0};
+	float predelay_{0.0f};
 
 	// Derived coefficients
-	float feedback_{0.85f};     // Derived from roomSize
-	float dampCoeffNear_{0.5f}; // Damping for D0-D1 (brighter early reflections)
-	float dampCoeffFar_{0.4f};  // Damping for D2-D3 (darker tail, scales with size)
+	float feedback_{0.85f};
+	float dampCoeff_{0.5f};
+	float cascadeDamping_{0.7f}; // Damping in cascade (darker tail)
 
-	// Matrix rotation state (from Zone 1)
-	// 4x4 orthonormal rotation matrix stored as 4 rows of 4 elements
-	// Default: normalized Hadamard (0.5 scaling for unit columns)
-	std::array<std::array<float, 4>, 4> matrix_{{
-	    {0.5f, 0.5f, 0.5f, 0.5f},   // Hadamard row 0 (normalized)
-	    {0.5f, -0.5f, 0.5f, -0.5f}, // Hadamard row 1 (normalized)
-	    {0.5f, 0.5f, -0.5f, -0.5f}, // Hadamard row 2 (normalized)
-	    {0.5f, -0.5f, -0.5f, 0.5f}  // Hadamard row 3 (normalized)
-	}};
+	// 3x3 matrix for FDN (normalized Hadamard)
+	// H3 = 1/sqrt(3) * [[1,1,1], [1,w,w^2], [1,w^2,w]] where w = e^(2πi/3)
+	// Using real approximation: sign pattern with 1/sqrt(3) normalization
+	static constexpr float kH3Norm = 0.577350269f; // 1/sqrt(3)
+	std::array<std::array<float, 3>, 3> matrix_{{{kH3Norm, kH3Norm, kH3Norm},
+	                                             {kH3Norm, -kH3Norm, 0.0f}, // Simplified orthogonal
+	                                             {kH3Norm, 0.0f, -kH3Norm}}};
 
-	// Per-delay feedback multipliers (from Zone 3)
-	std::array<float, kNumDelays> feedbackMult_{1.0f, 1.0f, 1.0f, 1.0f};
+	// Per-delay feedback multipliers
+	std::array<float, kNumFdnDelays> feedbackMult_{1.0f, 1.0f, 1.0f};
 
 	// Filter states
-	float hpState_{0.0f};  // Input HPF state
-	float lpStateL_{0.0f}; // Output LPF state (left)
-	float lpStateR_{0.0f}; // Output LPF state (right)
+	float hpState_{0.0f};
+	float lpStateL_{0.0f};
+	float lpStateR_{0.0f};
+	float dcBlockState_{0.0f};
 
-	/// Update matrix_ based on zone1_ value using Givens rotations
+	// LFO for modulation
+	float lfoPhase_{0.0f};
+	float modDepth_{0.0f};    // LFO pitch wobble depth (controlled by Zone 3)
+	float widthBreath_{0.0f}; // Width breathing amount (controlled by Zone 3)
+	float crossBleed_{0.0f};  // L↔R cross-channel bleed in FDN (controlled by Zone 3)
+
+	// Envelope followers
+	float inputEnvelope_{0.0f};
+
+	// Undersampling state
+	bool undersamplePhase_{false};
+	float accumIn_{0.0f};
+	float prevOutL_{0.0f};
+	float prevOutR_{0.0f};
+	float currOutL_{0.0f};
+	float currOutR_{0.0f};
+
+	// Update functions
 	void updateMatrix();
-
-	/// Update feedbackMult_ based on zone3_ value
 	void updateFeedbackPattern();
+	void updateSizes(); // Updates D2 and cascade lengths from Zone 2
 
-	/// Update D2 and D3 lengths based on zone2_ value
-	void updateDelayLengths();
+	// FDN delay helpers
+	[[gnu::always_inline]] float fdnRead(size_t line) const { return buffer_[fdnOffsets_[line] + fdnWritePos_[line]]; }
 
-	/// Read from delay line at current position (oldest sample = full delay)
-	[[gnu::always_inline]] float read(size_t line) const { return buffer_[delayOffsets_[line] + writePos_[line]]; }
-
-	/// Read from delay line at offset samples more recent than full delay
-	/// offset=0 is same as read(), offset>0 gives shorter delay (more recent)
-	[[gnu::always_inline]] float readAt(size_t line, size_t offset) const {
-		size_t pos = (writePos_[line] + offset) % actualDelayLengths_[line];
-		return buffer_[delayOffsets_[line] + pos];
+	[[gnu::always_inline]] float fdnReadAt(size_t line, size_t offset) const {
+		size_t pos = fdnWritePos_[line] + offset;
+		if (pos >= fdnLengths_[line]) {
+			pos -= fdnLengths_[line];
+		}
+		return buffer_[fdnOffsets_[line] + pos];
 	}
 
-	/// Write to delay line and advance position
-	[[gnu::always_inline]] void write(size_t line, float value) {
-		buffer_[delayOffsets_[line] + writePos_[line]] = value;
-		if (++writePos_[line] >= actualDelayLengths_[line]) {
-			writePos_[line] = 0;
+	[[gnu::always_inline]] void fdnWrite(size_t line, float value) {
+		buffer_[fdnOffsets_[line] + fdnWritePos_[line]] = value;
+		if (++fdnWritePos_[line] >= fdnLengths_[line]) {
+			fdnWritePos_[line] = 0;
 		}
 	}
 
-	/// One-pole lowpass filter
+	// Cascade allpass helpers
+	[[gnu::always_inline]] float processCascadeStage(size_t stage, float input) {
+		size_t idx = cascadeOffsets_[stage] + cascadeWritePos_[stage];
+		float delayed = buffer_[idx];
+		float output = -kCascadeCoeff * input + delayed;
+		buffer_[idx] = input + kCascadeCoeff * output;
+		if (++cascadeWritePos_[stage] >= cascadeLengths_[stage]) {
+			cascadeWritePos_[stage] = 0;
+		}
+		return output;
+	}
+
+	// Diffuser helper
+	[[gnu::always_inline]] float processDiffuser(size_t idx, float input, size_t length) {
+		float delayed = buffer_[diffuserOffsets_[idx] + diffuserWritePos_[idx]];
+		float output = -kDiffuserCoeff * input + delayed;
+		buffer_[diffuserOffsets_[idx] + diffuserWritePos_[idx]] = input + kDiffuserCoeff * output;
+		if (++diffuserWritePos_[idx] >= length) {
+			diffuserWritePos_[idx] = 0;
+		}
+		return output;
+	}
+
+	// Predelay helpers
+	[[gnu::always_inline]] float readPredelay(size_t offset) const {
+		if (predelayLength_ == 0)
+			return 0.0f;
+		size_t pos = (predelayWritePos_ >= offset) ? (predelayWritePos_ - offset)
+		                                           : (predelayWritePos_ + kPredelayMaxLength - offset);
+		return buffer_[predelayOffset_ + pos];
+	}
+
+	[[gnu::always_inline]] void writePredelay(float value) {
+		buffer_[predelayOffset_ + predelayWritePos_] = value;
+		if (++predelayWritePos_ >= kPredelayMaxLength) {
+			predelayWritePos_ = 0;
+		}
+	}
+
 	[[gnu::always_inline]] static float onepole(float input, float& state, float coeff) {
 		state += coeff * (input - state);
 		return state;

@@ -181,7 +181,8 @@ public:
 };
 
 /**
- * Featherverb Pre-delay - Standard knob (0-50)
+ * Featherverb Pre-delay - Standard knob (0-50 → 0-100ms)
+ * Multi-tap predelay with Zone 2-modulated tap spacing
  * Only visible when Featherverb is active
  */
 class FeatherPredelay final : public Integer {
