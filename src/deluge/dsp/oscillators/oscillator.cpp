@@ -551,12 +551,6 @@ callRenderWave:
 			return;
 		}
 		else {
-			// renderWave uses SIMD vectorization that only processes multiples of 4 samples.
-			// Correct the phase update (done at line 38) for any remainder samples not rendered.
-			uint32_t remainderSamples = numSamples & 3;
-			if (remainderSamples) {
-				*startPhase -= phaseIncrement * remainderSamples;
-			}
 			dsp::renderWave(table, tableSizeMagnitude, amplitude, {bufferStart, bufferEnd}, phaseIncrement, phase,
 			                applyAmplitude, phaseToAdd, amplitudeIncrement);
 			return;

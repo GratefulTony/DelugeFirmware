@@ -15,6 +15,13 @@ This is **owlet-firmware**, a personal fork of the Deluge Community Firmware mai
 | **Retrospective Sampler** | Lookback buffer for capturing audio after the fact. It is what it is and if you need it you need it. Very light on CPU. configurable memory footprint. very light in default settings.|
 | **Zone Menu Items** | Horizontal menu UI component for zone-based parameters with visual feedback. |
 | **FX Benchmarking Framework** | Performance profiling tools for DSP development. |
+| **Pulse Width Triangle** | Triangle oscillator with pulse width control. Creates compressed triangle cycles with dead zones—at 0% you get a full triangle, at 100% narrow spikes. Useful for timbral variety and rhythmic pulsing effects. |
+
+### Random Fixes
+
+| Fix | Description |
+|-----|-------------|
+| **SIMD oscillator remainder handling** | Fixed tempo-synced clicking on sine and analog waveforms. The SIMD-vectorized `renderWave` only processed samples in groups of 4, leaving remainder samples unwritten when buffer sizes weren't multiples of 4 (common due to tempo tick alignment). Added scalar fallback loops for remainder samples. |
 
 ### Benchmarks
 

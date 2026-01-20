@@ -34,6 +34,8 @@ void renderWave(const int16_t* __restrict__ table, int32_t table_size_magnitude,
 	Argon<q31_t> amplitude_vector = createAmplitudeVector(amplitude, amplitude_increment);
 	Argon<q31_t> amplitude_increment_vector = amplitude_increment << 1;
 
+	// SIMD loop processes samples in groups of 4
+	size_t simd_samples = buffer.size() & ~size_t{3};
 	for (Argon<q31_t>& sample_vector : argon::vectorize(buffer)) {
 		auto [value_vector, new_phase] =
 		    waveRenderingFunctionGeneral(phase, phase_increment, phase_to_add, table, table_size_magnitude);
@@ -45,6 +47,31 @@ void renderWave(const int16_t* __restrict__ table, int32_t table_size_magnitude,
 
 		sample_vector = value_vector;
 		phase = new_phase;
+	}
+
+	// Handle remainder samples (when buffer size is not a multiple of 4)
+	for (size_t i = simd_samples; i < buffer.size(); i++) {
+		phase += phase_increment;
+
+		// Interpolated table lookup (scalar version of waveRenderingFunctionGeneral)
+		uint32_t whichValue = phase >> (32 - table_size_magnitude);
+		uint32_t rshifted = phase >> (32 - 16 - table_size_magnitude);
+		int32_t strength2 = (rshifted & 0xFFFF) >> 1;
+
+		int16_t value1 = table[whichValue];
+		int16_t value2 = table[whichValue + 1];
+		int32_t difference = value2 - value1;
+		int32_t interpolated = (static_cast<int32_t>(value1) << 16) + (difference * strength2 * 2);
+
+		if (apply_amplitude) {
+			// Amplitude for sample i is (amplitude + (i+1)*amplitude_increment) >> 1
+			int32_t sample_amplitude = (amplitude + static_cast<int32_t>(i + 1) * amplitude_increment) >> 1;
+			// Use Q31 multiply (>> 31) to match SIMD MultiplyAddFixedPoint
+			buffer[i] += multiply_32x32_rshift32_rounded(interpolated, sample_amplitude) << 1;
+		}
+		else {
+			buffer[i] = interpolated;
+		}
 	}
 }
 
@@ -58,6 +85,8 @@ void renderPulseWave(const int16_t* __restrict__ table, int32_t table_size_magni
 	Argon<q31_t> amplitude_vector = createAmplitudeVector(amplitude, amplitude_increment);
 	Argon<q31_t> amplitude_increment_vector = amplitude_increment << 1;
 
+	// SIMD loop processes samples in groups of 4
+	size_t simd_samples = buffer.size() & ~size_t{3};
 	for (Argon<q31_t>& sample_vector : argon::vectorize(buffer)) {
 		auto [value_vector, new_phase] =
 		    waveRenderingFunctionPulse(phase, phase_increment, phase_to_add, table, table_size_magnitude);
@@ -69,6 +98,43 @@ void renderPulseWave(const int16_t* __restrict__ table, int32_t table_size_magni
 
 		sample_vector = value_vector;
 		phase = new_phase;
+	}
+
+	// Handle remainder samples (when buffer size is not a multiple of 4)
+	// Note: For pulse waves, we need both the base phase and the phase+phaseToAdd lookup
+	for (size_t i = simd_samples; i < buffer.size(); i++) {
+		phase += phase_increment;
+		uint32_t phaseLater = phase + phase_to_add;
+
+		// First table lookup (base phase)
+		uint32_t whichValueA = phase >> (32 - table_size_magnitude);
+		int32_t rshiftedA = (phase >> (32 - 16 - table_size_magnitude)) & 0x7FFF;
+		int16_t valueA1 = table[whichValueA];
+		int16_t valueA2 = table[whichValueA + 1];
+		int32_t strengthA1 = rshiftedA | 0x8000;
+		int32_t strengthA2 = 0x8000 - strengthA1;
+		int32_t outputA = (strengthA2 * valueA2 + strengthA1 * valueA1) << 1;
+
+		// Second table lookup (phase + phaseToAdd)
+		uint32_t whichValueB = phaseLater >> (32 - table_size_magnitude);
+		int32_t rshiftedB = (phaseLater >> (32 - 16 - table_size_magnitude)) & 0x7FFF;
+		int16_t valueB1 = table[whichValueB];
+		int16_t valueB2 = table[whichValueB + 1];
+		int32_t strengthB2 = rshiftedB;
+		int32_t strengthB1 = 0x7FFF - strengthB2;
+		int32_t outputB = (strengthB2 * valueB2 + strengthB1 * valueB1) << 1;
+
+		// Multiply the two outputs together (ring mod for pulse wave)
+		int32_t interpolated = multiply_32x32_rshift32_rounded(outputA, outputB) << 1;
+
+		if (apply_amplitude) {
+			int32_t sample_amplitude = (amplitude + static_cast<int32_t>(i + 1) * amplitude_increment) >> 1;
+			// Use Q31 multiply (>> 31) to match SIMD MultiplyAddFixedPoint
+			buffer[i] += multiply_32x32_rshift32_rounded(interpolated, sample_amplitude) << 1;
+		}
+		else {
+			buffer[i] = interpolated;
+		}
 	}
 }
 
