@@ -350,21 +350,55 @@ public:
 		return std::clamp(gain, 0.1f, 31.6f);
 	}
 
-	/// Update the level from stereo band buffers
+	/// Update the level from stereo band buffers (NEON-optimized)
 	/// @param bufferL Left channel samples
 	/// @param bufferR Right channel samples
 	/// @param numSamples Number of samples in each buffer
 	/// @param alpha Pre-computed IIR alpha (hoisted from response calculation)
 	/// @param oneMinusAlpha Pre-computed (1-alpha)
 	/// @param useAvg Use average instead of max for less stereo linking
-	/// Optimized: alpha hoisted out of audio loop, computed only when response changes
+	/// @param stride Sample stride (1=every sample, 2=every other). Use 1 for high freq bands.
+	/// Optimized: NEON SIMD for 4x throughput, alpha hoisted out of audio loop
 	void updateLevel(const q31_t* bufferL, const q31_t* bufferR, size_t numSamples, float alpha, float oneMinusAlpha,
-	                 bool useAvg) {
+	                 bool useAvg, int32_t stride = 1) {
 		q31_t peak = 0;
 
-		// Peak detection - scan all samples for accurate envelope tracking
-		// useAvg: average preserves stereo width better, max is tighter control
-		for (size_t i = 0; i < numSamples; ++i) {
+		// NEON peak detection - process 4 samples at a time
+		// Stride affects step size: stride=1 processes all, stride=2 skips every other group
+		const size_t step = static_cast<size_t>(4 * stride);
+		const size_t vectorLen = (numSamples / step) * step;
+		int32x4_t peakVec = vdupq_n_s32(0);
+
+		if (useAvg) {
+			// Average mode: (|L| + |R|) / 2 for less aggressive stereo linking
+			for (size_t i = 0; i < vectorLen; i += step) {
+				int32x4_t L = vld1q_s32(&bufferL[i]);
+				int32x4_t R = vld1q_s32(&bufferR[i]);
+				L = vabsq_s32(L);
+				R = vabsq_s32(R);
+				int32x4_t avg = vhaddq_s32(L, R); // Halving add = (L + R) / 2
+				peakVec = vmaxq_s32(peakVec, avg);
+			}
+		}
+		else {
+			// Max mode: max(|L|, |R|) for tighter compression control
+			for (size_t i = 0; i < vectorLen; i += step) {
+				int32x4_t L = vld1q_s32(&bufferL[i]);
+				int32x4_t R = vld1q_s32(&bufferR[i]);
+				L = vabsq_s32(L);
+				R = vabsq_s32(R);
+				int32x4_t maxLR = vmaxq_s32(L, R);
+				peakVec = vmaxq_s32(peakVec, maxLR);
+			}
+		}
+
+		// Horizontal max reduction (ARMv7-compatible)
+		int32x2_t peak2 = vmax_s32(vget_low_s32(peakVec), vget_high_s32(peakVec));
+		peak2 = vpmax_s32(peak2, peak2);
+		peak = vget_lane_s32(peak2, 0);
+
+		// Handle remainder samples (scalar fallback)
+		for (size_t i = vectorLen; i < numSamples; ++i) {
 			q31_t L = bufferL[i];
 			q31_t R = bufferR[i];
 			L = (L < 0) ? -L : L;
@@ -1424,11 +1458,17 @@ public:
 		// updateLevel scans all samples for accurate peak tracking
 		// Use average (less stereo linking) when high band width > 1 (enhanced stereo)
 		bool useAvgEnvelope = bandWidth_[2] > 1.0f;
+		// Peak detection stride per band - safe based on Nyquist limits
+		// Bass (<200Hz): stride=4 safe (200Hz → 220 samples/cycle, 4x stride → 55 samples/cycle)
+		// Mid (200-2kHz): stride=2 safe (2kHz → 22 samples/cycle, 2x stride → 11 samples/cycle)
+		// High (>2kHz): stride=1 required (up to 22kHz near Nyquist)
+		static constexpr std::array<int32_t, kNumBands> kPeakStride = {4, 2, 1};
+
 		std::array<float, kNumBands> bandGains;
 		for (size_t b = 0; b < kNumBands; ++b) {
-			// Calculate level using float IIR with pre-computed alpha (hoisted from response calc)
+			// Calculate level using NEON-optimized peak detection with band-appropriate stride
 			bands_[b].updateLevel(bandBufferL[b].data(), bandBufferR[b].data(), buffer.size(), alpha_, oneMinusAlpha_,
-			                      useAvgEnvelope);
+			                      useAvgEnvelope, kPeakStride[b]);
 
 			// Calculate compression gain
 			// Use character-derived knee and add per-band skew offset to global skew
@@ -1444,14 +1484,31 @@ public:
 		// This combines compression gain, per-band output level, stereo width, and output gain
 		// into a single pass over the data, reducing memory bandwidth
 
-		// Pre-compute combined gain as ShiftedGain for efficient fixed-point math
-		// This eliminates all float conversions from the inner loop
+		// Compute target gains and check if smoothing is needed
+		std::array<float, kNumBands> targetBandGain;
+		for (size_t b = 0; b < kNumBands; ++b) {
+			targetBandGain[b] = bandGains[b] * bands_[b].getOutputLevelLinear();
+		}
+		float targetOutputGain = outputGain_;
+
+		// Check convergence - skip smoothing if all gains are within epsilon of target
+		bool gainsConverged = true;
+		for (size_t b = 0; b < kNumBands; ++b) {
+			if (std::abs(smoothedBandGain_[b] - targetBandGain[b]) > kGainConvergenceEpsilon * targetBandGain[b]) {
+				gainsConverged = false;
+				break;
+			}
+		}
+		if (std::abs(smoothedOutputGain_ - targetOutputGain) > kGainConvergenceEpsilon * targetOutputGain) {
+			gainsConverged = false;
+		}
+
+		// Convert current smoothed gains to ShiftedGain for NEON inner loop
 		std::array<ShiftedGain, kNumBands> bandCombinedGain;
 		for (size_t b = 0; b < kNumBands; ++b) {
-			float combinedFloat = bandGains[b] * bands_[b].getOutputLevelLinear();
-			bandCombinedGain[b] = floatToShiftedGain(combinedFloat);
+			bandCombinedGain[b] = floatToShiftedGain(smoothedBandGain_[b]);
 		}
-		ShiftedGain outputGainShifted = floatToShiftedGain(outputGain_);
+		ShiftedGain outputGainShifted = floatToShiftedGain(smoothedOutputGain_);
 
 		// Pre-compute per-band stereo width as fixed-point
 		// Width 0=mono, 1=unity, >1=enhanced, <0=inverted - clamped to [-2, 2] to avoid overflow
@@ -1487,7 +1544,28 @@ public:
 		const size_t vectorLen = numSamples & ~3; // Round down to multiple of 4
 
 		// Main NEON loop - process 4 samples at a time
+		// Gain smoothing stride counter (update every 8 samples = 2 iterations)
+		int32_t smoothingCounter = 0;
+
 		for (size_t i = 0; i < vectorLen; i += 4) {
+			// Strided gain smoothing - update every kGainSmoothingStride samples
+			if (!gainsConverged && (smoothingCounter & (kGainSmoothingStride / 4 - 1)) == 0) {
+				// IIR smooth toward target gains
+				for (size_t b = 0; b < kNumBands; ++b) {
+					smoothedBandGain_[b] += (targetBandGain[b] - smoothedBandGain_[b]) * kGainSmoothingAlpha;
+					bandCombinedGain[b] = floatToShiftedGain(smoothedBandGain_[b]);
+				}
+				smoothedOutputGain_ += (targetOutputGain - smoothedOutputGain_) * kGainSmoothingAlpha;
+				outputGainShifted = floatToShiftedGain(smoothedOutputGain_);
+
+				// Rebuild NEON mantissa vectors with updated gains
+				mantissa0 = vdupq_n_s32(bandCombinedGain[0].mantissa);
+				mantissa1 = vdupq_n_s32(bandCombinedGain[1].mantissa);
+				mantissa2 = vdupq_n_s32(bandCombinedGain[2].mantissa);
+				mantissaOut = vdupq_n_s32(outputGainShifted.mantissa);
+			}
+			++smoothingCounter;
+
 			// === Band 0 (bass): M/S with per-band width (default 50%) ===
 			int32x4_t L0 = vld1q_s32(&bandBufferL[0][i]);
 			int32x4_t R0 = vld1q_s32(&bandBufferR[0][i]);
@@ -1678,6 +1756,19 @@ public:
 					clippingHoldCounter_--;
 				}
 				clipping_ = (clippingHoldCounter_ > 0);
+			}
+		}
+
+		// Final gain convergence - snap to target if close enough
+		// This ensures we fully reach target over multiple buffers
+		if (!gainsConverged) {
+			for (size_t b = 0; b < kNumBands; ++b) {
+				if (std::abs(smoothedBandGain_[b] - targetBandGain[b]) < kGainConvergenceEpsilon * targetBandGain[b]) {
+					smoothedBandGain_[b] = targetBandGain[b];
+				}
+			}
+			if (std::abs(smoothedOutputGain_ - targetOutputGain) < kGainConvergenceEpsilon * targetOutputGain) {
+				smoothedOutputGain_ = targetOutputGain;
 			}
 		}
 
@@ -1920,6 +2011,20 @@ private:
 	static constexpr uint8_t kMeterRefreshBuffers = 35;
 	uint8_t meterRefreshCounter_{0};
 	bool meterNeedsRefresh_{false}; // Set by audio path, cleared by UI
+
+	// Gain smoothing state - prevents zipper noise from step-wise gain changes
+	// Smoothed in float domain, converted to ShiftedGain for NEON inner loop
+	std::array<float, kNumBands> smoothedBandGain_{1.0f, 1.0f, 1.0f}; // Current smoothed band gains
+	float smoothedOutputGain_{1.0f};                                  // Current smoothed output gain
+
+	// Gain smoothing constants - update every 8 samples (2 NEON iterations)
+	static constexpr int32_t kGainSmoothingStride = 8;
+	// Alpha scaled for stride: ~2ms time constant at 44.1kHz
+	// alpha = 1 - exp(-stride / (tau * sampleRate)), tau = 0.002s
+	// For stride=8, alpha ≈ 0.09 gives ~2ms smoothing
+	static constexpr float kGainSmoothingAlpha = 0.09f;
+	// Convergence threshold - skip smoothing when within 0.1% of target
+	static constexpr float kGainConvergenceEpsilon = 0.001f;
 
 public:
 	// ========== Serialization ==========
