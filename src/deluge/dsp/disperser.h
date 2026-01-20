@@ -43,6 +43,7 @@
 #include "dsp/util.hpp"
 #include "dsp/zone_param.hpp"
 #include "io/debug/fx_benchmark.h"
+#include "memory/memory_allocator_interface.h"
 #include "modulation/params/param.h"
 #include "storage/field_serialization.h"
 #include "util/fixedpoint.h"
@@ -94,16 +95,62 @@ constexpr float kParamSmoothingAlpha = 0.03f; // ~100ms settling time
  */
 /// Delay line state for comb resonance (shared across topologies)
 /// Supports multi-offset writes for frequency-dispersed feedback
+/// Memory is dynamically allocated via allocSdram() when disperser is enabled
 struct DisperserDelayState {
-	static constexpr size_t kMaxDelaySamples = 8820; // 200ms at 44.1kHz (fine pitch resolution)
-	std::array<q31_t, kMaxDelaySamples> bufferL{};
-	std::array<q31_t, kMaxDelaySamples> bufferR{};
+	static constexpr size_t kMaxDelaySamples = 8820;                             // 200ms at 44.1kHz
+	static constexpr size_t kBufferSizeBytes = kMaxDelaySamples * sizeof(q31_t); // ~35KB per channel
+	static constexpr size_t kTotalSizeBytes = kBufferSizeBytes * 2;              // ~70KB total
+
+	q31_t* bufferL{nullptr};     // Dynamically allocated L channel buffer
+	q31_t* bufferR{nullptr};     // Dynamically allocated R channel buffer
 	size_t headPos{0};           // Current head position (most recent)
 	uint16_t activityCounter{0}; // Buffers since last write (for tail detection)
 
+	/// Allocate delay buffers from SDRAM. Returns true on success.
+	[[nodiscard]] bool allocate() {
+		if (bufferL != nullptr) {
+			return true; // Already allocated
+		}
+		bufferL = static_cast<q31_t*>(allocSdram(kBufferSizeBytes));
+		if (bufferL == nullptr) {
+			return false;
+		}
+		bufferR = static_cast<q31_t*>(allocSdram(kBufferSizeBytes));
+		if (bufferR == nullptr) {
+			delugeDealloc(bufferL);
+			bufferL = nullptr;
+			return false;
+		}
+		// Zero the buffers
+		memset(bufferL, 0, kBufferSizeBytes);
+		memset(bufferR, 0, kBufferSizeBytes);
+		headPos = 0;
+		activityCounter = 0;
+		return true;
+	}
+
+	/// Deallocate delay buffers
+	void deallocate() {
+		if (bufferL != nullptr) {
+			delugeDealloc(bufferL);
+			bufferL = nullptr;
+		}
+		if (bufferR != nullptr) {
+			delugeDealloc(bufferR);
+			bufferR = nullptr;
+		}
+		headPos = 0;
+		activityCounter = 0;
+	}
+
+	/// Check if buffers are allocated
+	[[nodiscard]] bool isAllocated() const { return bufferL != nullptr && bufferR != nullptr; }
+
 	void reset() {
-		bufferL.fill(0);
-		bufferR.fill(0);
+		if (isAllocated()) {
+			memset(bufferL, 0, kBufferSizeBytes);
+			memset(bufferR, 0, kBufferSizeBytes);
+		}
 		headPos = 0;
 		activityCounter = 0;
 	}
@@ -197,6 +244,9 @@ struct DisperserDelayState {
 
 	/// Check if delay buffer has recent activity or significant energy
 	[[nodiscard]] bool hasEnergy() const {
+		if (!isAllocated()) {
+			return false;
+		}
 		// Fast path: if recently active, definitely has energy
 		if (activityCounter > 0) {
 			return true;
@@ -264,8 +314,8 @@ struct DisperserParams {
 	ZoneBasedParam<kDisperserNumZones, false> twist;
 
 	// User-facing knob values
-	uint8_t freq{64};  // Center frequency (0-127, maps to 1Hz-8kHz)
-	uint8_t stages{0}; // Number of active stages (0-32, 0 = bypass)
+	uint8_t freq{64};   // Center frequency (0-127, maps to 1Hz-8kHz)
+	uint8_t stages_{0}; // Number of active stages (0-32, 0 = bypass) - use setStages()
 
 	// DSP smoothing state (per-sound, persists across buffers)
 	q31_t smoothedTopo{0};
@@ -280,22 +330,62 @@ struct DisperserParams {
 	// Shared delay line for comb resonance (all topologies can use)
 	DisperserDelayState delay;
 
+	/// Get current stage count
+	[[nodiscard]] uint8_t getStages() const { return stages_; }
+
+	/// Set stage count with automatic memory management.
+	/// When stages goes 0→N, allocates delay buffer (~70KB from SDRAM).
+	/// When stages goes N→0, deallocates delay buffer.
+	/// Returns true on success, false if allocation failed (stages remains 0).
+	bool setStages(uint8_t newStages) {
+		if (newStages == stages_) {
+			return true; // No change
+		}
+
+		bool wasEnabled = stages_ > 0;
+		bool willBeEnabled = newStages > 0;
+
+		if (!wasEnabled && willBeEnabled) {
+			// Enabling: allocate delay buffer
+			if (!delay.allocate()) {
+				return false; // Allocation failed, stay disabled
+			}
+		}
+		else if (wasEnabled && !willBeEnabled) {
+			// Disabling: deallocate delay buffer
+			delay.deallocate();
+		}
+
+		stages_ = newStages;
+		return true;
+	}
+
 	/// Check if disperser is enabled
-	[[nodiscard]] bool isEnabled() const { return stages > 0; }
+	[[nodiscard]] bool isEnabled() const { return stages_ > 0; }
 
 	/// Write disperser params to file (only non-default values)
 	void writeToFile(Serializer& writer) const {
 		WRITE_FIELD_DEFAULT(writer, freq, "dispFreq", 64);
-		WRITE_FIELD(writer, stages, "dispStages");
+		WRITE_FIELD(writer, stages_, "dispStages");
 		WRITE_ZONE(writer, topo.value, "dispTopo");
 		WRITE_ZONE(writer, twist.value, "dispTwist");
 		phases.writeToFile(writer);
 	}
 
 	/// Read a tag into disperser params, returns true if tag was handled
+	/// Automatically allocates delay buffer when stages > 0 is read
 	bool readTag(Deserializer& reader, const char* tagName) {
 		READ_FIELD(reader, tagName, freq, "dispFreq");
-		READ_FIELD(reader, tagName, stages, "dispStages");
+		// Handle stages specially to trigger allocation
+		if (deluge::storage::readField(reader, tagName, "dispStages", stages_)) {
+			// Allocate delay buffer if stages > 0
+			if (stages_ > 0 && !delay.isAllocated()) {
+				if (!delay.allocate()) {
+					stages_ = 0; // Allocation failed, disable disperser
+				}
+			}
+			return true;
+		}
 		READ_ZONE(reader, tagName, topo.value, "dispTopo");
 		READ_ZONE(reader, tagName, twist.value, "dispTwist");
 		if (phases.readTag(reader, tagName)) {
@@ -1395,7 +1485,7 @@ private:
  */
 inline void processDisperser(StereoBuffer<q31_t> buffer, Disperser& dsp, DisperserParams& params, q31_t topoPreset,
                              q31_t topoCables, q31_t twistPreset, q31_t twistCables, int32_t noteCode) {
-	if (!params.isEnabled() || buffer.empty()) {
+	if (!params.isEnabled() || buffer.empty() || !params.delay.isAllocated()) {
 		return;
 	}
 
@@ -1476,20 +1566,20 @@ inline void processDisperser(StereoBuffer<q31_t> buffer, Disperser& dsp, Dispers
 	float bimodalSeparation = (topoParams.zone == 2) ? topoParams.param0 : 0.0f;
 
 	// Update coefficients with smoothing (lrOffset creates stereo width, Q from topo zone)
+	uint8_t stages = params.getStages();
 	dsp.updateCoefficientsSmoothed(dispFreq, dispSpread, &params.smoothedFreq, &params.smoothedSpread, lrSpreadOffset,
-	                               topoParams.q, params.stages, twistParams.spreadCurve, twistParams.qTilt,
-	                               bimodalSeparation, topoParams.detuning, topoParams.emphasis,
-	                               twistParams.lfoRateScale);
+	                               topoParams.q, stages, twistParams.spreadCurve, twistParams.qTilt, bimodalSeparation,
+	                               topoParams.detuning, topoParams.emphasis, twistParams.lfoRateScale);
 
 	// Cross mix amount for Cross topology (zone 3)
 	float crossMix = (topoParams.zone == 3) ? (0.3f + topoParams.param0 * 0.5f) : 0.0f;
 
 	// Delay time comes from freq knob (via stage offsets), doubled for longer echo
-	size_t centerStage = params.stages / 2;
+	size_t centerStage = stages / 2;
 	size_t delaySamples = dsp.getStageOffset(centerStage) * 2;
 
 	// Unified processing: topology routing + optional punch/chirp feedback
-	dsp.processBuffer(buffer, params.stages, params.delay, twistParams.punch, twistParams.chirpAmount, delaySamples,
+	dsp.processBuffer(buffer, stages, params.delay, twistParams.punch, twistParams.chirpAmount, delaySamples,
 	                  topoParams.harmonicBlend, topoParams.zone, crossMix);
 }
 

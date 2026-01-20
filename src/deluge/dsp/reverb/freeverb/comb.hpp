@@ -32,7 +32,10 @@ namespace freeverb {
 class Comb {
 public:
 	Comb() = default;
-	constexpr void setBuffer(std::span<int32_t> buffer) { buffer_ = buffer; }
+	constexpr void setBuffer(std::span<int32_t> buffer) {
+		buffer_ = buffer;
+		bufidx_ = 0; // Reset index when buffer changes to prevent out-of-bounds access
+	}
 
 	constexpr void mute() { std::fill(buffer_.begin(), buffer_.end(), 0); }
 
@@ -49,6 +52,9 @@ public:
 
 	// Big to inline - but crucial for speed
 	inline int32_t process(int32_t input) {
+		if (buffer_.empty()) {
+			return 0; // No buffer, output silence
+		}
 		int32_t output = buffer_[bufidx_];
 
 		filterstore_ = (multiply_32x32_rshift32_rounded(output, damp2_) + //<

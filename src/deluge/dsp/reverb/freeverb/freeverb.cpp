@@ -27,33 +27,7 @@
 namespace deluge::dsp::reverb {
 
 Freeverb::Freeverb() {
-	// Tie the components to their buffers
-	combL[0].setBuffer(bufcombL1);
-	combR[0].setBuffer(bufcombR1);
-	combL[1].setBuffer(bufcombL2);
-	combR[1].setBuffer(bufcombR2);
-	combL[2].setBuffer(bufcombL3);
-	combR[2].setBuffer(bufcombR3);
-	combL[3].setBuffer(bufcombL4);
-	combR[3].setBuffer(bufcombR4);
-	combL[4].setBuffer(bufcombL5);
-	combR[4].setBuffer(bufcombR5);
-	combL[5].setBuffer(bufcombL6);
-	combR[5].setBuffer(bufcombR6);
-	combL[6].setBuffer(bufcombL7);
-	combR[6].setBuffer(bufcombR7);
-	combL[7].setBuffer(bufcombL8);
-	combR[7].setBuffer(bufcombR8);
-	allpassL[0].setBuffer(bufallpassL1);
-	allpassR[0].setBuffer(bufallpassR1);
-	allpassL[1].setBuffer(bufallpassL2);
-	allpassR[1].setBuffer(bufallpassR2);
-	allpassL[2].setBuffer(bufallpassL3);
-	allpassR[2].setBuffer(bufallpassR3);
-	allpassL[3].setBuffer(bufallpassL4);
-	allpassR[3].setBuffer(bufallpassR4);
-
-	// Set default values
+	// Set default values for allpass feedback
 	allpassL[0].setFeedback(0.5f);
 	allpassR[0].setFeedback(0.5f);
 	allpassL[1].setFeedback(0.5f);
@@ -62,14 +36,81 @@ Freeverb::Freeverb() {
 	allpassR[2].setFeedback(0.5f);
 	allpassL[3].setFeedback(0.5f);
 	allpassR[3].setFeedback(0.5f);
+
+	// Set default parameter values
 	setWet(initialwet);
 	setRoomSize(initialroom);
 	setDry(initialdry);
 	setDamping(initialdamp);
 	setWidth(initialwidth);
 
-	// Buffer will be full of rubbish - so we MUST mute them
-	mute();
+	// Note: buffers are NOT set up here - call allocate() before first use
+}
+
+bool Freeverb::allocate() {
+	if (buffer_ != nullptr) {
+		return true; // Already allocated
+	}
+	buffer_ = static_cast<int32_t*>(
+	    GeneralMemoryAllocator::get().regions[MEMORY_REGION_STEALABLE].alloc(kTotalBufferBytes, false, nullptr));
+	if (buffer_ == nullptr) {
+		return false;
+	}
+	std::memset(buffer_, 0, kTotalBufferBytes);
+	setupBuffers();
+	return true;
+}
+
+void Freeverb::deallocate() {
+	if (buffer_ != nullptr) {
+		delugeDealloc(buffer_);
+		buffer_ = nullptr;
+		// Clear buffer references in comb/allpass filters
+		for (int32_t i = 0; i < numcombs; i++) {
+			combL[i].setBuffer(std::span<int32_t>());
+			combR[i].setBuffer(std::span<int32_t>());
+		}
+		for (int32_t i = 0; i < numallpasses; i++) {
+			allpassL[i].setBuffer(std::span<int32_t>());
+			allpassR[i].setBuffer(std::span<int32_t>());
+		}
+	}
+}
+
+void Freeverb::setupBuffers() {
+	// Wire up comb and allpass filters to regions of the contiguous buffer
+	// Buffer layout: [CombL1..CombL8][CombR1..CombR8][AllpassL1..L4][AllpassR1..R4]
+	int32_t* ptr = buffer_;
+
+	// Comb L buffers
+	static constexpr size_t combSizesL[] = {combtuningL1, combtuningL2, combtuningL3, combtuningL4,
+	                                        combtuningL5, combtuningL6, combtuningL7, combtuningL8};
+	for (int32_t i = 0; i < numcombs; i++) {
+		combL[i].setBuffer(std::span<int32_t>(ptr, combSizesL[i]));
+		ptr += combSizesL[i];
+	}
+
+	// Comb R buffers
+	static constexpr size_t combSizesR[] = {combtuningR1, combtuningR2, combtuningR3, combtuningR4,
+	                                        combtuningR5, combtuningR6, combtuningR7, combtuningR8};
+	for (int32_t i = 0; i < numcombs; i++) {
+		combR[i].setBuffer(std::span<int32_t>(ptr, combSizesR[i]));
+		ptr += combSizesR[i];
+	}
+
+	// Allpass L buffers
+	static constexpr size_t allpassSizesL[] = {allpasstuningL1, allpasstuningL2, allpasstuningL3, allpasstuningL4};
+	for (int32_t i = 0; i < numallpasses; i++) {
+		allpassL[i].setBuffer(std::span<int32_t>(ptr, allpassSizesL[i]));
+		ptr += allpassSizesL[i];
+	}
+
+	// Allpass R buffers
+	static constexpr size_t allpassSizesR[] = {allpasstuningR1, allpasstuningR2, allpasstuningR3, allpasstuningR4};
+	for (int32_t i = 0; i < numallpasses; i++) {
+		allpassR[i].setBuffer(std::span<int32_t>(ptr, allpassSizesR[i]));
+		ptr += allpassSizesR[i];
+	}
 }
 
 void Freeverb::mute() {

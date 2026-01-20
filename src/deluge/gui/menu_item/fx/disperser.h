@@ -75,7 +75,7 @@ class DisperserStages final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->disperser.stages); }
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->disperser.getStages()); }
 	bool usesAffectEntire() override { return true; }
 
 	// Show CPU indicator in notification when HiCPU mode is enabled
@@ -111,12 +111,16 @@ public:
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->disperser.stages = current_value;
+					soundDrum->disperser.setStages(current_value);
 				}
 			}
 		}
 		else {
-			soundEditor.currentModControllable->disperser.stages = current_value;
+			if (!soundEditor.currentModControllable->disperser.setStages(current_value)) {
+				// Allocation failed - show error and revert to 0
+				display->displayPopup("RAM!");
+				this->setValue(0);
+			}
 		}
 	}
 

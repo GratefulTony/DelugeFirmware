@@ -30,7 +30,17 @@ class FxEngine {
 public:
 	FxEngine(std::span<float> signal, std::array<float, 2> lfo_freqs)
 	    : buffer_(signal), mask(buffer_.size() - 1), lfo_{lfo_freqs} {};
+	FxEngine(std::array<float, 2> lfo_freqs) : buffer_(), mask(0), lfo_{lfo_freqs} {};
 	~FxEngine() = default;
+
+	void setBuffer(std::span<float> signal) {
+		buffer_ = signal;
+		// Prevent mask overflow when buffer is empty (size-1 would wrap to SIZE_MAX)
+		mask = buffer_.empty() ? 0 : buffer_.size() - 1;
+		write_ptr_ = 0;
+	}
+
+	[[nodiscard]] bool hasBuffer() const { return !buffer_.empty(); }
 
 	void Clear() {
 		std::fill(buffer_.begin(), buffer_.end(), 0);

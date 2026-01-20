@@ -396,7 +396,7 @@ public:
 	TimelineCounter* getTimelineCounterToRecordTo() override;
 
 	// Reverb params to be stored here between loading and song being made the active one
-	dsp::Reverb::Model model = deluge::dsp::Reverb::Model::MUTABLE;
+	dsp::Reverb::Model model = deluge::dsp::Reverb::Model::FEATHERVERB;
 	float reverbRoomSize = 30 / 50.f;
 	float reverbHPF = 0;
 	float reverbLPF = 1;

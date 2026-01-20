@@ -27,14 +27,29 @@
 #include "dsp/reverb/freeverb/allpass.hpp"
 #include "dsp/reverb/freeverb/comb.hpp"
 #include "dsp/reverb/freeverb/tuning.h"
+#include "memory/general_memory_allocator.h"
 #include <cstdint>
+#include <cstring>
 #include <span>
 
 namespace deluge::dsp::reverb {
 class Freeverb : public Base {
+	// Total buffer size: all comb + allpass buffers combined (~93 KB)
+	// Comb L: 1116+1188+1277+1356+1422+1491+1557+1617 = 10024
+	// Comb R: 1139+1211+1300+1379+1445+1514+1580+1640 = 10208
+	// Allpass L: 556+441+341+225 = 1563
+	// Allpass R: 579+464+364+248 = 1655
+	static constexpr size_t kTotalBufferSamples = 10024 + 10208 + 1563 + 1655; // 23450
+	static constexpr size_t kTotalBufferBytes = kTotalBufferSamples * sizeof(int32_t);
+
 public:
 	Freeverb();
-	~Freeverb() override = default;
+	~Freeverb() override { deallocate(); }
+
+	// Dynamic allocation for SDRAM - call before first use
+	[[nodiscard]] bool allocate();
+	void deallocate();
+	[[nodiscard]] bool isAllocated() const { return buffer_ != nullptr; }
 
 	void mute();
 
@@ -96,6 +111,10 @@ public:
 	}
 
 	[[gnu::always_inline]] void process(std::span<int32_t> input, StereoBuffer<q31_t> output) override {
+		// Safety check - skip if buffer deallocated (can happen during model switch race)
+		if (buffer_ == nullptr) {
+			return;
+		}
 		// HPF on reverb input, cos if it has DC offset, the reverb magnifies that, and the sound farts out
 		for (int32_t& reverb_sample : input) {
 			int32_t distance_to_go_l = reverb_sample - reverb_send_post_lpf_;
@@ -110,6 +129,7 @@ public:
 
 private:
 	void update();
+	void setupBuffers(); // Called from allocate() to wire up comb/allpass to buffer_
 
 	int32_t gain;
 	float roomsize;
@@ -120,45 +140,17 @@ private:
 	float dry;
 	float width;
 
-	// The following are all declared inline
-	// to remove the need for dynamic allocation
-	// with its subsequent error-checking messiness
-
-	// Comb filters
+	// Comb filters (state objects, buffers set via setBuffer())
 	std::array<freeverb::Comb, numcombs> combL;
 	std::array<freeverb::Comb, numcombs> combR;
 
-	// Allpass filters
+	// Allpass filters (state objects, buffers set via setBuffer())
 	std::array<freeverb::Allpass, numallpasses> allpassL;
 	std::array<freeverb::Allpass, numallpasses> allpassR;
 
-	// Buffers for the combs
-	std::array<int32_t, combtuningL1> bufcombL1;
-	std::array<int32_t, combtuningR1> bufcombR1;
-	std::array<int32_t, combtuningL2> bufcombL2;
-	std::array<int32_t, combtuningR2> bufcombR2;
-	std::array<int32_t, combtuningL3> bufcombL3;
-	std::array<int32_t, combtuningR3> bufcombR3;
-	std::array<int32_t, combtuningL4> bufcombL4;
-	std::array<int32_t, combtuningR4> bufcombR4;
-	std::array<int32_t, combtuningL5> bufcombL5;
-	std::array<int32_t, combtuningR5> bufcombR5;
-	std::array<int32_t, combtuningL6> bufcombL6;
-	std::array<int32_t, combtuningR6> bufcombR6;
-	std::array<int32_t, combtuningL7> bufcombL7;
-	std::array<int32_t, combtuningR7> bufcombR7;
-	std::array<int32_t, combtuningL8> bufcombL8;
-	std::array<int32_t, combtuningR8> bufcombR8;
-
-	// Buffers for the allpasses
-	std::array<int32_t, allpasstuningL1> bufallpassL1;
-	std::array<int32_t, allpasstuningR1> bufallpassR1;
-	std::array<int32_t, allpasstuningL2> bufallpassL2;
-	std::array<int32_t, allpasstuningR2> bufallpassR2;
-	std::array<int32_t, allpasstuningL3> bufallpassL3;
-	std::array<int32_t, allpasstuningR3> bufallpassR3;
-	std::array<int32_t, allpasstuningL4> bufallpassL4;
-	std::array<int32_t, allpasstuningR4> bufallpassR4;
+	// Single contiguous buffer for all comb/allpass delay lines (~93 KB)
+	// Allocated from SDRAM via allocate(), nullptr until then
+	int32_t* buffer_{nullptr};
 
 	int32_t reverb_send_post_lpf_ = 0;
 };

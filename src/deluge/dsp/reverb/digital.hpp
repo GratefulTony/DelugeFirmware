@@ -28,6 +28,10 @@ class Digital : public Mutable {
 
 public:
 	void process(std::span<q31_t> in, StereoBuffer<q31_t> output) override {
+		// Safety check - skip if buffer not allocated
+		if (!engine_.hasBuffer()) {
+			return;
+		}
 		typename FxEngine::Context c;
 
 		typename FxEngine::AllPass ap1(142 * kRatio);
@@ -141,6 +145,6 @@ public:
 	}
 
 private:
-	float lp_band_;
+	float lp_band_{0.0f};
 };
 } // namespace deluge::dsp::reverb

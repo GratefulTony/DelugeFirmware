@@ -32,7 +32,10 @@ class Allpass {
 public:
 	Allpass() = default;
 
-	constexpr void setBuffer(std::span<int32_t> buffer) { buffer_ = buffer; }
+	constexpr void setBuffer(std::span<int32_t> buffer) {
+		buffer_ = buffer;
+		bufidx_ = 0; // Reset index when buffer changes to prevent out-of-bounds access
+	}
 
 	constexpr void mute() { std::fill(buffer_.begin(), buffer_.end(), 0); }
 
@@ -41,6 +44,9 @@ public:
 	[[nodiscard]] constexpr float getFeedback() const { return (float)feedback_ / std::numeric_limits<int32_t>::max(); }
 
 	[[gnu::always_inline]] constexpr int32_t process(int32_t input) {
+		if (buffer_.empty()) {
+			return input; // No buffer, pass through (allpass identity)
+		}
 		int32_t bufout = buffer_[bufidx_];
 		int32_t output = -input + bufout;
 
