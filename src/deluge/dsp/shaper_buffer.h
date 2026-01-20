@@ -76,6 +76,10 @@ constexpr q31_t kShaperSmoothingAlpha = static_cast<q31_t>(0.0005 * ONE_Q31);
 /// FilterGain compensation only adjusts for resonance-induced level changes.
 constexpr int32_t kShaperNeutralFilterGainInt = 1 << 28; // filterGain at neutral settings (integer)
 
+/// Tolerance band for skipping gain adjustment (~1% of neutral)
+/// When filterGain is within this range of neutral, gain adjust is skipped (inaudible difference)
+constexpr int32_t kGainAdjustTolerance = kShaperNeutralFilterGainInt / 100;
+
 /// Context for per-sample IIR parameter smoothing during buffer processing
 struct ShaperSmoothingContext {
 	q31_t current;
@@ -134,7 +138,7 @@ struct ShaperBufferContext {
 	int32_t integratorBlend_Q16; ///< Integrator blend amount (0 = bypass, when slewIntensity < 0)
 
 	// Gain staging
-	int32_t attenGain_Q16; ///< Output attenuation (subtractive mode)
+	int32_t attenGain_Q30; ///< Output attenuation in Q30 (subtractive mode, uses SMMUL)
 
 	// Flags
 	bool isLinear;         ///< True if shaper is in linear bypass
@@ -274,16 +278,19 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 	// filterGain>0 means subtractive: compensate for resonance-induced level changes
 	// At neutral filterGain (2^28), gains = 1.0 (no adjustment)
 	// High resonance (low filterGain) → boost; low resonance (high filterGain) → attenuate
-	bool needsGainAdjust = (filterGain > 0) && hasFilters && (filterGain != kShaperNeutralFilterGainInt);
-	int32_t attenGain_Q16 = 65536; // 1.0 in Q16
+	// Skip if within 1% of neutral (inaudible, saves per-sample multiply)
+	int32_t filterDelta = filterGain - kShaperNeutralFilterGainInt;
+	bool needsGainAdjust =
+	    (filterGain > 0) && hasFilters && (filterDelta > kGainAdjustTolerance || filterDelta < -kGainAdjustTolerance);
+	int32_t attenGain_Q30 = 1 << 30; // 1.0 in Q30
 
 	// Compute target driveGain ONCE (hoisted p^5 calculation)
 	// Fold boost into drive target to save one multiply per sample
 	int32_t targetGain_Q26 = TableShaper::driveToGainQ26(drive);
 	if (needsGainAdjust) {
-		// One float divide per buffer for attenuation
+		// One float divide per buffer for attenuation (Q30 for single-cycle SMMUL)
 		float ratio = static_cast<float>(kShaperNeutralFilterGainInt) / static_cast<float>(filterGain);
-		attenGain_Q16 = static_cast<int32_t>((1.0f / ratio) * 65536.0f);
+		attenGain_Q30 = static_cast<int32_t>((1.0f / ratio) * 1073741824.0f); // 2^30
 		// Fold boost into drive: (boost_Q16 × drive_Q26) >> 16 → Q26
 		// Uses 64-bit intermediate to handle large boost × drive products
 		int64_t boosted64 = static_cast<int64_t>(ratio * 65536.0f) * targetGain_Q26;
@@ -392,7 +399,7 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 	    .rotation = rotation,
 	    .lpfAlpha_Q16 = lpfAlpha_Q16,
 	    .integratorBlend_Q16 = integratorBlend_Q16,
-	    .attenGain_Q16 = attenGain_Q16,
+	    .attenGain_Q30 = attenGain_Q30,
 	    .isLinear = isLinear,
 	    .lpfActive = lpfActive,
 	    .integratorActive = integratorActive,
@@ -443,7 +450,7 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 			q31_t out = shaper.processWithGainFast(driven, currentBlendSlope, currentThreshold32, tableIdx);
 
 			if (ctx.needsGainAdjust) {
-				out = static_cast<q31_t>((static_cast<int64_t>(out) * ctx.attenGain_Q16) >> 16);
+				out = multiply_32x32_rshift32(out, ctx.attenGain_Q30) << 2;
 			}
 
 			sample = out;
@@ -499,7 +506,7 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 			                                              ctx.tableIdx, ctx.hystOffset, hystState);
 			q31_t out = scaledOut >> ctx.inputScaleShift;
 			if (ctx.needsGainAdjust) {
-				out = static_cast<q31_t>((static_cast<int64_t>(out) * ctx.attenGain_Q16) >> 16);
+				out = multiply_32x32_rshift32(out, ctx.attenGain_Q30) << 2;
 			}
 			sample = out;
 		}
@@ -553,7 +560,7 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 			                                shaper, scaledFeedback);
 
 			if (ctx.needsGainAdjust) {
-				out = static_cast<q31_t>((static_cast<int64_t>(out) * ctx.attenGain_Q16) >> 16);
+				out = multiply_32x32_rshift32(out, ctx.attenGain_Q30) << 2;
 			}
 
 			sample = out;
@@ -619,16 +626,19 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 	// filterGain>0 means subtractive: compensate for resonance-induced level changes
 	// At neutral filterGain (2^28), gains = 1.0 (no adjustment)
 	// High resonance (low filterGain) → boost; low resonance (high filterGain) → attenuate
-	bool needsGainAdjust = (filterGain > 0) && hasFilters && (filterGain != kShaperNeutralFilterGainInt);
-	int32_t attenGain_Q16 = 65536; // 1.0 in Q16
+	// Skip if within 1% of neutral (inaudible, saves per-sample multiply)
+	int32_t filterDelta = filterGain - kShaperNeutralFilterGainInt;
+	bool needsGainAdjust =
+	    (filterGain > 0) && hasFilters && (filterDelta > kGainAdjustTolerance || filterDelta < -kGainAdjustTolerance);
+	int32_t attenGain_Q30 = 1 << 30; // 1.0 in Q30
 
 	// Compute target driveGain ONCE (hoisted p^5 calculation)
 	// Fold boost into drive target to save one multiply per sample
 	int32_t targetGain_Q26 = TableShaper::driveToGainQ26(drive);
 	if (needsGainAdjust) {
-		// One float divide per buffer for attenuation
+		// One float divide per buffer for attenuation (Q30 for single-cycle SMMUL)
 		float ratio = static_cast<float>(kShaperNeutralFilterGainInt) / static_cast<float>(filterGain);
-		attenGain_Q16 = static_cast<int32_t>((1.0f / ratio) * 65536.0f);
+		attenGain_Q30 = static_cast<int32_t>((1.0f / ratio) * 1073741824.0f); // 2^30
 		// Fold boost into drive: (boost_Q16 × drive_Q26) >> 16 → Q26
 		// Uses 64-bit intermediate to handle large boost × drive products
 		int64_t boosted64 = static_cast<int64_t>(ratio * 65536.0f) * targetGain_Q26;
@@ -739,7 +749,7 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 	    .rotation = rotation,
 	    .lpfAlpha_Q16 = lpfAlpha_Q16,
 	    .integratorBlend_Q16 = integratorBlend_Q16,
-	    .attenGain_Q16 = attenGain_Q16,
+	    .attenGain_Q30 = attenGain_Q30,
 	    .isLinear = isLinear,
 	    .lpfActive = lpfActive,
 	    .integratorActive = integratorActive,
@@ -795,8 +805,8 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 			q31_t outR = shaper.processWithGainFast(drivenR, currentBlendSlope, currentThreshold32, tableIdx);
 
 			if (ctx.needsGainAdjust) {
-				outL = static_cast<q31_t>((static_cast<int64_t>(outL) * ctx.attenGain_Q16) >> 16);
-				outR = static_cast<q31_t>((static_cast<int64_t>(outR) * ctx.attenGain_Q16) >> 16);
+				outL = multiply_32x32_rshift32(outL, ctx.attenGain_Q30) << 2;
+				outR = multiply_32x32_rshift32(outR, ctx.attenGain_Q30) << 2;
 			}
 
 			sample.l = outL;
@@ -858,8 +868,8 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 			q31_t outL = scaledOutL >> ctx.inputScaleShift;
 			q31_t outR = scaledOutR >> ctx.inputScaleShift;
 			if (ctx.needsGainAdjust) {
-				outL = static_cast<q31_t>((static_cast<int64_t>(outL) * ctx.attenGain_Q16) >> 16);
-				outR = static_cast<q31_t>((static_cast<int64_t>(outR) * ctx.attenGain_Q16) >> 16);
+				outL = multiply_32x32_rshift32(outL, ctx.attenGain_Q30) << 2;
+				outR = multiply_32x32_rshift32(outR, ctx.attenGain_Q30) << 2;
 			}
 			sample.l = outL;
 			sample.r = outR;
@@ -940,8 +950,8 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 			                                 scaledFeedbackR);
 
 			if (ctx.needsGainAdjust) {
-				outL = static_cast<q31_t>((static_cast<int64_t>(outL) * ctx.attenGain_Q16) >> 16);
-				outR = static_cast<q31_t>((static_cast<int64_t>(outR) * ctx.attenGain_Q16) >> 16);
+				outL = multiply_32x32_rshift32(outL, ctx.attenGain_Q30) << 2;
+				outR = multiply_32x32_rshift32(outR, ctx.attenGain_Q30) << 2;
 			}
 
 			sample.l = outL;
