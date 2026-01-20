@@ -24,6 +24,23 @@ CPU usage per voice (optimization ongoing). Target: stay under 2x the builtin sa
 
 ![Benchmark Histograms](docs/benchmarks/fx_benchmark_histograms.png)
 
+### Memory Optimizations
+
+Large effect buffers have been migrated from static SRAM to dynamic SDRAM allocation, reducing memory pressure on the constrained internal/external regions.
+
+| Component | Before | After | Savings |
+|-----------|--------|-------|---------|
+| **Reverb buffers** | ~128 KB static BSS | SDRAM (dynamic) | 128 KB SRAM freed |
+| **Analog waveform tables** | ~30 KB internal | SDRAM | 30 KB internal freed |
+| **Disperser delay lines** | 70 KB embedded/sound | 72 KB SDRAM (on-demand) | Up to 2.2 MB* |
+
+*Disperser memory is now allocated only when `stages > 0`. For songs with 32 sounds, this saves up to 2.2 MB vs the previous always-allocated approach.
+
+Key patterns:
+- `allocSdram()` - Direct SDRAM allocation for large buffers that must persist
+- On-demand allocation - Buffers allocated when effect is enabled, freed when disabled
+- Variant-based reverb - Only the active reverb model's buffer is allocated
+
 ### For Developers
 
 This fork is open source under the same GPL-3.0 license as the community firmware. Feel free to:

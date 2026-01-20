@@ -281,8 +281,10 @@ public:
 		float diffUp = threshUpdB - rms_;
 
 		// Knee width in dB (0 = hard knee, up to 12dB soft knee)
+		// Pre-compute reciprocal to avoid division in knee calculations
 		float kneeWidthdB = knee * 12.0f;
-		float halfKnee = kneeWidthdB / 2.0f;
+		float halfKnee = kneeWidthdB * 0.5f;
+		float invTwoKnee = (kneeWidthdB > 0.1f) ? (0.5f / kneeWidthdB) : 0.0f;
 
 		// Downward compression with soft knee
 		float over;
@@ -293,7 +295,7 @@ public:
 		else if (diffDown > -halfKnee) {
 			// In soft knee transition region - quadratic interpolation
 			float x = diffDown + halfKnee; // 0 to kneeWidth
-			over = (x * x) / (2.0f * kneeWidthdB);
+			over = x * x * invTwoKnee;
 		}
 		else {
 			// Below knee region
@@ -309,7 +311,7 @@ public:
 		else if (diffUp > -halfKnee) {
 			// In soft knee transition region
 			float x = diffUp + halfKnee;
-			under = (x * x) / (2.0f * kneeWidthdB);
+			under = x * x * invTwoKnee;
 		}
 		else {
 			// Above knee region
@@ -1536,9 +1538,10 @@ public:
 		int32x4_t bandPeakVec2 = vdupq_n_s32(0);
 
 		// Soft clip knee points: bands at +6dB, output at 0dBFS
-		// When disabled, use ONE_Q31 so soft clip never engages (pass-through)
-		const int32_t bandClipKnee = softClipEnabled_ ? (EFFECTIVE_0DBFS_Q31 * 2) : ONE_Q31;
-		const int32_t outputClipKnee = softClipEnabled_ ? EFFECTIVE_0DBFS_Q31 : ONE_Q31;
+		// When disabled, bypass soft clip calls entirely (saves ~8 NEON ops per iteration)
+		const bool doSoftClip = softClipEnabled_;
+		const int32_t bandClipKnee = EFFECTIVE_0DBFS_Q31 * 2;
+		const int32_t outputClipKnee = EFFECTIVE_0DBFS_Q31;
 
 		const size_t numSamples = buffer.size();
 		const size_t vectorLen = numSamples & ~3; // Round down to multiple of 4
@@ -1576,8 +1579,10 @@ public:
 			int32x4_t msR0 = vsubq_s32(mid0, sideScaled0);
 			int32x4_t scaledL0 = applyShiftedGainNeon(msL0, mantissa0, bandCombinedGain[0].shift);
 			int32x4_t scaledR0 = applyShiftedGainNeon(msR0, mantissa0, bandCombinedGain[0].shift);
-			scaledL0 = softClip_NEON(scaledL0, bandClipKnee);
-			scaledR0 = softClip_NEON(scaledR0, bandClipKnee);
+			if (doSoftClip) {
+				scaledL0 = softClip_NEON(scaledL0, bandClipKnee);
+				scaledR0 = softClip_NEON(scaledR0, bandClipKnee);
+			}
 
 			int32x4_t sumL = scaledL0;
 			int32x4_t sumR = scaledR0;
@@ -1596,8 +1601,10 @@ public:
 			int32x4_t msR1 = vsubq_s32(mid1, sideScaled1);
 			int32x4_t scaledL1 = applyShiftedGainNeon(msL1, mantissa1, bandCombinedGain[1].shift);
 			int32x4_t scaledR1 = applyShiftedGainNeon(msR1, mantissa1, bandCombinedGain[1].shift);
-			scaledL1 = softClip_NEON(scaledL1, bandClipKnee);
-			scaledR1 = softClip_NEON(scaledR1, bandClipKnee);
+			if (doSoftClip) {
+				scaledL1 = softClip_NEON(scaledL1, bandClipKnee);
+				scaledR1 = softClip_NEON(scaledR1, bandClipKnee);
+			}
 			sumL = vqaddq_s32(sumL, scaledL1);
 			sumR = vqaddq_s32(sumR, scaledR1);
 
@@ -1615,8 +1622,10 @@ public:
 			int32x4_t msR2 = vsubq_s32(mid2, sideScaled2);
 			int32x4_t scaledL2 = applyShiftedGainNeon(msL2, mantissa2, bandCombinedGain[2].shift);
 			int32x4_t scaledR2 = applyShiftedGainNeon(msR2, mantissa2, bandCombinedGain[2].shift);
-			scaledL2 = softClip_NEON(scaledL2, bandClipKnee);
-			scaledR2 = softClip_NEON(scaledR2, bandClipKnee);
+			if (doSoftClip) {
+				scaledL2 = softClip_NEON(scaledL2, bandClipKnee);
+				scaledR2 = softClip_NEON(scaledR2, bandClipKnee);
+			}
 			sumL = vqaddq_s32(sumL, scaledL2);
 			sumR = vqaddq_s32(sumR, scaledR2);
 
@@ -1627,33 +1636,49 @@ public:
 			// === Output gain + soft clip ===
 			int32x4_t outLVec = applyShiftedGainNeon(sumL, mantissaOut, outputGainShifted.shift);
 			int32x4_t outRVec = applyShiftedGainNeon(sumR, mantissaOut, outputGainShifted.shift);
-			outLVec = softClip_NEON(outLVec, outputClipKnee);
-			outRVec = softClip_NEON(outRVec, outputClipKnee);
+			if (doSoftClip) {
+				outLVec = softClip_NEON(outLVec, outputClipKnee);
+				outRVec = softClip_NEON(outRVec, outputClipKnee);
+			}
 
 			if (doMetering) {
 				peakVec = vmaxq_s32(peakVec, vmaxq_s32(vabsq_s32(outLVec), vabsq_s32(outRVec)));
 			}
 
-			// Extract lanes and apply DC block (scalar - has state dependency)
-			q31_t out0L = vgetq_lane_s32(outLVec, 0);
-			q31_t out0R = vgetq_lane_s32(outRVec, 0);
-			buffer[i + 0].l = out0L - dcBlockL_.doFilter(out0L, kDCBlockCoeff);
-			buffer[i + 0].r = out0R - dcBlockR_.doFilter(out0R, kDCBlockCoeff);
+			// Extract lanes and store to buffer
+			// DC block bypassed - symmetric soft clip doesn't introduce DC offset
+			if constexpr (kBypassDCBlock) {
+				vst1q_lane_s32(&buffer[i + 0].l, outLVec, 0);
+				vst1q_lane_s32(&buffer[i + 0].r, outRVec, 0);
+				vst1q_lane_s32(&buffer[i + 1].l, outLVec, 1);
+				vst1q_lane_s32(&buffer[i + 1].r, outRVec, 1);
+				vst1q_lane_s32(&buffer[i + 2].l, outLVec, 2);
+				vst1q_lane_s32(&buffer[i + 2].r, outRVec, 2);
+				vst1q_lane_s32(&buffer[i + 3].l, outLVec, 3);
+				vst1q_lane_s32(&buffer[i + 3].r, outRVec, 3);
+			}
+			else {
+				// DC block path (scalar - has state dependency)
+				q31_t out0L = vgetq_lane_s32(outLVec, 0);
+				q31_t out0R = vgetq_lane_s32(outRVec, 0);
+				buffer[i + 0].l = out0L - dcBlockL_.doFilter(out0L, kDCBlockCoeff);
+				buffer[i + 0].r = out0R - dcBlockR_.doFilter(out0R, kDCBlockCoeff);
 
-			q31_t out1L = vgetq_lane_s32(outLVec, 1);
-			q31_t out1R = vgetq_lane_s32(outRVec, 1);
-			buffer[i + 1].l = out1L - dcBlockL_.doFilter(out1L, kDCBlockCoeff);
-			buffer[i + 1].r = out1R - dcBlockR_.doFilter(out1R, kDCBlockCoeff);
+				q31_t out1L = vgetq_lane_s32(outLVec, 1);
+				q31_t out1R = vgetq_lane_s32(outRVec, 1);
+				buffer[i + 1].l = out1L - dcBlockL_.doFilter(out1L, kDCBlockCoeff);
+				buffer[i + 1].r = out1R - dcBlockR_.doFilter(out1R, kDCBlockCoeff);
 
-			q31_t out2L = vgetq_lane_s32(outLVec, 2);
-			q31_t out2R = vgetq_lane_s32(outRVec, 2);
-			buffer[i + 2].l = out2L - dcBlockL_.doFilter(out2L, kDCBlockCoeff);
-			buffer[i + 2].r = out2R - dcBlockR_.doFilter(out2R, kDCBlockCoeff);
+				q31_t out2L = vgetq_lane_s32(outLVec, 2);
+				q31_t out2R = vgetq_lane_s32(outRVec, 2);
+				buffer[i + 2].l = out2L - dcBlockL_.doFilter(out2L, kDCBlockCoeff);
+				buffer[i + 2].r = out2R - dcBlockR_.doFilter(out2R, kDCBlockCoeff);
 
-			q31_t out3L = vgetq_lane_s32(outLVec, 3);
-			q31_t out3R = vgetq_lane_s32(outRVec, 3);
-			buffer[i + 3].l = out3L - dcBlockL_.doFilter(out3L, kDCBlockCoeff);
-			buffer[i + 3].r = out3R - dcBlockR_.doFilter(out3R, kDCBlockCoeff);
+				q31_t out3L = vgetq_lane_s32(outLVec, 3);
+				q31_t out3R = vgetq_lane_s32(outRVec, 3);
+				buffer[i + 3].l = out3L - dcBlockL_.doFilter(out3L, kDCBlockCoeff);
+				buffer[i + 3].r = out3R - dcBlockR_.doFilter(out3R, kDCBlockCoeff);
+			}
 		}
 
 		// Handle remainder samples with scalar fallback (0-3 samples)
@@ -1664,36 +1689,44 @@ public:
 			q31_t mid0 = (bandBufferL[0][i] >> 1) + (bandBufferR[0][i] >> 1);
 			q31_t side0 = (bandBufferL[0][i] >> 1) - (bandBufferR[0][i] >> 1);
 			q31_t sideScaled0 = multiply_32x32_rshift32(side0, widthFixedBass) << 1;
-			q31_t scaledL0 = softClip(applyShiftedGain(mid0 + sideScaled0, bandCombinedGain[0]), bandClipKnee);
-			q31_t scaledR0 = softClip(applyShiftedGain(mid0 - sideScaled0, bandCombinedGain[0]), bandClipKnee);
-			sumL = add_saturate(sumL, scaledL0);
-			sumR = add_saturate(sumR, scaledR0);
+			q31_t gainedL0 = applyShiftedGain(mid0 + sideScaled0, bandCombinedGain[0]);
+			q31_t gainedR0 = applyShiftedGain(mid0 - sideScaled0, bandCombinedGain[0]);
+			sumL = add_saturate(sumL, doSoftClip ? softClip(gainedL0, bandClipKnee) : gainedL0);
+			sumR = add_saturate(sumR, doSoftClip ? softClip(gainedR0, bandClipKnee) : gainedR0);
 
 			// Band 1 (mid): M/S with per-band width
 			q31_t mid1 = (bandBufferL[1][i] >> 1) + (bandBufferR[1][i] >> 1);
 			q31_t side1 = (bandBufferL[1][i] >> 1) - (bandBufferR[1][i] >> 1);
 			q31_t sideScaled1 = multiply_32x32_rshift32(side1, widthFixedMid) << 1;
-			q31_t scaledL1 = softClip(applyShiftedGain(mid1 + sideScaled1, bandCombinedGain[1]), bandClipKnee);
-			q31_t scaledR1 = softClip(applyShiftedGain(mid1 - sideScaled1, bandCombinedGain[1]), bandClipKnee);
-			sumL = add_saturate(sumL, scaledL1);
-			sumR = add_saturate(sumR, scaledR1);
+			q31_t gainedL1 = applyShiftedGain(mid1 + sideScaled1, bandCombinedGain[1]);
+			q31_t gainedR1 = applyShiftedGain(mid1 - sideScaled1, bandCombinedGain[1]);
+			sumL = add_saturate(sumL, doSoftClip ? softClip(gainedL1, bandClipKnee) : gainedL1);
+			sumR = add_saturate(sumR, doSoftClip ? softClip(gainedR1, bandClipKnee) : gainedR1);
 
 			// Band 2 (high): M/S with per-band width
 			q31_t mid2 = (bandBufferL[2][i] >> 1) + (bandBufferR[2][i] >> 1);
 			q31_t side2 = (bandBufferL[2][i] >> 1) - (bandBufferR[2][i] >> 1);
 			q31_t sideScaled2 = multiply_32x32_rshift32(side2, widthFixedHigh) << 1;
-			q31_t scaledL2 = softClip(applyShiftedGain(mid2 + sideScaled2, bandCombinedGain[2]), bandClipKnee);
-			q31_t scaledR2 = softClip(applyShiftedGain(mid2 - sideScaled2, bandCombinedGain[2]), bandClipKnee);
-			sumL = add_saturate(sumL, scaledL2);
-			sumR = add_saturate(sumR, scaledR2);
+			q31_t gainedL2 = applyShiftedGain(mid2 + sideScaled2, bandCombinedGain[2]);
+			q31_t gainedR2 = applyShiftedGain(mid2 - sideScaled2, bandCombinedGain[2]);
+			sumL = add_saturate(sumL, doSoftClip ? softClip(gainedL2, bandClipKnee) : gainedL2);
+			sumR = add_saturate(sumR, doSoftClip ? softClip(gainedR2, bandClipKnee) : gainedR2);
 
 			// Output gain + soft clip
-			q31_t outL = softClip(applyShiftedGain(sumL, outputGainShifted), outputClipKnee);
-			q31_t outR = softClip(applyShiftedGain(sumR, outputGainShifted), outputClipKnee);
+			q31_t gainedOutL = applyShiftedGain(sumL, outputGainShifted);
+			q31_t gainedOutR = applyShiftedGain(sumR, outputGainShifted);
+			q31_t outL = doSoftClip ? softClip(gainedOutL, outputClipKnee) : gainedOutL;
+			q31_t outR = doSoftClip ? softClip(gainedOutR, outputClipKnee) : gainedOutR;
 
-			// DC block
-			buffer[i].l = outL - dcBlockL_.doFilter(outL, kDCBlockCoeff);
-			buffer[i].r = outR - dcBlockR_.doFilter(outR, kDCBlockCoeff);
+			// DC block bypassed - symmetric soft clip doesn't introduce DC offset
+			if constexpr (kBypassDCBlock) {
+				buffer[i].l = outL;
+				buffer[i].r = outR;
+			}
+			else {
+				buffer[i].l = outL - dcBlockL_.doFilter(outL, kDCBlockCoeff);
+				buffer[i].r = outR - dcBlockR_.doFilter(outR, kDCBlockCoeff);
+			}
 		}
 
 		// Reduce NEON peak vectors to scalars (ARMv7 horizontal max)
@@ -1986,9 +2019,11 @@ private:
 	std::array<uint32_t, kNumBands> saturationStateL_{kSaturationNeutral, kSaturationNeutral, kSaturationNeutral};
 	std::array<uint32_t, kNumBands> saturationStateR_{kSaturationNeutral, kSaturationNeutral, kSaturationNeutral};
 
-	// DC-blocking high-pass filter (removes DC offset introduced by saturation)
-	// fc = 5Hz gives very low cutoff that only removes DC, not audio
-	// hpfCoeff = tan(pi*fc/fs) / (1 + tan(pi*fc/fs)) ≈ fc/fs for small fc
+	// DC-blocking high-pass filter - BYPASSED
+	// The soft clipper is symmetric around zero, so it doesn't introduce DC offset.
+	// Asymmetric saturation (e.g., tube) would need DC blocking, but our soft clip doesn't.
+	// Keeping the filter components for potential future use with asymmetric saturation.
+	static constexpr bool kBypassDCBlock = true;
 	static constexpr q31_t kDCBlockCoeff = static_cast<q31_t>((5.0f / kSampleRate) * ONE_Q31);
 	filter::BasicFilterComponent dcBlockL_;
 	filter::BasicFilterComponent dcBlockR_;
