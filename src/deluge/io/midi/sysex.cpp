@@ -18,6 +18,7 @@
  */
 
 #include "io/midi/sysex.h"
+#include "io/debug/memory_profile.h"
 #include "io/debug/print.h"
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_engine.h"
@@ -51,6 +52,10 @@ void Debug::sysexReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 #ifdef ENABLE_SYSEX_LOAD
 		loadCheckAndRun(data, len);
 #endif
+		break;
+
+	case 3: // Memory stats query
+		MEMORY_PROFILE_OUTPUT();
 		break;
 
 	default:

@@ -21,6 +21,7 @@
 #include "gui/views/view.h"
 #include "model/action/action_logger.h"
 #include "model/clip/instrument_clip.h"
+#include "model/fx/stutterer.h"
 #include "model/instrument/instrument.h"
 #include "model/instrument/melodic_instrument.h"
 #include "model/mod_controllable/mod_controllable_audio.h"
@@ -401,7 +402,7 @@ bool UnpatchedParamSet::shouldParamIndicateMiddleValue(ModelStackWithParamId con
 		return !(((ModControllableAudio*)modelStack->modControllable)->stutterConfig.useSongStutter
 		             ? currentSong->globalEffectable.stutterConfig.quantized
 		             : ((ModControllableAudio*)modelStack->modControllable)->stutterConfig.quantized)
-		       || isUIModeActive(UI_MODE_STUTTERING);
+		       || isUIModeActive(UI_MODE_STUTTERING) || stutterer.isScatterPlaying();
 	case params::UNPATCHED_BASS:
 	case params::UNPATCHED_TREBLE:
 		return true;
@@ -423,16 +424,20 @@ static bool isMultibandCompressorParam(int32_t paramId) {
 	return paramId >= params::UNPATCHED_MB_COMPRESSOR_CHARACTER && paramId <= params::UNPATCHED_MB_COMPRESSOR_VIBE;
 }
 
-// Helper to check if an unpatched param is a high-resolution zone-based param (unipolar, 1024-step)
+// Helper to check if an unpatched param is a unipolar zone-based param (0 to INT32_MAX)
 static bool isHighResZoneParam(int32_t paramId) {
 	return paramId == params::UNPATCHED_SINE_SHAPER_HARMONIC || paramId == params::UNPATCHED_SINE_SHAPER_TWIST
-	       || paramId == params::UNPATCHED_DISPERSER_TOPO || paramId == params::UNPATCHED_DISPERSER_TWIST;
+	       || paramId == params::UNPATCHED_DISPERSER_TOPO || paramId == params::UNPATCHED_DISPERSER_TWIST
+	       || paramId == params::UNPATCHED_SCATTER_ZONE_A || paramId == params::UNPATCHED_SCATTER_ZONE_B
+	       || paramId == params::UNPATCHED_SCATTER_MACRO_CONFIG || paramId == params::UNPATCHED_SCATTER_MACRO;
 }
 
-// Helper to check if a patched param is a high-resolution zone-based param (unipolar, 1024-step)
+// Helper to check if a patched param is a unipolar zone-based param (0 to INT32_MAX)
 static bool isPatchedHighResZoneParam(int32_t paramId) {
 	return paramId == params::LOCAL_SINE_SHAPER_TWIST || paramId == params::LOCAL_SINE_SHAPER_HARMONIC
-	       || paramId == params::GLOBAL_DISPERSER_TOPO || paramId == params::GLOBAL_DISPERSER_TWIST;
+	       || paramId == params::GLOBAL_DISPERSER_TOPO || paramId == params::GLOBAL_DISPERSER_TWIST
+	       || paramId == params::GLOBAL_SCATTER_ZONE_A || paramId == params::GLOBAL_SCATTER_ZONE_B
+	       || paramId == params::GLOBAL_SCATTER_MACRO_CONFIG || paramId == params::GLOBAL_SCATTER_MACRO;
 }
 
 int32_t UnpatchedParamSet::paramValueToKnobPos(int32_t paramValue, ModelStackWithAutoParam* modelStack) {

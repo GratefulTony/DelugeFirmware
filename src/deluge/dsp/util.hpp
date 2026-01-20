@@ -117,12 +117,13 @@ inline float triangleSimpleUnipolar(float phase, float duty = 1.0f) {
 	// Fast floor via int32_t truncation (valid for non-negative phase)
 	phase = phase - static_cast<float>(static_cast<int32_t>(phase));
 	float halfDuty = duty * 0.5f;
+	float invHalfDuty = 2.0f / duty; // One division instead of two
 
 	if (phase < halfDuty) {
-		return phase / halfDuty; // Rising: 0→1
+		return phase * invHalfDuty; // Rising: 0→1
 	}
 	else if (phase < duty) {
-		return (duty - phase) / halfDuty; // Falling: 1→0
+		return (duty - phase) * invHalfDuty; // Falling: 1→0
 	}
 	return 0.0f; // Deadzone
 }

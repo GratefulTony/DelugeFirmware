@@ -7,20 +7,52 @@
 #include "dsp/reverb/base.hpp"
 #include "dsp/util.hpp"
 #include "fx_engine.hpp"
-#include <array>
+#include "memory/general_memory_allocator.h"
+#include <cstring>
 #include <limits>
 
 namespace deluge::dsp::reverb {
 
 class Mutable : public Base {
-	constexpr static size_t kBufferSize = 32768;
+protected:
+	static constexpr size_t kBufferSize = 32768;
+	static constexpr size_t kBufferSizeBytes = kBufferSize * sizeof(float);
 
 public:
 	Mutable() = default;
 
-	~Mutable() override = default;
+	~Mutable() override { deallocate(); }
+
+	// Dynamic allocation for SDRAM - call before first use
+	[[nodiscard]] bool allocate() {
+		if (buffer_ != nullptr) {
+			return true; // Already allocated
+		}
+		buffer_ = static_cast<float*>(
+		    GeneralMemoryAllocator::get().regions[MEMORY_REGION_STEALABLE].alloc(kBufferSizeBytes, false, nullptr));
+		if (buffer_ == nullptr) {
+			return false;
+		}
+		std::memset(buffer_, 0, kBufferSizeBytes);
+		engine_.setBuffer(std::span<float>(buffer_, kBufferSize));
+		return true;
+	}
+
+	void deallocate() {
+		if (buffer_ != nullptr) {
+			delugeDealloc(buffer_);
+			buffer_ = nullptr;
+			engine_.setBuffer(std::span<float>());
+		}
+	}
+
+	[[nodiscard]] bool isAllocated() const { return buffer_ != nullptr; }
 
 	void process(std::span<int32_t> in, StereoBuffer<q31_t> output) override {
+		// Safety check - skip if buffer deallocated (can happen during model switch race)
+		if (!engine_.hasBuffer()) {
+			return;
+		}
 		// This is the Griesinger topology described in the Dattorro paper
 		// (4 AP diffusers on the input, then a loop of 2x 2AP+1Delay).
 		// Modulation is applied in the loop of the first diffuser AP for additional
@@ -156,8 +188,8 @@ public:
 protected:
 	static constexpr float sample_rate = kSampleRate;
 
-	std::array<float, kBufferSize> buffer_{};
-	FxEngine engine_{buffer_, {0.5f / sample_rate, 0.3f / sample_rate}};
+	float* buffer_{nullptr};
+	FxEngine engine_{{0.5f / sample_rate, 0.3f / sample_rate}};
 
 	float input_gain_ = 0.2;
 

@@ -54,7 +54,10 @@ public:
 	virtual ~ModControllableAudio();
 	virtual void cloneFrom(ModControllableAudio* other);
 
-	void processStutter(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager);
+	/// Optional modulatedScatterValues array: [ZONE_A, ZONE_B, MACRO_CONFIG, MACRO]
+	/// If nullptr, preset values are used. If provided, these override preset values for modulation support.
+	void processStutter(deluge::dsp::StereoBuffer<q31_t> buffer, ParamManager* paramManager,
+	                    const q31_t* modulatedScatterValues = nullptr);
 	void processReverbSendAndVolume(deluge::dsp::StereoBuffer<q31_t> buffer, int32_t* reverbBuffer,
 	                                int32_t postFXVolume, int32_t postReverbVolume, int32_t reverbSendAmount,
 	                                int32_t pan = 0, bool doAmplitudeIncrement = false);

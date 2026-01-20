@@ -72,3 +72,8 @@ if(ENABLE_FX_BENCHMARK)
     target_compile_definitions(deluge PUBLIC ENABLE_FX_BENCHMARK=1)
 endif(ENABLE_FX_BENCHMARK)
 
+if(ENABLE_MEMORY_PROFILE)
+    message(STATUS "Memory profiling enabled for deluge")
+    target_compile_definitions(deluge PUBLIC ENABLE_MEMORY_PROFILE=1)
+endif(ENABLE_MEMORY_PROFILE)
+

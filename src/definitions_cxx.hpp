@@ -1004,7 +1004,7 @@ enum class IndependentNoteRowLengthIncrease {
 // From FatFS - we need access to this:
 constexpr int32_t DIR_FileSize = 28 /* File size (DWORD) */;
 
-constexpr int32_t kMaxNumUnsignedIntegerstoRepAllParams = 2;
+constexpr int32_t kMaxNumUnsignedIntegerstoRepAllParams = 3; // Supports up to 96 params (3 * 32 bits)
 
 constexpr int32_t kDefaultCalculateRootNote = std::numeric_limits<int32_t>::max();
 

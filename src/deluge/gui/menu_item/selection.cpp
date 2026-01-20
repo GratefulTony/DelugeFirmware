@@ -36,7 +36,8 @@ void Selection::drawPixelsForOled() {
 		pos = std::min<int32_t>(kOLEDMenuNumOptionsVisible - tail, nBefore);
 	}
 
-	MenuItem::drawItemsForOled(std::span{getOptions().data(), getOptions().size()}, pos, current - pos);
+	auto options = getOptions();
+	MenuItem::drawItemsForOled(std::span<std::string_view>{options.begin(), options.end()}, pos, current - pos);
 }
 
 // renders check box on OLED and dot on 7seg
