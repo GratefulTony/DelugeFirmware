@@ -117,6 +117,10 @@ static void SetupRetroSourceSetting(RuntimeFeatureSetting& setting, deluge::l10n
 	        .displayName = display->haveOLED() ? "Master" : "MAST",
 	        .value = RuntimeFeatureStateRetroSource::MasterOutput,
 	    },
+	    {
+	        .displayName = display->haveOLED() ? "Track" : "TRAK",
+	        .value = RuntimeFeatureStateRetroSource::FocusedTrack,
+	    },
 	};
 }
 
@@ -142,6 +146,18 @@ static void SetupRetroDurationSetting(RuntimeFeatureSetting& setting, deluge::l1
 	    {
 	        .displayName = display->haveOLED() ? "60 seconds" : "60S",
 	        .value = RuntimeFeatureStateRetroDuration::Seconds60,
+	    },
+	    {
+	        .displayName = display->haveOLED() ? "1 bar" : "1BR",
+	        .value = RuntimeFeatureStateRetroDuration::Bars1,
+	    },
+	    {
+	        .displayName = display->haveOLED() ? "2 bars" : "2BR",
+	        .value = RuntimeFeatureStateRetroDuration::Bars2,
+	    },
+	    {
+	        .displayName = display->haveOLED() ? "4 bars" : "4BR",
+	        .value = RuntimeFeatureStateRetroDuration::Bars4,
 	    },
 	};
 }

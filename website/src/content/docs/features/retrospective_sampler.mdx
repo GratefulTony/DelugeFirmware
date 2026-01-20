@@ -9,7 +9,7 @@ import { Badge, Aside } from "@astrojs/starlight/components"
 Capture recent audio on demand. Never miss a happy accident again.
 
 <Aside type="note">
-This feature has been tested on the OLED version of the Deluge.
+  This feature has been tested on the OLED version of the Deluge.
 </Aside>
 
 ## Description
@@ -29,41 +29,42 @@ If you're in a Kit with a drum pad selected, the sample is automatically loaded 
 
 Navigate to **Settings > Community Features > Retro Sampler** to configure:
 
-| Setting | Options | Default | Description |
-|---------|---------|---------|-------------|
-| Enable | On / Off | Off | Enable or disable the feature |
-| Source | Input / Master | Input | What audio to capture |
-| Duration | 5s / 15s / 30s / 60s | 5s | How much audio to keep in the buffer |
-| Bit Depth | 16-bit / 24-bit | 16-bit | Audio quality vs memory usage |
-| Channels | Mono / Stereo | Mono | Mono saves memory, stereo preserves panning |
-| Ext In Monitor | On / Off | Off | Pass external input audio through to outputs (only when Source is Input) |
-| Normalize | On / Off | Off | Automatically normalize audio level when saving |
+| Setting        | Options              | Default | Description                                                              |
+| -------------- | -------------------- | ------- | ------------------------------------------------------------------------ |
+| Enable         | On / Off             | Off     | Enable or disable the feature                                            |
+| Source         | Input / Master       | Input   | What audio to capture                                                    |
+| Duration       | 5s / 15s / 30s / 60s | 5s      | How much audio to keep in the buffer                                     |
+| Bit Depth      | 16-bit / 24-bit      | 16-bit  | Audio quality vs memory usage                                            |
+| Channels       | Mono / Stereo        | Mono    | Mono saves memory, stereo preserves panning                              |
+| Ext In Monitor | On / Off             | Off     | Pass external input audio through to outputs (only when Source is Input) |
+| Normalize      | On / Off             | Off     | Automatically normalize audio level when saving                          |
 
 ### Memory Usage
 
 The buffer is allocated in external SDRAM when enabled. The default settings (5s mono 16-bit) use only **0.4 MB**:
 
 | Duration | Mono 16-bit | Stereo 16-bit | Mono 24-bit | Stereo 24-bit |
-|----------|-------------|---------------|-------------|---------------|
-| 5s | **0.4 MB** | 0.9 MB | 0.6 MB | 1.3 MB |
-| 15s | 1.3 MB | 2.6 MB | 2.0 MB | 4.0 MB |
-| 30s | 2.6 MB | 5.3 MB | 4.0 MB | 7.9 MB |
-| 60s | 5.3 MB | 10.6 MB | 7.9 MB | 15.9 MB |
+| -------- | ----------- | ------------- | ----------- | ------------- |
+| 5s       | **0.4 MB**  | 0.9 MB        | 0.6 MB      | 1.3 MB        |
+| 15s      | 1.3 MB      | 2.6 MB        | 2.0 MB      | 4.0 MB        |
+| 30s      | 2.6 MB      | 5.3 MB        | 4.0 MB      | 7.9 MB        |
+| 60s      | 5.3 MB      | 10.6 MB       | 7.9 MB      | 15.9 MB       |
 
 ### Performance
 
 The retrospective buffer has **minimal CPU overhead**:
 
-| Metric | Default (5s mono 16-bit) | Max (60s stereo 24-bit) |
-|--------|--------------------------|-------------------------|
-| Memory writes per render | 256 bytes | 768 bytes |
-| Memory bandwidth | 86 KB/s | 258 KB/s |
+| Metric                   | Default (5s mono 16-bit) | Max (60s stereo 24-bit) |
+| ------------------------ | ------------------------ | ----------------------- |
+| Memory writes per render | 256 bytes                | 768 bytes               |
+| Memory bandwidth         | 86 KB/s                  | 258 KB/s                |
 
 **Buffer duration does NOT affect CPU usage.** Whether you choose 5 seconds or 60 seconds, the audio engine processes the same 128 samples per render cycle. Longer durations only use more SDRAM.
 
 For comparison, the audio engine's existing `memset` operations write 1024 bytes per render - the retrospective buffer writes 4x less in its default configuration.
 
 The `feedAudio()` function is lock-free and real-time safe:
+
 - Zero memory allocations in the audio path
 - No floating point operations
 - No file I/O until you trigger a save
@@ -103,11 +104,13 @@ For the fastest workflow when building kits from external sources:
 When using **Input** as the source, enable **Monitor** to hear the input audio through the Deluge's outputs. This lets you hear what you're capturing in real-time.
 
 When Monitor is enabled:
+
 - Input audio passes through to the main outputs
 - Mono input (when Channels is set to Mono) is sent to both left and right outputs
 - No need to set up a separate Audio Clip for monitoring
 
 When Monitor is disabled:
+
 - Audio is still captured to the buffer, you just can't hear it through the Deluge
 - Useful if you're monitoring through your external source directly
 

@@ -1274,8 +1274,8 @@ bool doSomeOutputting() {
 			}
 		}
 
-		// Feed audio to retrospective buffer if enabled
-		if (retrospectiveBuffer.isEnabled()) {
+		// Feed audio to retrospective buffer if enabled (skip for focused track mode - handled in Song::renderAudio)
+		if (retrospectiveBuffer.isEnabled() && !retrospectiveBuffer.isFocusedTrackMode()) {
 			AudioInputChannel retroSource = retrospectiveBuffer.getSource();
 			if (retroSource == AudioInputChannel::MIX) {
 				// Record from master output
@@ -1306,6 +1306,12 @@ bool doSomeOutputting() {
 					                              numSamplesOutputted);
 				}
 			}
+		}
+
+		// Check for pending bar-synced save (handles all modes including FocusedTrack)
+		// Must be outside interrupt-disabled context for file I/O
+		if (retrospectiveBuffer.isEnabled()) {
+			retrospectiveBuffer.checkAndExecutePendingSave();
 		}
 	}
 
