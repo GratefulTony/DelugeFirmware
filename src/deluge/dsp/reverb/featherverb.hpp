@@ -60,15 +60,21 @@ class Featherverb : public Base {
 	// C3 can run parallel (from cascadeIn) or series (from c2) via cascadeSeriesMix_
 	// Prime lengths for good diffusion, scalable by Zone 2
 	// With 2x undersampling, effective lengths are 2x these values
-	// Vast mode (Zone 2 > 80%): C2+C3 get 4x undersample for extended tails
+	// Vast mode (Zone 2 > 80%): all stages at uniform 4x for extended tails
 	static constexpr size_t kNumCascade = 4;
 	static constexpr size_t kC0BaseLength = 773;  // ~17.5ms base, ~35ms effective - prime
 	static constexpr size_t kC1BaseLength = 997;  // ~22.6ms base, ~45ms effective - prime
 	static constexpr size_t kC2BaseLength = 1231; // ~27.9ms base, ~56ms effective - prime
-	static constexpr size_t kC3BaseLength = 4001; // ~90ms base, ~181ms @2x, ~362ms @4x, ~724ms @8x - prime
+	static constexpr size_t kC3BaseLength = 4001; // ~90ms base, ~181ms @2x, ~362ms @4x - prime
 	static constexpr size_t kCascadeBaseTotal = kC0BaseLength + kC1BaseLength + kC2BaseLength + kC3BaseLength; // 7002
 	static constexpr float kCascadeMaxScale = 1.8f; // Zone 2 can scale cascade up to 1.8x for vast rooms
 	static constexpr size_t kCascadeMaxTotal = static_cast<size_t>(kCascadeBaseTotal * kCascadeMaxScale); // ~12604
+
+	// Multi-tap write offsets (prime numbers for good diffusion)
+	// Writes are cheap (pipelined), so add secondary write for doubled impulse density
+	static constexpr bool kEnableMultiTapWrites = true;
+	static constexpr std::array<size_t, kNumCascade> kMultiTapOffsets = {311, 401, 509, 1607}; // C0-C3 offsets
+	static constexpr float kMultiTapGain = 0.18f; // Gain for secondary tap (low to preserve feedback headroom)
 
 	// Buffer layout: FDN delays + cascade + predelay + diffusers
 	static constexpr size_t kFdnMaxSamples = kD0MaxLength + kD1MaxLength + kD2MaxLength; // 2339
@@ -124,6 +130,10 @@ public:
 	void setPredelay(float value);
 	[[nodiscard]] float getPredelay() const { return predelay_; }
 
+	/// Diagnostic: cascade-only mode (bypasses FDN, mutes early)
+	void setCascadeOnly(bool value) { cascadeOnly_ = value; }
+	[[nodiscard]] bool getCascadeOnly() const { return cascadeOnly_; }
+
 private:
 	float* buffer_{nullptr};
 
@@ -137,16 +147,19 @@ private:
 	std::array<size_t, kNumCascade> cascadeWritePos_{};
 	std::array<size_t, kNumCascade> cascadeOffsets_{};
 	std::array<size_t, kNumCascade> cascadeLengths_{kC0BaseLength, kC1BaseLength, kC2BaseLength, kC3BaseLength};
-	float cascadeScale_{1.0f};        // Current scale factor from Zone 2
-	float earlyMixGain_{0.3f};        // Early reflection gain (scales inverse with Zone 2: smaller = more early)
-	float tailMixGain_{0.6f};         // Tail output gain (scales with Zone 2: bigger room = more tail)
-	float directEarlyGain_{0.15f};    // Direct early tap (bypasses output LPF for brightness)
-	float cascadeLpState_{0.0f};      // LP filter state for cascade output
-	float cascadeSeriesMix_{0.6f};    // 0=parallel (C3 from cascadeIn), 1=series (C3 from c2)
-	float cascadeFeedbackMult_{0.7f}; // How much cascade feeds back into FDN (controlled by Zone 3)
-	float cascadeNestFeedback_{0.0f}; // Nested feedback: C3 → C0 for extended tails (controlled by Zone 3)
-	float prevC3Out_{0.0f};           // Previous C3 output for nested feedback delay
-	static constexpr float kCascadeCoeff = 0.4f; // Allpass coefficient for cascade (lower = less dense)
+	float cascadeScale_{1.0f};            // Current scale factor from Zone 2
+	float earlyMixGain_{0.3f};            // Early reflection gain (scales inverse with Zone 2: smaller = more early)
+	float tailMixGain_{0.6f};             // Tail output gain (scales with Zone 2: bigger room = more tail)
+	float directEarlyGain_{0.15f};        // Direct early tap (bypasses output LPF for brightness)
+	float cascadeLpState_{0.0f};          // LP filter state for cascade output
+	float cascadeSeriesMix_{0.6f};        // 0=parallel (C3 from cascadeIn), 1=series (C3 from c2)
+	float cascadeFeedbackMult_{0.7f};     // How much cascade feeds back into FDN (controlled by Zone 3)
+	float cascadeNestFeedback_{0.0f};     // Nested feedback: C3 → C0 for extended tails (combined)
+	float cascadeNestFeedbackBase_{0.0f}; // Base nest feedback from Zone 3 (before Zone 2 vast boost)
+	float prevC3Out_{0.0f};               // Previous C3 output for nested feedback delay
+	static constexpr float kCascadeCoeffBase = 0.4f; // Base allpass coefficient for cascade
+	std::array<float, kNumCascade> cascadeCoeffs_{kCascadeCoeffBase, kCascadeCoeffBase, kCascadeCoeffBase,
+	                                              kCascadeCoeffBase};
 
 	// Diffuser state
 	std::array<size_t, kNumDiffusers> diffuserOffsets_{};
@@ -171,6 +184,9 @@ private:
 	int32_t zone2_{512};
 	int32_t zone3_{0};
 	float predelay_{0.0f};
+
+	// Diagnostic
+	bool cascadeOnly_{false}; // Runtime toggle: true = cascade-only (bypasses FDN, mutes early)
 
 	// Derived coefficients
 	float feedback_{0.85f};
@@ -213,15 +229,27 @@ private:
 	float currOutL_{0.0f};
 	float currOutR_{0.0f};
 
-	// C2/C3 extra undersampling for vast rooms
-	// Normal: 2x, Double (vast): 4x total
-	bool cascadeDoubleUndersample_{false}; // When true, C2+C3 run at 4x undersample (Zone 2 > 80%)
-	uint8_t c2Phase_{0};                   // Phase counter for C2 undersampling
-	float c2Accum_{0.0f};                  // Accumulated input for C2
-	float c2Prev_{0.0f};                   // Previous C2 output for interpolation
-	uint8_t c3Phase_{0};                   // Phase counter for C3 undersampling
-	float c3Accum_{0.0f};                  // Accumulated input for C3
-	float c3Prev_{0.0f};                   // Previous C3 output for interpolation
+	// Cascade extra undersampling for vast rooms
+	// Normal: 2x, Vast: all stages at uniform 4x (8x caused ringing)
+	bool cascadeDoubleUndersample_{false};              // When true, cascade runs at 4x undersample (Zone 2 > 80%)
+	float cascadeAaState1_{0.0f};                       // Anti-alias LP filter state (pre-decimation, vast only)
+	float cascadeLpStateMono_{0.0f};                    // Cascade output LP filter state (mono component)
+	float cascadeLpStateSide_{0.0f};                    // Cascade output LP filter state (side component)
+	static constexpr float kPreCascadeAaCoeff = 0.35f;  // LP coeff ~3.5kHz for pre-decimation AA (below 4x Nyquist)
+	static constexpr float kCascadeLpCoeffMono = 0.6f;  // LP coeff ~5.5kHz for cascade mono (darker tail)
+	static constexpr float kCascadeLpCoeffSide = 0.85f; // LP coeff ~8kHz for cascade side (brighter stereo spread)
+	uint8_t c0Phase_{0};                                // Phase counter for C0 undersampling
+	float c0Accum_{0.0f};                               // Accumulated input for C0
+	float c0Prev_{0.0f};                                // Previous C0 output for interpolation
+	uint8_t c1Phase_{0};                                // Phase counter for C1 undersampling
+	float c1Accum_{0.0f};                               // Accumulated input for C1
+	float c1Prev_{0.0f};                                // Previous C1 output for interpolation
+	uint8_t c2Phase_{0};                                // Phase counter for C2 undersampling
+	float c2Accum_{0.0f};                               // Accumulated input for C2
+	float c2Prev_{0.0f};                                // Previous C2 output for interpolation
+	uint8_t c3Phase_{0};                                // Phase counter for C3 undersampling
+	float c3Accum_{0.0f};                               // Accumulated input for C3
+	float c3Prev_{0.0f};                                // Previous C3 output for interpolation
 
 	// Direct early tap (bypasses output LPF for brightness)
 	float directEarlyL_{0.0f};
@@ -254,8 +282,20 @@ private:
 	[[gnu::always_inline]] float processCascadeStage(size_t stage, float input) {
 		size_t idx = cascadeOffsets_[stage] + cascadeWritePos_[stage];
 		float delayed = buffer_[idx];
-		float output = -kCascadeCoeff * input + delayed;
-		buffer_[idx] = input + kCascadeCoeff * output;
+		float coeff = cascadeCoeffs_[stage];
+		float output = -coeff * input + delayed;
+		float writeVal = input + coeff * output;
+		buffer_[idx] = writeVal;
+
+		// Multi-tap write: secondary echo at prime offset for doubled density
+		if constexpr (kEnableMultiTapWrites) {
+			size_t tapOffset = kMultiTapOffsets[stage];
+			if (tapOffset < cascadeLengths_[stage]) {
+				size_t tapPos = (cascadeWritePos_[stage] + tapOffset) % cascadeLengths_[stage];
+				buffer_[cascadeOffsets_[stage] + tapPos] += writeVal * kMultiTapGain;
+			}
+		}
+
 		if (++cascadeWritePos_[stage] >= cascadeLengths_[stage]) {
 			cascadeWritePos_[stage] = 0;
 		}

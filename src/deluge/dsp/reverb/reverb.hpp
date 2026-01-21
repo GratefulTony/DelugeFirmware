@@ -245,6 +245,19 @@ public:
 		return featherPredelay_;
 	}
 
+	// Diagnostic: cascade-only mode toggle (for A/B testing during development)
+	void setFeatherCascadeOnly(bool value) {
+		if (model_ == Model::FEATHERVERB) {
+			reverb_as<reverb::Featherverb>().setCascadeOnly(value);
+		}
+	}
+	[[nodiscard]] bool getFeatherCascadeOnly() const {
+		if (model_ == Model::FEATHERVERB) {
+			return std::get<reverb::Featherverb>(reverb_).getCascadeOnly();
+		}
+		return false;
+	}
+
 	template <typename T>
 	constexpr T& reverb_as() {
 		return std::get<T>(reverb_);

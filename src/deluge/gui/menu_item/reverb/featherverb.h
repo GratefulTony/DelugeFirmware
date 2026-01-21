@@ -26,6 +26,7 @@
 #include "gui/menu_item/decimal.h"
 #include "gui/menu_item/integer.h"
 #include "gui/menu_item/velocity_encoder.h"
+#include "hid/display/display.h"
 #include "processing/engines/audio_engine.h"
 
 namespace deluge::gui::menu_item::reverb {
@@ -184,6 +185,7 @@ public:
  * Featherverb Pre-delay - Standard knob (0-50 → 0-100ms)
  * Multi-tap predelay with Zone 2-modulated tap spacing
  * Only visible when Featherverb is active
+ * Button press toggles cascade-only mode for A/B testing
  */
 class FeatherPredelay final : public Integer {
 public:
@@ -198,6 +200,14 @@ public:
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		return AudioEngine::reverb.getModel() == dsp::Reverb::Model::FEATHERVERB;
+	}
+
+	/// Click encoder to toggle cascade-only diagnostic mode
+	MenuItem* selectButtonPress() override {
+		bool current = AudioEngine::reverb.getFeatherCascadeOnly();
+		AudioEngine::reverb.setFeatherCascadeOnly(!current);
+		display->displayPopup(current ? "FULL" : "CASC");
+		return NO_NAVIGATION;
 	}
 };
 
