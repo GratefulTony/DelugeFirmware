@@ -963,6 +963,7 @@ Submenu audioClipFXMenu{
         &globalModFXMenu,
         &shapingMenu,
         &audioClipDistortionMenu,
+        &dottMenu,
     },
 };
 

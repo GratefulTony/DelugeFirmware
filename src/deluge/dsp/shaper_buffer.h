@@ -277,11 +277,12 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 	// filterGain=0 means FM mode (no adjustment needed)
 	// filterGain>0 means subtractive: compensate for resonance-induced level changes
 	// At neutral filterGain (2^28), gains = 1.0 (no adjustment)
-	// High resonance (low filterGain) → boost; low resonance (high filterGain) → attenuate
-	// Skip if within 1% of neutral (inaudible, saves per-sample multiply)
+	// High resonance (low filterGain) → boost input, attenuate output
+	// Low resonance (high filterGain) → no adjustment (signal already quiet, table handles it)
+	// Q30 format can only represent values <= 1.0, so we can't boost output (ratio < 1)
 	int32_t filterDelta = filterGain - kShaperNeutralFilterGainInt;
-	bool needsGainAdjust =
-	    (filterGain > 0) && hasFilters && (filterDelta > kGainAdjustTolerance || filterDelta < -kGainAdjustTolerance);
+	// Only boost input when filterGain < neutral (high resonance)
+	bool needsGainAdjust = (filterGain > 0) && hasFilters && (filterDelta < -kGainAdjustTolerance);
 	int32_t attenGain_Q30 = 1 << 30; // 1.0 in Q30
 
 	// Compute target driveGain ONCE (hoisted p^5 calculation)
@@ -289,6 +290,7 @@ inline void shapeBufferInt32(std::span<q31_t> buffer, TableShaper& shaper, q31_t
 	int32_t targetGain_Q26 = TableShaper::driveToGainQ26(drive);
 	if (needsGainAdjust) {
 		// One float divide per buffer for attenuation (Q30 for single-cycle SMMUL)
+		// ratio > 1.0 here (filterGain < neutral), so 1/ratio < 1.0, fits in Q30
 		float ratio = static_cast<float>(kShaperNeutralFilterGainInt) / static_cast<float>(filterGain);
 		attenGain_Q30 = static_cast<int32_t>((1.0f / ratio) * 1073741824.0f); // 2^30
 		// Fold boost into drive: (boost_Q16 × drive_Q26) >> 16 → Q26
@@ -625,11 +627,12 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 	// filterGain=0 means FM mode (no adjustment needed)
 	// filterGain>0 means subtractive: compensate for resonance-induced level changes
 	// At neutral filterGain (2^28), gains = 1.0 (no adjustment)
-	// High resonance (low filterGain) → boost; low resonance (high filterGain) → attenuate
-	// Skip if within 1% of neutral (inaudible, saves per-sample multiply)
+	// High resonance (low filterGain) → boost input, attenuate output
+	// Low resonance (high filterGain) → no adjustment (signal already quiet, table handles it)
+	// Q30 format can only represent values <= 1.0, so we can't boost output (ratio < 1)
 	int32_t filterDelta = filterGain - kShaperNeutralFilterGainInt;
-	bool needsGainAdjust =
-	    (filterGain > 0) && hasFilters && (filterDelta > kGainAdjustTolerance || filterDelta < -kGainAdjustTolerance);
+	// Only boost input when filterGain < neutral (high resonance)
+	bool needsGainAdjust = (filterGain > 0) && hasFilters && (filterDelta < -kGainAdjustTolerance);
 	int32_t attenGain_Q30 = 1 << 30; // 1.0 in Q30
 
 	// Compute target driveGain ONCE (hoisted p^5 calculation)
@@ -637,6 +640,7 @@ inline void shapeBufferInt32(StereoBuffer<q31_t> buffer, TableShaper& shaper, q3
 	int32_t targetGain_Q26 = TableShaper::driveToGainQ26(drive);
 	if (needsGainAdjust) {
 		// One float divide per buffer for attenuation (Q30 for single-cycle SMMUL)
+		// ratio > 1.0 here (filterGain < neutral), so 1/ratio < 1.0, fits in Q30
 		float ratio = static_cast<float>(kShaperNeutralFilterGainInt) / static_cast<float>(filterGain);
 		attenGain_Q30 = static_cast<int32_t>((1.0f / ratio) * 1073741824.0f); // 2^30
 		// Fold boost into drive: (boost_Q16 × drive_Q26) >> 16 → Q26
