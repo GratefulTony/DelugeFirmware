@@ -48,12 +48,13 @@ class Featherverb : public Base {
 	static constexpr size_t kNumFdnDelays = 3;
 
 	// FDN delay lengths (D0/D1 variable from Zone 1, D2 variable from Zone 2)
-	static constexpr size_t kD0MinLength = 350;  // ~7.9ms
-	static constexpr size_t kD0MaxLength = 450;  // ~10.2ms
-	static constexpr size_t kD1MinLength = 580;  // ~13.2ms
-	static constexpr size_t kD1MaxLength = 850;  // ~19.3ms
-	static constexpr size_t kD2MinLength = 650;  // ~14.7ms
-	static constexpr size_t kD2MaxLength = 1039; // ~23.5ms
+	// With 2x undersample, effective times are 2x these values
+	static constexpr size_t kD0MinLength = 350;  // ~16ms effective
+	static constexpr size_t kD0MaxLength = 550;  // ~25ms effective (shrunk to give to D2)
+	static constexpr size_t kD1MinLength = 580;  // ~26ms effective
+	static constexpr size_t kD1MaxLength = 1500; // ~68ms effective
+	static constexpr size_t kD2MinLength = 650;  // ~29ms effective
+	static constexpr size_t kD2MaxLength = 2050; // ~93ms effective
 
 	// 4-stage allpass cascade for tail density (replaces long D3)
 	// Each stage splits impulses → exponential density growth
@@ -77,7 +78,7 @@ class Featherverb : public Base {
 	static constexpr float kMultiTapGain = 0.18f; // Gain for secondary tap (low to preserve feedback headroom)
 
 	// Buffer layout: FDN delays + cascade + predelay + diffusers
-	static constexpr size_t kFdnMaxSamples = kD0MaxLength + kD1MaxLength + kD2MaxLength; // 2339
+	static constexpr size_t kFdnMaxSamples = kD0MaxLength + kD1MaxLength + kD2MaxLength; // 4100
 	static constexpr size_t kPredelayMaxLength = 2205;                                   // 50ms at 44.1kHz (single tap)
 	static constexpr size_t kNumDiffusers = 2;
 	static constexpr size_t kDiffuser0Length = 137;
@@ -85,7 +86,7 @@ class Featherverb : public Base {
 	static constexpr size_t kDiffuserTotal = kDiffuser0Length + kDiffuser1Length; // 348
 
 	static constexpr size_t kTotalMaxSamples = kFdnMaxSamples + kCascadeMaxTotal + kPredelayMaxLength + kDiffuserTotal;
-	static constexpr size_t kBufferBytes = kTotalMaxSamples * sizeof(float); // ~68KB
+	static constexpr size_t kBufferBytes = kTotalMaxSamples * sizeof(float); // ~77KB
 
 public:
 	Featherverb();

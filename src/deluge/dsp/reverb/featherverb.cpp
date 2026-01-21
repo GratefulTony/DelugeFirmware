@@ -31,8 +31,8 @@ using namespace deluge::dsp;
 // Compile-time diagnostic toggles (for permanent debugging builds)
 // Runtime toggle cascadeOnly_ is preferred - controlled via predelay encoder button
 static constexpr bool kMuteEarly = false;
-static constexpr bool kMuteCascade = false;
-static constexpr bool kMuteCascadeFeedback = false;
+static constexpr bool kMuteCascade = true;
+static constexpr bool kMuteCascadeFeedback = true;
 static constexpr bool kBypassFdnToCascade = false;
 static constexpr bool kDisableVastUndersample = false;
 
@@ -785,7 +785,7 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 
 void Featherverb::setRoomSize(float value) {
 	roomSize_ = value;
-	feedback_ = 0.75f + value * 0.24f;
+	feedback_ = 0.6f + value * 0.15f; // 0.6 → 0.75
 }
 
 void Featherverb::setDamping(float value) {
@@ -1002,7 +1002,7 @@ void Featherverb::updateFeedbackPattern() {
 	std::array<float, 3> mods = ctx.evalBank(kFeedback3TriBank);
 
 	for (size_t i = 0; i < 3; ++i) {
-		feedbackMult_[i] = std::clamp(kZoneBias[zone][i] + mods[i] * 0.15f, 0.75f, 1.25f);
+		feedbackMult_[i] = std::clamp(kZoneBias[zone][i] + mods[i] * 0.075f, 0.85f, 1.15f);
 	}
 
 	// Cascade series mix - 10 periods for fine density control
