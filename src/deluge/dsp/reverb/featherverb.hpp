@@ -213,11 +213,12 @@ private:
 
 	// LFO for modulation
 	float lfoPhase_{0.0f};
-	float modDepth_{0.0f};        // LFO pitch wobble depth for FDN (controlled by Zone 3)
-	float cascadeModDepth_{0.0f}; // LFO pitch wobble depth for C2/C3 in vast mode
-	float cascadeAmpMod_{0.0f};   // LFO amplitude modulation depth for C2/C3 diffusion contour
-	float widthBreath_{0.0f};     // Width breathing amount (controlled by Zone 3)
-	float crossBleed_{0.0f};      // L↔R cross-channel bleed in FDN (controlled by Zone 3)
+	float modDepth_{0.0f};         // LFO pitch wobble depth for FDN (controlled by Zone 3)
+	float cascadeModDepth_{0.0f};  // LFO pitch wobble depth for C2/C3 in vast mode
+	float cascadeAmpMod_{0.0f};    // LFO amplitude modulation depth for C2/C3 diffusion contour
+	float widthBreath_{0.0f};      // Width breathing amount (controlled by Zone 3)
+	float crossBleed_{0.0f};       // L↔R cross-channel bleed in FDN (controlled by Zone 3)
+	float fdnFeedbackScale_{1.0f}; // Inverse scale: reduce FDN feedback as Zone 3 (cascade) increases
 
 	// Envelope followers
 	float inputEnvelope_{0.0f};

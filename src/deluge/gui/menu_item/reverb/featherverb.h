@@ -47,7 +47,7 @@ public:
 
 	[[nodiscard]] virtual const char* getZoneName(int32_t zoneIndex) const = 0;
 
-	[[nodiscard]] int32_t getMaxValue() const override { return kFeatherResolution; }
+	[[nodiscard]] int32_t getMaxValue() const override { return kFeatherResolution - 1; }
 	[[nodiscard]] int32_t getNumDecimalPlaces() const override { return 0; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
 

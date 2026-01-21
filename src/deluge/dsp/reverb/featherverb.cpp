@@ -31,8 +31,8 @@ using namespace deluge::dsp;
 // Compile-time diagnostic toggles (for permanent debugging builds)
 // Runtime toggle cascadeOnly_ is preferred - controlled via predelay encoder button
 static constexpr bool kMuteEarly = false;
-static constexpr bool kMuteCascade = true;
-static constexpr bool kMuteCascadeFeedback = true;
+static constexpr bool kMuteCascade = false;
+static constexpr bool kMuteCascadeFeedback = false;
 static constexpr bool kBypassFdnToCascade = false;
 static constexpr bool kDisableVastUndersample = false;
 
@@ -236,7 +236,7 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 				float feedbackFloor = kMinFeedbackMult + (zone2_ * (1.0f - kMinFeedbackMult)) / 1023.0f;
 				float envNorm = std::min(inputEnvelope_ / kEnvReference, 1.0f);
 				float feedbackMod = feedbackFloor + envNorm * (1.0f - feedbackFloor);
-				effectiveFeedback *= feedbackMod;
+				effectiveFeedback *= feedbackMod * fdnFeedbackScale_; // Scale inversely with Zone 3
 
 				// Damping + feedback
 				h0 = onepole(h0, fdnLpState_[0], dampCoeff_) * effectiveFeedback * feedbackMult_[0];
@@ -259,13 +259,8 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 					cascadeIn = fdnIn * 1.4f + prevC3Out_ * cascadeNestFeedback_ * tailFeedback;
 				}
 				else {
-					// TODO(FDN tail investigation): This 0.4 gain causes ~4x less energy into cascade
-					// vs cascade-only mode (1.5). Contributing factors to FDN killing tails:
-					// 1. Gain mismatch: 0.4 vs 1.5 = ~4x difference in cascade drive
-					// 2. FDN damping: LPF on d0/d1/d2 attenuates before reaching cascade
-					// 3. Matrix absorption: Hadamard mixing distributes/cancels energy
-					// To fix: try increasing to 0.8 or higher, or add separate cascade input gain
-					cascadeIn = (d0 + d1 + d2) * 0.4f + prevC3Out_ * cascadeNestFeedback_ * tailFeedback;
+					// 50% dry + 50% FDN to cascade
+					cascadeIn = fdnIn * 0.7f + (d0 + d1 + d2) * 0.7f + prevC3Out_ * cascadeNestFeedback_ * tailFeedback;
 				}
 
 				// c0→c1→c2 series chain with optional 4x undersample for vast rooms
@@ -523,7 +518,7 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 			float feedbackFloor = kMinFeedbackMult + (zone2_ * (1.0f - kMinFeedbackMult)) / 1023.0f;
 			float envNorm = std::min(inputEnvelope_ / kEnvReference, 1.0f);
 			float feedbackMod = feedbackFloor + envNorm * (1.0f - feedbackFloor);
-			effectiveFeedback *= feedbackMod;
+			effectiveFeedback *= feedbackMod * fdnFeedbackScale_; // Scale inversely with Zone 3
 
 			h0 = onepole(h0, fdnLpState_[0], dampCoeff_) * effectiveFeedback * feedbackMult_[0];
 			h1 = onepole(h1, fdnLpState_[1], dampCoeff_) * effectiveFeedback * feedbackMult_[1];
@@ -544,9 +539,8 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 				cascadeIn = in * 1.4f + prevC3Out_ * cascadeNestFeedback_ * tailFeedback;
 			}
 			else {
-				// TODO(FDN tail investigation): See undersampled path comment for details
-				// 0.4 gain vs 1.5 in cascade-only = ~4x less cascade drive when FDN active
-				cascadeIn = (d0 + d1 + d2) * 0.4f + prevC3Out_ * cascadeNestFeedback_ * tailFeedback;
+				// 50% dry + 50% FDN to cascade
+				cascadeIn = in * 0.7f + (d0 + d1 + d2) * 0.7f + prevC3Out_ * cascadeNestFeedback_ * tailFeedback;
 			}
 
 			// c0→c1→c2 series chain with optional 2x undersample for vast rooms
@@ -785,7 +779,7 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 
 void Featherverb::setRoomSize(float value) {
 	roomSize_ = value;
-	feedback_ = 0.6f + value * 0.15f; // 0.6 → 0.75
+	feedback_ = 0.38f + value * 0.12f; // 0.38 → 0.5
 }
 
 void Featherverb::setDamping(float value) {
@@ -947,7 +941,7 @@ void Featherverb::updateSizes() {
 		// Amplitude modulation on C2/C3 for diffusion contour
 		cascadeAmpMod_ = 0.25f; // Subtle balance shift between stages
 		// Extra nested feedback to compensate for pre-AA filter energy loss
-		cascadeNestFeedback_ = std::clamp(cascadeNestFeedbackBase_ + 0.25f, 0.0f, 0.55f);
+		cascadeNestFeedback_ = std::clamp(cascadeNestFeedbackBase_ + 0.35f, 0.0f, 0.6f);
 	}
 	else {
 		cascadeDamping_ = baseCascadeDamping;
@@ -1017,8 +1011,8 @@ void Featherverb::updateFeedbackPattern() {
 	// Base increases with yNorm (0.4 to 0.9), triangle adds ±0.1 texture
 	float phase7 = yNorm * 7.0f;
 	float tri7 = 1.0f - 4.0f * std::abs(phase7 - std::floor(phase7) - 0.5f);
-	float baseFeedback = 0.4f + yNorm * 0.5f; // 0.4 to 0.9 as yNorm increases
-	cascadeFeedbackMult_ = std::clamp(baseFeedback + tri7 * 0.1f, 0.3f, 1.0f);
+	float baseFeedback = 0.03f + yNorm * 0.12f; // 0.03 to 0.15 as yNorm increases (tinier)
+	cascadeFeedbackMult_ = std::clamp(baseFeedback + tri7 * 0.02f, 0.02f, 0.2f);
 
 	// Nested cascade feedback (C3→C0) - 5 periods, clockwise = more recirculation
 	// Kicks in at higher yNorm values; scaled by room feedback in processing
@@ -1047,6 +1041,10 @@ void Featherverb::updateFeedbackPattern() {
 	float tri9 = 1.0f - 4.0f * std::abs(phase9 - std::floor(phase9) - 0.5f);
 	float baseBleed = yNorm * 0.15f; // Increases with zone position
 	crossBleed_ = std::clamp(baseBleed + tri9 * 0.1f, 0.0f, 0.25f);
+
+	// FDN feedback scale - reduce FDN feedback as Zone 3 increases (inverse relationship)
+	// At low Zone 3: full FDN feedback (1.0), at high Zone 3: reduced (0.7)
+	fdnFeedbackScale_ = 1.0f - yNorm * 0.3f;
 
 	// Per-stage cascade allpass coefficients - higher coeffs = more diffusion (less slapback)
 	// Each stage uses different triangle period for variety
