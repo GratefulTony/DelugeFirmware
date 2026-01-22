@@ -152,6 +152,7 @@ Understanding the relative cost of new community effects versus traditional Delu
 Other effects (full load only):
 - Disperser (8 stages): 25.7k
 - Sine Shaper: 8.8k
+- Multiband (DOTT): 4.9k
 - Scatter: 3.9k
 - Table Shaper: 2.0k
 
