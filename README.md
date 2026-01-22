@@ -23,6 +23,15 @@ This is **owlet-firmware**, a personal fork of the Deluge Community Firmware mai
 |-----|-------------|
 | **SIMD oscillator remainder handling** | Fixed tempo-synced clicking on sine and analog waveforms. The SIMD-vectorized `renderWave` only processed samples in groups of 4, leaving remainder samples unwritten when buffer sizes weren't multiples of 4 (common due to tempo tick alignment). Added scalar fallback loops for remainder samples. |
 
+### Changelog
+
+**Latest**
+- Reverb memory optimization: all models now use dynamic allocation, freeing ~220 KB when switching models
+- Added Featherverb reverb with zone-based parameter design
+- Table Shaper and Sine Shaper now available for audio clips via DOTT menu
+- Bar-synced retrospective sampler with BPM-tagged filenames
+- Disperser delay buffers now allocate on-demand (saves up to 2.2 MB in complex songs)
+
 ### Benchmarks
 
 CPU usage per voice (optimization ongoing). Target: stay under 2x the builtin saturation (`getTanhAntialiased`) cost, except for disperser which is inherently more expensive.
