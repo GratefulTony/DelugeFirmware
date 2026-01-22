@@ -71,10 +71,22 @@ These effects have state embedded in the `ModControllableAudio` class, meaning m
 
 | Effect | Location | Notes |
 |--------|----------|-------|
-| **Reverb** | Song | Buffer allocated at song load, always present |
+| **Reverb** | Song | Buffer allocated via allocMaxSpeed(), only active model allocated |
 | Delay | Song | Send-based, always running |
 
 ## CPU Findings
+
+### Important: L1 D-Cache Contention
+
+**CPU measurements vary dramatically based on what synth feeds an effect, not the effect itself.**
+
+The ARM Cortex-A9 has a 32 KB L1 data cache. Complex synths (DX7/FM) have large working sets that evict effect data from cache, causing ~1.8× more CPU usage for the *same* effect code.
+
+See [memory_architecture.md](memory_architecture.md) for detailed analysis.
+
+### Task Scheduler Estimates (Rough)
+
+These percentages are from task scheduler working time stats, which are approximate and affected by cache contention:
 
 Baseline: Simple synth @ **28% CPU**
 
@@ -89,6 +101,17 @@ Baseline: Simple synth @ **28% CPU**
 | Stutter | +0.6% | 61% | Standby mode, minimal |
 | Dott | +3% | 64% | Pure DSP |
 
+### Microbenchmark Data (FX Benchmark System)
+
+Precise cycle counts from the `FxBenchmark` system show the cache contention effect clearly:
+
+| Effect | Cycles (Simple Synth) | Cycles (DX7/FM) | Ratio |
+|--------|----------------------|-----------------|-------|
+| Featherverb | ~10,000 | ~19,000 | 1.9× |
+| Mutable Reverb | ~9,500 | ~17,500 | 1.8× |
+
+**Key insight**: The ~1.8× penalty is from the *synth's* cache footprint, not the effect's memory location. BSS vs dynamic allocation makes <1% difference because both go through the same D-cache.
+
 ## Cost Comparison: New vs Traditional Effects
 
 Understanding the relative cost of new community effects versus traditional Deluge effects helps contextualize optimization priorities.
@@ -99,7 +122,9 @@ Understanding the relative cost of new community effects versus traditional Delu
 |--------|--------|------|-----|---------|
 | **Grain** | 4.2 MB | Per-sound | New | ~33× larger than reverb buffer |
 | **Stutter** | 3.0 MB | Per-sound | New | Looper buffers for beat repeat |
-| **Reverb** | ~128 KB | Song-level | Original | Mutable model buffer, now SDRAM |
+| **Mutable Reverb** | ~128 KB | Song-level | Original | Now dynamic via allocMaxSpeed() |
+| **Freeverb** | ~93 KB | Song-level | Original | Now dynamic via allocMaxSpeed() |
+| **Featherverb** | ~77 KB | Song-level | New | Dynamic via allocMaxSpeed() |
 | **Disperser** | 72 KB | Per-sound | New | Comparable to reverb, now dynamic |
 | **Table Shaper** | 12 KB | Per-sound | New | Lookup table only |
 | **Filters/Saturator** | < 1 KB | Per-sound | Original | Minimal state |
@@ -107,22 +132,23 @@ Understanding the relative cost of new community effects versus traditional Delu
 
 **Key insight**: The new granular/looping effects (Grain, Stutter) require 25-35× more memory than traditional effects like reverb. This is expected—they buffer audio for manipulation—but highlights why dynamic allocation matters.
 
+**Reverb note**: All reverb models now use `allocMaxSpeed()` for dynamic allocation. Only the active model's buffer is allocated at any time, saving ~298 KB total when models are switched.
+
 ### CPU Cost Comparison
 
-| Effect | CPU | Era | Relative Cost |
-|--------|-----|-----|---------------|
-| **Sine Shaper** | +12% | New | 2× reverb |
-| **Grain** | +6.5% | New | ~1× reverb |
-| **Disperser (8 stages)** | +6% | New | ~1× reverb |
-| **Saturator** | +6% | Original | ~1× reverb |
-| **Reverb** | ~6%* | Original | Baseline comparison |
-| **Dott** | +3% | New | 0.5× reverb |
-| **Table Shaper** | ~0% | New | Negligible (LUT) |
-| **Stutter (standby)** | +0.6% | New | Negligible |
+| Effect | CPU (Task Stats) | Cycles (Microbench) | Notes |
+|--------|------------------|---------------------|-------|
+| **Sine Shaper** | +12% | — | Pure DSP, no memory |
+| **Grain** | +6.5% | — | Granular processing |
+| **Disperser (8 stages)** | +6% | — | Allpass cascade |
+| **Saturator** | +6% | — | Filter processing |
+| **Featherverb** | — | ~10k-19k | Varies with synth complexity |
+| **Mutable Reverb** | — | ~9.5k-17.5k | Varies with synth complexity |
+| **Dott** | +3% | — | Multiband compressor |
+| **Table Shaper** | ~0% | — | Negligible (LUT) |
+| **Stutter (standby)** | +0.6% | — | Standby mode |
 
-*Reverb CPU estimated from architecture; always running so delta not directly measurable.
-
-**Key insight**: New effects are generally CPU-comparable to original effects. Sine Shaper is the most expensive at 2× reverb, but this is reasonable for real-time waveshaping with multiple harmonics.
+**Key insight**: Reverb CPU varies 1.8× based on synth complexity due to L1 D-cache contention. The synth's working set evicts reverb data from cache. Simple synth → ~10k cycles; DX7/FM → ~19k cycles. See [memory_architecture.md](memory_architecture.md) for details.
 
 ### Memory per Sound: The Hidden Cost
 
@@ -177,36 +203,34 @@ bool setStages(uint8_t newStages) {
 
 Stutter's 3 MB buffers now go directly to SDRAM via `allocSdram()`, avoiding the "FULL external" warnings that occurred when `allocLowSpeed()` tried to fit 3 MB into the 2.1 MB external region.
 
-### 3. Reverb SDRAM Migration (Implemented)
+### 3. Reverb Dynamic Allocation (Implemented)
 
-**Before**: ~128 KB embedded in global BSS (Mutable model, the largest of the three reverb types)
-**After**: Buffer allocated from SDRAM via `allocSdram()` when reverb model is set
+**Before**: Static BSS buffers (128 KB Mutable, 93 KB Freeverb)
+**After**: Dynamic allocation via `allocMaxSpeed()` - prefers fast SRAM, falls back to SDRAM
 
-The reverb uses a `std::variant<Freeverb, Mutable, Digital>` where:
+The reverb uses a `std::variant<Freeverb, Mutable, Featherverb>` where:
 - Freeverb: ~93 KB (comb + allpass buffers)
 - Mutable: ~128 KB (32768 float FxEngine buffer)
-- Digital: inherits Mutable's buffer
+- Featherverb: ~77 KB (4-tap FDN delay lines)
 
-Implementation pattern:
+**Allocation strategy**: All reverbs now use `allocMaxSpeed()`:
 ```cpp
-// In Mutable/Freeverb:
+// In all reverb models (Featherverb, Mutable, Freeverb):
 bool allocate() {
     buffer_ = static_cast<float*>(
-        GeneralMemoryAllocator::get().regions[MEMORY_REGION_STEALABLE].alloc(kBufferSizeBytes, false, nullptr));
+        GeneralMemoryAllocator::get().allocMaxSpeed(kBufferSizeBytes));
     // ... setup engine/filters
-}
-
-// In Reverb::setModel():
-void setModel(Model m) {
-    // Deallocate current model
-    std::visit([](auto& r) { r.deallocate(); }, reverb_);
-    // Emplace and allocate new model
-    reverb_.emplace<NewModel>();
-    std::get<NewModel>(reverb_).allocate();
 }
 ```
 
-This frees ~128 KB of static SRAM (BSS segment) for other firmware use.
+**Benchmarking showed <1% performance difference** between static BSS and dynamic allocation:
+- Static BSS: 18,856 cycles (DX7 synth)
+- Dynamic allocMaxSpeed: 18,993 cycles (DX7 synth)
+- Difference: +0.7%
+
+The ~1.8× CPU variation (10k vs 19k cycles) comes from L1 D-cache contention with the synth, not memory allocation strategy. See [memory_architecture.md](memory_architecture.md) for full analysis.
+
+This frees ~298 KB (77+128+93) when reverbs are switched or disabled.
 
 ### 4. Grain is the Largest Per-Sound Allocator
 
@@ -227,8 +251,10 @@ At 4.2 MB per sound when enabled, Grain is larger than Stutter. However, Grain a
 
 ## References
 
+- **[Memory Architecture](memory_architecture.md)** - Detailed analysis of L1 D-cache contention, BSS vs dynamic allocation benchmarks
 - Memory profiler: `scripts/tasks/task-memory-profile.py`
-- allocSdram implementation: `src/deluge/memory/memory_allocator_interface.cpp`
+- allocMaxSpeed/allocSdram: `src/deluge/memory/memory_allocator_interface.cpp`
 - Disperser dynamic allocation: `src/deluge/dsp/disperser.h`
-- Reverb SDRAM migration: `src/deluge/dsp/reverb/mutable.hpp`, `src/deluge/dsp/reverb/freeverb/freeverb.hpp`
+- Reverb allocation: `src/deluge/dsp/reverb/mutable.hpp`, `src/deluge/dsp/reverb/freeverb/freeverb.hpp`, `src/deluge/dsp/reverb/featherverb.hpp`
 - Stutter allocation: `src/deluge/model/fx/stutterer.cpp`
+- FX Benchmark system: `src/deluge/io/debug/fx_benchmark.h`
