@@ -103,7 +103,7 @@ Baseline: Simple synth @ **28% CPU**
 
 ### Microbenchmark Data (FX Benchmark System)
 
-Precise cycle counts from the `FxBenchmark` system under different load conditions:
+Cycle counts from the `FxBenchmark` system under different load conditions. **Note**: These figures vary significantly based on system load due to L1 D-cache contention—the 32KB data cache is shared between synths and effects. Expect ~2-3× higher cycles under heavy load compared to quiet conditions.
 
 | Effect | Quiet (DX7 only) | Full Load (all FX) | Ratio |
 |--------|------------------|-------------------|-------|
