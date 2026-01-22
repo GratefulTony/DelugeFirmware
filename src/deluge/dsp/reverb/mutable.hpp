@@ -23,13 +23,12 @@ public:
 
 	~Mutable() override { deallocate(); }
 
-	// Dynamic allocation for SDRAM - call before first use
+	// Dynamic allocation - prefers fast SRAM, falls back to SDRAM
 	[[nodiscard]] bool allocate() {
 		if (buffer_ != nullptr) {
 			return true; // Already allocated
 		}
-		buffer_ = static_cast<float*>(
-		    GeneralMemoryAllocator::get().regions[MEMORY_REGION_STEALABLE].alloc(kBufferSizeBytes, false, nullptr));
+		buffer_ = static_cast<float*>(GeneralMemoryAllocator::get().allocMaxSpeed(kBufferSizeBytes, nullptr));
 		if (buffer_ == nullptr) {
 			return false;
 		}

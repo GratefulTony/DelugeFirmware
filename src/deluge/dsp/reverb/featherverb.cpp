@@ -95,18 +95,20 @@ Featherverb::Featherverb() {
 }
 
 bool Featherverb::allocate() {
-	if (buffer_ != nullptr) {
-		return true;
+	if constexpr (kUseStaticBss) {
+		// Static BSS - buffer already points to staticBuffer_, just clear it
+		std::memset(buffer_, 0, kBufferBytes);
 	}
-
-	buffer_ = static_cast<float*>(
-	    GeneralMemoryAllocator::get().regions[MEMORY_REGION_STEALABLE].alloc(kBufferBytes, false, nullptr));
-
-	if (buffer_ == nullptr) {
-		return false;
+	else {
+		// Dynamic SDRAM allocation
+		if (buffer_ == nullptr) {
+			buffer_ = static_cast<float*>(GeneralMemoryAllocator::get().allocMaxSpeed(kBufferBytes, nullptr));
+			if (buffer_ == nullptr) {
+				return false;
+			}
+		}
+		std::memset(buffer_, 0, kBufferBytes);
 	}
-
-	std::memset(buffer_, 0, kBufferBytes);
 
 	// Reset state
 	fdnWritePos_.fill(0);
@@ -150,10 +152,14 @@ bool Featherverb::allocate() {
 }
 
 void Featherverb::deallocate() {
-	if (buffer_ != nullptr) {
-		delugeDealloc(buffer_);
-		buffer_ = nullptr;
+	if constexpr (!kUseStaticBss) {
+		// Dynamic allocation - free the buffer
+		if (buffer_ != nullptr) {
+			delugeDealloc(buffer_);
+			buffer_ = nullptr;
+		}
 	}
+	// Static BSS - nothing to deallocate
 }
 
 void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) {

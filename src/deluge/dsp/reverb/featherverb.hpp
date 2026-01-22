@@ -44,6 +44,13 @@ class Featherverb : public Base {
 	// === Undersampling toggle (set to false for full-rate operation) ===
 	static constexpr bool kUndersample = true;
 
+	// === Memory allocation strategy ===
+	// true = static BSS (77KB always allocated)
+	// false = dynamic via allocMaxSpeed() (preferred - frees memory when switching models)
+	// Benchmarking showed <1% performance difference between BSS and dynamic.
+	// The ~1.8x CPU variation (10k vs 19k cycles) is from synth cache pressure, not allocation.
+	static constexpr bool kUseStaticBss = false;
+
 	// 3 FDN delays for early reflections (D0, D1, D2)
 	static constexpr size_t kNumFdnDelays = 3;
 
@@ -136,7 +143,11 @@ public:
 	[[nodiscard]] bool getCascadeOnly() const { return cascadeOnly_; }
 
 private:
-	float* buffer_{nullptr};
+	// Buffer storage - controlled by kUseStaticBss
+	// Static BSS: 77KB always in fast SRAM, no cache contention
+	// Dynamic SDRAM: allocate on demand, subject to cache misses with complex synths
+	static inline std::array<float, kTotalMaxSamples> staticBuffer_{}; // Only used if kUseStaticBss
+	float* buffer_{kUseStaticBss ? staticBuffer_.data() : nullptr};
 
 	// FDN delay state (3 delays)
 	std::array<size_t, kNumFdnDelays> fdnWritePos_{};

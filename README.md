@@ -7,7 +7,7 @@ This is **owlet-firmware**, a personal fork of the Deluge Community Firmware mai
 | Feature | Description |
 |---------|-------------|
 | **Scatter (Bird Brain)** | Beat-repeat and slice manipulation effect. Double-buffer system for glitch-free triggering. Rate knob controls slice length. Future modes: beat reordering, fractional positions, random patterns. |
-| **Featherverb** | Lightweight 4-tap FDN reverb. 68 KB buffer vs Mutable's 128 KB (47% smaller). ~14k cycles vs Mutable's ~21k (35% less CPU). Lush sound with lower resource footprint. |
+| **Featherverb** | Lightweight 4-tap FDN reverb. 77 KB buffer vs Mutable's 128 KB (40% smaller). ~19k cycles under heavy load (DX7), ~10k with simple synths. Three zone parameters for matrix/size/decay character. |
 | **Multiband OTT Compressor (OWLTT/DOTT)** | 3-band upward/downward compressor with "Feel" modulation system. 8 vibe zones for dynamic character control and creative crossover options. Realistically its the worlds best creative multiband compressor. Also can serve utillity duty and cleans up nice when not acting nuts. Can funciton as full downward or full upward compression or anywhere in between. Aggressively optimized and surprisingly light on cpu for what it does. Minimal metering also included so you know when and what is clipping and when up or downn compression is being applied.|
 | **Sine Shaper (HOOT)** | 4-knob Harmonic waveshaping with width, evolution, recursion, and feedback zones. 8 Different algorithms with complex routing capabilities. |
 | **Disperser (OWLPASS)** | 4-knob Allpass filter cascade for frequency-dependent phase smearing. 8 algorithms and various Twist zones with punch, curve, chirp, and Q-tilt. Classic and exotic phase dispersion sounds with some Karplus Strong capabilitites in certain configurations. Unlike any dispersion you have ever heard. 8 stages max in lo-cpu mode. up to 32 in cpu heavy "shoot myself in the foot" mode (sounds amazing). (benchmarks at 8 stages, scales linearly with stages. very cheap at 1,2 stages still sounds disperserey) In a few configurations, KS feedback can get out of control so its "fun" to tune.|
@@ -33,18 +33,21 @@ CPU usage per voice (optimization ongoing). Target: stay under 2x the builtin sa
 
 ### Memory Optimizations
 
-Large effect buffers have been migrated from static SRAM to dynamic SDRAM allocation, reducing memory pressure on the constrained internal/external regions.
+Large effect buffers use dynamic allocation via `allocMaxSpeed()`, which tries fast memory first (Internal SRAM → External SRAM → SDRAM). Benchmarking showed <1% performance difference vs static BSS allocation.
 
 | Component | Before | After | Savings |
 |-----------|--------|-------|---------|
-| **Reverb buffers** | ~128 KB static BSS | SDRAM (dynamic) | 128 KB SRAM freed |
+| **Featherverb** | — | 77 KB dynamic | 77 KB (new, never static) |
+| **Mutable reverb** | ~128 KB static BSS | dynamic | 128 KB SRAM freed |
+| **Freeverb** | ~93 KB static BSS | dynamic | 93 KB SRAM freed |
 | **Analog waveform tables** | ~30 KB internal | SDRAM | 30 KB internal freed |
 | **Disperser delay lines** | 70 KB embedded/sound | 72 KB SDRAM (on-demand) | Up to 2.2 MB* |
 
 *Disperser memory is now allocated only when `stages > 0`. For songs with 32 sounds, this saves up to 2.2 MB vs the previous always-allocated approach.
 
 Key patterns:
-- `allocSdram()` - Direct SDRAM allocation for large buffers that must persist
+- `allocMaxSpeed()` - For song-level effects; prefers fast SRAM, falls back gracefully
+- `allocSdram()` - Direct SDRAM allocation for per-sound effects
 - On-demand allocation - Buffers allocated when effect is enabled, freed when disabled
 - Variant-based reverb - Only the active reverb model's buffer is allocated
 

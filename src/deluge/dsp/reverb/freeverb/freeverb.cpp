@@ -51,8 +51,8 @@ bool Freeverb::allocate() {
 	if (buffer_ != nullptr) {
 		return true; // Already allocated
 	}
-	buffer_ = static_cast<int32_t*>(
-	    GeneralMemoryAllocator::get().regions[MEMORY_REGION_STEALABLE].alloc(kTotalBufferBytes, false, nullptr));
+	// Prefer fast SRAM, fall back to SDRAM - benchmarking shows no performance difference
+	buffer_ = static_cast<int32_t*>(GeneralMemoryAllocator::get().allocMaxSpeed(kTotalBufferBytes, nullptr));
 	if (buffer_ == nullptr) {
 		return false;
 	}

@@ -46,7 +46,7 @@ public:
 	Freeverb();
 	~Freeverb() override { deallocate(); }
 
-	// Dynamic allocation for SDRAM - call before first use
+	// Dynamic allocation - prefers fast SRAM, falls back to SDRAM
 	[[nodiscard]] bool allocate();
 	void deallocate();
 	[[nodiscard]] bool isAllocated() const { return buffer_ != nullptr; }
@@ -149,7 +149,7 @@ private:
 	std::array<freeverb::Allpass, numallpasses> allpassR;
 
 	// Single contiguous buffer for all comb/allpass delay lines (~93 KB)
-	// Allocated from SDRAM via allocate(), nullptr until then
+	// Allocated via allocMaxSpeed() - prefers fast SRAM, falls back to SDRAM
 	int32_t* buffer_{nullptr};
 
 	int32_t reverb_send_post_lpf_ = 0;
