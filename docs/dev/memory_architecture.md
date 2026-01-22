@@ -74,14 +74,15 @@ BSS (Block Started by Symbol) is zero-initialized static data. On Deluge:
 
 ### The Cache Contention Problem
 
-During Featherverb development, we discovered that CPU cycles varied dramatically based on which synth fed the reverb:
+During Featherverb development, we discovered that CPU cycles varied dramatically based on system load:
 
-| Synth Type | Featherverb Cycles | Mutable Cycles |
-|------------|-------------------|----------------|
-| Subtractive | ~10,000 | ~9,500 |
-| DX7 (FM) | ~18,000 | ~17,500 |
+| Load Condition | Featherverb | Mutable | Digital | Freeverb |
+|----------------|-------------|---------|---------|----------|
+| Quiet (DX7 only) | 11.4k | 10.7k | 14.3k | 15.4k |
+| Full load (all FX) | 27.7k | 27.5k | 38.9k | 43.4k |
+| **Scaling factor** | 2.4× | 2.6× | 2.7× | 2.8× |
 
-Both reverbs showed the same ~1.8× penalty with complex synths. This is **L1 D-cache contention**.
+All reverbs scale ~2.5× from quiet to full load. This is **L1 D-cache contention**.
 
 #### Why L1 D-cache (not allocation) Determines Performance
 
@@ -94,9 +95,9 @@ Neither synth working set nor reverb buffer (77KB) fits in the 32KB D-cache. Dur
 2. Reverb runs → evicts DX7 data, loads delay buffer chunks
 3. Next buffer → repeat, everything gets evicted
 
-With subtractive synth, the working set is small enough that reverb data stays cached longer → fewer misses → ~10k cycles instead of ~19k.
+With minimal effects active, reverb data stays cached longer → fewer misses → ~11k cycles. Under full load with all effects, cache pressure from other DSP increases reverb cycles to ~28k.
 
-**Key insight**: The ~1.8× penalty is from the *synth's* cache footprint, not the reverb's memory location. BSS vs dynamic allocation makes <1% difference because both go through the same D-cache
+**Key insight**: The ~2.5× scaling is from cumulative cache pressure, not the reverb's memory location. BSS vs dynamic allocation makes <1% difference because both go through the same D-cache
 
 ### Allocation Strategy Comparison
 

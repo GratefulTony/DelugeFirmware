@@ -103,14 +103,20 @@ Baseline: Simple synth @ **28% CPU**
 
 ### Microbenchmark Data (FX Benchmark System)
 
-Precise cycle counts from the `FxBenchmark` system show the cache contention effect clearly:
+Precise cycle counts from the `FxBenchmark` system under different load conditions:
 
-| Effect | Cycles (Simple Synth) | Cycles (DX7/FM) | Ratio |
-|--------|----------------------|-----------------|-------|
-| Featherverb | ~10,000 | ~19,000 | 1.9× |
-| Mutable Reverb | ~9,500 | ~17,500 | 1.8× |
+| Effect | Quiet (DX7 only) | Full Load (all FX) | Ratio |
+|--------|------------------|-------------------|-------|
+| **Mutable** | 10.7k | 27.5k | 2.6× |
+| **Featherverb** | 11.4k | 27.7k | 2.4× |
+| **Digital** | 14.3k | 38.9k | 2.7× |
+| **Freeverb** | 15.4k | 43.4k | 2.8× |
 
-**Key insight**: The ~1.8× penalty is from the *synth's* cache footprint, not the effect's memory location. BSS vs dynamic allocation makes <1% difference because both go through the same D-cache.
+**Key findings**:
+- Featherverb and Mutable are essentially tied across all load conditions
+- All reverbs scale ~2.5× from quiet to full load (cache pressure from other effects)
+- Freeverb is 44% more expensive than Mutable/Featherverb (8-comb architecture)
+- BSS vs dynamic allocation makes <1% difference because both go through the same D-cache
 
 ## Cost Comparison: New vs Traditional Effects
 
@@ -136,19 +142,20 @@ Understanding the relative cost of new community effects versus traditional Delu
 
 ### CPU Cost Comparison
 
-| Effect | CPU (Task Stats) | Cycles (Microbench) | Notes |
-|--------|------------------|---------------------|-------|
-| **Sine Shaper** | +12% | — | Pure DSP, no memory |
-| **Grain** | +6.5% | — | Granular processing |
-| **Disperser (8 stages)** | +6% | — | Allpass cascade |
-| **Saturator** | +6% | — | Filter processing |
-| **Featherverb** | — | ~10k-19k | Varies with synth complexity |
-| **Mutable Reverb** | — | ~9.5k-17.5k | Varies with synth complexity |
-| **Dott** | +3% | — | Multiband compressor |
-| **Table Shaper** | ~0% | — | Negligible (LUT) |
-| **Stutter (standby)** | +0.6% | — | Standby mode |
+| Effect | Cycles (Quiet) | Cycles (Full Load) | Scaling |
+|--------|----------------|-------------------|---------|
+| **Freeverb** | 15.4k | 43.4k | 2.8× |
+| **Digital** | 14.3k | 38.9k | 2.7× |
+| **Featherverb** | 11.4k | 27.7k | 2.4× |
+| **Mutable Reverb** | 10.7k | 27.5k | 2.6× |
 
-**Key insight**: Reverb CPU varies 1.8× based on synth complexity due to L1 D-cache contention. The synth's working set evicts reverb data from cache. Simple synth → ~10k cycles; DX7/FM → ~19k cycles. See [memory_architecture.md](memory_architecture.md) for details.
+Other effects (full load only):
+- Disperser (8 stages): 25.7k
+- Sine Shaper: 8.8k
+- Scatter: 3.9k
+- Table Shaper: 2.0k
+
+**Key insight**: Reverb CPU scales ~2.5× from quiet to full load due to L1 D-cache contention. Featherverb matches Mutable performance while using 40% less memory (77 KB vs 128 KB).
 
 ### Memory per Sound: The Hidden Cost
 
