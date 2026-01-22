@@ -265,70 +265,67 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 
 				// c0→c1→c2 series chain with optional 4x undersample for vast rooms
 				float c0, c1, c2;
+				float cascadeOutL, cascadeOutR;
+				float dynamicWidth = width_ + (1.0f - std::min(inputEnvelope_ * 100.0f, 1.0f)) * widthBreath_;
+
 				if (cascadeDoubleUndersample_) {
-					// Pre-decimation AA filter (1 pole before, 1 pole after cascade)
-					cascadeIn = onepole(cascadeIn, cascadeAaState1_, kPreCascadeAaCoeff);
-					// C0 with 4x undersample
-					c0Accum_ += cascadeIn;
+					// === VAST CHAIN MODE ===
+					// Topology with nested feedback loops + global recirculation:
+					//   Input ←───────────────────────────────────┐
+					//       → C0 → D0 ←──┐                        │
+					//                └→ C1 → D1 ←──┐              │
+					//                          └→ C2 → D2 ←──┐   │
+					//                                    └→ C3 ──┘
+					// Local loops add density, global loop adds tail length
+
+					// Feedback coefficients: Room → density, Zone 3 → tail length
+					// Self-limiting feedback: reduce when reverb level is high
+					float fbEnvScale = 1.0f - std::min(feedbackEnvelope_ * 5.0f, 0.95f);
+					float loopFb = feedback_ * 0.5f * delayRatio_ * fbEnvScale;
+					float globalFb = cascadeNestFeedback_ * fbEnvScale;
+
+					// Pre-decimation AA filter with global C3 feedback
+					float chainIn = onepole(fdnIn * 1.4f + prevC3Out_ * globalFb, cascadeAaState1_, kPreCascadeAaCoeff);
+
+					// C0 with 4x undersample (input → first allpass)
+					c0Accum_ += chainIn;
 					if (c0Phase_ == 1) {
 						float avgIn = c0Accum_ * 0.5f;
-						float c0Coeff = cascadeCoeffs_[0];
-						size_t origWritePos = cascadeWritePos_[0];
-						size_t idx = cascadeOffsets_[0] + origWritePos;
-						float delayed = buffer_[idx];
-						float output = -c0Coeff * avgIn + delayed;
-						float writeVal = avgIn + c0Coeff * output;
-						buffer_[idx] = writeVal;
-						if (++cascadeWritePos_[0] >= cascadeLengths_[0])
-							cascadeWritePos_[0] = 0;
-						buffer_[cascadeOffsets_[0] + cascadeWritePos_[0]] = writeVal;
-						if (++cascadeWritePos_[0] >= cascadeLengths_[0])
-							cascadeWritePos_[0] = 0;
-						// Multi-tap write for density
-						if constexpr (kEnableMultiTapWrites) {
-							size_t tapPos = (origWritePos + kMultiTapOffsets[0]) % cascadeLengths_[0];
-							buffer_[cascadeOffsets_[0] + tapPos] += writeVal * kMultiTapGain;
-						}
-						c0Prev_ = output;
+						c0Prev_ = processCascadeStage(0, avgIn);
 						c0Accum_ = 0.0f;
 					}
 					c0Phase_ = (c0Phase_ + 1) & 1;
 					c0 = c0Prev_;
 
+					// D0 delay between C0 and C1
+					fdnWrite(0, c0);
+					fdnWrite(0, c0); // Double write for 4x undersample
+					float d0Out = fdnRead(0);
+
 					// C1 with 4x undersample
-					c1Accum_ += c0;
+					c1Accum_ += d0Out;
 					if (c1Phase_ == 1) {
 						float avgIn = c1Accum_ * 0.5f;
-						float c1Coeff = cascadeCoeffs_[1];
-						size_t origWritePos = cascadeWritePos_[1];
-						size_t idx = cascadeOffsets_[1] + origWritePos;
-						float delayed = buffer_[idx];
-						float output = -c1Coeff * avgIn + delayed;
-						float writeVal = avgIn + c1Coeff * output;
-						buffer_[idx] = writeVal;
-						if (++cascadeWritePos_[1] >= cascadeLengths_[1])
-							cascadeWritePos_[1] = 0;
-						buffer_[cascadeOffsets_[1] + cascadeWritePos_[1]] = writeVal;
-						if (++cascadeWritePos_[1] >= cascadeLengths_[1])
-							cascadeWritePos_[1] = 0;
-						// Multi-tap write for density
-						if constexpr (kEnableMultiTapWrites) {
-							size_t tapPos = (origWritePos + kMultiTapOffsets[1]) % cascadeLengths_[1];
-							buffer_[cascadeOffsets_[1] + tapPos] += writeVal * kMultiTapGain;
-						}
-						c1Prev_ = output;
+						c1Prev_ = processCascadeStage(1, avgIn);
 						c1Accum_ = 0.0f;
 					}
 					c1Phase_ = (c1Phase_ + 1) & 1;
 					c1 = c1Prev_;
 
-					// C2 with 4x undersample
-					c2Accum_ += c1;
+					// C1 → D0 nested feedback loop (single write - feedback timing less critical)
+					fdnWrite(0, c1 * loopFb);
+
+					// D1 delay between C1 and C2
+					fdnWrite(1, c1);
+					fdnWrite(1, c1);
+					float d1Out = fdnRead(1);
+
+					// C2 with 4x undersample + pitch modulation
+					c2Accum_ += d1Out;
 					if (c2Phase_ == 1) {
 						float avgIn = c2Accum_ * 0.5f;
 						float c2Coeff = cascadeCoeffs_[2];
 						size_t origWritePos = cascadeWritePos_[2];
-						// Pitch modulation: read from offset position for chorus-like smearing
 						size_t c2ModOffset = static_cast<size_t>(std::max(0.0f, lfoTri * cascadeModDepth_));
 						size_t readPos = (origWritePos + c2ModOffset) % cascadeLengths_[2];
 						size_t idx = cascadeOffsets_[2] + readPos;
@@ -341,7 +338,6 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 						buffer_[cascadeOffsets_[2] + cascadeWritePos_[2]] = writeVal;
 						if (++cascadeWritePos_[2] >= cascadeLengths_[2])
 							cascadeWritePos_[2] = 0;
-						// Multi-tap write for density
 						if constexpr (kEnableMultiTapWrites) {
 							size_t tapPos = (origWritePos + kMultiTapOffsets[2]) % cascadeLengths_[2];
 							buffer_[cascadeOffsets_[2] + tapPos] += writeVal * kMultiTapGain;
@@ -351,26 +347,22 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 					}
 					c2Phase_ = (c2Phase_ + 1) & 1;
 					c2 = c2Prev_;
-				}
-				else {
-					c0 = processCascadeStage(0, cascadeIn);
-					c1 = processCascadeStage(1, c0);
-					c2 = processCascadeStage(2, c1);
-				}
 
-				// C3 input: blend parallel (cascadeIn) ↔ series (c2)
-				float c3In = cascadeIn + (c2 - cascadeIn) * cascadeSeriesMix_;
+					// C2 → D1 nested feedback loop
+					fdnWrite(1, c2 * loopFb);
 
-				// C3 with 4x undersample for vast rooms (Zone 2 > 80%)
-				// All cascade stages use uniform 4x in vast mode (8x caused ringing)
-				float c3;
-				if (cascadeDoubleUndersample_) {
-					c3Accum_ += c3In;
+					// D2 delay between C2 and C3
+					fdnWrite(2, c2);
+					fdnWrite(2, c2);
+					float d2Out = fdnRead(2);
+
+					// C3 with 4x undersample + inverted pitch modulation
+					float c3;
+					c3Accum_ += d2Out;
 					if (c3Phase_ == 1) {
 						float avgIn = c3Accum_ * 0.5f;
 						float c3Coeff = cascadeCoeffs_[3];
 						size_t origWritePos = cascadeWritePos_[3];
-						// Pitch modulation: inverted phase from C2 for decorrelation
 						size_t c3ModOffset = static_cast<size_t>(std::max(0.0f, -lfoTri * cascadeModDepth_));
 						size_t readPos = (origWritePos + c3ModOffset) % cascadeLengths_[3];
 						size_t idx = cascadeOffsets_[3] + readPos;
@@ -383,7 +375,6 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 						buffer_[cascadeOffsets_[3] + cascadeWritePos_[3]] = writeVal;
 						if (++cascadeWritePos_[3] >= cascadeLengths_[3])
 							cascadeWritePos_[3] = 0;
-						// Multi-tap write for density
 						if constexpr (kEnableMultiTapWrites) {
 							size_t tapPos = (origWritePos + kMultiTapOffsets[3]) % cascadeLengths_[3];
 							buffer_[cascadeOffsets_[3] + tapPos] += writeVal * kMultiTapGain;
@@ -393,66 +384,91 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 					}
 					c3Phase_ = (c3Phase_ + 1) & 1;
 					c3 = c3Prev_;
+					prevC3Out_ = c3;
+
+					// Track feedback envelope for self-limiting (branchless attack/release)
+					float c3Abs = std::abs(c3);
+					float coeff = (c3Abs > feedbackEnvelope_) ? 0.01f : 0.0005f;
+					feedbackEnvelope_ += coeff * (c3Abs - feedbackEnvelope_);
+
+					// C3 → D2 nested feedback loop
+					fdnWrite(2, c3 * loopFb);
+
+					// Amplitude modulation for diffusion contour
+					if (cascadeAmpMod_ > 0.0f) {
+						c2 *= (1.0f + lfoTri * cascadeAmpMod_);
+						c3 *= (1.0f - lfoTri * cascadeAmpMod_);
+					}
+
+					// Mix chain outputs - stereo from intermediate stages
+					float cascadeMono = (c2 + c3) * 0.5f;
+					float cascadeSide = (c0 - c1) * 0.2f * dynamicWidth;
+					cascadeMono = onepole(cascadeMono, cascadeLpStateMono_, kCascadeLpCoeffMono);
+					cascadeSide = onepole(cascadeSide, cascadeLpStateSide_, kCascadeLpCoeffSide);
+					cascadeMono = onepole(cascadeMono, cascadeLpState_, cascadeDamping_);
+					cascadeOutL = cascadeMono + cascadeSide;
+					cascadeOutR = cascadeMono - cascadeSide;
+
+					// No early reflections in vast chain mode (FDN is repurposed)
+					directEarlyL_ = 0.0f;
+					directEarlyR_ = 0.0f;
 				}
 				else {
-					c3 = processCascadeStage(3, c3In);
+					// === NORMAL FDN + CASCADE MODE ===
+					c0 = processCascadeStage(0, cascadeIn);
+					c1 = processCascadeStage(1, c0);
+					c2 = processCascadeStage(2, c1);
+
+					// C3 input: blend parallel (cascadeIn) ↔ series (c2)
+					float c3In = cascadeIn + (c2 - cascadeIn) * cascadeSeriesMix_;
+					float c3 = processCascadeStage(3, c3In);
+					prevC3Out_ = c3;
+
+					// Mix outputs - stereo tail from cascade (mid/side)
+					float cascadeMono = (c2 + c3) * 0.5f;
+					float cascadeSide = (c0 - c1) * 0.2f * dynamicWidth;
+					cascadeMono = onepole(cascadeMono, cascadeLpStateMono_, kCascadeLpCoeffMono);
+					cascadeSide = onepole(cascadeSide, cascadeLpStateSide_, kCascadeLpCoeffSide);
+					cascadeMono = onepole(cascadeMono, cascadeLpState_, cascadeDamping_);
+					cascadeOutL = cascadeMono + cascadeSide;
+					cascadeOutR = cascadeMono - cascadeSide;
+
+					// Inject input + cascade feedback into FDN
+					if (kMuteCascadeFeedback || cascadeOnly_) {
+						h0 += fdnIn;
+					}
+					else {
+						h0 += fdnIn + cascadeMono * tailFeedback * cascadeFeedbackMult_;
+					}
+
+					// Write FDN (double write for undersampling)
+					fdnWrite(0, h0);
+					fdnWrite(1, h1);
+					fdnWrite(2, h2);
+					fdnWrite(0, h0);
+					fdnWrite(1, h1);
+					fdnWrite(2, h2);
+
+					// Early reflections from FDN
+					if (!kMuteEarly && !cascadeOnly_) {
+						float earlyMid = (d0 + d1) * earlyMixGain_;
+						float earlySide = (d0 - d1) * earlyMixGain_ * dynamicWidth;
+						directEarlyL_ = (earlyMid + earlySide) * directEarlyGain_;
+						directEarlyR_ = (earlyMid - earlySide) * directEarlyGain_;
+					}
+					else {
+						directEarlyL_ = 0.0f;
+						directEarlyR_ = 0.0f;
+					}
 				}
-				prevC3Out_ = c3; // Store for nested feedback next sample
 
-				// Amplitude modulation on C2/C3 for diffusion contour (opposite phases)
-				// Creates stereo movement as the balance shifts between stages
-				if (cascadeAmpMod_ > 0.0f) {
-					c2 *= (1.0f + lfoTri * cascadeAmpMod_);
-					c3 *= (1.0f - lfoTri * cascadeAmpMod_);
-				}
-
-				// Width breathing: expand stereo as signal decays
-				float dynamicWidth = width_ + (1.0f - std::min(inputEnvelope_ * 100.0f, 1.0f)) * widthBreath_;
-
-				// Mix outputs - stereo tail from cascade (mid/side)
-				// c2+c3 = dense tail (both channels), c0-c1 = stereo spread scaled by width
-				float cascadeMono = (c2 + c3) * 0.5f;
-				float cascadeSide = (c0 - c1) * 0.2f * dynamicWidth;
-
-				// Cascade LP filters - mono darker (~5.5kHz), side brighter (~8kHz) for airy stereo
-				cascadeMono = onepole(cascadeMono, cascadeLpStateMono_, kCascadeLpCoeffMono);
-				cascadeSide = onepole(cascadeSide, cascadeLpStateSide_, kCascadeLpCoeffSide);
-
-				// Apply damping to mono component
-				cascadeMono = onepole(cascadeMono, cascadeLpState_, cascadeDamping_);
-				float cascadeOutL = cascadeMono + cascadeSide;
-				float cascadeOutR = cascadeMono - cascadeSide;
-
-				// Inject input + cascade feedback into FDN (tail uses squared feedback)
-				if (kMuteCascadeFeedback || cascadeOnly_) {
-					h0 += fdnIn;
-				}
-				else {
-					h0 += fdnIn + cascadeMono * tailFeedback * cascadeFeedbackMult_;
-				}
-
-				// Write FDN (double write for undersampling)
-				fdnWrite(0, h0);
-				fdnWrite(1, h1);
-				fdnWrite(2, h2);
-				fdnWrite(0, h0);
-				fdnWrite(1, h1);
-				fdnWrite(2, h2);
-
-				// Output: mix early (FDN) + late (cascade)
+				// Output: early (FDN) + late (cascade)
 				float earlyL = 0.0f, earlyR = 0.0f;
-				if (!kMuteEarly && !cascadeOnly_) {
+				if (!cascadeDoubleUndersample_ && !kMuteEarly && !cascadeOnly_) {
 					float earlyMid = (d0 + d1) * earlyMixGain_;
 					float earlySide = (d0 - d1) * earlyMixGain_ * dynamicWidth;
 					earlyL = earlyMid + earlySide;
 					earlyR = earlyMid - earlySide;
-					// Save direct early for brightness tap (bypasses output LPF)
-					directEarlyL_ = earlyL * directEarlyGain_;
-					directEarlyR_ = earlyR * directEarlyGain_;
-				}
-				else {
-					directEarlyL_ = 0.0f;
-					directEarlyR_ = 0.0f;
 				}
 
 				float newOutL, newOutR;
@@ -543,72 +559,67 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 				cascadeIn = in * 0.7f + (d0 + d1 + d2) * 0.7f + prevC3Out_ * cascadeNestFeedback_ * tailFeedback;
 			}
 
-			// c0→c1→c2 series chain with optional 2x undersample for vast rooms
+			// c0→c1→c2 series chain with optional vast chain mode
 			float c0, c1, c2;
+			float cascadeOutL, cascadeOutR;
+			float dynamicWidth = width_ + (1.0f - std::min(inputEnvelope_ * 100.0f, 1.0f)) * widthBreath_;
+
 			if (cascadeDoubleUndersample_) {
-				// Pre-decimation AA filter (1 pole before, 1 pole after cascade)
-				cascadeIn = onepole(cascadeIn, cascadeAaState1_, kPreCascadeAaCoeff);
+				// === VAST CHAIN MODE (non-undersampled path) ===
+				// Topology with nested feedback loops + global recirculation:
+				//   Input ←───────────────────────────────────┐
+				//       → C0 → D0 ←──┐                        │
+				//                └→ C1 → D1 ←──┐              │
+				//                          └→ C2 → D2 ←──┐   │
+				//                                    └→ C3 ──┘
+				// Local loops add density, global loop adds tail length
+
+				// Feedback coefficients: Room → density, Zone 3 → tail length
+				// Self-limiting feedback: reduce when reverb level is high
+				float fbEnvScale = 1.0f - std::min(feedbackEnvelope_ * 5.0f, 0.95f);
+				float loopFb = feedback_ * 0.5f * delayRatio_ * fbEnvScale;
+				float globalFb = cascadeNestFeedback_ * fbEnvScale;
+
+				// Pre-decimation AA filter with global C3 feedback
+				float chainIn = onepole(in * 1.4f + prevC3Out_ * globalFb, cascadeAaState1_, kPreCascadeAaCoeff);
+
 				// C0 with 2x undersample
-				c0Accum_ += cascadeIn;
+				c0Accum_ += chainIn;
 				if (c0Phase_ == 1) {
 					float avgIn = c0Accum_ * 0.5f;
-					float c0Coeff = cascadeCoeffs_[0];
-					size_t origWritePos = cascadeWritePos_[0];
-					size_t idx = cascadeOffsets_[0] + origWritePos;
-					float delayed = buffer_[idx];
-					float output = -c0Coeff * avgIn + delayed;
-					float writeVal = avgIn + c0Coeff * output;
-					buffer_[idx] = writeVal;
-					if (++cascadeWritePos_[0] >= cascadeLengths_[0])
-						cascadeWritePos_[0] = 0;
-					buffer_[cascadeOffsets_[0] + cascadeWritePos_[0]] = writeVal;
-					if (++cascadeWritePos_[0] >= cascadeLengths_[0])
-						cascadeWritePos_[0] = 0;
-					// Multi-tap write for density
-					if constexpr (kEnableMultiTapWrites) {
-						size_t tapPos = (origWritePos + kMultiTapOffsets[0]) % cascadeLengths_[0];
-						buffer_[cascadeOffsets_[0] + tapPos] += writeVal * kMultiTapGain;
-					}
-					c0Prev_ = output;
+					c0Prev_ = processCascadeStage(0, avgIn);
 					c0Accum_ = 0.0f;
 				}
 				c0Phase_ = (c0Phase_ + 1) & 1;
 				c0 = c0Prev_;
 
+				// D0 delay between C0 and C1
+				fdnWrite(0, c0);
+				float d0Out = fdnRead(0);
+
 				// C1 with 2x undersample
-				c1Accum_ += c0;
+				c1Accum_ += d0Out;
 				if (c1Phase_ == 1) {
 					float avgIn = c1Accum_ * 0.5f;
-					float c1Coeff = cascadeCoeffs_[1];
-					size_t origWritePos = cascadeWritePos_[1];
-					size_t idx = cascadeOffsets_[1] + origWritePos;
-					float delayed = buffer_[idx];
-					float output = -c1Coeff * avgIn + delayed;
-					float writeVal = avgIn + c1Coeff * output;
-					buffer_[idx] = writeVal;
-					if (++cascadeWritePos_[1] >= cascadeLengths_[1])
-						cascadeWritePos_[1] = 0;
-					buffer_[cascadeOffsets_[1] + cascadeWritePos_[1]] = writeVal;
-					if (++cascadeWritePos_[1] >= cascadeLengths_[1])
-						cascadeWritePos_[1] = 0;
-					// Multi-tap write for density
-					if constexpr (kEnableMultiTapWrites) {
-						size_t tapPos = (origWritePos + kMultiTapOffsets[1]) % cascadeLengths_[1];
-						buffer_[cascadeOffsets_[1] + tapPos] += writeVal * kMultiTapGain;
-					}
-					c1Prev_ = output;
+					c1Prev_ = processCascadeStage(1, avgIn);
 					c1Accum_ = 0.0f;
 				}
 				c1Phase_ = (c1Phase_ + 1) & 1;
 				c1 = c1Prev_;
 
-				// C2 with 2x undersample
-				c2Accum_ += c1;
+				// C1 → D0 nested feedback loop
+				fdnWrite(0, c1 * loopFb);
+
+				// D1 delay between C1 and C2
+				fdnWrite(1, c1);
+				float d1Out = fdnRead(1);
+
+				// C2 with 2x undersample + pitch modulation
+				c2Accum_ += d1Out;
 				if (c2Phase_ == 1) {
 					float avgIn = c2Accum_ * 0.5f;
 					float c2Coeff = cascadeCoeffs_[2];
 					size_t origWritePos = cascadeWritePos_[2];
-					// Pitch modulation: read from offset position for chorus-like smearing
 					size_t c2ModOffset = static_cast<size_t>(std::max(0.0f, lfoTri * cascadeModDepth_));
 					size_t readPos = (origWritePos + c2ModOffset) % cascadeLengths_[2];
 					size_t idx = cascadeOffsets_[2] + readPos;
@@ -621,7 +632,6 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 					buffer_[cascadeOffsets_[2] + cascadeWritePos_[2]] = writeVal;
 					if (++cascadeWritePos_[2] >= cascadeLengths_[2])
 						cascadeWritePos_[2] = 0;
-					// Multi-tap write for density
 					if constexpr (kEnableMultiTapWrites) {
 						size_t tapPos = (origWritePos + kMultiTapOffsets[2]) % cascadeLengths_[2];
 						buffer_[cascadeOffsets_[2] + tapPos] += writeVal * kMultiTapGain;
@@ -631,33 +641,27 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 				}
 				c2Phase_ = (c2Phase_ + 1) & 1;
 				c2 = c2Prev_;
-			}
-			else {
-				c0 = processCascadeStage(0, cascadeIn);
-				c1 = processCascadeStage(1, c0);
-				c2 = processCascadeStage(2, c1);
-			}
 
-			// C3 input: blend parallel (cascadeIn) ↔ series (c2)
-			float c3In = cascadeIn + (c2 - cascadeIn) * cascadeSeriesMix_;
+				// C2 → D1 nested feedback loop
+				fdnWrite(1, c2 * loopFb);
 
-			// C3 with 4x undersample for vast rooms (Zone 2 > 80%)
-			// C0/C1/C2 at 2x, C3 at 4x for maximum tail extension (~362ms effective)
-			float c3;
-			if (cascadeDoubleUndersample_) {
-				c3Accum_ += c3In;
+				// D2 delay between C2 and C3
+				fdnWrite(2, c2);
+				float d2Out = fdnRead(2);
+
+				// C3 with 4x undersample + inverted pitch modulation
+				float c3;
+				c3Accum_ += d2Out;
 				if (c3Phase_ == 3) {
-					float avgIn = c3Accum_ * 0.25f; // Average over 4 samples
+					float avgIn = c3Accum_ * 0.25f;
 					float c3Coeff = cascadeCoeffs_[3];
 					size_t origWritePos = cascadeWritePos_[3];
-					// Pitch modulation: inverted phase from C2 for decorrelation
 					size_t c3ModOffset = static_cast<size_t>(std::max(0.0f, -lfoTri * cascadeModDepth_));
 					size_t readPos = (origWritePos + c3ModOffset) % cascadeLengths_[3];
 					size_t idx = cascadeOffsets_[3] + readPos;
 					float delayed = buffer_[idx];
 					float output = -c3Coeff * avgIn + delayed;
 					float writeVal = avgIn + c3Coeff * output;
-					// Quad-write for 4x undersample
 					buffer_[cascadeOffsets_[3] + origWritePos] = writeVal;
 					if (++cascadeWritePos_[3] >= cascadeLengths_[3])
 						cascadeWritePos_[3] = 0;
@@ -670,7 +674,6 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 					buffer_[cascadeOffsets_[3] + cascadeWritePos_[3]] = writeVal;
 					if (++cascadeWritePos_[3] >= cascadeLengths_[3])
 						cascadeWritePos_[3] = 0;
-					// Multi-tap write for density
 					if constexpr (kEnableMultiTapWrites) {
 						size_t tapPos = (origWritePos + kMultiTapOffsets[3]) % cascadeLengths_[3];
 						buffer_[cascadeOffsets_[3] + tapPos] += writeVal * kMultiTapGain;
@@ -678,63 +681,93 @@ void Featherverb::process(std::span<int32_t> input, StereoBuffer<q31_t> output) 
 					c3Prev_ = output;
 					c3Accum_ = 0.0f;
 				}
-				c3Phase_ = (c3Phase_ + 1) & 3; // 2-bit counter for 4x
+				c3Phase_ = (c3Phase_ + 1) & 3;
 				c3 = c3Prev_;
+				prevC3Out_ = c3;
+
+				// Track feedback envelope for self-limiting (slow attack, slower release)
+				float c3Abs = std::abs(c3);
+				if (c3Abs > feedbackEnvelope_) {
+					feedbackEnvelope_ += 0.01f * (c3Abs - feedbackEnvelope_); // Attack
+				}
+				else {
+					feedbackEnvelope_ += 0.0005f * (c3Abs - feedbackEnvelope_); // Release
+				}
+
+				// C3 → D2 nested feedback loop
+				fdnWrite(2, c3 * loopFb);
+
+				// Amplitude modulation for diffusion contour
+				if (cascadeAmpMod_ > 0.0f) {
+					c2 *= (1.0f + lfoTri * cascadeAmpMod_);
+					c3 *= (1.0f - lfoTri * cascadeAmpMod_);
+				}
+
+				// Mix chain outputs
+				float cascadeMono = (c2 + c3) * 0.5f;
+				float cascadeSide = (c0 - c1) * 0.2f * dynamicWidth;
+				cascadeMono = onepole(cascadeMono, cascadeLpStateMono_, kCascadeLpCoeffMono);
+				cascadeSide = onepole(cascadeSide, cascadeLpStateSide_, kCascadeLpCoeffSide);
+				cascadeMono = onepole(cascadeMono, cascadeLpState_, cascadeDamping_);
+				cascadeOutL = cascadeMono + cascadeSide;
+				cascadeOutR = cascadeMono - cascadeSide;
+
+				// No early reflections in vast chain mode
+				directEarlyL_ = 0.0f;
+				directEarlyR_ = 0.0f;
 			}
 			else {
-				c3 = processCascadeStage(3, c3In);
+				// === NORMAL FDN + CASCADE MODE ===
+				c0 = processCascadeStage(0, cascadeIn);
+				c1 = processCascadeStage(1, c0);
+				c2 = processCascadeStage(2, c1);
+
+				// C3 input: blend parallel (cascadeIn) ↔ series (c2)
+				float c3In = cascadeIn + (c2 - cascadeIn) * cascadeSeriesMix_;
+				float c3 = processCascadeStage(3, c3In);
+				prevC3Out_ = c3;
+
+				// Mix outputs
+				float cascadeMono = (c2 + c3) * 0.5f;
+				float cascadeSide = (c0 - c1) * 0.2f * dynamicWidth;
+				cascadeMono = onepole(cascadeMono, cascadeLpStateMono_, kCascadeLpCoeffMono);
+				cascadeSide = onepole(cascadeSide, cascadeLpStateSide_, kCascadeLpCoeffSide);
+				cascadeMono = onepole(cascadeMono, cascadeLpState_, cascadeDamping_);
+				cascadeOutL = cascadeMono + cascadeSide;
+				cascadeOutR = cascadeMono - cascadeSide;
+
+				// Inject input + cascade feedback into FDN
+				if (kMuteCascadeFeedback || cascadeOnly_) {
+					h0 += in;
+				}
+				else {
+					h0 += in + cascadeMono * tailFeedback * cascadeFeedbackMult_;
+				}
+
+				fdnWrite(0, h0);
+				fdnWrite(1, h1);
+				fdnWrite(2, h2);
+
+				// Early reflections from FDN
+				if (!kMuteEarly && !cascadeOnly_) {
+					float earlyMid = (d0 + d1) * earlyMixGain_;
+					float earlySide = (d0 - d1) * earlyMixGain_ * dynamicWidth;
+					directEarlyL_ = (earlyMid + earlySide) * directEarlyGain_;
+					directEarlyR_ = (earlyMid - earlySide) * directEarlyGain_;
+				}
+				else {
+					directEarlyL_ = 0.0f;
+					directEarlyR_ = 0.0f;
+				}
 			}
-			prevC3Out_ = c3; // Store for nested feedback next sample
 
-			// Amplitude modulation on C2/C3 for diffusion contour (opposite phases)
-			if (cascadeAmpMod_ > 0.0f) {
-				c2 *= (1.0f + lfoTri * cascadeAmpMod_);
-				c3 *= (1.0f - lfoTri * cascadeAmpMod_);
-			}
-
-			// Width breathing: expand stereo as signal decays
-			float dynamicWidth = width_ + (1.0f - std::min(inputEnvelope_ * 100.0f, 1.0f)) * widthBreath_;
-
-			// Mix outputs - stereo tail from cascade (mid/side)
-			// c2+c3 = dense tail (both channels), c0-c1 = stereo spread scaled by width
-			float cascadeMono = (c2 + c3) * 0.5f;
-			float cascadeSide = (c0 - c1) * 0.2f * dynamicWidth;
-
-			// Cascade LP filters - mono darker (~5.5kHz), side brighter (~8kHz) for airy stereo
-			cascadeMono = onepole(cascadeMono, cascadeLpStateMono_, kCascadeLpCoeffMono);
-			cascadeSide = onepole(cascadeSide, cascadeLpStateSide_, kCascadeLpCoeffSide);
-
-			// Apply damping to mono component
-			cascadeMono = onepole(cascadeMono, cascadeLpState_, cascadeDamping_);
-			float cascadeOutL = cascadeMono + cascadeSide;
-			float cascadeOutR = cascadeMono - cascadeSide;
-
-			// Inject input + cascade feedback into FDN (tail uses squared feedback)
-			if (kMuteCascadeFeedback || cascadeOnly_) {
-				h0 += in;
-			}
-			else {
-				h0 += in + cascadeMono * tailFeedback * cascadeFeedbackMult_;
-			}
-
-			fdnWrite(0, h0);
-			fdnWrite(1, h1);
-			fdnWrite(2, h2);
-
-			// Output: mix early (FDN) + late (cascade)
+			// Output: early (FDN) + late (cascade)
 			float earlyL = 0.0f, earlyR = 0.0f;
-			if (!kMuteEarly && !cascadeOnly_) {
+			if (!cascadeDoubleUndersample_ && !kMuteEarly && !cascadeOnly_) {
 				float earlyMid = (d0 + d1) * earlyMixGain_;
 				float earlySide = (d0 - d1) * earlyMixGain_ * dynamicWidth;
 				earlyL = earlyMid + earlySide;
 				earlyR = earlyMid - earlySide;
-				// Save direct early for brightness tap (bypasses output LPF)
-				directEarlyL_ = earlyL * directEarlyGain_;
-				directEarlyR_ = earlyR * directEarlyGain_;
-			}
-			else {
-				directEarlyL_ = 0.0f;
-				directEarlyR_ = 0.0f;
 			}
 
 			float rawOutL, rawOutR;
@@ -888,11 +921,13 @@ void Featherverb::updateMatrix() {
 
 	modDepth_ = blend * 25.0f;
 
-	// Update D0/D1 lengths from phi triangles
+	// Update D0 from phi triangle, D1 linear with Zone 1
 	float d0Tri = (vals[0] + 1.0f) * 0.5f;
-	float d1Tri = (vals[3] + 1.0f) * 0.5f;
 	fdnLengths_[0] = kD0MinLength + static_cast<size_t>(d0Tri * (kD0MaxLength - kD0MinLength));
-	fdnLengths_[1] = kD1MinLength + static_cast<size_t>(d1Tri * (kD1MaxLength - kD1MinLength));
+	fdnLengths_[1] = kD1MinLength + static_cast<size_t>(yNorm * (kD1MaxLength - kD1MinLength));
+
+	// Precompute delay ratio for feedback normalization (avoid division in hot path)
+	delayRatio_ = static_cast<float>(fdnLengths_[0] + fdnLengths_[1]) / static_cast<float>(kD0MaxLength + kD1MaxLength);
 
 	if (fdnWritePos_[0] >= fdnLengths_[0])
 		fdnWritePos_[0] = 0;

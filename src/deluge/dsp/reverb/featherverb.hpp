@@ -158,6 +158,7 @@ private:
 	float cascadeNestFeedback_{0.0f};     // Nested feedback: C3 → C0 for extended tails (combined)
 	float cascadeNestFeedbackBase_{0.0f}; // Base nest feedback from Zone 3 (before Zone 2 vast boost)
 	float prevC3Out_{0.0f};               // Previous C3 output for nested feedback delay
+	float delayRatio_{1.0f};              // (D0+D1)/(D0max+D1max) for feedback normalization
 	static constexpr float kCascadeCoeffBase = 0.4f; // Base allpass coefficient for cascade
 	std::array<float, kNumCascade> cascadeCoeffs_{kCascadeCoeffBase, kCascadeCoeffBase, kCascadeCoeffBase,
 	                                              kCascadeCoeffBase};
@@ -222,6 +223,7 @@ private:
 
 	// Envelope followers
 	float inputEnvelope_{0.0f};
+	float feedbackEnvelope_{0.0f}; // Tracks C3 output for self-limiting feedback
 
 	// Undersampling state
 	bool undersamplePhase_{false};
