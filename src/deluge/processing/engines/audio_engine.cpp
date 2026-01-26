@@ -32,6 +32,7 @@
 #include "hid/display/display.h"
 #include "hid/encoders.h"
 #include "hid/led/indicator_leds.h"
+#include "io/debug/fx_benchmark.h"
 #include "io/debug/log.h"
 #include "io/midi/midi_engine.h"
 #include "memory/general_memory_allocator.h"
@@ -222,6 +223,9 @@ void init() {
 	sampleForPreview->patcher.performInitialPatching(*sampleForPreview, *paramManagerForSamplePreview);
 
 	sampleForPreview->sideChainSendLevel = 2147483647;
+
+	// Allocate reverb buffer (Featherverb uses dynamic allocation)
+	(void)reverb.allocate();
 
 	i2sTXBufferPos = (uint32_t)getTxBufferStart();
 
@@ -602,6 +606,8 @@ bool calledFromScheduler = false;
 	bypassCulling = false;
 }
 void renderAudio(size_t numSamples) {
+	FX_BENCH_TICK(); // Advance global sampling counter
+
 	std::span renderingBuffer{renderingMemory.data(), numSamples};
 	std::span reverbBuffer{reverbMemory.data(), numSamples};
 
@@ -634,6 +640,8 @@ void renderAudio(size_t numSamples) {
 
 	renderingBufferOutputPos = renderingMemory.begin();
 	renderingBufferOutputEnd = renderingMemory.begin() + numSamples;
+
+	FX_BENCH_END_BUFFER(); // Reset sampling flag for next buffer
 }
 
 void renderAudioForStemExport(size_t numSamples) {
@@ -829,7 +837,26 @@ void renderReverb(size_t numSamples) {
 
 		// Mix reverb into main render
 		reverb.setPanLevels(reverbAmplitudeL, reverbAmplitudeR);
-		reverb.process(reverbBuffer, renderingBuffer);
+		{
+#if ENABLE_FX_BENCHMARK
+			// Separate benchmarks per reverb model for distinct comparison
+			static Debug::FxBenchmark benchFeather("reverb_feather");
+			static Debug::FxBenchmark benchFreeverb("reverb_freeverb");
+			static Debug::FxBenchmark benchMutable("reverb_mutable");
+			static Debug::FxBenchmark benchDigital("reverb_digital");
+			static Debug::FxBenchmark* benches[] = {&benchFeather, &benchFreeverb, &benchMutable, &benchDigital};
+			// Add mode tag for Featherverb (zone2 >> 7 gives zone 0-7)
+			if (reverb.getModel() == dsp::Reverb::Model::FEATHERVERB) {
+				int32_t zone = reverb.getFeatherZone2() >> 7;
+				// Zone 0-3: normal rooms, 4: feather, 5: sky, 6: owl, 7: vast
+				static const char* zoneModes[] = {"normal",  "normal", "normal", "normal",
+				                                  "feather", "sky",    "owl",    "vast"};
+				benchFeather.setTag(0, zoneModes[zone & 7]);
+			}
+			Debug::FxBenchmarkScope scope(*benches[static_cast<int>(reverb.getModel())]);
+#endif
+			reverb.process(reverbBuffer, renderingBuffer);
+		}
 		logAction("Reverb complete");
 	}
 }
@@ -1382,6 +1409,15 @@ void getReverbParamsFromSong(Song* song) {
 	reverbSidechain.attack = song->reverbSidechainAttack;
 	reverbSidechain.release = song->reverbSidechainRelease;
 	reverbSidechain.syncLevel = song->reverbSidechainSync;
+
+	// Featherverb-specific params
+	if (song->model == dsp::Reverb::Model::FEATHERVERB) {
+		reverb.setFeatherZone1(song->featherZone1);
+		reverb.setFeatherZone2(song->featherZone2);
+		reverb.setFeatherZone3(song->featherZone3);
+		reverb.setFeatherPredelay(song->featherPredelay);
+		reverb.setFeatherDryMinus(song->featherDryMinus);
+	}
 }
 
 bool allowedToStartVoice() {
