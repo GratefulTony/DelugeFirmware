@@ -2,6 +2,9 @@
 
 This is **owlet-firmware**, a personal fork of the Deluge Community Firmware maintained at [owlet-labs/DelugeFirmware](https://github.com/owlet-labs/DelugeFirmware). It serves as a playground for experimental sound design features that may be too specialized or CPU-intensive for the main community branch.
 
+### NOTICE
+this repo is in the process of migrating from community to 1.3 base for stability. 
+
 ### Features (vs Community)
 
 | Feature | Description |
@@ -32,35 +35,7 @@ This is **owlet-firmware**, a personal fork of the Deluge Community Firmware mai
 - Bar-synced retrospective sampler with BPM-tagged filenames
 - Disperser delay buffers now allocate on-demand (saves up to 2.2 MB in complex songs)
 
-### Benchmarks
 
-CPU usage per voice (optimization ongoing). Target: stay under 2x the builtin saturation (`getTanhAntialiased`) cost, except for disperser which is inherently more expensive.
-
-**Note**: Benchmark figures vary significantly (~2-3×) based on system load due to L1 D-cache contention. Complex synths and multiple active effects compete for the 32KB data cache, increasing cycle counts. The figures below represent typical conditions; expect higher values under heavy load.
-
-![Benchmark Comparison](docs/benchmarks/fx_benchmark_comparison.png)
-
-![Benchmark Histograms](docs/benchmarks/fx_benchmark_histograms.png)
-
-### Memory Optimizations
-
-Large effect buffers use dynamic allocation via `allocMaxSpeed()`, which tries fast memory first (Internal SRAM → External SRAM → SDRAM). Benchmarking showed <1% performance difference vs static BSS allocation.
-
-| Component | Before | After | Savings |
-|-----------|--------|-------|---------|
-| **Featherverb** | — | 77 KB dynamic | 77 KB (new, never static) |
-| **Mutable reverb** | ~128 KB static BSS | dynamic | 128 KB SRAM freed |
-| **Freeverb** | ~93 KB static BSS | dynamic | 93 KB SRAM freed |
-| **Analog waveform tables** | ~30 KB internal | SDRAM | 30 KB internal freed |
-| **Disperser delay lines** | 70 KB embedded/sound | 72 KB SDRAM (on-demand) | Up to 2.2 MB* |
-
-*Disperser memory is now allocated only when `stages > 0`. For songs with 32 sounds, this saves up to 2.2 MB vs the previous always-allocated approach.
-
-Key patterns:
-- `allocMaxSpeed()` - For song-level effects; prefers fast SRAM, falls back gracefully
-- `allocSdram()` - Direct SDRAM allocation for per-sound effects
-- On-demand allocation - Buffers allocated when effect is enabled, freed when disabled
-- Variant-based reverb - Only the active reverb model's buffer is allocated
 
 ### For Developers
 
