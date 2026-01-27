@@ -3,7 +3,7 @@
 This is **owlet-firmware**, a personal fork of the Deluge Community Firmware maintained at [owlet-labs/DelugeFirmware](https://github.com/owlet-labs/DelugeFirmware). It serves as a playground for experimental sound design features that may be too specialized or CPU-intensive for the main community branch.
 
 ### NOTICE
-this repo is in the process of migrating from community to 1.3 base for stability. 
+this repo is in the process of migrating from community to 1.3 base for stability. Current builds are on comunity until the rest of tthe features are migrated. In testing, 1.3 base has been stable.
 
 ### Features (vs Community)
 
