@@ -215,7 +215,7 @@ struct SineTableShaperParams {
 	// Phase offsets (per-patch, secret menus)
 	float twistPhaseOffset{0};    // Offset for Twist param triangles (push Twist encoder)
 	float harmonicPhaseOffset{0}; // Offset for Harmonic zone triangles (push Harmonic encoder)
-	float gammaPhase{0};          // 100x multiplier phase (push Mix encoder)
+	float gammaPhase{0};          // 1024x multiplier phase (push Mix encoder)
 	// DSP smoothing state (per-sound, shared across voices)
 	// INT32_MIN = sentinel for "snap to target on first use"
 	q31_t smoothedDrive{INT32_MIN}; // Previous drive value for parameter smoothing

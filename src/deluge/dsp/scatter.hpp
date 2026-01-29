@@ -805,7 +805,7 @@ struct ScatterPhaseOffsets {
 	float zoneA{0};       ///< Zone A structural phase offset
 	float zoneB{0};       ///< Zone B timbral phase offset
 	float macroConfig{0}; ///< Macro config phase offset
-	float gamma{0};       ///< Gamma multiplier for phi evolution (100x scale)
+	float gamma{0};       ///< Gamma multiplier for phi evolution (1024x scale)
 
 	// Precomputed threshold scales (from staticTriangles, depend only on macroConfig)
 	float reverseScale{0}; ///< Bipolar [-1,1] scale for reverse probability
