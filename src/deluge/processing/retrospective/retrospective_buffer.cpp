@@ -203,6 +203,7 @@ void RetrospectiveBuffer::clear() {
 	runningPeak_.store(0, std::memory_order_relaxed);
 	peakPosition_.store(0, std::memory_order_relaxed);
 	peakValid_.store(false, std::memory_order_relaxed);
+	ditherState_ = 0x12345678;
 }
 
 void RetrospectiveBuffer::setEnabled(bool enabled) {
@@ -1054,17 +1055,17 @@ Error RetrospectiveBuffer::requestBarSyncedSave(String* filePath) {
 	// Capture BPM at trigger time
 	float bpm = playbackHandler.calculateBPMForDisplay();
 
-	// Store pending state
+	// Store pending state (all stores before the release on pendingSave_ are visible to acquirers)
 	savedBPM_.store(bpm, std::memory_order_relaxed);
 	saveTargetTick_.store(target_tick, std::memory_order_relaxed);
-	pendingFilePath_ = filePath;
+	pendingFilePath_.store(filePath, std::memory_order_relaxed);
 	pendingSave_.store(true, std::memory_order_release);
 
 	return Error::NONE;
 }
 
 void RetrospectiveBuffer::cancelPendingSave() {
-	pendingFilePath_ = nullptr;
+	pendingFilePath_.store(nullptr, std::memory_order_relaxed);
 	pendingSave_.store(false, std::memory_order_release);
 }
 
@@ -1095,10 +1096,10 @@ void RetrospectiveBuffer::executePendingSave() {
 	}
 
 	// Capture pointer locally before clearing pending flag to avoid race with cancelPendingSave()
-	String* file_path = pendingFilePath_;
+	String* file_path = pendingFilePath_.load(std::memory_order_relaxed);
 
-	// Clear pending flag and pointer atomically (from this thread's perspective)
-	pendingFilePath_ = nullptr;
+	// Clear pending flag and pointer
+	pendingFilePath_.store(nullptr, std::memory_order_relaxed);
 	pendingSave_.store(false, std::memory_order_release);
 
 	if (file_path == nullptr) {

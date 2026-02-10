@@ -167,10 +167,10 @@ private:
 	uint32_t ditherState_ = 0x12345678; ///< PRNG state for dithering
 
 	// Bar-sync pending save state
-	std::atomic<bool> pendingSave_{false};   ///< True when waiting for downbeat to save
-	std::atomic<int64_t> saveTargetTick_{0}; ///< Tick position of target downbeat
-	std::atomic<float> savedBPM_{0.0f};      ///< BPM captured when save triggered
-	String* pendingFilePath_{nullptr};       ///< File path output pointer for pending save
+	std::atomic<bool> pendingSave_{false};          ///< True when waiting for downbeat to save
+	std::atomic<int64_t> saveTargetTick_{0};        ///< Tick position of target downbeat
+	std::atomic<float> savedBPM_{0.0f};             ///< BPM captured when save triggered
+	std::atomic<String*> pendingFilePath_{nullptr}; ///< File path output pointer for pending save
 
 	/// Execute the pending save (called when downbeat reached)
 	void executePendingSave();
