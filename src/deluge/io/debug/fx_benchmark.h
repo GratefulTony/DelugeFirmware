@@ -32,8 +32,8 @@ namespace Debug {
 // Default: sample every 3450 buffers (~10 seconds at 44.1kHz/128 samples)
 inline constexpr uint32_t kFxBenchDefaultN = 3450;
 
-// Maximum queued results per buffer (8 voices × ~5 effects × sub-aggregations)
-inline constexpr uint32_t kMaxPendingResults = 128;
+// Maximum queued results per buffer (outputs × phases + FX + metadata)
+inline constexpr uint32_t kMaxPendingResults = 192;
 
 // Queued benchmark result - stored during audio processing, output at end of buffer
 struct FxBenchResult {

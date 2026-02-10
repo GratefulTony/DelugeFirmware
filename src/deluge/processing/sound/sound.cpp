@@ -26,6 +26,7 @@
 #include "hid/display/display.h"
 #include "hid/led/indicator_leds.h"
 #include "hid/matrix/matrix_driver.h"
+#include "io/debug/fx_benchmark.h"
 #include "io/midi/midi_engine.h"
 #include "memory/fast_allocator.h"
 #include "memory/general_memory_allocator.h"
@@ -2400,6 +2401,21 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		return;
 	}
 
+#if ENABLE_FX_BENCHMARK
+	const bool doBenchSound = Debug::FxBenchGlobal::sampleThisBuffer;
+	static Debug::FxBenchmark benchSetup("sound", "setup");
+	static Debug::FxBenchmark benchVoices("sound", "voices");
+	static Debug::FxBenchmark benchFx("sound", "fx");
+	static char voiceCountBuf[8];
+	if (doBenchSound) {
+		snprintf(voiceCountBuf, sizeof(voiceCountBuf), "v%zu", voices_.size());
+		benchSetup.setTag(1, voiceCountBuf);
+		benchVoices.setTag(1, voiceCountBuf);
+		benchFx.setTag(1, voiceCountBuf);
+	}
+	benchSetup.start();
+#endif
+
 	ParamManagerForTimeline* paramManager = (ParamManagerForTimeline*)modelStack->paramManager;
 
 	// Do global LFO
@@ -2519,6 +2535,11 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 	// Render each voice into a local buffer here
 	bool voice_rendered_in_stereo = renderingVoicesInStereo(modelStackWithSoundFlags);
 
+#if ENABLE_FX_BENCHMARK
+	benchSetup.stop();
+	benchVoices.start();
+#endif
+
 	// FIXME(@stellar-aria): if we have simulataneous sounds rendering, they'll overwrite
 	// each other in this buffer. It probably should be object or thread-local
 	alignas(CACHE_LINE_SIZE) static q31_t sound_memory[SSI_TX_BUFFER_NUM_SAMPLES * 2];
@@ -2603,6 +2624,11 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 			memset(&sound_mono[sound_mono.size()], 0, sound_stereo.size_bytes() - sound_mono.size_bytes());
 		}
 	}
+
+#if ENABLE_FX_BENCHMARK
+	benchVoices.stop();
+	benchFx.start();
+#endif
 
 	int32_t postFXVolume = paramFinalValues[params::GLOBAL_VOLUME_POST_FX - params::FIRST_GLOBAL];
 	int32_t postReverbVolume = paramFinalValues[params::GLOBAL_VOLUME_POST_REVERB_SEND - params::FIRST_GLOBAL];
@@ -2695,6 +2721,10 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		// we need to double it because for reasons I don't understand audio clips max volume is half the sample volume
 		recorder->feedAudio(sound_stereo, true, 2);
 	}
+
+#if ENABLE_FX_BENCHMARK
+	benchFx.stop();
+#endif
 
 	// add the sound to the output, i.e. output = output + sound
 	std::ranges::transform(output, sound_stereo, output.begin(), std::plus{});

@@ -32,6 +32,7 @@
 #include "hid/led/indicator_leds.h"
 #include "hid/led/pad_leds.h"
 #include "hid/matrix/matrix_driver.h"
+#include "io/debug/fx_benchmark.h"
 #include "io/midi/device_specific/specific_midi_device.h"
 #include "io/midi/midi_engine.h"
 #include "memory/general_memory_allocator.h"
@@ -2444,6 +2445,26 @@ void Song::renderAudio(std::span<StereoSample> outputBuffer, int32_t* reverbBuff
 	StereoSample tempBufferStorage[kMaxTempBufferSamples];
 
 	AudioEngine::logAction("Start output render");
+
+#if ENABLE_FX_BENCHMARK
+	const bool doBenchSong = Debug::FxBenchGlobal::sampleThisBuffer;
+	static Debug::FxBenchmark benchOutput("song", "output");
+	// Emit buffer metadata: numSamples as tag so analysis can correlate window size with spike severity
+	static char numSamplesBuf[8];
+	static char outputCountBuf[8];
+	if (doBenchSong) {
+		snprintf(numSamplesBuf, sizeof(numSamplesBuf), "n%zu", outputBuffer.size());
+		// Count active outputs
+		int32_t outputCount = 0;
+		for (Output* o = firstOutput; o; o = o->next) {
+			if (o->inValidState && o->shouldRenderInSong()) {
+				outputCount++;
+			}
+		}
+		snprintf(outputCountBuf, sizeof(outputCountBuf), "o%d", outputCount);
+	}
+#endif
+
 	for (Output* output = firstOutput; output; output = output->next) {
 		if (!output->inValidState) {
 			continue;
@@ -2453,6 +2474,13 @@ void Song::renderAudio(std::span<StereoSample> outputBuffer, int32_t* reverbBuff
 		    (output->getActiveClip() && isClipActive(output->getActiveClip()->getClipBeingRecordedFrom()));
 		DISABLE_ALL_INTERRUPTS();
 		if (output->shouldRenderInSong()) {
+#if ENABLE_FX_BENCHMARK
+			if (doBenchSong) {
+				benchOutput.setTag(1, output->name.get());
+				benchOutput.setTag(2, numSamplesBuf);
+			}
+			benchOutput.start();
+#endif
 			// Check if this is the focused output and we need to capture it
 			if (output == focusedOutputForRetro && outputBuffer.size() <= kMaxTempBufferSamples) {
 				// Zero the temp buffer
@@ -2480,6 +2508,9 @@ void Song::renderAudio(std::span<StereoSample> outputBuffer, int32_t* reverbBuff
 				output->renderOutput(modelStack, outputBuffer, reverbBuffer, volumePostFX >> 1, sideChainHitPending,
 				                     !isClipActiveNow, isClipActiveNow);
 			}
+#if ENABLE_FX_BENCHMARK
+			benchOutput.stop();
+#endif
 		}
 		ENABLE_INTERRUPTS();
 #if DO_AUDIO_LOG
