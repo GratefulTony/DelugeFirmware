@@ -1573,28 +1573,31 @@ public:
 		const size_t numSamples = buffer.size();
 		const size_t vectorLen = numSamples & ~3; // Round down to multiple of 4
 
+		// Per-iteration linear gain ramp — eliminates staircase artifacts from strided IIR.
+		// Gain increments computed once per buffer; applied every NEON iteration (4 samples).
+		const int32_t numIterations = static_cast<int32_t>(vectorLen >> 2);
+		std::array<int32_t, kNumBands> bandGainInc{};
+		int32_t outputGainInc = 0;
+		if (numIterations > 0 && !gainsConverged) {
+			for (size_t b = 0; b < kNumBands; ++b) {
+				bandGainInc[b] = (targetBandGainQ22[b] - bandGainQ22[b]) / numIterations;
+			}
+			outputGainInc = (targetOutputGainQ22 - outputGainQ22) / numIterations;
+		}
+
 		// Main NEON loop - process 4 samples at a time
-		// Gain smoothing stride counter (update every 8 samples = 2 iterations)
-		int32_t smoothingCounter = 0;
-
 		for (size_t i = 0; i < vectorLen; i += 4) {
-			// Strided gain smoothing - update every kGainSmoothingStride samples
-			if (!gainsConverged && (smoothingCounter & (kGainSmoothingStride / 4 - 1)) == 0) {
-				// Integer IIR smooth toward target gains: gain += (target - gain) >> shift
-				for (size_t b = 0; b < kNumBands; ++b) {
-					smoothedBandGain_[b] += (targetBandGainQ22[b] - smoothedBandGain_[b]) >> kGainSmoothingShift;
-					bandGainQ22[b] = smoothedBandGain_[b];
-				}
-				smoothedOutputGain_ += (targetOutputGainQ22 - smoothedOutputGain_) >> kGainSmoothingShift;
-				outputGainQ22 = smoothedOutputGain_;
-
-				// Rebuild NEON gain vectors with updated values
+			// Linear gain ramp - increment every NEON iteration (4 samples)
+			if (!gainsConverged) {
+				bandGainQ22[0] += bandGainInc[0];
+				bandGainQ22[1] += bandGainInc[1];
+				bandGainQ22[2] += bandGainInc[2];
+				outputGainQ22 += outputGainInc;
 				gainVec0 = vdupq_n_s32(bandGainQ22[0]);
 				gainVec1 = vdupq_n_s32(bandGainQ22[1]);
 				gainVec2 = vdupq_n_s32(bandGainQ22[2]);
 				gainVecOut = vdupq_n_s32(outputGainQ22);
 			}
-			++smoothingCounter;
 
 			// === Band 0 (bass): M/S with per-band width (default 50%) ===
 			int32x4_t L0 = vld1q_s32(&bandBufferL[0][i]);
@@ -1706,6 +1709,17 @@ public:
 				buffer[i + 3].l = out3L - dcBlockL_.doFilter(out3L, kDCBlockCoeff);
 				buffer[i + 3].r = out3R - dcBlockR_.doFilter(out3R, kDCBlockCoeff);
 			}
+		}
+
+		// Snap smoothed gains to target after the ramp completes.
+		// The linear ramp reaches the target by end of buffer (within integer rounding).
+		if (!gainsConverged) {
+			for (size_t b = 0; b < kNumBands; ++b) {
+				smoothedBandGain_[b] = targetBandGainQ22[b];
+				bandGainQ22[b] = targetBandGainQ22[b];
+			}
+			smoothedOutputGain_ = targetOutputGainQ22;
+			outputGainQ22 = targetOutputGainQ22;
 		}
 
 		// Handle remainder samples with scalar fallback (0-3 samples)
@@ -2079,13 +2093,7 @@ private:
 	std::array<int32_t, kNumBands> smoothedBandGain_{kGainQ22Unity, kGainQ22Unity, kGainQ22Unity};
 	int32_t smoothedOutputGain_{kGainQ22Unity};
 
-	// Gain smoothing constants - update every 8 samples (2 NEON iterations)
-	static constexpr int32_t kGainSmoothingStride = 8;
-	// Alpha as right-shift for integer IIR: gain += (target - gain) >> kGainSmoothingShift
-	// Shift of 4 gives alpha ≈ 0.0625, similar to previous 0.09 float alpha
-	// Time constant: ~2ms at 44.1kHz with stride=8
-	static constexpr int32_t kGainSmoothingShift = 4;
-	// Convergence threshold in q9.22 - skip smoothing when within this delta of target
+	// Convergence threshold in q9.22 - skip gain ramp when within this delta of target
 	// ~0.1% of unity gain = 4194 (0.001 * 2^22)
 	static constexpr int32_t kGainConvergenceThreshold = kGainQ22Unity >> 10;
 
