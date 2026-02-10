@@ -277,9 +277,13 @@ void RetrospectiveBuffer::feedAudio(const StereoSample* samples, size_t numSampl
 	size_t pos = writePos_.load(std::memory_order_relaxed);
 	size_t written = samplesWritten_.load(std::memory_order_relaxed);
 
-	// Only apply gain when normalization is OFF - normalization will handle levels otherwise
-	// and we want to preserve headroom to avoid clipping before normalization
-	bool apply_gain = !runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RetrospectiveSamplerNormalize);
+	// For 16-bit: always apply gain — internal mixing levels are ~8 bits below DAC output,
+	// so without the boost only ~7-8 bits of 16-bit are used. Normalization during save can't
+	// recover the resolution lost to truncation. The +5 bit shift gives ~13 usable bits.
+	// For 24-bit: skip gain when normalization is on to preserve headroom (24-bit has enough
+	// resolution even at internal levels: ~16 usable bits out of 24).
+	bool apply_gain = (bytesPerSample_ == 2)
+	                  || !runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RetrospectiveSamplerNormalize);
 
 	// Cache peak tracking state for this batch
 	int32_t peak = runningPeak_.load(std::memory_order_relaxed);
@@ -402,8 +406,9 @@ void RetrospectiveBuffer::feedAudioMono(const int32_t* samples, size_t numSample
 	size_t pos = writePos_.load(std::memory_order_relaxed);
 	size_t written = samplesWritten_.load(std::memory_order_relaxed);
 
-	// Only apply gain when normalization is OFF
-	bool apply_gain = !runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RetrospectiveSamplerNormalize);
+	// Always apply gain for 16-bit (critical for bit utilization), skip only for 24-bit with normalize
+	bool apply_gain = (bytesPerSample_ == 2)
+	                  || !runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RetrospectiveSamplerNormalize);
 
 	// Cache peak tracking state for this batch
 	int32_t peak = runningPeak_.load(std::memory_order_relaxed);
