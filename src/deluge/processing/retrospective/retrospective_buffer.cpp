@@ -152,12 +152,14 @@ Error RetrospectiveBuffer::init() {
 	runningPeak_.store(0, std::memory_order_relaxed);
 	peakPosition_.store(0, std::memory_order_relaxed);
 	peakValid_.store(false, std::memory_order_relaxed);
-	enabled_ = true;
+	enabled_.store(true, std::memory_order_release);
 
 	return Error::NONE;
 }
 
 void RetrospectiveBuffer::deinit() {
+	enabled_.store(false, std::memory_order_release);
+	cancelPendingSave();
 	if (buffer_ != nullptr) {
 		GeneralMemoryAllocator::get().dealloc(buffer_);
 		buffer_ = nullptr;
@@ -169,14 +171,12 @@ void RetrospectiveBuffer::deinit() {
 	runningPeak_.store(0, std::memory_order_relaxed);
 	peakPosition_.store(0, std::memory_order_relaxed);
 	peakValid_.store(false, std::memory_order_relaxed);
-	enabled_ = false;
 }
 
 Error RetrospectiveBuffer::reinit() {
-	// Check if settings have changed
-	uint8_t old_duration = durationSeconds_;
-	uint8_t old_bytes_per_sample = bytesPerSample_;
-	uint8_t old_num_channels = numChannels_;
+	// Disable recording before changing settings to prevent the audio thread
+	// from using stale cached values (numChannels_, bytesPerSample_) mid-update
+	enabled_.store(false, std::memory_order_release);
 
 	readSettings();
 
@@ -185,6 +185,7 @@ Error RetrospectiveBuffer::reinit() {
 	// If size hasn't changed, just clear and return
 	if (buffer_ != nullptr && new_size == bufferSizeBytes_) {
 		clear();
+		enabled_.store(true, std::memory_order_release);
 		return Error::NONE;
 	}
 
@@ -205,7 +206,7 @@ void RetrospectiveBuffer::clear() {
 }
 
 void RetrospectiveBuffer::setEnabled(bool enabled) {
-	enabled_ = enabled;
+	enabled_.store(enabled, std::memory_order_release);
 }
 
 size_t RetrospectiveBuffer::getSamplesInBuffer() const {
@@ -223,9 +224,7 @@ AudioInputChannel RetrospectiveBuffer::getSource() const {
 }
 
 uint8_t RetrospectiveBuffer::getNumChannels() const {
-	// Read directly from settings so changes take effect immediately for monitoring
-	uint32_t channels_setting = runtimeFeatureSettings.get(RuntimeFeatureSettingType::RetrospectiveSamplerChannels);
-	return (channels_setting == 0) ? 1 : 2; // 0 = mono, 1 = stereo
+	return numChannels_;
 }
 
 uint8_t RetrospectiveBuffer::getBytesPerSample() const {
@@ -265,7 +264,7 @@ bool RetrospectiveBuffer::isEnabled() const {
 }
 
 void RetrospectiveBuffer::feedAudio(const StereoSample* samples, size_t numSamples, bool skipPendingSaveCheck) {
-	if (!enabled_ || buffer_ == nullptr || numSamples == 0) {
+	if (!enabled_.load(std::memory_order_acquire) || buffer_ == nullptr || numSamples == 0) {
 		return;
 	}
 
@@ -395,7 +394,7 @@ void RetrospectiveBuffer::feedAudio(const StereoSample* samples, size_t numSampl
 }
 
 void RetrospectiveBuffer::feedAudioMono(const int32_t* samples, size_t numSamples) {
-	if (!enabled_ || buffer_ == nullptr || numSamples == 0) {
+	if (!enabled_.load(std::memory_order_acquire) || buffer_ == nullptr || numSamples == 0) {
 		return;
 	}
 
@@ -587,14 +586,65 @@ int32_t RetrospectiveBuffer::findPeakLevel(size_t savedWritePos, size_t savedSam
 	return peak;
 }
 
+int32_t RetrospectiveBuffer::findPeakLevelInRegion(size_t startPos, size_t numSamples) {
+	if (buffer_ == nullptr || numSamples == 0) {
+		return 0;
+	}
+
+	constexpr size_t kFadeInSamples = 44;
+	constexpr size_t kStride = 8;
+
+	int32_t peak = 0;
+
+	if (bytesPerSample_ == 2) {
+		const int16_t* buf16 = reinterpret_cast<const int16_t*>(buffer_);
+		size_t samples_per_frame = numChannels_;
+
+		for (size_t i = kFadeInSamples; i < numSamples; i += kStride) {
+			size_t buf_idx = (startPos + i) % bufferSizeSamples_;
+			size_t offset = buf_idx * samples_per_frame;
+
+			for (size_t ch = 0; ch < numChannels_; ch++) {
+				int32_t sample = buf16[offset + ch];
+				int32_t abs_sample = (sample < 0) ? -sample : sample;
+				if (abs_sample > peak) {
+					peak = abs_sample;
+				}
+			}
+		}
+	}
+	else {
+		size_t bytes_per_frame = numChannels_ * 3;
+
+		for (size_t i = kFadeInSamples; i < numSamples; i += kStride) {
+			size_t buf_idx = (startPos + i) % bufferSizeSamples_;
+			size_t offset = buf_idx * bytes_per_frame;
+
+			for (size_t ch = 0; ch < numChannels_; ch++) {
+				int32_t sample = buffer_[offset] | (buffer_[offset + 1] << 8) | (buffer_[offset + 2] << 16);
+				if (sample & 0x800000) {
+					sample |= 0xFF000000;
+				}
+				int32_t abs_sample = (sample < 0) ? -sample : sample;
+				if (abs_sample > peak) {
+					peak = abs_sample;
+				}
+				offset += 3;
+			}
+		}
+	}
+
+	return peak;
+}
+
 Error RetrospectiveBuffer::saveToFile(String* filePath) {
 	if (buffer_ == nullptr || samplesWritten_.load(std::memory_order_relaxed) == 0) {
 		return Error::UNSPECIFIED;
 	}
 
 	// Temporarily disable recording to prevent race conditions while saving
-	bool was_enabled = enabled_;
-	enabled_ = false;
+	bool was_enabled = enabled_.load(std::memory_order_acquire);
+	enabled_.store(false, std::memory_order_release);
 
 	// Capture current buffer state with acquire semantics to ensure we see all prior writes
 	// from the audio thread. Capture samplesWritten first, then writePos - this ensures we
@@ -614,7 +664,7 @@ Error RetrospectiveBuffer::saveToFile(String* filePath) {
 
 	// Ensure we have valid data to write
 	if (saved_samples_written == 0) {
-		enabled_ = was_enabled;
+		enabled_.store(was_enabled, std::memory_order_release);
 		return Error::UNSPECIFIED;
 	}
 
@@ -693,7 +743,7 @@ Error RetrospectiveBuffer::saveToFile(String* filePath) {
 		}
 		file_num++;
 		if (file_num > 9999) {
-			enabled_ = was_enabled;
+			enabled_.store(was_enabled, std::memory_order_release);
 			return Error::UNSPECIFIED; // Too many files
 		}
 	}
@@ -701,7 +751,7 @@ Error RetrospectiveBuffer::saveToFile(String* filePath) {
 	// Open file for writing
 	fres = f_open(&file, filename, FA_CREATE_NEW | FA_WRITE);
 	if (fres != FR_OK) {
-		enabled_ = was_enabled; // Re-enable before returning
+		enabled_.store(was_enabled, std::memory_order_release); // Re-enable before returning
 		return Error::SD_CARD;
 	}
 
@@ -742,7 +792,7 @@ Error RetrospectiveBuffer::saveToFile(String* filePath) {
 	if (fres != FR_OK || bytes_written != 44) {
 		f_close(&file);
 		f_unlink(filename);
-		enabled_ = was_enabled; // Re-enable before returning
+		enabled_.store(was_enabled, std::memory_order_release); // Re-enable before returning
 		return Error::SD_CARD;
 	}
 
@@ -929,7 +979,7 @@ Error RetrospectiveBuffer::saveToFile(String* filePath) {
 	if (!write_samples(start_pos, samples_to_write_first)) {
 		f_close(&file);
 		f_unlink(filename);
-		enabled_ = was_enabled; // Re-enable before returning
+		enabled_.store(was_enabled, std::memory_order_release); // Re-enable before returning
 		return Error::SD_CARD;
 	}
 
@@ -937,14 +987,14 @@ Error RetrospectiveBuffer::saveToFile(String* filePath) {
 	if (!write_samples(0, samples_to_write_second)) {
 		f_close(&file);
 		f_unlink(filename);
-		enabled_ = was_enabled; // Re-enable before returning
+		enabled_.store(was_enabled, std::memory_order_release); // Re-enable before returning
 		return Error::SD_CARD;
 	}
 
 	f_close(&file);
 
 	// Re-enable recording now that save is complete
-	enabled_ = was_enabled;
+	enabled_.store(was_enabled, std::memory_order_release);
 
 	// Return the file path
 	if (filePath != nullptr) {
@@ -1009,12 +1059,19 @@ Error RetrospectiveBuffer::requestBarSyncedSave(String* filePath) {
 }
 
 void RetrospectiveBuffer::cancelPendingSave() {
-	pendingSave_.store(false, std::memory_order_release);
 	pendingFilePath_ = nullptr;
+	pendingSave_.store(false, std::memory_order_release);
 }
 
 void RetrospectiveBuffer::checkAndExecutePendingSave() {
 	if (!pendingSave_.load(std::memory_order_acquire)) {
+		return;
+	}
+
+	// If transport stopped while waiting for downbeat, execute immediately
+	// rather than leaving the save pending forever
+	if (!playbackHandler.isEitherClockActive()) {
+		executePendingSave();
 		return;
 	}
 
@@ -1028,24 +1085,33 @@ void RetrospectiveBuffer::checkAndExecutePendingSave() {
 }
 
 void RetrospectiveBuffer::executePendingSave() {
-	if (!pendingSave_.load(std::memory_order_relaxed)) {
+	if (!pendingSave_.load(std::memory_order_acquire)) {
 		return;
 	}
 
-	// Clear pending flag first to prevent re-entry
+	// Capture pointer locally before clearing pending flag to avoid race with cancelPendingSave()
+	String* file_path = pendingFilePath_;
+
+	// Clear pending flag and pointer atomically (from this thread's perspective)
+	pendingFilePath_ = nullptr;
 	pendingSave_.store(false, std::memory_order_release);
+
+	if (file_path == nullptr) {
+		display->displayPopup("FAIL");
+		return;
+	}
 
 	// Calculate exact samples to save based on bar count
 	size_t samples_to_save = calculateBarSyncedSamples();
 
 	// Save with BPM tag
 	float bpm = savedBPM_.load(std::memory_order_relaxed);
-	Error error = saveToFileWithBPM(pendingFilePath_, samples_to_save, bpm);
+	Error error = saveToFileWithBPM(file_path, samples_to_save, bpm);
 
 	// Show result to user
-	if (error == Error::NONE && pendingFilePath_ != nullptr) {
+	if (error == Error::NONE) {
 		// Extract just the filename for display
-		const char* full_path = pendingFilePath_->get();
+		const char* full_path = file_path->get();
 		const char* filename = full_path;
 		for (const char* p = full_path; *p; p++) {
 			if (*p == '/') {
@@ -1057,8 +1123,6 @@ void RetrospectiveBuffer::executePendingSave() {
 	else {
 		display->displayPopup("FAIL");
 	}
-
-	pendingFilePath_ = nullptr;
 }
 
 Error RetrospectiveBuffer::saveToFileWithBPM(String* filePath, size_t maxSamples, float bpm) {
@@ -1067,8 +1131,8 @@ Error RetrospectiveBuffer::saveToFileWithBPM(String* filePath, size_t maxSamples
 	}
 
 	// Temporarily disable recording to prevent race conditions while saving
-	bool was_enabled = enabled_;
-	enabled_ = false;
+	bool was_enabled = enabled_.load(std::memory_order_acquire);
+	enabled_.store(false, std::memory_order_release);
 
 	// Capture current buffer state
 	size_t saved_samples_written = samplesWritten_.load(std::memory_order_acquire);
@@ -1083,13 +1147,34 @@ Error RetrospectiveBuffer::saveToFileWithBPM(String* filePath, size_t maxSamples
 	}
 
 	if (saved_samples_written == 0) {
-		enabled_ = was_enabled;
+		enabled_.store(was_enabled, std::memory_order_release);
 		return Error::UNSPECIFIED;
 	}
 
 	// Limit samples to save based on maxSamples and what's available
 	size_t num_samples = buffer_was_full ? bufferSizeSamples_ : saved_samples_written;
 	num_samples = std::min(num_samples, maxSamples);
+
+	// Calculate the start position for the data we want BEFORE normalization,
+	// so peak detection only scans the region being saved (not the full buffer)
+	size_t data_start_pos;
+	if (buffer_was_full) {
+		if (saved_samples_written > num_samples) {
+			size_t samples_to_skip = bufferSizeSamples_ - num_samples;
+			data_start_pos = (saved_write_pos + samples_to_skip) % bufferSizeSamples_;
+		}
+		else {
+			data_start_pos = saved_write_pos;
+		}
+	}
+	else {
+		if (saved_samples_written > num_samples) {
+			data_start_pos = saved_samples_written - num_samples;
+		}
+		else {
+			data_start_pos = 0;
+		}
+	}
 
 	// Check if normalization is enabled
 	bool normalize = runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RetrospectiveSamplerNormalize);
@@ -1099,7 +1184,8 @@ Error RetrospectiveBuffer::saveToFileWithBPM(String* filePath, size_t maxSamples
 	double gain_factor = 1.0;
 
 	if (normalize) {
-		peak_level = findPeakLevel(saved_write_pos, saved_samples_written);
+		// Scan only the region being saved, not the full buffer
+		peak_level = findPeakLevelInRegion(data_start_pos, num_samples);
 		if (peak_level > 0 && static_cast<double>(peak_level) < target_level) {
 			gain_factor = target_level / static_cast<double>(peak_level);
 			// Cap at 128x gain (~+42dB) for external input which may need significant boost
@@ -1163,14 +1249,14 @@ Error RetrospectiveBuffer::saveToFileWithBPM(String* filePath, size_t maxSamples
 		}
 		file_num++;
 		if (file_num > 9999) {
-			enabled_ = was_enabled;
+			enabled_.store(was_enabled, std::memory_order_release);
 			return Error::UNSPECIFIED;
 		}
 	}
 
 	fres = f_open(&file, filename, FA_CREATE_NEW | FA_WRITE);
 	if (fres != FR_OK) {
-		enabled_ = was_enabled;
+		enabled_.store(was_enabled, std::memory_order_release);
 		return Error::SD_CARD;
 	}
 
@@ -1204,35 +1290,11 @@ Error RetrospectiveBuffer::saveToFileWithBPM(String* filePath, size_t maxSamples
 	if (fres != FR_OK || bytes_written != 44) {
 		f_close(&file);
 		f_unlink(filename);
-		enabled_ = was_enabled;
+		enabled_.store(was_enabled, std::memory_order_release);
 		return Error::SD_CARD;
 	}
 
-	// For bar-synced save, we want the LAST N samples (most recent bars)
-	// Calculate the start position for the data we want
-	size_t data_start_pos;
-	if (buffer_was_full) {
-		// Buffer is full - oldest data is at saved_write_pos
-		// We want the last num_samples, so start from (saved_write_pos - num_samples) mod bufferSize
-		// But since we save in time order, calculate properly
-		if (saved_samples_written > num_samples) {
-			// We have more samples than we need - skip the oldest ones
-			size_t samples_to_skip = bufferSizeSamples_ - num_samples;
-			data_start_pos = (saved_write_pos + samples_to_skip) % bufferSizeSamples_;
-		}
-		else {
-			data_start_pos = saved_write_pos;
-		}
-	}
-	else {
-		// Buffer not full - data starts at 0
-		if (saved_samples_written > num_samples) {
-			data_start_pos = saved_samples_written - num_samples;
-		}
-		else {
-			data_start_pos = 0;
-		}
-	}
+	// data_start_pos was already calculated above (before normalize)
 
 	// Track for fade-in
 	size_t total_samples_written_to_file = 0;
@@ -1399,14 +1461,14 @@ Error RetrospectiveBuffer::saveToFileWithBPM(String* filePath, size_t maxSamples
 		if (!write_samples(data_start_pos, samples_to_write_first)) {
 			f_close(&file);
 			f_unlink(filename);
-			enabled_ = was_enabled;
+			enabled_.store(was_enabled, std::memory_order_release);
 			return Error::SD_CARD;
 		}
 
 		if (samples_to_write_second > 0 && !write_samples(0, samples_to_write_second)) {
 			f_close(&file);
 			f_unlink(filename);
-			enabled_ = was_enabled;
+			enabled_.store(was_enabled, std::memory_order_release);
 			return Error::SD_CARD;
 		}
 	}
@@ -1414,13 +1476,13 @@ Error RetrospectiveBuffer::saveToFileWithBPM(String* filePath, size_t maxSamples
 		if (!write_samples(data_start_pos, num_samples)) {
 			f_close(&file);
 			f_unlink(filename);
-			enabled_ = was_enabled;
+			enabled_.store(was_enabled, std::memory_order_release);
 			return Error::SD_CARD;
 		}
 	}
 
 	f_close(&file);
-	enabled_ = was_enabled;
+	enabled_.store(was_enabled, std::memory_order_release);
 
 	if (filePath != nullptr) {
 		filePath->set(filename);
