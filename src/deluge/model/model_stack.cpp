@@ -245,7 +245,7 @@ ModelStackWithAutoParam* ModelStackWithThreeMainThings::getUnpatchedAutoParamFro
 
 ModelStackWithAutoParam* ModelStackWithThreeMainThings::getPatchedAutoParamFromId(int32_t newParamId) {
 	ModelStackWithAutoParam* modelStackWithParam = nullptr;
-	if (paramManager && paramManager->containsAnyParamCollectionsIncludingExpression()) {
+	if (paramManager && paramManager->hasPatchedParamSet()) {
 		ParamCollectionSummary* summary = paramManager->getPatchedParamSetSummary();
 
 		ModelStackWithParamId* modelStackWithParamId =
@@ -258,7 +258,7 @@ ModelStackWithAutoParam* ModelStackWithThreeMainThings::getPatchedAutoParamFromI
 
 ModelStackWithAutoParam* ModelStackWithThreeMainThings::getPatchCableAutoParamFromId(int32_t newParamId) {
 	ModelStackWithAutoParam* modelStackWithParam = nullptr;
-	if (paramManager && paramManager->containsAnyParamCollectionsIncludingExpression()) {
+	if (paramManager && paramManager->hasPatchedParamSet()) {
 		ParamCollectionSummary* summary = paramManager->getPatchCableSetSummary();
 
 		ModelStackWithParamId* modelStackWithParamId =

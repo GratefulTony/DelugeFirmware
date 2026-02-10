@@ -89,7 +89,7 @@ constexpr int32_t kNumSyncRates = sizeof(kSyncRates) / sizeof(kSyncRates[0]);
 
 // Helpers for dual patched/unpatched automod param access (Sound vs GlobalEffectable contexts)
 inline q31_t getAutomodParamValue(params::ParamType patched, params::ParamType unpatched) {
-	if (soundEditor.currentParamManager->containsAnyMainParamCollections()) {
+	if (soundEditor.currentParamManager->hasPatchedParamSet()) {
 		return soundEditor.currentParamManager->getPatchedParamSet()->getValue(patched);
 	}
 	return soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(unpatched);
@@ -98,7 +98,7 @@ inline q31_t getAutomodParamValue(params::ParamType patched, params::ParamType u
 inline ModelStackWithAutoParam* getAutomodModelStack(void* memory, params::ParamType patched,
                                                      params::ParamType unpatched) {
 	ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(memory);
-	if (soundEditor.currentParamManager->containsAnyMainParamCollections()) {
+	if (soundEditor.currentParamManager->hasPatchedParamSet()) {
 		return modelStack->getPatchedAutoParamFromId(patched);
 	}
 	return modelStack->getUnpatchedAutoParamFromId(unpatched);
