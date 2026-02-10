@@ -40,7 +40,7 @@ namespace deluge::gui::menu_item::fx {
 
 // Helpers for dual patched/unpatched param access (Sound vs GlobalEffectable contexts)
 inline q31_t getShapingParamValue(params::ParamType patched, params::ParamType unpatched) {
-	if (soundEditor.currentParamManager->containsAnyMainParamCollections()) {
+	if (soundEditor.currentParamManager->hasPatchedParamSet()) {
 		return soundEditor.currentParamManager->getPatchedParamSet()->getValue(patched);
 	}
 	return soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(unpatched);
@@ -49,7 +49,7 @@ inline q31_t getShapingParamValue(params::ParamType patched, params::ParamType u
 inline ModelStackWithAutoParam* getShapingModelStack(void* memory, params::ParamType patched,
                                                      params::ParamType unpatched) {
 	ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(memory);
-	if (soundEditor.currentParamManager->containsAnyMainParamCollections()) {
+	if (soundEditor.currentParamManager->hasPatchedParamSet()) {
 		return modelStack->getPatchedAutoParamFromId(patched);
 	}
 	return modelStack->getUnpatchedAutoParamFromId(unpatched);
