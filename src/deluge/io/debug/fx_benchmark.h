@@ -39,6 +39,7 @@ inline constexpr uint32_t kMaxPendingResults = 192;
 struct FxBenchResult {
 	const char* name;
 	uint32_t cycles;
+	uint32_t numSamples;
 	uint32_t ts;
 	const char* tags[3];
 	uint8_t numTags;
@@ -52,6 +53,7 @@ struct FxBenchGlobal {
 	static inline bool sampleThisBuffer = false;
 	static inline uint32_t counter = 0;
 	static inline uint32_t interval = kFxBenchDefaultN;
+	static inline uint32_t currentNumSamples = 0; // Set per buffer for cycles/sample normalization
 
 	// Pending results queue - filled during audio processing, flushed at end
 	static inline FxBenchResult pendingResults[kMaxPendingResults];
@@ -71,6 +73,7 @@ struct FxBenchGlobal {
 			FxBenchResult& r = pendingResults[numPending++];
 			r.name = name;
 			r.cycles = cycles;
+			r.numSamples = currentNumSamples;
 			r.ts = ts;
 			r.numTags = numTags;
 			for (uint8_t i = 0; i < 3; ++i) {

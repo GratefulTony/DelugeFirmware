@@ -9,17 +9,20 @@ End-to-end workflow for collecting FX benchmark data from Deluge:
 4. Write to CSV
 
 Usage:
-  dbt fx-benchmark              # Full workflow (build, upload, collect)
-  dbt fx-benchmark --build      # Build only
-  dbt fx-benchmark --upload     # Upload only
-  dbt fx-benchmark --collect    # Collect data only
+  dbt fx-benchmark                          # Full workflow (build, upload, collect)
+  dbt fx-benchmark --collect --label before # Collect baseline data
+  dbt fx-benchmark --collect --label after  # Collect after changes
 """
 
 import argparse
 import csv
+import os
 import time
 import sys
 import util
+
+# Default data directory for benchmark CSVs
+DATA_DIR = os.path.join("contrib", "analysis", "data")
 
 
 def argparser():
@@ -28,10 +31,14 @@ def argparser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Collect FX benchmark data from Deluge",
         epilog="""\nWorkflow:
-  1. dbt fx-benchmark --build    # Build with benchmarking enabled
-  2. dbt fx-benchmark --upload   # Upload firmware via sysex
-  3. dbt fx-benchmark --collect  # Collect data to CSV
-  4. dbt fx-benchmark            # All of the above""",
+  1. dbt fx-benchmark --build                # Build with benchmarking enabled
+  2. dbt fx-benchmark --upload               # Upload firmware via sysex
+  3. dbt fx-benchmark --collect --label name  # Collect data to contrib/analysis/data/
+  4. dbt fx-benchmark                        # All of the above
+
+Data files:
+  Output goes to contrib/analysis/data/fx_bench_<label>.csv
+  Use different labels for before/after comparison in the analysis notebook.""",
         exit_on_error=False,
     )
     parser.group = "Development"
@@ -41,8 +48,14 @@ def argparser():
     parser.add_argument(
         "-o",
         "--output",
-        default="fx_benchmark.csv",
-        help="Output CSV file (default: fx_benchmark.csv)",
+        default=None,
+        help="Output CSV file (default: contrib/analysis/data/fx_bench_<label>.csv)",
+    )
+    parser.add_argument(
+        "-l",
+        "--label",
+        default=None,
+        help="Label for this run (e.g., 'before', 'after', 'baseline'). Used in filename.",
     )
     parser.add_argument(
         "-d",
@@ -248,21 +261,23 @@ def collect_data(output_file, duration, port=None, verbose=False):
                         if verbose and text:
                             util.note(f"  [DBG] {text}")
 
-                        # Look for CSV benchmark output: B,fx,cycles,ts,tag1,tag2,...
+                        # Look for CSV benchmark output: B,fx,cycles,cps,n,ts,tag1,tag2,...
                         if text.startswith("B,"):
                             parts = text.split(",")
-                            if len(parts) >= 4:
+                            if len(parts) >= 6:
                                 bench_data = {
                                     "fx": parts[1],
                                     "cycles": int(parts[2]),
-                                    "ts": int(parts[3]),
-                                    "tags": parts[4:] if len(parts) > 4 else [],
+                                    "cps": int(parts[3]),
+                                    "n": int(parts[4]),
+                                    "ts": int(parts[5]),
+                                    "tags": parts[6:] if len(parts) > 6 else [],
                                 }
                                 samples.append(bench_data)
                                 if verbose:
                                     tags_str = ",".join(bench_data["tags"])
                                     util.note(
-                                        f"  [{len(samples):4d}] {bench_data['fx']}: {bench_data['cycles']:,} [{tags_str}]"
+                                        f"  [{len(samples):4d}] {bench_data['fx']}: {bench_data['cps']:,} cps [{tags_str}]"
                                     )
                     except (ValueError, UnicodeDecodeError, IndexError) as e:
                         if verbose:
@@ -292,13 +307,15 @@ def collect_data(output_file, duration, port=None, verbose=False):
     util.note("")
     if samples:
         with open(output_file, "w", newline="") as f:
-            fieldnames = ["fx", "cycles", "ts", "tags"]
+            fieldnames = ["fx", "cycles", "cps", "n", "ts", "tags"]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for sample in samples:
                 row = {
                     "fx": sample.get("fx", ""),
                     "cycles": sample.get("cycles", 0),
+                    "cps": sample.get("cps", 0),
+                    "n": sample.get("n", 0),
                     "ts": sample.get("ts", 0),
                     "tags": ",".join(sample.get("tags", [])),
                 }
@@ -354,6 +371,14 @@ def main():
         util.note(f"ERROR: {e}")
         return 1
 
+    # Resolve output path
+    if args.output:
+        output_file = args.output
+    else:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        label = args.label or "default"
+        output_file = os.path.join(DATA_DIR, f"fx_bench_{label}.csv")
+
     # Default: do everything
     do_all = not (args.build or args.upload or args.collect)
 
@@ -365,7 +390,7 @@ def main():
             upload_firmware(args.port)
 
         if args.collect or do_all:
-            collect_data(args.output, args.duration, args.port, args.verbose)
+            collect_data(output_file, args.duration, args.port, args.verbose)
 
     except Exception as e:
         util.note(f"ERROR: {e}")

@@ -2449,12 +2449,8 @@ void Song::renderAudio(std::span<StereoSample> outputBuffer, int32_t* reverbBuff
 #if ENABLE_FX_BENCHMARK
 	const bool doBenchSong = Debug::FxBenchGlobal::sampleThisBuffer;
 	static Debug::FxBenchmark benchOutput("song", "output");
-	// Emit buffer metadata: numSamples as tag so analysis can correlate window size with spike severity
-	static char numSamplesBuf[8];
 	static char outputCountBuf[8];
 	if (doBenchSong) {
-		snprintf(numSamplesBuf, sizeof(numSamplesBuf), "n%zu", outputBuffer.size());
-		// Count active outputs
 		int32_t outputCount = 0;
 		for (Output* o = firstOutput; o; o = o->next) {
 			if (o->inValidState && o->shouldRenderInSong()) {
@@ -2477,7 +2473,7 @@ void Song::renderAudio(std::span<StereoSample> outputBuffer, int32_t* reverbBuff
 #if ENABLE_FX_BENCHMARK
 			if (doBenchSong) {
 				benchOutput.setTag(1, output->name.get());
-				benchOutput.setTag(2, numSamplesBuf);
+				benchOutput.setTag(2, outputCountBuf);
 			}
 			benchOutput.start();
 #endif

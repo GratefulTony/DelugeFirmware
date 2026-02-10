@@ -85,7 +85,8 @@ static char* appendNum(char* p, uint32_t num, char* end) {
 
 void FxBenchGlobal::endBuffer() {
 	// Output all queued results as compact CSV (lighter than JSON)
-	// Format: B,fx,cycles,ts,tag1,tag2,tag3
+	// Format: B,fx,cycles,cps,n,ts,tag1,tag2,tag3
+	// cps = cycles per sample (normalized), n = numSamples
 	// 'B' prefix identifies benchmark lines (vs other debug output)
 	char buffer[128];
 	char* end = buffer + 120;
@@ -94,11 +95,17 @@ void FxBenchGlobal::endBuffer() {
 		const FxBenchResult& r = pendingResults[i];
 		char* p = buffer;
 
+		uint32_t cps = (r.numSamples > 0) ? (r.cycles / r.numSamples) : r.cycles;
+
 		*p++ = 'B';
 		*p++ = ',';
 		p = appendStr(p, r.name, end);
 		*p++ = ',';
 		p = appendNum(p, r.cycles, end);
+		*p++ = ',';
+		p = appendNum(p, cps, end);
+		*p++ = ',';
+		p = appendNum(p, r.numSamples, end);
 		*p++ = ',';
 		p = appendNum(p, r.ts, end);
 
