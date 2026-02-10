@@ -277,11 +277,9 @@ void RetrospectiveBuffer::feedAudio(const StereoSample* samples, size_t numSampl
 	size_t pos = writePos_.load(std::memory_order_relaxed);
 	size_t written = samplesWritten_.load(std::memory_order_relaxed);
 
-	// For 16-bit: always apply gain — internal mixing levels are ~8 bits below DAC output,
-	// so without the boost only ~7-8 bits of 16-bit are used. Normalization during save can't
-	// recover the resolution lost to truncation. The +5 bit shift gives ~13 usable bits.
-	// For 24-bit: skip gain when normalization is on to preserve headroom (24-bit has enough
-	// resolution even at internal levels: ~16 usable bits out of 24).
+	// For 16-bit: always apply +7 bit gain. Internal mixing levels sit well below DAC clip
+	// (which is itself below digital full scale). +7 gives ~15 usable bits with ~6dB headroom.
+	// For 24-bit: skip gain when normalization is on to preserve headroom.
 	bool apply_gain = (bytesPerSample_ == 2)
 	                  || !runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RetrospectiveSamplerNormalize);
 
@@ -296,19 +294,17 @@ void RetrospectiveBuffer::feedAudio(const StereoSample* samples, size_t numSampl
 			peak_is_valid = false;
 		}
 
-		// Apply +5 bit gain only when normalization is off
-		// Internal mixing level is ~8 bits below DAC output; +5 matches stem export
-		int32_t sample_l = apply_gain ? lshiftAndSaturate<5>(samples[i].l) : samples[i].l;
-		int32_t sample_r = apply_gain ? lshiftAndSaturate<5>(samples[i].r) : samples[i].r;
+		// Compensate for internal mixing levels sitting ~8 bits below DAC clip point
+		// (DAC itself clips below digital full scale, so saturation rarely triggers)
+		int32_t sample_l = apply_gain ? lshiftAndSaturate<7>(samples[i].l) : samples[i].l;
+		int32_t sample_r = apply_gain ? lshiftAndSaturate<7>(samples[i].r) : samples[i].r;
 
 		size_t byte_offset = pos * bytes_per_frame;
 		uint8_t* dest = buffer_ + byte_offset;
 		int32_t sample_peak = 0; // Track peak of this sample (at stored bit depth)
 
 		if (bytesPerSample_ == 2) {
-			// 16-bit truncation — no explicit dither needed; the internal mixing chain
-			// (multiply_32x32_rshift32 rounding, multi-source accumulation) already
-			// randomizes the lower bits, and the +5 bit gain leaves ~3 unused LSBs.
+			// 16-bit truncation — +7 bit gain gives ~15 usable bits with 6dB headroom.
 			int16_t left = static_cast<int16_t>(sample_l >> 16);
 			int16_t right = static_cast<int16_t>(sample_r >> 16);
 
@@ -409,8 +405,8 @@ void RetrospectiveBuffer::feedAudioMono(const int32_t* samples, size_t numSample
 			peak_is_valid = false;
 		}
 
-		// Apply +5 bit gain only when normalization is off
-		int32_t gained_sample = apply_gain ? lshiftAndSaturate<5>(samples[i]) : samples[i];
+		// Compensate for internal mixing levels (~8 bits below DAC clip)
+		int32_t gained_sample = apply_gain ? lshiftAndSaturate<7>(samples[i]) : samples[i];
 
 		size_t byte_offset = pos * bytes_per_frame;
 		uint8_t* dest = buffer_ + byte_offset;
