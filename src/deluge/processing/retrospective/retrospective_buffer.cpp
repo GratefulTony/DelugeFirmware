@@ -1101,6 +1101,14 @@ void RetrospectiveBuffer::executePendingSave() {
 		return;
 	}
 
+	// Show feedback while saving
+	if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RetrospectiveSamplerNormalize)) {
+		display->displayPopup(l10n::get(l10n::String::STRING_FOR_RETRO_NORMALIZING));
+	}
+	else {
+		display->displayPopup(l10n::get(l10n::String::STRING_FOR_RETRO_SAVING));
+	}
+
 	// Calculate exact samples to save based on bar count
 	size_t samples_to_save = calculateBarSyncedSamples();
 
