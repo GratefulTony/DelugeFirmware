@@ -347,8 +347,7 @@ void updateAutomodPhiCache(AutomodulatorParams& params, uint32_t timePerTickInve
 			}
 		}
 		else {
-			// Transport stopped: use fallback Hz based on sync level
-			// Level 1=1/1 (~0.5Hz), Level 9=1/256 (~128Hz at 120bpm baseline)
+			// No tempo available (first call before transport has ever run).
 			// Use 120bpm as reference: level 1=0.5Hz, each level doubles
 			// slowShift divides by 2^slowShift for ultra-slow rates
 			float fallbackHz = 0.5f * static_cast<float>(1 << (rateResult.syncLevel - 1));
@@ -554,6 +553,12 @@ void processAutomodulator(std::span<StereoSample> buffer, AutomodulatorParams& p
 		benchTotal.start();
 	}
 #endif
+
+	// Latch last non-zero timePerTickInverse so synced LFO rate doesn't jump on transport stop.
+	// When transport stops, sound.cpp passes 0 — substitute the last known tempo value.
+	if (timePerTickInverse == 0 && params.prevTimePerTickInverse > 0 && params.prevTimePerTickInverse != 0xFFFFFFFF) {
+		timePerTickInverse = params.prevTimePerTickInverse;
+	}
 
 	// Local references to lazily-allocated state (minimizes pointer dereferences)
 	AutomodPhiCache& c = *params.cache;
