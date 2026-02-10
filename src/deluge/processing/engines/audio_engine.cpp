@@ -619,6 +619,16 @@ bool calledFromScheduler = false;
 void renderAudio(size_t numSamples) {
 	FX_BENCH_TICK(); // Advance global sampling counter
 
+#if ENABLE_FX_BENCHMARK
+	static Debug::FxBenchmark benchTotal("buffer", "total");
+	static char nsBuf[8];
+	if (Debug::FxBenchGlobal::sampleThisBuffer) {
+		snprintf(nsBuf, sizeof(nsBuf), "n%zu", numSamples);
+		benchTotal.setTag(1, nsBuf);
+	}
+	benchTotal.start();
+#endif
+
 	std::span renderingBuffer{renderingMemory.data(), numSamples};
 	std::span reverbBuffer{reverbMemory.data(), numSamples};
 
@@ -652,6 +662,9 @@ void renderAudio(size_t numSamples) {
 	renderingBufferOutputPos = renderingMemory.begin();
 	renderingBufferOutputEnd = renderingMemory.begin() + numSamples;
 
+#if ENABLE_FX_BENCHMARK
+	benchTotal.stop();
+#endif
 	FX_BENCH_END_BUFFER(); // Reset sampling flag for next buffer
 }
 
