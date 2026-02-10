@@ -138,12 +138,19 @@ private:
 	/// @return Peak absolute sample value
 	int32_t findPeakLevel(size_t savedWritePos, size_t savedSamplesWritten);
 
+	/// Find peak level in a specific region of the circular buffer.
+	/// Used for bar-synced saves where only a portion of the buffer is saved.
+	/// @param startPos Start position in the circular buffer (in samples)
+	/// @param numSamples Number of samples to scan
+	/// @return Peak absolute sample value
+	int32_t findPeakLevelInRegion(size_t startPos, size_t numSamples);
+
 	uint8_t* buffer_ = nullptr;             ///< Circular buffer in external SDRAM
 	size_t bufferSizeBytes_ = 0;            ///< Actual allocated buffer size in bytes
 	size_t bufferSizeSamples_ = 0;          ///< Buffer capacity in samples
 	std::atomic<size_t> writePos_{0};       ///< Current write position in samples
 	std::atomic<size_t> samplesWritten_{0}; ///< Total samples written (to know if buffer is full)
-	bool enabled_ = false;                  ///< Whether recording is active
+	std::atomic<bool> enabled_{false};      ///< Whether recording is active (audio thread reads, UI thread writes)
 
 	// Incremental peak tracking for fast normalization
 	std::atomic<int32_t> runningPeak_{0}; ///< Highest absolute sample value seen
