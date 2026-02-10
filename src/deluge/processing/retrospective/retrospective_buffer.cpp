@@ -203,7 +203,6 @@ void RetrospectiveBuffer::clear() {
 	runningPeak_.store(0, std::memory_order_relaxed);
 	peakPosition_.store(0, std::memory_order_relaxed);
 	peakValid_.store(false, std::memory_order_relaxed);
-	ditherState_ = 0x12345678;
 }
 
 void RetrospectiveBuffer::setEnabled(bool enabled) {
@@ -307,23 +306,11 @@ void RetrospectiveBuffer::feedAudio(const StereoSample* samples, size_t numSampl
 		int32_t sample_peak = 0; // Track peak of this sample (at stored bit depth)
 
 		if (bytesPerSample_ == 2) {
-			// 16-bit with TPDF dither to eliminate quantization distortion
-			// Generate two random values using LCG and subtract for triangular distribution
-			// Dither range is ±1 LSB at 16-bit (±65536 in 32-bit domain)
-			ditherState_ = ditherState_ * 1664525u + 1013904223u;
-			int32_t rand1 = static_cast<int32_t>(ditherState_ & 0xFFFF); // [0, 65535]
-			ditherState_ = ditherState_ * 1664525u + 1013904223u;
-			int32_t rand2 = static_cast<int32_t>(ditherState_ & 0xFFFF); // [0, 65535]
-			int32_t dither = rand1 - rand2;                              // Triangular distribution (-65535, +65535)
-
-			// Apply dither before truncation (use 64-bit to avoid overflow)
-			int32_t left_dithered = static_cast<int32_t>(
-			    std::clamp(static_cast<int64_t>(sample_l) + dither, (int64_t)INT32_MIN, (int64_t)INT32_MAX));
-			int32_t right_dithered = static_cast<int32_t>(
-			    std::clamp(static_cast<int64_t>(sample_r) + dither, (int64_t)INT32_MIN, (int64_t)INT32_MAX));
-
-			int16_t left = static_cast<int16_t>(left_dithered >> 16);
-			int16_t right = static_cast<int16_t>(right_dithered >> 16);
+			// 16-bit truncation — no explicit dither needed; the internal mixing chain
+			// (multiply_32x32_rshift32 rounding, multi-source accumulation) already
+			// randomizes the lower bits, and the +5 bit gain leaves ~3 unused LSBs.
+			int16_t left = static_cast<int16_t>(sample_l >> 16);
+			int16_t right = static_cast<int16_t>(sample_r >> 16);
 
 			if (numChannels_ == 2) {
 				// Stereo
@@ -430,16 +417,8 @@ void RetrospectiveBuffer::feedAudioMono(const int32_t* samples, size_t numSample
 		int32_t sample_peak = 0;
 
 		if (bytesPerSample_ == 2) {
-			// 16-bit with TPDF dither
-			ditherState_ = ditherState_ * 1664525u + 1013904223u;
-			int32_t rand1 = static_cast<int32_t>(ditherState_ & 0xFFFF);
-			ditherState_ = ditherState_ * 1664525u + 1013904223u;
-			int32_t rand2 = static_cast<int32_t>(ditherState_ & 0xFFFF);
-			int32_t dither = rand1 - rand2;
-
-			int32_t dithered = static_cast<int32_t>(
-			    std::clamp(static_cast<int64_t>(gained_sample) + dither, (int64_t)INT32_MIN, (int64_t)INT32_MAX));
-			int16_t sample = static_cast<int16_t>(dithered >> 16);
+			// 16-bit truncation (no explicit dither — mixing chain provides natural noise)
+			int16_t sample = static_cast<int16_t>(gained_sample >> 16);
 			sample_peak = std::abs(static_cast<int32_t>(sample));
 
 			if (numChannels_ == 2) {
