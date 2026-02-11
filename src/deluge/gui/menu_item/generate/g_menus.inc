@@ -61,8 +61,10 @@ std::array<MenuItem*, 2> child5 = {
 HorizontalMenu recorderMenu{STRING_FOR_SAMPLE_RECORDER, child5};
 osc::Type osc0TypeMenu{STRING_FOR_TYPE, STRING_FOR_OSC_TYPE_MENU_TITLE, 0};
 FileSelector deluge::gui::menu_item::file0SelectorMenu{STRING_FOR_FILE_BROWSER, 0};
-sample::Transpose source0TransposeMenu{STRING_FOR_TRANSPOSE, STRING_FOR_OSC_TRANSPOSE_MENU_TITLE, params::LOCAL_OSC_A_PITCH_ADJUST, 0};
+osc::PhiMorphZone osc0PhiZoneAMenu{STRING_FOR_PHI_ZONE_A, STRING_FOR_OSC_PHI_ZONE_A_MENU_TITLE, 0, 0};
 osc::source::WaveIndex source0WaveIndexMenu{STRING_FOR_WAVE_INDEX, STRING_FOR_OSC_WAVE_IND_MENU_TITLE, params::LOCAL_OSC_A_WAVE_INDEX, 0};
+osc::PhiMorphZone osc0PhiZoneBMenu{STRING_FOR_PHI_ZONE_B, STRING_FOR_OSC_PHI_ZONE_B_MENU_TITLE, 0, 1};
+sample::Transpose source0TransposeMenu{STRING_FOR_TRANSPOSE, STRING_FOR_OSC_TRANSPOSE_MENU_TITLE, params::LOCAL_OSC_A_PITCH_ADJUST, 0};
 osc::PulseWidth osc0PulseWidthMenu{STRING_FOR_PULSE_WIDTH, STRING_FOR_OSC_P_WIDTH_MENU_TITLE, params::LOCAL_OSC_A_PHASE_WIDTH, 0};
 osc::source::Feedback source0FeedbackMenu{STRING_FOR_FEEDBACK, STRING_FOR_CARRIER_FEED_MENU_TITLE, params::LOCAL_CARRIER_0_FEEDBACK, 0};
 osc::RetriggerPhase osc0PhaseMenu{STRING_FOR_RETRIGGER_PHASE, STRING_FOR_OSC_R_PHASE_MENU_TITLE, 0, false};
@@ -74,8 +76,6 @@ sample::Interpolation sample0InterpolationMenu{STRING_FOR_INTERPOLATION, STRING_
 sample::Start sample0StartMenu{STRING_FOR_START_POINT, 0};
 sample::End sample0EndMenu{STRING_FOR_END_POINT, 0};
 sample::StartOffset sample0StartOffsetMenu{STRING_FOR_START_OFFSET, 0};
-osc::PhiMorphZone osc0PhiZoneAMenu{STRING_FOR_PHI_ZONE_A, STRING_FOR_OSC_PHI_ZONE_A_MENU_TITLE, 0, 0};
-osc::PhiMorphZone osc0PhiZoneBMenu{STRING_FOR_PHI_ZONE_B, STRING_FOR_OSC_PHI_ZONE_B_MENU_TITLE, 0, 1};
 std::array<MenuItem*, 17> child6 = {
     &osc0TypeMenu,
     &deluge::gui::menu_item::file0SelectorMenu,
@@ -98,8 +98,10 @@ std::array<MenuItem*, 17> child6 = {
 submenu::ActualSource source0Menu{STRING_FOR_OSCILLATOR_1, child6, 0};
 osc::Type osc1TypeMenu{STRING_FOR_TYPE, STRING_FOR_OSC_TYPE_MENU_TITLE, 1};
 FileSelector deluge::gui::menu_item::file1SelectorMenu{STRING_FOR_FILE_BROWSER, 1};
-sample::Transpose source1TransposeMenu{STRING_FOR_TRANSPOSE, STRING_FOR_OSC_TRANSPOSE_MENU_TITLE, params::LOCAL_OSC_A_PITCH_ADJUST, 1};
+osc::PhiMorphZone osc1PhiZoneAMenu{STRING_FOR_PHI_ZONE_A, STRING_FOR_OSC_PHI_ZONE_A_MENU_TITLE, 1, 0};
 osc::source::WaveIndex source1WaveIndexMenu{STRING_FOR_WAVE_INDEX, STRING_FOR_OSC_WAVE_IND_MENU_TITLE, params::LOCAL_OSC_A_WAVE_INDEX, 1};
+osc::PhiMorphZone osc1PhiZoneBMenu{STRING_FOR_PHI_ZONE_B, STRING_FOR_OSC_PHI_ZONE_B_MENU_TITLE, 1, 1};
+sample::Transpose source1TransposeMenu{STRING_FOR_TRANSPOSE, STRING_FOR_OSC_TRANSPOSE_MENU_TITLE, params::LOCAL_OSC_A_PITCH_ADJUST, 1};
 osc::PulseWidth osc1PulseWidthMenu{STRING_FOR_PULSE_WIDTH, STRING_FOR_OSC_P_WIDTH_MENU_TITLE, params::LOCAL_OSC_A_PHASE_WIDTH, 1};
 osc::source::Feedback source1FeedbackMenu{STRING_FOR_FEEDBACK, STRING_FOR_CARRIER_FEED_MENU_TITLE, params::LOCAL_CARRIER_0_FEEDBACK, 1};
 osc::RetriggerPhase osc1PhaseMenu{STRING_FOR_RETRIGGER_PHASE, STRING_FOR_OSC_R_PHASE_MENU_TITLE, 1, false};
@@ -111,8 +113,6 @@ sample::Interpolation sample1InterpolationMenu{STRING_FOR_INTERPOLATION, STRING_
 sample::Start sample1StartMenu{STRING_FOR_START_POINT, 1};
 sample::End sample1EndMenu{STRING_FOR_END_POINT, 1};
 sample::StartOffset sample1StartOffsetMenu{STRING_FOR_START_OFFSET, 1};
-osc::PhiMorphZone osc1PhiZoneAMenu{STRING_FOR_PHI_ZONE_A, STRING_FOR_OSC_PHI_ZONE_A_MENU_TITLE, 1, 0};
-osc::PhiMorphZone osc1PhiZoneBMenu{STRING_FOR_PHI_ZONE_B, STRING_FOR_OSC_PHI_ZONE_B_MENU_TITLE, 1, 1};
 std::array<MenuItem*, 17> child7 = {
     &osc1TypeMenu,
     &deluge::gui::menu_item::file1SelectorMenu,
