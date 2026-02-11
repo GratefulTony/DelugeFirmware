@@ -38,6 +38,7 @@
 #pragma once
 
 #include "definitions_cxx.hpp"
+#include "dsp/fast_math.h"
 #include "dsp/filter/ladder_components.h"
 #include "dsp/phi_triangle.hpp"
 #include "dsp/stereo_sample.h"
@@ -112,6 +113,12 @@ struct DisperserDelayState {
 	size_t headPos{0};           // Current head position (most recent)
 	uint16_t activityCounter{0}; // Buffers since last write (for tail detection)
 
+	/// Wrap position into [0, kMaxDelaySamples) without modulo division.
+	/// Caller must ensure pos < 2 * kMaxDelaySamples (true for all our offset patterns).
+	[[gnu::always_inline]] static size_t wrapPos(size_t pos) {
+		return (pos >= kMaxDelaySamples) ? (pos - kMaxDelaySamples) : pos;
+	}
+
 	/// Allocate delay buffers from SDRAM. Returns true on success.
 	[[nodiscard]] bool allocate() {
 		if (bufferL != nullptr) {
@@ -169,7 +176,7 @@ struct DisperserDelayState {
 
 	/// Read from delay buffer at given offset from head
 	[[gnu::always_inline]] inline void read(size_t delaySamples, q31_t& outL, q31_t& outR) const {
-		size_t readPos = (headPos + kMaxDelaySamples - delaySamples) % kMaxDelaySamples;
+		size_t readPos = wrapPos(headPos + kMaxDelaySamples - delaySamples);
 		outL = bufferL[readPos];
 		outR = bufferR[readPos];
 	}
@@ -177,7 +184,7 @@ struct DisperserDelayState {
 	/// Add at offset from head (for frequency-dispersed multi-tap writes)
 	/// Additive so multiple stages accumulate, with saturation to prevent blowup
 	[[gnu::always_inline]] inline void writeAtOffset(q31_t inL, q31_t inR, size_t offset) {
-		size_t pos = (headPos + offset) % kMaxDelaySamples;
+		size_t pos = wrapPos(headPos + offset);
 		// Saturating add with extra headroom check to prevent runaway
 		q31_t newL = q31_sat_add(bufferL[pos], inL);
 		q31_t newR = q31_sat_add(bufferR[pos], inR);
@@ -200,8 +207,8 @@ struct DisperserDelayState {
 		size_t offsetInt = offsetQ16 >> 16;
 		uint32_t frac16 = offsetQ16 & 0xFFFF; // 0-65535 representing 0.0-1.0
 
-		size_t pos0 = (headPos + offsetInt) % kMaxDelaySamples;
-		size_t pos1 = (headPos + offsetInt + 1) % kMaxDelaySamples;
+		size_t pos0 = wrapPos(headPos + offsetInt);
+		size_t pos1 = wrapPos(headPos + offsetInt + 1);
 
 		// Distribute energy: (1-frac) to pos0, frac to pos1
 		// Scale frac16 to q31: frac16 << 15 (0-65535 -> 0-2147418112)
@@ -227,7 +234,7 @@ struct DisperserDelayState {
 	}
 
 	/// Advance head position (call once per sample after all writes)
-	[[gnu::always_inline]] inline void advanceHead() { headPos = (headPos + 1) % kMaxDelaySamples; }
+	[[gnu::always_inline]] inline void advanceHead() { headPos = wrapPos(headPos + 1); }
 
 	/// Legacy: write at head and advance (for simple single-write case)
 	[[gnu::always_inline]] inline void write(q31_t inL, q31_t inR) {
@@ -264,7 +271,10 @@ struct DisperserDelayState {
 		constexpr size_t kStride = kMaxDelaySamples / kSampleCount;
 
 		for (size_t i = 0; i < kSampleCount; ++i) {
-			size_t pos = (headPos + i * kStride) % kMaxDelaySamples;
+			size_t pos = headPos + i * kStride;
+			while (pos >= kMaxDelaySamples) {
+				pos -= kMaxDelaySamples;
+			}
 			if (std::abs(bufferL[pos]) > kEnergyThreshold || std::abs(bufferR[pos]) > kEnergyThreshold) {
 				return true;
 			}
@@ -623,7 +633,7 @@ public:
 		lastEmphasis_ = emphasis;
 
 		// freq: 0-127 -> 1Hz-8kHz (13 octaves)
-		float centerHz = exp2f(freq * k127Recip * 13.0f);
+		float centerHz = fastPow2(freq * k127Recip * 13.0f);
 
 		// spread: 0-127 -> ±4 octaves (used as local spread around each mode in bimodal)
 		float spreadOctaves = spread * k127Recip * 4.0f;
@@ -698,7 +708,7 @@ public:
 		// spreadCurve=0.5: exponent=1.0 (linear distribution within mode)
 		// spreadCurve=1: exponent=0.1 (stages spread extremely toward edges)
 		float curveClamped = std::clamp(spreadCurve, 0.0f, 1.0f);
-		float exponent = expf((1.0f - curveClamped * 2.0f) * kLog10);
+		float exponent = fastExp((1.0f - curveClamped * 2.0f) * kLog10);
 
 		// Q tilt: multiply Q by factor based on stage position
 		float qTiltClamped = std::clamp(qTilt, -1.0f, 1.0f);
@@ -711,7 +721,7 @@ public:
 			// Two modes centered geometrically around centerHz
 			// separation=1 octave → modeA = center/sqrt(2), modeB = center*sqrt(2)
 			float halfSep = bimodalSeparation * 0.5f;
-			float sepMult = exp2f(halfSep);
+			float sepMult = fastPow2(halfSep);
 			modeAHz = centerHz / sepMult;
 			modeBHz = centerHz * sepMult;
 		}
@@ -742,7 +752,7 @@ public:
 
 				// Apply power curve within mode (log-distributed distance from center)
 				// Fast power: t^exp = exp(exp * log(t)), but t=0 needs special handling
-				float curved = (tLocal > 0.001f) ? expf(exponent * logf(tLocal)) : 0.0f;
+				float curved = (tLocal > 0.001f) ? fastExp(exponent * fastLog(tLocal)) : 0.0f;
 
 				// Mode A: positive offset (upward), Mode B: negative offset (downward)
 				// Clamping at 20Hz/16kHz handles boundaries naturally
@@ -750,18 +760,18 @@ public:
 
 				// Each mode uses half the spread range
 				float localSpread = spreadOctaves * 0.5f;
-				stageHzBase = modeCenter * exp2f(localPosition * localSpread);
+				stageHzBase = modeCenter * fastPow2(localPosition * localSpread);
 			}
 			else {
 				// Normal single-mode distribution
 				// Fast power: t^exp = exp(exp * log(t)), but t=0 needs special handling
-				float curved = (t > 0.001f) ? expf(exponent * logf(t)) : 0.0f;
+				float curved = (t > 0.001f) ? fastExp(exponent * fastLog(t)) : 0.0f;
 				float stagePosition = curved * 2.0f - 1.0f;
-				stageHzBase = centerHz * exp2f(stagePosition * spreadOctaves);
+				stageHzBase = centerHz * fastPow2(stagePosition * spreadOctaves);
 			}
 
 			// Per-stage Q with tilt
-			float qFactor = exp2f(qTiltClamped * 2.0f * (t * 2.0f - 1.0f));
+			float qFactor = fastPow2(qTiltClamped * 2.0f * (t * 2.0f - 1.0f));
 			float stageQ = std::clamp(qBase * qFactor, 0.5f, 20.0f);
 
 			// Per-stage detuning: alternating +/- for chorus shimmer
@@ -769,8 +779,8 @@ public:
 			float detuneOct = useDetuning ? (((i & 1) ? -1.0f : 1.0f) * maxDetuneOct) : 0.0f;
 
 			// Apply L/R offset + detuning and clamp to useful range (1Hz floor for subharmonics)
-			float stageHzL = std::clamp(stageHzBase * exp2f(lOffsetOct + detuneOct), 1.0f, 16000.0f);
-			float stageHzR = std::clamp(stageHzBase * exp2f(rOffsetOct + detuneOct), 1.0f, 16000.0f);
+			float stageHzL = std::clamp(stageHzBase * fastPow2(lOffsetOct + detuneOct), 1.0f, 16000.0f);
+			float stageHzR = std::clamp(stageHzBase * fastPow2(rOffsetOct + detuneOct), 1.0f, 16000.0f);
 
 			// Compute 2nd-order biquad allpass coefficients with per-stage Q
 			coeffsL_[i].compute(stageHzL, stageQ, static_cast<float>(kSampleRate));
@@ -796,7 +806,7 @@ public:
 				float tiltDb = (emphasisClamped > 0) ? (emphasisClamped * 2.5f) : (emphasisClamped * 2.0f);
 				float stageDb = tiltDb * (t * 2.0f - 1.0f);
 				// Fast dB→linear: 10^(dB/20) = exp(dB * log(10)/20)
-				stageGain = expf(stageDb * kLog10Over20);
+				stageGain = fastExp(stageDb * kLog10Over20);
 			}
 			// Smooth gain transitions to avoid transient volume excursions
 			// (especially problematic at high chirp/feedback values)
@@ -809,6 +819,13 @@ public:
 				delta = (targetGain > currentGain) ? 1 : -1;
 			}
 			stageGains_[i] = currentGain + delta;
+
+			// Pack L/R coefficients + gain for cache-friendly inner loop access
+			packed_[i].a1[0] = coeffsL_[i].a1;
+			packed_[i].a1[1] = coeffsR_[i].a1;
+			packed_[i].a2[0] = coeffsL_[i].a2;
+			packed_[i].a2[1] = coeffsR_[i].a2;
+			packed_[i].emphGain = stageGains_[i];
 		}
 	}
 
@@ -918,7 +935,7 @@ public:
 
 		// Triangle fold in OCTAVE space to get a TARGET, then quantize to octave of ORIGINAL
 		// This preserves user's inharmonic offset while preventing pileup
-		float octavesFromMin = log2f(delaySamples / kMinDelayF);
+		float octavesFromMin = fastLog2(delaySamples / kMinDelayF);
 
 		// Triangle fold: bounces between 0 and maxOctaves to get target position
 		if (octavesFromMin < 0.0f || octavesFromMin > kMaxOctaves) {
@@ -928,13 +945,13 @@ public:
 				octavesFromMin = doubled - octavesFromMin;
 			}
 		}
-		float targetDelay = kMinDelayF * exp2f(octavesFromMin);
+		float targetDelay = kMinDelayF * fastPow2(octavesFromMin);
 
 		// Quantize to nearest perfect fifth of ORIGINAL pitch (preserves user's inharmonic offset)
 		constexpr float kFifth = 0.5849625f; // log2(3/2)
-		float idealShift = log2f(targetDelay / delaySamples);
+		float idealShift = fastLog2(targetDelay / delaySamples);
 		float quantizedShift = std::round(idealShift / kFifth) * kFifth;
-		float foldedDelay = delaySamples * exp2f(quantizedShift);
+		float foldedDelay = delaySamples * fastPow2(quantizedShift);
 
 		// Ensure result is in range - adjust by one octave if needed
 		if (foldedDelay > kMaxDelayF) {
@@ -965,9 +982,9 @@ public:
 	 * @param fbLimitFactor Feedback limiting factor [0.25,1.0] computed once per buffer
 	 */
 	[[gnu::noinline]] void processSample(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR, uint8_t stages,
-	                                     DisperserDelayState& delay, float punch, float chirp, float foldedDelay,
-	                                     int32_t topology, q31_t crossGain, q31_t punchGain, q31_t chirpGainF,
-	                                     q31_t chirpGain2F, bool useHarmonic2F, float fbLimitFactor) {
+	                                     DisperserDelayState& delay, float foldedDelay, int32_t topology,
+	                                     q31_t crossGain, q31_t punchGain, q31_t chirpGainF, q31_t chirpGain2F,
+	                                     bool useHarmonic2F, q31_t fbGainQ31) {
 
 		if (stages == 0) {
 			outL = inL;
@@ -993,6 +1010,7 @@ public:
 				prevDelayQ16_ = currentDelayQ16_;
 				currentDelayQ16_ = newDelayQ16;
 				crossfadeRemaining_ = kDelayCrossfadeSamples;
+				crossfadeGainQ31_ = 0;
 			}
 			else {
 				currentDelayQ16_ = newDelayQ16; // Small change, just snap
@@ -1007,8 +1025,7 @@ public:
 			q31_t writeR = multiply_32x32_rshift32(inR, punchGain) << 1;
 			if (crossfadeRemaining_ > 0) {
 				// During crossfade: write to both old and new offsets with complementary gains
-				q31_t fadeNew = static_cast<q31_t>(
-				    (1.0f - static_cast<float>(crossfadeRemaining_) / kDelayCrossfadeSamples) * ONE_Q31);
+				q31_t fadeNew = crossfadeGainQ31_;
 				q31_t fadeOld = ONE_Q31 - fadeNew;
 				q31_t wNewL = multiply_32x32_rshift32(writeL, fadeNew) << 1;
 				q31_t wNewR = multiply_32x32_rshift32(writeR, fadeNew) << 1;
@@ -1028,12 +1045,10 @@ public:
 		delay.readHead(fbL, fbR);
 		delay.clearHead();
 
-		float fbAmount = std::max(punch, chirp);
-		if (fbAmount > 0.01f) {
-			// Normal feedback with regeneration (fbLimitFactor prevents runaway)
-			q31_t fbGain = static_cast<q31_t>(fbAmount * 0.99f * fbLimitFactor * ONE_Q31);
-			q31_t fbL_scaled = signed_saturate<30>(multiply_32x32_rshift32(fbL, fbGain) << 1);
-			q31_t fbR_scaled = signed_saturate<30>(multiply_32x32_rshift32(fbR, fbGain) << 1);
+		if (fbGainQ31 != 0) {
+			// Normal feedback with regeneration
+			q31_t fbL_scaled = signed_saturate<30>(multiply_32x32_rshift32(fbL, fbGainQ31) << 1);
+			q31_t fbR_scaled = signed_saturate<30>(multiply_32x32_rshift32(fbR, fbGainQ31) << 1);
 			procL = q31_sat_add(procL, fbL_scaled);
 			procR = q31_sat_add(procR, fbR_scaled);
 		}
@@ -1053,8 +1068,7 @@ public:
 
 			if (crossfadeRemaining_ > 0) {
 				// During crossfade: write to both old and new offsets
-				q31_t fadeNew = static_cast<q31_t>(
-				    (1.0f - static_cast<float>(crossfadeRemaining_) / kDelayCrossfadeSamples) * ONE_Q31);
+				q31_t fadeNew = crossfadeGainQ31_;
 				q31_t fadeOld = ONE_Q31 - fadeNew;
 
 				// Fundamental at both offsets
@@ -1080,6 +1094,7 @@ public:
 				}
 
 				crossfadeRemaining_--;
+				crossfadeGainQ31_ += kCrossfadeIncrement;
 			}
 			else {
 				// Normal: write to current offset only
@@ -1094,7 +1109,8 @@ public:
 			}
 		}
 		else if (crossfadeRemaining_ > 0) {
-			crossfadeRemaining_--; // Still tick crossfade even without chirp writes
+			crossfadeRemaining_--;
+			crossfadeGainQ31_ += kCrossfadeIncrement;
 		}
 
 		delay.advanceHead();
@@ -1176,27 +1192,24 @@ public:
 			delay.markActive(); // Mark delay as having content
 		}
 
-		// Feedback limiting disabled - just pass 1.0
-		float fbLimitFactor = 1.0f;
-
-		// Track output energy for tail detection (~500ms decay for proper tail preservation)
-		// Decay coefficient: 0.99986 at 44.1kHz/128 samples ≈ 500ms to -60dB
-		constexpr q31_t kOutputEnvDecay = static_cast<q31_t>(0.99986 * ONE_Q31);
+		// Precompute feedback gain as q31 (avoids per-sample float→int conversion)
+		q31_t fbGainQ31 = (fbAmount > 0.01f) ? static_cast<q31_t>(fbAmount * 0.99f * ONE_Q31) : q31_t{0};
 
 		for (auto& sample : buffer) {
 			q31_t outL, outR;
-			processSample(sample.l, sample.r, outL, outR, stages, delay, punch, chirp, foldedDelay, topology, crossGain,
-			              punchGain, chirpGainF, chirpGain2F, useHarmonic2F, fbLimitFactor);
+			processSample(sample.l, sample.r, outL, outR, stages, delay, foldedDelay, topology, crossGain, punchGain,
+			              chirpGainF, chirpGain2F, useHarmonic2F, fbGainQ31);
 			sample.l = outL;
 			sample.r = outR;
-
-			// Update output envelope: peak detection with slow decay
-			q31_t absOut = std::max(std::abs(outL), std::abs(outR));
-			if (absOut > outputEnv_) {
-				outputEnv_ = absOut; // Instant attack
-			}
 		}
-		// Decay once per buffer (not per sample) for efficiency
+
+		// Output envelope for tail detection: peak detect then decay per buffer
+		// Only need approximate peak — sample last output rather than tracking every sample
+		constexpr q31_t kOutputEnvDecay = static_cast<q31_t>(0.99986 * ONE_Q31);
+		q31_t lastAbs = std::max(std::abs(buffer.back().l), std::abs(buffer.back().r));
+		if (lastAbs > outputEnv_) {
+			outputEnv_ = lastAbs;
+		}
 		outputEnv_ = multiply_32x32_rshift32(outputEnv_, kOutputEnvDecay) << 1;
 
 		// Tick activity counter for tail detection
@@ -1227,6 +1240,7 @@ public:
 		currentDelayQ16_ = 0;
 		prevDelayQ16_ = 0;
 		crossfadeRemaining_ = 0;
+		crossfadeGainQ31_ = 0;
 	}
 
 	/// Soft reset: fade filter states toward zero (>> 3 = 12.5% of current value remains)
@@ -1258,13 +1272,10 @@ private:
 
 	/// Cascade routing: allpass cascade with per-stage emphasis gains
 	void processRoutingCascade(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR, size_t numStages) {
-		int32_t tmp[2] = {inL, inR};
-		int32x2_t proc = vld1_s32(tmp);
+		int32x2_t proc = vset_lane_s32(inR, vdup_n_s32(inL), 1);
 
 		for (size_t i = 0; i < numStages; ++i) {
-			proc = stages_[i].processLR(proc, coeffsL_[i], coeffsR_[i]);
-			int32x2_t emphGain = vdup_n_s32(stageGains_[i]);
-			proc = vshl_n_s32(vqrdmulh_s32(proc, emphGain), 1);
+			proc = stages_[i].processPacked(proc, packed_[i]);
 		}
 
 		outL = vget_lane_s32(proc, 0);
@@ -1292,8 +1303,7 @@ private:
 			    q31_sat_add(multiply_32x32_rshift32(procR, keepG) << 1, multiply_32x32_rshift32(procL, crossG) << 1);
 
 			proc = vset_lane_s32(blendR, vdup_n_s32(blendL), 1);
-			proc = stages_[i].processLR(proc, coeffsL_[i], coeffsR_[i]);
-			proc = vshl_n_s32(vqrdmulh_s32(proc, vdup_n_s32(stageGains_[i])), 1);
+			proc = stages_[i].processPacked(proc, packed_[i]);
 		}
 
 		outL = vget_lane_s32(proc, 0);
@@ -1306,8 +1316,7 @@ private:
 		int32x2_t proc = vset_lane_s32(inR, vdup_n_s32(inL), 1);
 
 		for (size_t i = 0; i < numStages; ++i) {
-			proc = stages_[i].processLR(proc, coeffsL_[i], coeffsR_[i]);
-			proc = vshl_n_s32(vqrdmulh_s32(proc, vdup_n_s32(stageGains_[i])), 1);
+			proc = stages_[i].processPacked(proc, packed_[i]);
 
 			// Cross-swap every 4 stages for swirling stereo character
 			if ((i & 3) == 3) {
@@ -1339,15 +1348,13 @@ private:
 		// Path A: first half of stages
 		int32x2_t pathA = input;
 		for (size_t i = 0; i < half; ++i) {
-			pathA = stages_[i].processLR(pathA, coeffsL_[i], coeffsR_[i]);
-			pathA = vshl_n_s32(vqrdmulh_s32(pathA, vdup_n_s32(stageGains_[i])), 1);
+			pathA = stages_[i].processPacked(pathA, packed_[i]);
 		}
 
 		// Path B: second half of stages (parallel, not series!)
 		int32x2_t pathB = input; // Same input, not pathA output
 		for (size_t i = half; i < numStages; ++i) {
-			pathB = stages_[i].processLR(pathB, coeffsL_[i], coeffsR_[i]);
-			pathB = vshl_n_s32(vqrdmulh_s32(pathB, vdup_n_s32(stageGains_[i])), 1);
+			pathB = stages_[i].processPacked(pathB, packed_[i]);
 		}
 
 		// Sum paths with 50% each for unity gain
@@ -1364,16 +1371,12 @@ private:
 		if (half == 0)
 			half = 1;
 
-		int32_t inTmp[2] = {inL, inR};
-		int32x2_t input = vld1_s32(inTmp);
+		int32x2_t input = vset_lane_s32(inR, vdup_n_s32(inL), 1);
 
 		// Inner chain (first half)
 		int32x2_t inner = input;
 		for (size_t i = 0; i < half; ++i) {
-			inner = stages_[i].processLR(inner, coeffsL_[i], coeffsR_[i]);
-			// Apply per-stage emphasis gain
-			int32x2_t emphGain = vdup_n_s32(stageGains_[i]);
-			inner = vshl_n_s32(vqrdmulh_s32(inner, emphGain), 1);
+			inner = stages_[i].processPacked(inner, packed_[i]);
 		}
 
 		// Outer chain (second half) - fed by inner for nested structure
@@ -1382,10 +1385,7 @@ private:
 		    vqadd_s32(vqrdmulh_s32(input, vdup_n_s32(0x40000000)), vqrdmulh_s32(inner, vdup_n_s32(0x40000000)));
 		int32x2_t outer = outerIn;
 		for (size_t i = half; i < numStages; ++i) {
-			outer = stages_[i].processLR(outer, coeffsL_[i], coeffsR_[i]);
-			// Apply per-stage emphasis gain
-			int32x2_t emphGain = vdup_n_s32(stageGains_[i]);
-			outer = vshl_n_s32(vqrdmulh_s32(outer, emphGain), 1);
+			outer = stages_[i].processPacked(outer, packed_[i]);
 		}
 
 		// Cross-mix L/R with unity gain (blend, not add): 80% self + 20% other
@@ -1399,8 +1399,7 @@ private:
 
 	/// Spring routing: Multi-tap capture for chirp character
 	void processRoutingSpring(q31_t inL, q31_t inR, q31_t& outL, q31_t& outR, size_t numStages) {
-		int32_t inTmp[2] = {inL, inR};
-		int32x2_t proc = vld1_s32(inTmp);
+		int32x2_t proc = vset_lane_s32(inR, vdup_n_s32(inL), 1);
 
 		// Tap points at 1/3 and 2/3 for spring character
 		size_t tap1 = numStages / 3;
@@ -1414,10 +1413,7 @@ private:
 		int32x2_t tap2Val{};
 
 		for (size_t i = 0; i < numStages; ++i) {
-			proc = stages_[i].processLR(proc, coeffsL_[i], coeffsR_[i]);
-			// Apply per-stage emphasis gain
-			int32x2_t emphGain = vdup_n_s32(stageGains_[i]);
-			proc = vshl_n_s32(vqrdmulh_s32(proc, emphGain), 1);
+			proc = stages_[i].processPacked(proc, packed_[i]);
 
 			// Capture taps for blending into output
 			if (i == tap1) {
@@ -1444,8 +1440,9 @@ private:
 	}
 
 	std::array<filter::StereoBiquadAllpass, kMaxStages> stages_{};  // 2nd-order biquad allpasses
-	std::array<filter::BiquadAllpassCoeffs, kMaxStages> coeffsL_{}; // L channel coefficients
-	std::array<filter::BiquadAllpassCoeffs, kMaxStages> coeffsR_{}; // R channel coefficients
+	std::array<filter::BiquadAllpassCoeffs, kMaxStages> coeffsL_{}; // L channel coefficients (scratch for compute)
+	std::array<filter::BiquadAllpassCoeffs, kMaxStages> coeffsR_{}; // R channel coefficients (scratch for compute)
+	std::array<filter::PackedStageCoeffs, kMaxStages> packed_{};    // Pre-packed L/R + gain (used in inner loop)
 	std::array<size_t, kMaxStages> stageOffsets_{};                 // Delay offsets per stage (from frequency)
 	std::array<q31_t, kMaxStages> ladderCrossGains_{};              // Precomputed ladder cross-coupling gains
 	std::array<q31_t, kMaxStages> stageGains_ = []() {
@@ -1455,10 +1452,12 @@ private:
 	}(); // Per-stage gain with sign for polarity flip
 	// Delay crossfade state: when delay time changes significantly, crossfade writes
 	// between old and new offsets to avoid pitch-shifting artifacts
-	static constexpr uint16_t kDelayCrossfadeSamples = 256; // ~6ms crossfade
-	uint32_t currentDelayQ16_{0};                           // Current delay offset (16.16 fixed-point)
-	uint32_t prevDelayQ16_{0};                              // Previous delay offset (for crossfade)
-	uint16_t crossfadeRemaining_{0};                        // Samples remaining in crossfade (0 = not crossfading)
+	static constexpr uint16_t kDelayCrossfadeSamples = 256;                        // ~6ms crossfade
+	static constexpr q31_t kCrossfadeIncrement = ONE_Q31 / kDelayCrossfadeSamples; // Per-sample gain step
+	uint32_t currentDelayQ16_{0};                                                  // Current delay offset (16.16)
+	uint32_t prevDelayQ16_{0};       // Previous delay offset (for crossfade)
+	uint16_t crossfadeRemaining_{0}; // Samples remaining in crossfade (0 = not crossfading)
+	q31_t crossfadeGainQ31_{0};      // Current crossfade gain (0→ONE_Q31 over crossfade)
 
 	// Transient detection state (for Punch and Chirp zones)
 	// Fast envelope (~1ms attack) tracks peaks
@@ -1493,7 +1492,7 @@ private:
 [[gnu::always_inline]] inline uint8_t hzToDisperserFreq(float hz) {
 	// Inverse of: centerHz = 1.0f * exp2f((freq / 127.0f) * 13.0f)
 	// freq = 127 * log2(hz) / 13
-	float octaves = log2f(std::max(hz, 1.0f));
+	float octaves = fastLog2(std::max(hz, 1.0f));
 	return static_cast<uint8_t>(std::clamp(octaves * 127.0f / 13.0f, 0.0f, 127.0f));
 }
 
@@ -1600,7 +1599,7 @@ inline void processDisperser(std::span<StereoSample> buffer, Disperser& dsp, Dis
 
 		// Freq knob becomes bipolar offset: 64=center (no offset), 0=-6.5 octaves, 127=+6.5 octaves
 		float offsetOctaves = (static_cast<float>(params.freq) - 64.0f) / 64.0f * 6.5f;
-		float offsetHz = noteHz * exp2f(offsetOctaves);
+		float offsetHz = noteHz * fastPow2(offsetOctaves);
 		effectiveFreq = hzToDisperserFreq(offsetHz);
 	}
 	// else: no pitch info (clips/samples), use freq knob as absolute frequency

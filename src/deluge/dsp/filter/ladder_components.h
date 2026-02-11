@@ -193,6 +193,14 @@ struct BiquadAllpassCoeffs {
 	}
 };
 
+/// Pre-packed L/R coefficients + emphasis gain for cache-friendly inner loops.
+/// Packed once per coefficient update, read 128× per buffer per stage.
+struct PackedStageCoeffs {
+	int32_t a1[2];  ///< {a1L, a1R} — direct NEON vld1_s32
+	int32_t a2[2];  ///< {a2L, a2R} — direct NEON vld1_s32
+	q31_t emphGain; ///< Per-stage emphasis gain (ONE_Q31/2 = unity)
+};
+
 /// 2nd-order biquad allpass filter - stereo NEON implementation
 /// Provides 360° phase shift with variable Q (vs 180° for 1st-order)
 /// Higher Q = sharper phase transition = more "resonant" disperser sound
@@ -278,6 +286,35 @@ struct StereoBiquadAllpass {
 		vst1_s32(s2_, new_s2);
 
 		return y;
+	}
+
+	/// Process from pre-packed coefficients (eliminates per-call stack packing).
+	/// Includes emphasis gain multiply for fused allpass+gain in one call.
+	[[gnu::always_inline]] int32x2_t processPacked(int32x2_t input, const PackedStageCoeffs& packed) {
+		int32x2_t s1 = vld1_s32(s1_);
+		int32x2_t s2 = vld1_s32(s2_);
+		int32x2_t a1 = vld1_s32(packed.a1);
+		int32x2_t a2 = vld1_s32(packed.a2);
+
+		// y = a2*x + s1
+		int32x2_t a2x = vqrdmulh_s32(input, a2);
+		int32x2_t y = vqadd_s32(a2x, s1);
+
+		// s1 = a1*(x - y) + s2 (with 2x scale compensation)
+		int32x2_t diff = vqsub_s32(input, y);
+		int32x2_t a1diff = vqrdmulh_s32(diff, a1);
+		int32x2_t a1diff_scaled = vqadd_s32(a1diff, a1diff);
+		int32x2_t new_s1 = vqadd_s32(a1diff_scaled, s2);
+
+		// s2 = x - a2*y
+		int32x2_t a2y = vqrdmulh_s32(y, a2);
+		int32x2_t new_s2 = vqsub_s32(input, a2y);
+
+		vst1_s32(s1_, new_s1);
+		vst1_s32(s2_, new_s2);
+
+		// Fused emphasis gain (avoids separate load + multiply in caller)
+		return vshl_n_s32(vqrdmulh_s32(y, vdup_n_s32(packed.emphGain)), 1);
 	}
 };
 
