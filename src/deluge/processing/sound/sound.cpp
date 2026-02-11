@@ -59,6 +59,7 @@
 #include "util/comparison.h"
 #include "util/exceptions.h"
 #include "util/firmware_version.h"
+#include "util/fixedpoint.h"
 #include "util/functions.h"
 #include "util/misc.h"
 #include <algorithm>
@@ -190,6 +191,9 @@ void Sound::initParams(ParamManager* paramManager) {
 	patchedParams->params[params::GLOBAL_SCATTER_PWRITE].setCurrentValueBasicForSetup(-2147483648);
 	patchedParams->params[params::GLOBAL_SCATTER_MACRO].setCurrentValueBasicForSetup(-2147483648);
 	patchedParams->params[params::GLOBAL_SCATTER_DENSITY].setCurrentValueBasicForSetup(2147483647);
+
+	// Automod depth defaults to 100% (ONE_Q31) so effect is fully active when enabled
+	patchedParams->params[params::GLOBAL_AUTOMOD_DEPTH].setCurrentValueBasicForSetup(2147483647);
 }
 
 void Sound::setupAsSample(ParamManagerForTimeline* paramManager) {
@@ -1522,6 +1526,9 @@ void Sound::noteOn(ModelStackWithThreeMainThings* modelStack, ArpeggiatorBase* a
 		return;
 	}
 
+	// Notify automodulator of note-on for Once mode retrigger tracking
+	automod.notifyNoteOn();
+
 	UnpatchedParamSet* unpatchedParams = paramManager->getUnpatchedParamSet();
 
 	ArpeggiatorSettings* arpSettings = getArpSettings();
@@ -1573,6 +1580,9 @@ void Sound::noteOn(ModelStackWithThreeMainThings* modelStack, ArpeggiatorBase* a
 }
 
 void Sound::noteOff(ModelStackWithThreeMainThings* modelStack, ArpeggiatorBase* arpeggiator, int32_t noteCode) {
+	// Notify automodulator of note-off for Once mode retrigger tracking
+	automod.notifyNoteOff();
+
 	ModelStackWithSoundFlags* modelStackWithSoundFlags = modelStack->addSoundFlags();
 	ArpeggiatorSettings* arpSettings = getArpSettings();
 
@@ -1642,6 +1652,7 @@ void Sound::noteOnPostArpeggiator(ModelStackWithSoundFlags* modelStack, int32_t 
 
 	if (polyphonic == PolyphonyMode::LEGATO && voiceForLegato) [[unlikely]] {
 		(*voiceForLegato)->changeNoteCode(modelStack, noteCodePreArp, noteCodePostArp, fromMIDIChannel, mpeValues);
+		// Note: intentionally NO automod reset here - legato should maintain LFO continuity
 	}
 	else {
 		try {
@@ -1653,11 +1664,25 @@ void Sound::noteOnPostArpeggiator(ModelStackWithSoundFlags* modelStack, int32_t 
 				for (int32_t e = 0; e < kNumEnvelopes; e++) {
 					envelopePositions[e] = (*voiceToReuse)->envelopes[e].lastValue;
 				}
+				// Reset automod LFO phase for note retrigger (only in ONCE/RETRIG modes)
+				if (automod.isEnabled() && automod.dspState != nullptr
+				    && (automod.lfoMode == dsp::AutomodLfoMode::ONCE
+				        || automod.lfoMode == dsp::AutomodLfoMode::RETRIG)) {
+					float effectiveModPhase = automod.modPhaseOffset + automod.gammaPhase;
+					automod.dspState->lfoPhase = dsp::getLfoInitialPhaseFromMod(automod.mod, effectiveModPhase);
+				}
 			}
 			else {
 				// Since we potentially just added a voice where there were none before...
 				reassessRenderSkippingStatus(modelStack);
 				voice->randomizeOscPhases(*this);
+				// Reset automod LFO phase for note retrigger (only in ONCE/RETRIG modes)
+				if (automod.isEnabled() && automod.dspState != nullptr
+				    && (automod.lfoMode == dsp::AutomodLfoMode::ONCE
+				        || automod.lfoMode == dsp::AutomodLfoMode::RETRIG)) {
+					float effectiveModPhase = automod.modPhaseOffset + automod.gammaPhase;
+					automod.dspState->lfoPhase = dsp::getLfoInitialPhaseFromMod(automod.mod, effectiveModPhase);
+				}
 			}
 
 			if (sideChainSendLevel != 0) [[unlikely]] {
@@ -2169,6 +2194,7 @@ void Sound::reassessRenderSkippingStatus(ModelStackWithSoundFlags* modelStack, b
 
 	bool skippingStatusNow =
 	    (voices_.empty() && (delay.repeatsUntilAbandon == 0u) && !stutterer.isStuttering(this)
+	     && !disperser.delay.hasEnergy() // Disperser tail still ringing
 	     && ((arpSettings == nullptr) || !getArp()->hasAnyInputNotesActive() || arpSettings->mode == ArpMode::OFF));
 
 	if (skippingStatusNow != skippingRendering) {
@@ -2590,13 +2616,40 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 
 	processSRRAndBitcrushing(sound_stereo, &postFXVolume, paramManager);
 
+	// Disperser modulation cables (for mod matrix support)
+	q31_t topoCables = paramFinalValues[params::GLOBAL_DISPERSER_TOPO - params::FIRST_GLOBAL];
+	q31_t twistCables = paramFinalValues[params::GLOBAL_DISPERSER_TWIST - params::FIRST_GLOBAL];
+	processDisperser(sound_stereo, paramManager, topoCables, twistCables);
+
 	// Check if ModFX should run after DOTT and stutter
 	bool modFXPostDOTT =
 	    runtimeFeatureSettings.get(RuntimeFeatureSettingType::ModFXPostDOTT) == RuntimeFeatureStateToggle::On;
 	bool dottEnabled = multibandCompressor.isEnabled();
 
-	// Default order: ModFX → Stutter → DOTT → Reverb
-	// With ModFXPostDOTT: Stutter → DOTT → ModFX → Reverb
+	// Automodulator processing (pre-delay, pre-modFX)
+	if (automod.isEnabled()) {
+		// Zone params: paramFinalValues contains only modulation, add base value from patched params
+		PatchedParamSet* automodPatchedParams = paramManager->getPatchedParamSet();
+		q31_t automodDepth = add_saturate(automodPatchedParams->getValue(params::GLOBAL_AUTOMOD_DEPTH),
+		                                  paramFinalValues[params::GLOBAL_AUTOMOD_DEPTH - params::FIRST_GLOBAL]);
+		// Freq: base value + modulation (raw offset for filter/pitch)
+		q31_t automodFreq = add_saturate(automodPatchedParams->getValue(params::GLOBAL_AUTOMOD_FREQ),
+		                                 paramFinalValues[params::GLOBAL_AUTOMOD_FREQ - params::FIRST_GLOBAL]);
+		// Manual: base value + modulation (direct LFO offset)
+		q31_t automodManual = add_saturate(automodPatchedParams->getValue(params::GLOBAL_AUTOMOD_MANUAL),
+		                                   paramFinalValues[params::GLOBAL_AUTOMOD_MANUAL - params::FIRST_GLOBAL]);
+		// Pass timePerTickInverse for tempo sync (0 if clock not active)
+		uint32_t timePerTickInv =
+		    playbackHandler.isEitherClockActive() ? playbackHandler.getTimePerInternalTickInverse() : 0;
+		uint8_t voiceCount = static_cast<uint8_t>(std::min(voices_.size(), static_cast<size_t>(255)));
+		bool isLegato = (polyphonic == PolyphonyMode::LEGATO);
+		// Pass lastNoteCode for pitch tracking (filter/comb track played note)
+		deluge::dsp::processAutomodulator(sound_stereo, automod, automodDepth, automodFreq, automodManual, true,
+		                                  voiceCount, timePerTickInv, lastNoteCode, isLegato);
+	}
+
+	// Default order: Automodulator → ModFX → Stutter → DOTT → Reverb
+	// With ModFXPostDOTT: Automodulator → Stutter → DOTT → ModFX → Reverb
 	if (!modFXPostDOTT) {
 		processFX(sound_stereo, modFXType_, modFXRate, modFXDepth, delayWorkingState, &postFXVolume, paramManager,
 		          !voices_.empty(), reverbSendAmount >> 1);
@@ -2678,6 +2731,7 @@ void Sound::startSkippingRendering(ModelStackWithSoundFlags* modelStack) {
 	// reversible without doing anything
 
 	setSkippingRendering(true);
+	gateOpen = true;
 	grainFX->startSkippingRendering();
 	stopParamLPF(modelStack);
 }
@@ -2716,6 +2770,9 @@ void Sound::stopSkippingRendering(ArpeggiatorSettings* arpSettings) {
 
 			// clearModFXMemory(); // No need anymore, now we wait for this to basically empty before starting skipping
 		}
+
+		// Reset automod voice tracking so LFO retrigs on first render after resuming
+		automod.lastVoiceCount = 0;
 
 		setSkippingRendering(false);
 	}
@@ -2919,6 +2976,10 @@ void Sound::ensureInaccessibleParamPresetValuesWithoutKnobsAreZeroWithMinimalDet
 // Song may be NULL
 void Sound::ensureInaccessibleParamPresetValuesWithoutKnobsAreZero(ModelStackWithThreeMainThings* modelStack) {
 
+	// Only applies to patched params — bail if no PatchCableSet (e.g. drum without full param manager)
+	if (!modelStack->paramManager->summaries[2].paramCollection) {
+		return;
+	}
 	ModelStackWithParamCollection* modelStackWithParamCollection =
 	    modelStack->paramManager->getPatchCableSet(modelStack);
 
@@ -3407,6 +3468,26 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			patch->setEngineMode(reader.readTagOrAttributeValueInt());
 			reader.exitTag("dx7enginemode");
 		}
+		else if (!strcmp(tagName, "phiMorphZoneA")) {
+			source->phiMorphZoneA = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiMorphZoneA");
+		}
+		else if (!strcmp(tagName, "phiMorphZoneB")) {
+			source->phiMorphZoneB = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiMorphZoneB");
+		}
+		else if (!strcmp(tagName, "phiMorphPhaseA")) {
+			source->phiMorphPhaseOffsetA = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiMorphPhaseA");
+		}
+		else if (!strcmp(tagName, "phiMorphPhaseB")) {
+			source->phiMorphPhaseOffsetB = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiMorphPhaseB");
+		}
+		else if (!strcmp(tagName, "phiMorphGamma")) {
+			source->phiMorphGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiMorphGamma");
+		}
 		/*
 		else if (!strcmp(tagName, "sampleSync")) {
 		    source->sampleSync = stringToBool(reader.readTagContents());
@@ -3756,6 +3837,20 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 			goto justCloseTag;
 		}
 		else {
+			// PHI_MORPH: persist zone knobs, phase offsets, and gamma
+			if (source->oscType == OscType::PHI_MORPH) {
+				writer.writeAttribute("phiMorphZoneA", source->phiMorphZoneA);
+				writer.writeAttribute("phiMorphZoneB", source->phiMorphZoneB);
+				if (source->phiMorphPhaseOffsetA != 0.0f) {
+					writer.writeAttribute("phiMorphPhaseA", static_cast<int32_t>(source->phiMorphPhaseOffsetA * 10.0f));
+				}
+				if (source->phiMorphPhaseOffsetB != 0.0f) {
+					writer.writeAttribute("phiMorphPhaseB", static_cast<int32_t>(source->phiMorphPhaseOffsetB * 10.0f));
+				}
+				if (source->phiMorphGamma != 0.0f) {
+					writer.writeAttribute("phiMorphGamma", static_cast<int32_t>(source->phiMorphGamma * 10.0f));
+				}
+			}
 justCloseTag:
 			writer.closeTag();
 		}
@@ -4041,6 +4136,81 @@ bool Sound::readParamTagFromFile(Deserializer& reader, char const* tagName, Para
 		paramManager->getPatchCableSet()->readPatchCablesFromFile(reader, readAutomationUpToPos);
 		reader.exitTag("patchCables");
 	}
+
+	// Shaper params (patched, Sound context)
+	else if (!strcmp(tagName, "tableShaperDrive")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_TABLE_SHAPER_DRIVE, readAutomationUpToPos);
+		reader.exitTag("tableShaperDrive");
+	}
+	else if (!strcmp(tagName, "tableShaperMix")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_TABLE_SHAPER_MIX, readAutomationUpToPos);
+		reader.exitTag("tableShaperMix");
+	}
+	else if (!strcmp(tagName, "sineShaperDrive")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_SINE_SHAPER_DRIVE, readAutomationUpToPos);
+		reader.exitTag("sineShaperDrive");
+	}
+	else if (!strcmp(tagName, "sineShaperTwist")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_SINE_SHAPER_TWIST, readAutomationUpToPos);
+		reader.exitTag("sineShaperTwist");
+	}
+	else if (!strcmp(tagName, "patchedSineShaperHarmonic")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::LOCAL_SINE_SHAPER_HARMONIC,
+		                         readAutomationUpToPos);
+		reader.exitTag("patchedSineShaperHarmonic");
+	}
+
+	// Disperser params (patched, Sound context)
+	else if (!strcmp(tagName, "globalDisperserTopo")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_DISPERSER_TOPO, readAutomationUpToPos);
+		reader.exitTag("globalDisperserTopo");
+	}
+	else if (!strcmp(tagName, "globalDisperserTwist")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_DISPERSER_TWIST, readAutomationUpToPos);
+		reader.exitTag("globalDisperserTwist");
+	}
+
+	// Automodulator params (patched, Sound context)
+	else if (!strcmp(tagName, "globalAutomodMacro")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_AUTOMOD_DEPTH, readAutomationUpToPos);
+		reader.exitTag("globalAutomodMacro");
+	}
+	else if (!strcmp(tagName, "globalAutomodFreq")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_AUTOMOD_FREQ, readAutomationUpToPos);
+		reader.exitTag("globalAutomodFreq");
+	}
+	else if (!strcmp(tagName, "globalAutomodManual")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_AUTOMOD_MANUAL, readAutomationUpToPos);
+		reader.exitTag("globalAutomodManual");
+	}
+
+	// Scatter params (patched, Sound context)
+	else if (!strcmp(tagName, "globalScatterZoneA")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_SCATTER_ZONE_A, readAutomationUpToPos);
+		reader.exitTag("globalScatterZoneA");
+	}
+	else if (!strcmp(tagName, "globalScatterZoneB")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_SCATTER_ZONE_B, readAutomationUpToPos);
+		reader.exitTag("globalScatterZoneB");
+	}
+	else if (!strcmp(tagName, "globalScatterDepth")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_SCATTER_MACRO_CONFIG,
+		                         readAutomationUpToPos);
+		reader.exitTag("globalScatterDepth");
+	}
+	else if (!strcmp(tagName, "globalScatterMacro")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_SCATTER_MACRO, readAutomationUpToPos);
+		reader.exitTag("globalScatterMacro");
+	}
+	else if (!strcmp(tagName, "globalScatterPWrite")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_SCATTER_PWRITE, readAutomationUpToPos);
+		reader.exitTag("globalScatterPWrite");
+	}
+	else if (!strcmp(tagName, "globalScatterDensity")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_SCATTER_DENSITY, readAutomationUpToPos);
+		reader.exitTag("globalScatterDensity");
+	}
+
 	else if (ModControllableAudio::readParamTagFromFile(reader, tagName, paramManager, readAutomationUpToPos)) {}
 
 	else {
@@ -4121,6 +4291,46 @@ void Sound::writeParamsToFile(Serializer& writer, ParamManager* paramManager, bo
 	patchedParams->writeParamAsAttribute(writer, "hpfMorph", params::LOCAL_HPF_MORPH, writeAutomation);
 
 	patchedParams->writeParamAsAttribute(writer, "waveFold", params::LOCAL_FOLD, writeAutomation);
+
+	// Shaper params (patched, Sound context)
+	patchedParams->writeParamAsAttribute(writer, "tableShaperDrive", params::LOCAL_TABLE_SHAPER_DRIVE, writeAutomation,
+	                                     true);
+	patchedParams->writeParamAsAttribute(writer, "tableShaperMix", params::LOCAL_TABLE_SHAPER_MIX, writeAutomation,
+	                                     true);
+	patchedParams->writeParamAsAttribute(writer, "sineShaperDrive", params::LOCAL_SINE_SHAPER_DRIVE, writeAutomation,
+	                                     true);
+	patchedParams->writeParamAsAttribute(writer, "sineShaperTwist", params::LOCAL_SINE_SHAPER_TWIST, writeAutomation,
+	                                     true);
+	patchedParams->writeParamAsAttribute(writer, "patchedSineShaperHarmonic", params::LOCAL_SINE_SHAPER_HARMONIC,
+	                                     writeAutomation, true);
+
+	// Disperser params (patched, Sound context)
+	patchedParams->writeParamAsAttribute(writer, "globalDisperserTopo", params::GLOBAL_DISPERSER_TOPO, writeAutomation,
+	                                     true);
+	patchedParams->writeParamAsAttribute(writer, "globalDisperserTwist", params::GLOBAL_DISPERSER_TWIST,
+	                                     writeAutomation, true);
+
+	// Automodulator params (patched, Sound context)
+	patchedParams->writeParamAsAttribute(writer, "globalAutomodMacro", params::GLOBAL_AUTOMOD_DEPTH, writeAutomation,
+	                                     true);
+	patchedParams->writeParamAsAttribute(writer, "globalAutomodFreq", params::GLOBAL_AUTOMOD_FREQ, writeAutomation,
+	                                     true);
+	patchedParams->writeParamAsAttribute(writer, "globalAutomodManual", params::GLOBAL_AUTOMOD_MANUAL, writeAutomation,
+	                                     true);
+
+	// Scatter params (patched, Sound context)
+	patchedParams->writeParamAsAttribute(writer, "globalScatterZoneA", params::GLOBAL_SCATTER_ZONE_A, writeAutomation,
+	                                     true);
+	patchedParams->writeParamAsAttribute(writer, "globalScatterZoneB", params::GLOBAL_SCATTER_ZONE_B, writeAutomation,
+	                                     true);
+	patchedParams->writeParamAsAttribute(writer, "globalScatterDepth", params::GLOBAL_SCATTER_MACRO_CONFIG,
+	                                     writeAutomation, true);
+	patchedParams->writeParamAsAttribute(writer, "globalScatterMacro", params::GLOBAL_SCATTER_MACRO, writeAutomation,
+	                                     true);
+	patchedParams->writeParamAsAttribute(writer, "globalScatterPWrite", params::GLOBAL_SCATTER_PWRITE, writeAutomation,
+	                                     true);
+	patchedParams->writeParamAsAttribute(writer, "globalScatterDensity", params::GLOBAL_SCATTER_DENSITY,
+	                                     writeAutomation, true);
 
 	writer.writeOpeningTagEnd();
 

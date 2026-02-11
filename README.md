@@ -20,11 +20,11 @@ Highly experimental and for most users, not a replacement for the main community
 ### Known limitations
 
 - **Horizontal menus must be enabled** - the UI for these effects requires horizontal menus to function properly. Future work will seek to decouple this requirement.
-- Disperser has high CPU usage with >8 stages
-- Sine shaper is moderately CPU hungry
+- Disperser (OWLPASS) has high CPU usage with >8 stages
+- Sine shaper (HOOT) is moderately CPU hungry
 - Other effects are fairly light
 
-### Features (vs Community 1.3)
+### Features (vs Main)
 
 | Feature | Description |
 |---------|-------------|
@@ -34,15 +34,14 @@ Highly experimental and for most users, not a replacement for the main community
 | **Retrospective Sampler** | Lookback buffer for capturing audio after the fact. Sources: Input, Master mix, or Focused Track. Duration modes: time-based (5/15/30/60 sec) or bar-synced (1/2/4 bars). Bar modes tag filenames with BPM. See [testing guide](docs/features/retrospective-sampler-testing.md). |
 | **Sine Shaper (HOOT)** | Harmonic waveshaping with drive, harmonic content, symmetry, and mix controls. Adds musical saturation and overtones. See [testing guide](docs/features/sine-shaper-testing.md). |
 | **Table Shaper (PELLET)** | XY wavetable-based waveshaper with smooth interpolation between shapes. See [testing guide](docs/features/table-shaper-testing.md). |
+| **Disperser (OWLPASS)** | Allpass cascade effect with zone-based topology. Available per-voice and in GlobalEffectable chain. High CPU usage with >8 stages. |
+| **Pulse Width Triangle** | New oscillator type (TrianglePW / TRPW). Triangle wave with dead-zone pulse width control — PW knob compresses the triangle into a narrower region with silence in the dead zone. Waveform visualization in pulse width menu. |
+| **Automodulator** | Automodulation effect with phi triangle routing and 4-point XY LFO wavetable. Available per-voice and in GlobalEffectable chain. |
+| **Phi Morph Oscillator** | Procedural oscillator generating waveforms from phi-triangle banks. Two zone knobs (A/B) each produce a distinct 8-segment waveform shape. Crossfade (Wave Position) morphs between them with morph excitation effects (amplitude overshoot, curvature boost, phase distortion). Waveform shaping via sine blend, odd symmetry, windowing, and slope matching. Per-sample modifiers: phase jitter, amplitude-dependent noise, asymmetric gain for even harmonics. Supports pulse width modulation. |
+| **Gate Sample Mode** | New sample repeat mode for drum kit rows. Notes act as mute/unmute gates — the sample loops for the duration of the note. If BPM is detected in the filename (e.g. `_120BPM` or bare `_120_`), the sample is tempo-synced and phase-locked so triggering mid-bar starts at the position it would have reached if playing since the downbeat. Without BPM in the filename the sample still gates normally, just without time-stretching or phase-lock. **Gate View Editor:** Press SCALE in kit mode to enter gate view (SCALE LED lights, "GATE" popup). Green pads = audible, red pads = muted. Tap to toggle. Hold first + tap second on same row to span-fill. Hold a green pad + twist vertical encoder to set per-segment attack (fade-in, 0-127), horizontal encoder for release (fade-out). Hold multiple green pads simultaneously to adjust all at once. Exponential time scaling: 0 = instant, ~64 = 50ms, ~96 = 400ms, 127 = ~2.4s. Values are saved per gate segment and serialized with the song. Also available for audio clips. |
+| **Plockable Sample Start Offset (positive or negative)** | Per-note start offset for samples, accessible via menu. In synced modes (GATE/STRETCH), offset is applied as a tick shift for phase-correct playback. |
+| **Gate View Editor:** | Press SCALE in kit mode to enter gate view (SCALE LED lights, "GATE" popup). Green pads = audible, red pads = muted. Tap to toggle. Hold first + tap second on same row to span-fill. Hold a green pad + twist vertical encoder to set per-segment attack (fade-in, 0-127), horizontal encoder for release (fade-out). Hold multiple green pads simultaneously to adjust all at once. Exponential time scaling: 0 = instant, ~64 = 50ms, ~96 = 400ms, 127 = ~2.4s. Values are saved per gate segment and serialized with the song. Also available for audio clips. |
 | **FX Benchmarking Framework** | Performance profiling tools for DSP development. |
-
-### Not Yet Ported
-
-| Feature | Status |
-|---------|--------|
-| Disperser (OWLPASS) | Pending - high CPU usage with >8 stages |
-| Pulse Width Triangle | Pending |
-| Automodulator | Shelved - stability issues during preset switching |
 
 ### For Developers
 

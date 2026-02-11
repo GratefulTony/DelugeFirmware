@@ -140,11 +140,17 @@ public:
 
 	int32_t lastNoteCode = std::numeric_limits<int32_t>::min();
 
+	[[nodiscard]] int32_t getLastNoteCode() const override { return lastNoteCode; }
+
 	bool oscillatorSync = false;
 
 	VoicePriority voicePriority = VoicePriority::MEDIUM;
 
 	bool skippingRendering = true;
+
+	bool gateOpen{true};    // Gate layer state for per-step muting. True = audible.
+	uint8_t gateAttack{0};  // Per-segment gate fade-in rate (0 = instant, 127 = slowest)
+	uint8_t gateRelease{0}; // Per-segment gate fade-out rate (0 = instant, 127 = slowest)
 
 	std::bitset<kNumExpressionDimensions> expressionSourcesChangedAtSynthLevel{0};
 

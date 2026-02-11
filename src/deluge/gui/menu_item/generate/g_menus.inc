@@ -73,11 +73,16 @@ sample::PitchSpeed sample0PitchSpeedMenu{STRING_FOR_PITCH_SPEED, 0};
 sample::Interpolation sample0InterpolationMenu{STRING_FOR_INTERPOLATION, STRING_FOR_SAMP_INTERP_MENU_TITLE, 0};
 sample::Start sample0StartMenu{STRING_FOR_START_POINT, 0};
 sample::End sample0EndMenu{STRING_FOR_END_POINT, 0};
-std::array<MenuItem*, 14> child6 = {
+sample::StartOffset sample0StartOffsetMenu{STRING_FOR_START_OFFSET, 0};
+osc::PhiMorphZone osc0PhiZoneAMenu{STRING_FOR_PHI_ZONE_A, STRING_FOR_OSC_PHI_ZONE_A_MENU_TITLE, 0, 0};
+osc::PhiMorphZone osc0PhiZoneBMenu{STRING_FOR_PHI_ZONE_B, STRING_FOR_OSC_PHI_ZONE_B_MENU_TITLE, 0, 1};
+std::array<MenuItem*, 17> child6 = {
     &osc0TypeMenu,
     &deluge::gui::menu_item::file0SelectorMenu,
-    &source0TransposeMenu,
+    &osc0PhiZoneAMenu,
     &source0WaveIndexMenu,
+    &osc0PhiZoneBMenu,
+    &source0TransposeMenu,
     &osc0PulseWidthMenu,
     &source0FeedbackMenu,
     &osc0PhaseMenu,
@@ -88,6 +93,7 @@ std::array<MenuItem*, 14> child6 = {
     &sample0InterpolationMenu,
     &sample0StartMenu,
     &sample0EndMenu,
+    &sample0StartOffsetMenu,
 };
 submenu::ActualSource source0Menu{STRING_FOR_OSCILLATOR_1, child6, 0};
 osc::Type osc1TypeMenu{STRING_FOR_TYPE, STRING_FOR_OSC_TYPE_MENU_TITLE, 1};
@@ -104,11 +110,16 @@ sample::PitchSpeed sample1PitchSpeedMenu{STRING_FOR_PITCH_SPEED, 1};
 sample::Interpolation sample1InterpolationMenu{STRING_FOR_INTERPOLATION, STRING_FOR_SAMP_INTERP_MENU_TITLE, 1};
 sample::Start sample1StartMenu{STRING_FOR_START_POINT, 1};
 sample::End sample1EndMenu{STRING_FOR_END_POINT, 1};
-std::array<MenuItem*, 14> child7 = {
+sample::StartOffset sample1StartOffsetMenu{STRING_FOR_START_OFFSET, 1};
+osc::PhiMorphZone osc1PhiZoneAMenu{STRING_FOR_PHI_ZONE_A, STRING_FOR_OSC_PHI_ZONE_A_MENU_TITLE, 1, 0};
+osc::PhiMorphZone osc1PhiZoneBMenu{STRING_FOR_PHI_ZONE_B, STRING_FOR_OSC_PHI_ZONE_B_MENU_TITLE, 1, 1};
+std::array<MenuItem*, 17> child7 = {
     &osc1TypeMenu,
     &deluge::gui::menu_item::file1SelectorMenu,
-    &source1TransposeMenu,
+    &osc1PhiZoneAMenu,
     &source1WaveIndexMenu,
+    &osc1PhiZoneBMenu,
+    &source1TransposeMenu,
     &osc1PulseWidthMenu,
     &source1FeedbackMenu,
     &osc1PhaseMenu,
@@ -119,6 +130,7 @@ std::array<MenuItem*, 14> child7 = {
     &sample1InterpolationMenu,
     &sample1StartMenu,
     &sample1EndMenu,
+    &sample1StartOffsetMenu,
 };
 submenu::ActualSource source1Menu{STRING_FOR_OSCILLATOR_2, child7, 1};
 modulator::Transpose modulator0TransposeMenu{STRING_FOR_TRANSPOSE, STRING_FOR_FM_MOD_TRAN_MENU_TITLE, params::LOCAL_MODULATOR_0_PITCH_ADJUST, 0};

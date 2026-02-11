@@ -383,11 +383,13 @@ enum class MIDIFollowFeedbackAutomationMode : uint8_t {
 enum class OscType : uint8_t {
 	SINE,
 	TRIANGLE,
+	TRIANGLE_PW, // Triangle with pulse width (dead zones / truncation)
 	SQUARE,
 	ANALOG_SQUARE,
 	SAW,
 	ANALOG_SAW_2,
 	WAVETABLE,
+	PHI_MORPH,
 	SAMPLE,
 	DX7,
 	INPUT_L,
@@ -395,7 +397,7 @@ enum class OscType : uint8_t {
 	INPUT_STEREO,
 };
 
-constexpr OscType kLastRingmoddableOscType = OscType::WAVETABLE;
+constexpr OscType kLastRingmoddableOscType = OscType::PHI_MORPH;
 constexpr int32_t kNumOscTypesRingModdable = util::to_underlying(kLastRingmoddableOscType) + 1;
 constexpr int32_t kNumOscTypes = util::to_underlying(OscType::INPUT_STEREO) + 1;
 

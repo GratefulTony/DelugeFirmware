@@ -153,12 +153,17 @@ enum Global : ParamType {
 
 	// Global zone params begin (patcher outputs cables only, DSP combines with preset)
 	FIRST_GLOBAL_ZONE = FIRST_GLOBAL_HYBRID,
-	GLOBAL_SCATTER_MACRO = FIRST_GLOBAL_ZONE, // Scatter macro control (zone param for cable-only output)
-	GLOBAL_SCATTER_PWRITE,                    // Scatter buffer write probability
-	GLOBAL_SCATTER_DENSITY,                   // Scatter grain density (dry/wet)
-	GLOBAL_SCATTER_ZONE_A,                    // Scatter structural zone
-	GLOBAL_SCATTER_ZONE_B,                    // Scatter timbral zone
-	GLOBAL_SCATTER_MACRO_CONFIG,              // Scatter effect depth
+	GLOBAL_DISPERSER_TOPO = FIRST_GLOBAL_ZONE, // Disperser topology zone (clips to boundaries)
+	GLOBAL_DISPERSER_TWIST,                    // Disperser character zone (allows cross-zone)
+	GLOBAL_SCATTER_MACRO,                      // Scatter macro control (zone param for cable-only output)
+	GLOBAL_SCATTER_PWRITE,                     // Scatter buffer write probability
+	GLOBAL_SCATTER_DENSITY,                    // Scatter grain density (dry/wet)
+	GLOBAL_SCATTER_ZONE_A,                     // Scatter structural zone
+	GLOBAL_SCATTER_ZONE_B,                     // Scatter timbral zone
+	GLOBAL_SCATTER_MACRO_CONFIG,               // Scatter effect depth
+	GLOBAL_AUTOMOD_DEPTH,                      // Automodulator modulation depth
+	GLOBAL_AUTOMOD_FREQ,                       // Automodulator filter frequency offset (bipolar)
+	GLOBAL_AUTOMOD_MANUAL,                     // Automodulator manual LFO offset (bipolar)
 
 	// Global exp params begin
 	FIRST_GLOBAL_EXP,
@@ -221,6 +226,13 @@ enum UnpatchedShared : ParamType {
 	UNPATCHED_SINE_SHAPER_TWIST,
 	UNPATCHED_TABLE_SHAPER_DRIVE,
 	UNPATCHED_TABLE_SHAPER_MIX,
+	// Disperser zone controls
+	UNPATCHED_DISPERSER_TOPO,
+	UNPATCHED_DISPERSER_TWIST,
+	// Automodulator controls
+	UNPATCHED_AUTOMOD_DEPTH,
+	UNPATCHED_AUTOMOD_FREQ,
+	UNPATCHED_AUTOMOD_MANUAL,
 	// Scatter controls
 	UNPATCHED_SCATTER_ZONE_A,
 	UNPATCHED_SCATTER_ZONE_B,
@@ -253,6 +265,8 @@ enum UnpatchedShared : ParamType {
 /// Unpatched params which are only used for Sounds
 enum UnpatchedSound : ParamType {
 	UNPATCHED_PORTAMENTO = UNPATCHED_NUM_SHARED,
+	UNPATCHED_SAMPLE_START_OFFSET_A,
+	UNPATCHED_SAMPLE_START_OFFSET_B,
 	UNPATCHED_SOUND_MAX_NUM,
 };
 
@@ -353,7 +367,7 @@ const uint32_t patchedParamShortcuts[kDisplayWidth][kDisplayHeight] = {
     {kNoParamID              , kNoParamID                    , kNoParamID                    , kNoParamID             , kNoParamID     , kNoParamID                , kNoParamID            , LOCAL_FOLD},
     {LOCAL_ENV_0_RELEASE     , LOCAL_ENV_0_SUSTAIN           , LOCAL_ENV_0_DECAY             , LOCAL_ENV_0_ATTACK     , LOCAL_LPF_MORPH, kNoParamID                , LOCAL_LPF_RESONANCE   , LOCAL_LPF_FREQ},
     {LOCAL_ENV_1_RELEASE     , LOCAL_ENV_1_SUSTAIN           , LOCAL_ENV_1_DECAY             , LOCAL_ENV_1_ATTACK     , LOCAL_HPF_MORPH, kNoParamID                , LOCAL_HPF_RESONANCE   , LOCAL_HPF_FREQ},
-    {kNoParamID              , kNoParamID                    , kNoParamID					 , kNoParamID             , kNoParamID     , kNoParamID                , kNoParamID            , kNoParamID},
+    {kNoParamID              , kNoParamID                    , kNoParamID                    , kNoParamID             , kNoParamID     , kNoParamID                , kNoParamID            , kNoParamID},
     {GLOBAL_ARP_RATE         , kNoParamID                    , kNoParamID                    , kNoParamID             , kNoParamID     , kNoParamID                , kNoParamID            , kNoParamID},
     {GLOBAL_LFO_FREQ_1         , kNoParamID                    , kNoParamID                    , kNoParamID             , kNoParamID     , kNoParamID                , GLOBAL_MOD_FX_DEPTH   , GLOBAL_MOD_FX_RATE},
     {LOCAL_LFO_LOCAL_FREQ_1    , kNoParamID                    , kNoParamID                    , GLOBAL_REVERB_AMOUNT   , kNoParamID     , kNoParamID                , kNoParamID            , kNoParamID},
@@ -439,11 +453,14 @@ constexpr ZoneParamInfo getZoneParamInfo(ParamType paramId) {
 	switch (paramId) {
 	case LOCAL_SINE_SHAPER_HARMONIC:
 	case LOCAL_SINE_SHAPER_TWIST:
+	case GLOBAL_DISPERSER_TOPO:
+	case GLOBAL_DISPERSER_TWIST:
 	case GLOBAL_SCATTER_ZONE_A:
 	case GLOBAL_SCATTER_ZONE_B:
 	case GLOBAL_SCATTER_MACRO_CONFIG:
 		return {8, 1024}; // 8 zones, 1024 steps
 	case GLOBAL_SCATTER_MACRO:
+	case GLOBAL_AUTOMOD_DEPTH:
 		return {1, 128}; // Simple 0-127 range
 	default:
 		return {1, 128}; // Default non-zone param
@@ -455,11 +472,14 @@ constexpr ZoneParamInfo getZoneParamInfo(UnpatchedShared paramId) {
 	switch (paramId) {
 	case UNPATCHED_SINE_SHAPER_HARMONIC:
 	case UNPATCHED_SINE_SHAPER_TWIST:
+	case UNPATCHED_DISPERSER_TOPO:
+	case UNPATCHED_DISPERSER_TWIST:
 	case UNPATCHED_SCATTER_ZONE_A:
 	case UNPATCHED_SCATTER_ZONE_B:
 	case UNPATCHED_SCATTER_MACRO_CONFIG:
 		return {8, 1024}; // 8 zones, 1024 steps
 	case UNPATCHED_SCATTER_MACRO:
+	case UNPATCHED_AUTOMOD_DEPTH:
 		return {1, 128}; // Simple 0-127 range
 	case UNPATCHED_MB_COMPRESSOR_CHARACTER:
 	case UNPATCHED_MB_COMPRESSOR_VIBE:
@@ -482,6 +502,10 @@ constexpr int32_t getUnpatchedFallback(ParamType patchedId) {
 		return UNPATCHED_SINE_SHAPER_HARMONIC;
 	case LOCAL_SINE_SHAPER_TWIST:
 		return UNPATCHED_SINE_SHAPER_TWIST;
+	case GLOBAL_DISPERSER_TOPO:
+		return UNPATCHED_DISPERSER_TOPO;
+	case GLOBAL_DISPERSER_TWIST:
+		return UNPATCHED_DISPERSER_TWIST;
 	case GLOBAL_SCATTER_ZONE_A:
 		return UNPATCHED_SCATTER_ZONE_A;
 	case GLOBAL_SCATTER_ZONE_B:
@@ -494,6 +518,12 @@ constexpr int32_t getUnpatchedFallback(ParamType patchedId) {
 		return UNPATCHED_SCATTER_PWRITE;
 	case GLOBAL_SCATTER_DENSITY:
 		return UNPATCHED_SCATTER_DENSITY;
+	case GLOBAL_AUTOMOD_DEPTH:
+		return UNPATCHED_AUTOMOD_DEPTH;
+	case GLOBAL_AUTOMOD_FREQ:
+		return UNPATCHED_AUTOMOD_FREQ;
+	case GLOBAL_AUTOMOD_MANUAL:
+		return UNPATCHED_AUTOMOD_MANUAL;
 	default:
 		return -1; // No fallback
 	}

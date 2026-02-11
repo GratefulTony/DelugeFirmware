@@ -754,11 +754,17 @@ char const* oscTypeToString(OscType oscType) {
 	case OscType::TRIANGLE:
 		return "triangle";
 
+	case OscType::TRIANGLE_PW:
+		return "trianglePW";
+
 	case OscType::SAMPLE:
 		return "sample";
 
 	case OscType::WAVETABLE:
 		return "wavetable";
+
+	case OscType::PHI_MORPH:
+		return "phiMorph";
 
 	case OscType::INPUT_L:
 		return "inLeft";
@@ -794,11 +800,17 @@ OscType stringToOscType(char const* string) {
 	else if (!strcmp(string, "sine")) {
 		return OscType::SINE;
 	}
+	else if (!strcmp(string, "trianglePW")) {
+		return OscType::TRIANGLE_PW;
+	}
 	else if (!strcmp(string, "sample")) {
 		return OscType::SAMPLE;
 	}
 	else if (!strcmp(string, "wavetable")) {
 		return OscType::WAVETABLE;
+	}
+	else if (!strcmp(string, "phiMorph")) {
+		return OscType::PHI_MORPH;
 	}
 	else if (!strcmp(string, "inLeft")) {
 		return OscType::INPUT_L;
@@ -1504,6 +1516,7 @@ bool shouldDoPanning(int32_t panAmount, int32_t* amplitudeL, int32_t* amplitudeR
 uint32_t getOscInitialPhaseForZero(OscType waveType) {
 	switch (waveType) {
 	case OscType::TRIANGLE:
+	case OscType::TRIANGLE_PW:
 		return 1073741824;
 
 	default:

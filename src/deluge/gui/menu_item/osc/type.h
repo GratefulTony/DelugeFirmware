@@ -62,6 +62,7 @@ public:
 
 		    // Haven't actually really determined if this needs to be here - maybe not?
 		    OscType::WAVETABLE,
+		    OscType::PHI_MORPH,
 		};
 
 		if (util::one_of(oldValue, needs_unassignment) || util::one_of(newValue, needs_unassignment)) {
@@ -83,11 +84,13 @@ public:
 		deluge::vector options = {
 		    l10n::getView(STRING_FOR_SINE),          //<
 		    l10n::getView(STRING_FOR_TRIANGLE),      //<
+		    l10n::getView(STRING_FOR_TRIANGLE_PW),   //<
 		    l10n::getView(STRING_FOR_SQUARE),        //<
 		    l10n::getView(STRING_FOR_ANALOG_SQUARE), //<
 		    l10n::getView(STRING_FOR_SAW),           //<
 		    l10n::getView(STRING_FOR_ANALOG_SAW),    //<
 		    l10n::getView(STRING_FOR_WAVETABLE),     //<
+		    l10n::getView(STRING_FOR_PHI_MORPH),     //<
 		};
 
 		if (soundEditor.currentSound->getSynthMode() == SynthMode::RINGMOD) {
@@ -141,6 +144,7 @@ public:
 			case OscType::SINE:
 				return OLED::sineIcon;
 			case OscType::TRIANGLE:
+			case OscType::TRIANGLE_PW:
 				return OLED::triangleIcon;
 			case OscType::SQUARE:
 			case OscType::ANALOG_SQUARE:
@@ -156,6 +160,8 @@ public:
 				return AudioEngine::lineInPluggedIn ? OLED::inputIcon : OLED::micIcon;
 			case OscType::WAVETABLE:
 				return OLED::wavetableIcon;
+			case OscType::PHI_MORPH:
+				return OLED::phiMorphIcon;
 			default:
 				return OLED::sineIcon;
 			}
@@ -168,6 +174,12 @@ public:
 			constexpr int32_t y = OLED_MAIN_HEIGHT_PIXELS - kTextSpacingY - 8;
 			image.clearAreaExact(x - 1, y - 1, x + kTextSpacingX + 1, y + kTextSpacingY + 1);
 			image.drawChar('A', x, y, kTextSpacingX, kTextSpacingY);
+		}
+		else if (osc_type == OscType::TRIANGLE_PW) {
+			const int32_t x = slot.start_x + 4;
+			constexpr int32_t y = OLED_MAIN_HEIGHT_PIXELS - kTextSpacingY - 8;
+			image.clearAreaExact(x - 1, y - 1, x + kTextSpacingX + 1, y + kTextSpacingY + 1);
+			image.drawChar('P', x, y, kTextSpacingX, kTextSpacingY);
 		}
 	}
 

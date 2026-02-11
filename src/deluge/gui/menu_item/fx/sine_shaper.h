@@ -40,7 +40,7 @@ namespace deluge::gui::menu_item::fx {
 
 // Helpers for dual patched/unpatched param access (Sound vs GlobalEffectable contexts)
 inline q31_t getShapingParamValue(params::ParamType patched, params::ParamType unpatched) {
-	if (soundEditor.currentParamManager->containsAnyMainParamCollections()) {
+	if (soundEditor.currentParamManager->hasPatchedParamSet()) {
 		return soundEditor.currentParamManager->getPatchedParamSet()->getValue(patched);
 	}
 	return soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(unpatched);
@@ -49,7 +49,7 @@ inline q31_t getShapingParamValue(params::ParamType patched, params::ParamType u
 inline ModelStackWithAutoParam* getShapingModelStack(void* memory, params::ParamType patched,
                                                      params::ParamType unpatched) {
 	ModelStackWithThreeMainThings* modelStack = soundEditor.getCurrentModelStack(memory);
-	if (soundEditor.currentParamManager->containsAnyMainParamCollections()) {
+	if (soundEditor.currentParamManager->hasPatchedParamSet()) {
 		return modelStack->getPatchedAutoParamFromId(patched);
 	}
 	return modelStack->getUnpatchedAutoParamFromId(unpatched);
@@ -257,7 +257,7 @@ public:
 			float& phase = soundEditor.currentModControllable->sineShaper.twistPhaseOffset;
 			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 1.0f);
 			char buffer[16];
-			snprintf(buffer, sizeof(buffer), "T:%d", static_cast<int32_t>(phase));
+			snprintf(buffer, sizeof(buffer), "T:%d", static_cast<int32_t>(std::floor(effectivePhaseOffset())));
 			display->displayPopup(buffer);
 			renderUIsForOled();
 			suppressNotification_ = true;
@@ -314,7 +314,7 @@ private:
 
 	static inline char coord_buffer_[12] = {};
 	static void cacheCoordDisplay(float phase_offset, int32_t value) {
-		int32_t p = static_cast<int32_t>(phase_offset);
+		int32_t p = static_cast<int32_t>(std::floor(phase_offset));
 		int32_t z = value >> 7; // 0-1023 → 0-7 (zone index)
 		snprintf(coord_buffer_, sizeof(coord_buffer_), "%d:%d", p, z);
 	}

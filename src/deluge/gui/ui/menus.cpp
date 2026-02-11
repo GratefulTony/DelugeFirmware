@@ -25,6 +25,7 @@
 #include "gui/menu_item/audio_clip/reverse.h"
 #include "gui/menu_item/audio_clip/sample_marker_editor.h"
 #include "gui/menu_item/audio_clip/set_clip_length_equal_to_sample_length.h"
+#include "gui/menu_item/audio_clip/start_offset.h"
 #include "gui/menu_item/audio_clip/transpose.h"
 #include "gui/menu_item/audio_compressor/compressor_params.h"
 #include "gui/menu_item/audio_compressor/compressor_values.h"
@@ -75,7 +76,9 @@
 #include "gui/menu_item/filter_route.h"
 #include "gui/menu_item/firmware/version.h"
 #include "gui/menu_item/flash/status.h"
+#include "gui/menu_item/fx/automodulator.h"
 #include "gui/menu_item/fx/clipping.h"
+#include "gui/menu_item/fx/disperser.h"
 #include "gui/menu_item/fx/shaper.h"
 #include "gui/menu_item/fx/sine_shaper.h"
 #include "gui/menu_item/gate/mode.h"
@@ -136,6 +139,7 @@
 #include "gui/menu_item/note_row/iterance_step_toggle.h"
 #include "gui/menu_item/note_row/probability.h"
 #include "gui/menu_item/osc/audio_recorder.h"
+#include "gui/menu_item/osc/phi_morph_zone.h"
 #include "gui/menu_item/osc/pulse_width.h"
 #include "gui/menu_item/osc/retrigger_phase.h"
 #include "gui/menu_item/osc/source/feedback.h"
@@ -185,6 +189,7 @@
 #include "gui/menu_item/sample/repeat.h"
 #include "gui/menu_item/sample/reverse.h"
 #include "gui/menu_item/sample/start.h"
+#include "gui/menu_item/sample/start_offset.h"
 #include "gui/menu_item/sample/time_stretch.h"
 #include "gui/menu_item/sample/transpose.h"
 #include "gui/menu_item/sequence/direction.h"
@@ -737,10 +742,50 @@ HorizontalMenu tableShaperSubMenu{
     {&shaperDriveMenu, &shaperShapeXMenu, &shaperShapeYMenu, &shaperMixMenu},
 };
 
-// Shaping submenu - contains Sine Shaper and Table Shaper
+// Automodulator (auto-wah/filter/tremolo/comb)
+// Page 1: Freq, Rate, Manual, Mix
+fx::AutomodFreq automodFreqMenu{STRING_FOR_AUTOMOD_FREQ, STRING_FOR_AUTOMOD_FREQ, params::GLOBAL_AUTOMOD_FREQ};
+fx::AutomodRate automodRateMenu{STRING_FOR_AUTOMOD_RATE, STRING_FOR_AUTOMOD_RATE};
+fx::AutomodManual automodManualMenu{STRING_FOR_AUTOMOD_MANUAL, STRING_FOR_AUTOMOD_MANUAL,
+                                    params::GLOBAL_AUTOMOD_MANUAL};
+fx::AutomodMix automodMixMenu{STRING_FOR_AUTOMOD_MIX, STRING_FOR_AUTOMOD_MIX};
+// Page 2: Type, Flavor, Mod, Macro
+fx::AutomodType automodTypeMenu{STRING_FOR_AUTOMOD_TYPE, STRING_FOR_AUTOMOD_TYPE};
+fx::AutomodFlavor automodFlavorMenu{STRING_FOR_AUTOMOD_FLAVOR, STRING_FOR_AUTOMOD_FLAVOR};
+fx::AutomodMod automodModMenu{STRING_FOR_AUTOMOD_MOD, STRING_FOR_AUTOMOD_MOD};
+fx::AutomodDepth automodDepthMenu{STRING_FOR_AUTOMOD_DEPTH, STRING_FOR_AUTOMOD_DEPTH, params::GLOBAL_AUTOMOD_DEPTH};
+
+HorizontalMenu automodMenu{
+    STRING_FOR_AUTOMOD,
+    {
+        // Page 1: Zone controls
+        &automodTypeMenu,
+        &automodFlavorMenu,
+        &automodModMenu,
+        &automodMixMenu,
+        // Page 2: Core controls
+        &automodFreqMenu,
+        &automodRateMenu,
+        &automodManualMenu,
+        &automodDepthMenu,
+    },
+};
+
+// Disperser - allpass cascade with zone-based topology and character controls
+fx::DisperserFreq disperserFreqMenu{STRING_FOR_DISPERSER_FREQ};
+fx::DisperserTopo disperserTopoMenu{STRING_FOR_DISPERSER_TOPO};
+fx::DisperserTwist disperserTwistMenu{STRING_FOR_DISPERSER_TWIST};
+fx::DisperserStages disperserStagesMenu{STRING_FOR_DISPERSER_STAGES};
+
+HorizontalMenu disperserSubMenu{
+    STRING_FOR_DISPERSER_MENU,
+    {&disperserFreqMenu, &disperserTopoMenu, &disperserTwistMenu, &disperserStagesMenu},
+};
+
+// Shaping submenu - contains Sine Shaper, Table Shaper, Automodulator, and Disperser
 submenu::Shaping shapingMenu{
     STRING_FOR_SHAPING,
-    {&sineShaperSubMenu, &tableShaperSubMenu},
+    {&sineShaperSubMenu, &tableShaperSubMenu, &automodMenu, &disperserSubMenu},
 };
 
 // Output MIDI for sound drums --------------------------------------------------------------
@@ -1006,6 +1051,7 @@ audio_clip::Reverse audioClipReverseMenu{STRING_FOR_REVERSE};
 audio_clip::SampleMarkerEditor audioClipSampleMarkerEditorMenuStart{EMPTY_STRING, MarkerType::START};
 audio_clip::SampleMarkerEditor audioClipSampleMarkerEditorMenuEnd{STRING_FOR_WAVEFORM, MarkerType::END};
 AudioInterpolation audioClipInterpolationMenu{STRING_FOR_INTERPOLATION, STRING_FOR_AUDIO_INTERPOLATION};
+audio_clip::StartOffset audioClipStartOffsetMenu{STRING_FOR_START_OFFSET};
 
 HorizontalMenu audioClipSampleMenu{
     STRING_FOR_SAMPLE,
@@ -1016,6 +1062,7 @@ HorizontalMenu audioClipSampleMenu{
         &sample0PitchSpeedMenu,
         &audioClipSampleMarkerEditorMenuEnd,
         &audioClipInterpolationMenu,
+        &audioClipStartOffsetMenu,
     },
 };
 

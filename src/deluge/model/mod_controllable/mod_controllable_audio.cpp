@@ -105,10 +105,21 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	if (shaper.isEnabled()) {
 		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.gammaPhase, shaper.oscHarmonicWeight);
 	}
+	// Sine shaper state (copy params, invalidate cache to force recomputation)
+	sineShaper = other->sineShaper;
+	sineShaper.cachedZone = -1; // Invalidate cache
 	// Multiband compressor state
 	compressorMode = other->compressorMode;
 	multibandCompressor.setEnabledZone(other->multibandCompressor.getEnabledZone());
 	multibandCompressor.setCrossoverType(other->multibandCompressor.getCrossoverType());
+	// Automodulator params (does not copy comb buffers - they're lazy-allocated)
+	automod.cloneFrom(other->automod);
+	// Disperser state (copy user params, delay buffer is per-instance)
+	disperser.freq = other->disperser.freq;
+	disperser.topo = other->disperser.topo;
+	disperser.twist = other->disperser.twist;
+	disperser.phases = other->disperser.phases;
+	disperser.setStages(other->disperser.getStages());
 }
 
 void ModControllableAudio::initParams(ParamManager* paramManager) {
@@ -461,6 +472,20 @@ void ModControllableAudio::processSRRAndBitcrushing(std::span<StereoSample> buff
 	}
 }
 
+void ModControllableAudio::processDisperser(std::span<StereoSample> buffer, ParamManager* paramManager,
+                                            q31_t topoCables, q31_t twistCables) {
+	using namespace deluge::modulation::params;
+	if (!disperser.isEnabled()) {
+		return;
+	}
+
+	q31_t topoPreset = paramManager ? paramManager->getValueWithFallback(GLOBAL_DISPERSER_TOPO) : 0;
+	q31_t twistPreset = paramManager ? paramManager->getValueWithFallback(GLOBAL_DISPERSER_TWIST) : 0;
+
+	deluge::dsp::processDisperser(buffer, disperserDsp, disperser, topoPreset, topoCables, twistPreset, twistCables,
+	                              getLastNoteCode());
+}
+
 inline void ModControllableAudio::doEQ(bool doBass, bool doTreble, int32_t* inputL, int32_t* inputR, int32_t bassAmount,
                                        int32_t trebleAmount) {
 	int32_t trebleOnlyL;
@@ -505,6 +530,14 @@ void ModControllableAudio::writeAttributesToFile(Serializer& writer) {
 	}
 	// Table shaper state (only writes non-default values)
 	shaper.writeToFile(writer);
+	// Disperser state
+	disperser.writeToFile(writer);
+	// Sine shaper state
+	sineShaper.writeToFile(writer);
+	// Automodulator state
+	automod.writeToFile(writer);
+	// Multiband compressor state
+	multibandCompressor.writeToFile(writer);
 }
 
 void ModControllableAudio::writeTagsToFile(Serializer& writer) {
@@ -630,6 +663,81 @@ void ModControllableAudio::writeParamAttributesToFile(Serializer& writer, ParamM
 	unpatchedParams->writeParamAsAttribute(writer, "compressorThreshold", params::UNPATCHED_COMPRESSOR_THRESHOLD,
 	                                       writeAutomation, false, valuesForOverride);
 
+	// Multiband compressor params
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorCharacter", params::UNPATCHED_MB_COMPRESSOR_CHARACTER,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorLowCrossover",
+	                                       params::UNPATCHED_MB_COMPRESSOR_LOW_CROSSOVER, writeAutomation, true,
+	                                       valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorHighCrossover",
+	                                       params::UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER, writeAutomation, true,
+	                                       valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorThreshold", params::UNPATCHED_MB_COMPRESSOR_THRESHOLD,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorRatio", params::UNPATCHED_MB_COMPRESSOR_RATIO,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorAttack", params::UNPATCHED_MB_COMPRESSOR_ATTACK,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorRelease", params::UNPATCHED_MB_COMPRESSOR_RELEASE,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorSkew", params::UNPATCHED_MB_COMPRESSOR_SKEW,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorLowLevel", params::UNPATCHED_MB_COMPRESSOR_LOW_LEVEL,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorMidLevel", params::UNPATCHED_MB_COMPRESSOR_MID_LEVEL,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorHighLevel", params::UNPATCHED_MB_COMPRESSOR_HIGH_LEVEL,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorOutputGain",
+	                                       params::UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN, writeAutomation, true,
+	                                       valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorVibe", params::UNPATCHED_MB_COMPRESSOR_VIBE,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "mbCompressorBlend", params::UNPATCHED_MB_COMPRESSOR_BLEND,
+	                                       writeAutomation, true, valuesForOverride);
+
+	// Sine shaper params (clip/global context)
+	unpatchedParams->writeParamAsAttribute(writer, "clipSineShaperDrive", params::UNPATCHED_SINE_SHAPER_DRIVE,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "clipSineShaperHarmonic", params::UNPATCHED_SINE_SHAPER_HARMONIC,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "clipSineShaperSymmetry", params::UNPATCHED_SINE_SHAPER_TWIST,
+	                                       writeAutomation, true, valuesForOverride);
+
+	// Table shaper params (clip/global context)
+	unpatchedParams->writeParamAsAttribute(writer, "clipTableShaperDrive", params::UNPATCHED_TABLE_SHAPER_DRIVE,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "clipTableShaperMix", params::UNPATCHED_TABLE_SHAPER_MIX,
+	                                       writeAutomation, true, valuesForOverride);
+
+	// Disperser params
+	unpatchedParams->writeParamAsAttribute(writer, "disperserTopo", params::UNPATCHED_DISPERSER_TOPO, writeAutomation,
+	                                       true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "disperserTwist", params::UNPATCHED_DISPERSER_TWIST, writeAutomation,
+	                                       true, valuesForOverride);
+
+	// Automodulator params
+	unpatchedParams->writeParamAsAttribute(writer, "clipAutomodMacro", params::UNPATCHED_AUTOMOD_DEPTH, writeAutomation,
+	                                       true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "clipAutomodFreq", params::UNPATCHED_AUTOMOD_FREQ, writeAutomation,
+	                                       true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "clipAutomodManual", params::UNPATCHED_AUTOMOD_MANUAL,
+	                                       writeAutomation, true, valuesForOverride);
+
+	// Scatter params
+	unpatchedParams->writeParamAsAttribute(writer, "scatterZoneA", params::UNPATCHED_SCATTER_ZONE_A, writeAutomation,
+	                                       true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "scatterZoneB", params::UNPATCHED_SCATTER_ZONE_B, writeAutomation,
+	                                       true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "scatterDepth", params::UNPATCHED_SCATTER_MACRO_CONFIG,
+	                                       writeAutomation, true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "scatterMacro", params::UNPATCHED_SCATTER_MACRO, writeAutomation,
+	                                       true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "scatterPWrite", params::UNPATCHED_SCATTER_PWRITE, writeAutomation,
+	                                       true, valuesForOverride);
+	unpatchedParams->writeParamAsAttribute(writer, "scatterDensity", params::UNPATCHED_SCATTER_DENSITY, writeAutomation,
+	                                       true, valuesForOverride);
+
 	unpatchedParams->writeParamAsAttribute(writer, "arpeggiatorGate", params::UNPATCHED_ARP_GATE, writeAutomation);
 	unpatchedParams->writeParamAsAttribute(writer, "noteProbability", params::UNPATCHED_NOTE_PROBABILITY,
 	                                       writeAutomation);
@@ -740,6 +848,168 @@ bool ModControllableAudio::readParamTagFromFile(Deserializer& reader, char const
 		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_COMPRESSOR_THRESHOLD,
 		                           readAutomationUpToPos);
 		reader.exitTag("compressorThreshold");
+	}
+
+	// Multiband compressor params
+	else if (!strcmp(tagName, "mbCompressorCharacter")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_CHARACTER,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorCharacter");
+	}
+	else if (!strcmp(tagName, "mbCompressorLowCrossover")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_LOW_CROSSOVER,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorLowCrossover");
+	}
+	else if (!strcmp(tagName, "mbCompressorHighCrossover")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_HIGH_CROSSOVER,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorHighCrossover");
+	}
+	else if (!strcmp(tagName, "mbCompressorThreshold")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_THRESHOLD,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorThreshold");
+	}
+	else if (!strcmp(tagName, "mbCompressorRatio")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_RATIO,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorRatio");
+	}
+	else if (!strcmp(tagName, "mbCompressorAttack")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_ATTACK,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorAttack");
+	}
+	else if (!strcmp(tagName, "mbCompressorRelease")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_RELEASE,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorRelease");
+	}
+	else if (!strcmp(tagName, "mbCompressorSkew")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_SKEW,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorSkew");
+	}
+	else if (!strcmp(tagName, "mbCompressorLowLevel")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_LOW_LEVEL,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorLowLevel");
+	}
+	else if (!strcmp(tagName, "mbCompressorMidLevel")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_MID_LEVEL,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorMidLevel");
+	}
+	else if (!strcmp(tagName, "mbCompressorHighLevel")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_HIGH_LEVEL,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorHighLevel");
+	}
+	else if (!strcmp(tagName, "mbCompressorOutputGain")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_OUTPUT_GAIN,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorOutputGain");
+	}
+	else if (!strcmp(tagName, "mbCompressorVibe")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_VIBE,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorVibe");
+	}
+	else if (!strcmp(tagName, "mbCompressorBlend")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_MB_COMPRESSOR_BLEND,
+		                           readAutomationUpToPos);
+		reader.exitTag("mbCompressorBlend");
+	}
+
+	// Sine shaper params (clip/global context)
+	else if (!strcmp(tagName, "clipSineShaperDrive")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_SINE_SHAPER_DRIVE,
+		                           readAutomationUpToPos);
+		reader.exitTag("clipSineShaperDrive");
+	}
+	else if (!strcmp(tagName, "clipSineShaperHarmonic")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_SINE_SHAPER_HARMONIC,
+		                           readAutomationUpToPos);
+		reader.exitTag("clipSineShaperHarmonic");
+	}
+	else if (!strcmp(tagName, "clipSineShaperSymmetry")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_SINE_SHAPER_TWIST,
+		                           readAutomationUpToPos);
+		reader.exitTag("clipSineShaperSymmetry");
+	}
+
+	// Table shaper params (clip/global context)
+	else if (!strcmp(tagName, "clipTableShaperDrive")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_TABLE_SHAPER_DRIVE,
+		                           readAutomationUpToPos);
+		reader.exitTag("clipTableShaperDrive");
+	}
+	else if (!strcmp(tagName, "clipTableShaperMix")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_TABLE_SHAPER_MIX,
+		                           readAutomationUpToPos);
+		reader.exitTag("clipTableShaperMix");
+	}
+
+	// Disperser params
+	else if (!strcmp(tagName, "disperserTopo")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_DISPERSER_TOPO,
+		                           readAutomationUpToPos);
+		reader.exitTag("disperserTopo");
+	}
+	else if (!strcmp(tagName, "disperserTwist")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_DISPERSER_TWIST,
+		                           readAutomationUpToPos);
+		reader.exitTag("disperserTwist");
+	}
+
+	// Automodulator params
+	else if (!strcmp(tagName, "clipAutomodMacro")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_AUTOMOD_DEPTH,
+		                           readAutomationUpToPos);
+		reader.exitTag("clipAutomodMacro");
+	}
+	else if (!strcmp(tagName, "clipAutomodFreq")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_AUTOMOD_FREQ,
+		                           readAutomationUpToPos);
+		reader.exitTag("clipAutomodFreq");
+	}
+	else if (!strcmp(tagName, "clipAutomodManual")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_AUTOMOD_MANUAL,
+		                           readAutomationUpToPos);
+		reader.exitTag("clipAutomodManual");
+	}
+
+	// Scatter params
+	else if (!strcmp(tagName, "scatterZoneA")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_SCATTER_ZONE_A,
+		                           readAutomationUpToPos);
+		reader.exitTag("scatterZoneA");
+	}
+	else if (!strcmp(tagName, "scatterZoneB")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_SCATTER_ZONE_B,
+		                           readAutomationUpToPos);
+		reader.exitTag("scatterZoneB");
+	}
+	else if (!strcmp(tagName, "scatterDepth")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_SCATTER_MACRO_CONFIG,
+		                           readAutomationUpToPos);
+		reader.exitTag("scatterDepth");
+	}
+	else if (!strcmp(tagName, "scatterMacro")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_SCATTER_MACRO,
+		                           readAutomationUpToPos);
+		reader.exitTag("scatterMacro");
+	}
+	else if (!strcmp(tagName, "scatterPWrite")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_SCATTER_PWRITE,
+		                           readAutomationUpToPos);
+		reader.exitTag("scatterPWrite");
+	}
+	else if (!strcmp(tagName, "scatterDensity")) {
+		unpatchedParams->readParam(reader, unpatchedParamsSummary, params::UNPATCHED_SCATTER_DENSITY,
+		                           readAutomationUpToPos);
+		reader.exitTag("scatterDensity");
 	}
 
 	// Arpeggiator stuff
@@ -870,6 +1140,26 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 		if (shaper.isEnabled()) {
 			shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.gammaPhase, shaper.oscHarmonicWeight);
 		}
+	}
+
+	// Disperser state
+	else if (disperser.readTag(reader, tagName)) {
+		// Reading handled internally
+	}
+
+	// Sine shaper state
+	else if (sineShaper.readTag(reader, tagName)) {
+		// Reading handled internally
+	}
+
+	// Automodulator state
+	else if (automod.readTag(reader, tagName)) {
+		// Reading handled internally
+	}
+
+	// Multiband compressor state
+	else if (multibandCompressor.readTag(reader, tagName)) {
+		// Reading handled internally
 	}
 
 	// Arpeggiator
@@ -1852,6 +2142,11 @@ char const* ModControllableAudio::getHPFModeDisplayName() {
 // This can get called either for hibernation, or because drum now has no active noteRow
 void ModControllableAudio::wontBeRenderedForAWhile() {
 	delay.discardBuffers();
+	// Deallocate disperser delay buffers on hibernation to reclaim ~70KB SDRAM
+	if (disperser.isEnabled()) {
+		disperserDsp.reset();
+		disperser.delay.deallocate();
+	}
 	// Don't end latched scatter - it should keep playing when you switch tracks
 	// But release our ownership so the sound can stop rendering (new source can adopt)
 	if (stutterer.isLatched() && stutterer.isStuttering(this)) {
