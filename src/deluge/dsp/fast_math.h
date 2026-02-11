@@ -105,31 +105,9 @@ namespace deluge::dsp {
 }
 
 /// Fast pow(2, x) for frequency calculations.
-/// Uses IEEE 754 bit construction + polynomial, ~20-bit accuracy.
+/// Uses fastExp internally.
 [[gnu::always_inline]] inline float fastPow2(float x) {
-	float xi = std::floor(x);
-	float xf = x - xi;
-	// 2^f for f in [0,1): cubic minimax polynomial
-	float p = 1.0f + xf * (0.6930370f + xf * (0.2402264f + xf * 0.0520244f));
-	union {
-		float f;
-		uint32_t i;
-	} u;
-	u.i = static_cast<uint32_t>(static_cast<int32_t>(xi) + 127) << 23;
-	return u.f * p;
-}
-
-/// Fast log2(x) using IEEE 754 bit extraction + polynomial, ~20-bit accuracy.
-/// Valid for x > 0.
-[[gnu::always_inline]] inline float fastLog2(float x) {
-	union {
-		float f;
-		uint32_t i;
-	} u = {x};
-	float e = static_cast<float>(static_cast<int32_t>(u.i >> 23) - 127);
-	u.i = (u.i & 0x007FFFFFu) | 0x3F800000u; // mantissa in [1,2)
-	float m = u.f;
-	return e + (-0.3358287811f + m * (2.0f - 0.6642f * m));
+	return fastExp(x * 0.6931472f); // x * ln(2)
 }
 
 /// Fast tanh(x) using rational polynomial approximation.
