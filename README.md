@@ -2,7 +2,20 @@
 
 This is **owlet-firmware**, a personal fork of the Deluge Community Firmware maintained at [owlet-labs/DelugeFirmware](https://github.com/owlet-labs/DelugeFirmware). It serves as a playground for experimental sound design features that may be too specialized or CPU-intensive for the main community branch.
 
-This branch is based on **Community 1.3** for stability.
+This branch is based on **main** for stability.
+
+### Rationale/use case
+Most of the features in this branch are built to support my personal use case for the deluge:
+- A portable inspiration station/sound design machine and companion for external gear (useful effects added and lookback sampler make sampling external gear into loops and resampling very easy.)
+- Inspiring moreso than granular control over complex effects.
+- Less focus on raw voice count more focus on inspiring sound design and related workflow
+- This being said effects are designed to have minimal footprint when disabled except for binary size. i.e. dont allocate memory dont consume cpu when switched off. With everything "off" the baseline perf/voice count etc. should be ideally close to that of the normal deluge firmware.
+
+### Status
+Highly experimental and for most users, not a replacement for the main community firmware. Folks interested are encouraged to experiment, but we recommend backing up sd cards just in case. 
+
+- owlet-firmware-1.3 is the default branch and has a stable baseline.
+- dev branch is where new work happens. https://github.com/owlet-labs/DelugeFirmware/blob/dev/README.md
 
 ### Known limitations
 
