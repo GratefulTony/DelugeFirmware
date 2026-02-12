@@ -32,5 +32,8 @@ FilterMode stringToLPFType(char const* string) {
 	return deluge::dsp::filter::filterMap(string);
 }
 char const* lpfTypeToString(FilterMode mode) {
+	if (mode >= FilterMode::OFF) {
+		return "off";
+	}
 	return deluge::dsp::filter::filterMap(mode);
 }
