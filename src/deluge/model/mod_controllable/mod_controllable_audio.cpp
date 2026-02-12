@@ -2428,5 +2428,7 @@ bool ModControllableAudio::enableGrain() {
 	return false;
 }
 void ModControllableAudio::disableGrain() {
-	grainFX->startSkippingRendering();
+	if (grainFX) {
+		grainFX->startSkippingRendering();
+	}
 }
