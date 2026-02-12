@@ -192,7 +192,7 @@ public:
 			// Each increment = 1 full Y range (1024 steps) worth of phase rotation
 			Buttons::selectButtonPressUsedUp = true;
 			float& gammaPhase = soundEditor.currentModControllable->shaper.gammaPhase;
-			gammaPhase = std::max(0.0f, gammaPhase + static_cast<float>(velocity_.getScaledOffset(offset)) * 1.0f);
+			gammaPhase = std::max(0.0f, gammaPhase + static_cast<float>(offset));
 			// Regenerate table with new gammaPhase
 			auto* mca = soundEditor.currentModControllable;
 			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, gammaPhase,
@@ -200,7 +200,7 @@ public:
 			shaper_regen::scheduleRegeneration(mca);
 			// Show current value on display
 			char buffer[16];
-			snprintf(buffer, sizeof(buffer), "G:%d", static_cast<int32_t>(gammaPhase * 10.0f));
+			snprintf(buffer, sizeof(buffer), "G:%d", static_cast<int32_t>(gammaPhase));
 			display->displayPopup(buffer);
 			suppressNotification_ = true;
 		}
