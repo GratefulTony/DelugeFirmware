@@ -73,6 +73,8 @@
 #include <numeric>
 #include <ranges>
 
+extern "C" void routineForSD(void);
+
 namespace params = deluge::modulation::params;
 
 #if AUTOMATED_TESTER_ENABLED
@@ -199,6 +201,10 @@ StereoSample* renderingBufferOutputEnd = renderingMemory.begin();
 
 int32_t masterVolumeAdjustmentL;
 int32_t masterVolumeAdjustmentR;
+
+std::atomic<bool> muteForSave{false};
+int32_t saveRampValue = ONE_Q31;
+constexpr int32_t kSaveRampStep = ONE_Q31 / 64; // ~1.5ms fade at 44.1kHz
 
 bool doMonitoring;
 MonitoringAction monitoringAction;
@@ -396,6 +402,25 @@ void runRoutine() {
 	else {
 		ignoreForStats();
 		routine();
+	}
+}
+
+void waitForMuteFadeOut() {
+	muteForSave.store(true, std::memory_order_release);
+
+	if (audioRoutineLocked) {
+		// Bar-sync save path: we're already inside routine(), so routineForSD() can't
+		// re-enter the audio routine and the mute ramp in doSomeOutputting() can't run.
+		// Directly clear the I2S DMA buffer with codec-friendly silence (alternating 0/1).
+		clearTxBuffer();
+		saveRampValue = 0;
+	}
+	else {
+		// Immediate save path: fade out smoothly through the audio routine.
+		// Need ~64 samples for the ramp, then >=128 more to fill the DMA buffer.
+		for (int32_t i = 0; i < 384; i++) {
+			routineForSD();
+		}
 	}
 }
 
@@ -1180,6 +1205,22 @@ bool doSomeOutputting() {
 			}
 		}
 
+		// Apply save mute ramp (smooth fade for retro sampler save)
+		{
+			bool muting = muteForSave.load(std::memory_order_relaxed);
+			if (muting && saveRampValue > 0) {
+				saveRampValue = (saveRampValue > kSaveRampStep) ? saveRampValue - kSaveRampStep : 0;
+			}
+			else if (!muting && saveRampValue < ONE_Q31) {
+				// Guard against signed overflow: check before adding
+				saveRampValue = (saveRampValue < ONE_Q31 - kSaveRampStep) ? saveRampValue + kSaveRampStep : ONE_Q31;
+			}
+			if (saveRampValue < ONE_Q31) {
+				lAdjusted = multiply_32x32_rshift32(lAdjusted, saveRampValue) << 1;
+				rAdjusted = multiply_32x32_rshift32(rAdjusted, saveRampValue) << 1;
+			}
+		}
+
 #if HARDWARE_TEST_MODE
 		// Send a square wave if anything pressed
 		if (anythingProbablyPressed) {
@@ -1201,7 +1242,12 @@ bool doSomeOutputting() {
 #else
 		outputBufferForResampling[numSamplesOutputted].l = lshiftAndSaturate<AUDIO_OUTPUT_GAIN_DOUBLINGS>(lAdjusted);
 		outputBufferForResampling[numSamplesOutputted].r = lshiftAndSaturate<AUDIO_OUTPUT_GAIN_DOUBLINGS>(rAdjusted);
-		if (!stemExport.processStarted || (stemExport.processStarted && !stemExport.renderOffline)) {
+		if (saveRampValue == 0) {
+			// Codec-friendly silence while muted for save (alternating 0/1, same as clearTxBuffer)
+			i2sTXBufferPosNow[0] = numSamplesOutputted & 1;
+			i2sTXBufferPosNow[1] = numSamplesOutputted & 1;
+		}
+		else if (!stemExport.processStarted || (stemExport.processStarted && !stemExport.renderOffline)) {
 			i2sTXBufferPosNow[0] = outputBufferForResampling[numSamplesOutputted].l;
 			i2sTXBufferPosNow[1] = outputBufferForResampling[numSamplesOutputted].r;
 		}

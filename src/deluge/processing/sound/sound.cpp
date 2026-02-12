@@ -2222,7 +2222,7 @@ doCutModFXTail:
 						waitSamplesModfx = 20 * 44;
 						break;
 					case ModFXType::GRAIN:
-						waitSamplesModfx = grainFX->getSamplesToShutdown();
+						waitSamplesModfx = grainFX ? grainFX->getSamplesToShutdown() : 0;
 						break;
 					default:
 						waitSamplesModfx = (90 * 441);
@@ -2732,7 +2732,9 @@ void Sound::startSkippingRendering(ModelStackWithSoundFlags* modelStack) {
 
 	setSkippingRendering(true);
 	gateOpen = true;
-	grainFX->startSkippingRendering();
+	if (grainFX) {
+		grainFX->startSkippingRendering();
+	}
 	stopParamLPF(modelStack);
 }
 
