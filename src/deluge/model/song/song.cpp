@@ -2466,8 +2466,8 @@ void Song::renderAudio(std::span<StereoSample> outputBuffer, int32_t* reverbBuff
 				output->renderOutput(modelStack, tempBuffer, reverbBuffer, volumePostFX >> 1, sideChainHitPending,
 				                     !isClipActiveNow, isClipActiveNow);
 
-				// Feed to retrospective buffer (skip pending save check - we're in interrupt-disabled context)
-				retrospectiveBuffer.feedAudio(tempBufferStorage, numSamples, true);
+				// Feed to retrospective buffer
+				retrospectiveBuffer.feedAudio(tempBufferStorage, numSamples);
 
 				// Add temp buffer to main output buffer
 				for (size_t i = 0; i < numSamples; i++) {
@@ -2489,12 +2489,6 @@ void Song::renderAudio(std::span<StereoSample> outputBuffer, int32_t* reverbBuff
 #endif
 	}
 	AudioEngine::logAction("done rendering outputs");
-
-	// For focused track mode, check for pending bar-synced saves here
-	// (since feedAudio was called with skipPendingSaveCheck=true in interrupt context)
-	if (retrospectiveBuffer.isEnabled() && retrospectiveBuffer.isFocusedTrackMode()) {
-		retrospectiveBuffer.checkAndExecutePendingSave();
-	}
 
 	// If recording the "MIX", this is the place where we want to grab it - before any master FX or volume applied
 	// Go through each SampleRecorder, feeding them audio

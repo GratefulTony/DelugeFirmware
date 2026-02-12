@@ -1062,6 +1062,7 @@ extern "C" void routineForSD(void) {
 	switch (step) {
 	case UIStage::oled:
 		if (display->haveOLED()) {
+			deluge::hid::display::OLED::sendMainImage();
 			oledRoutine();
 		}
 		PIC::flush();

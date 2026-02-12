@@ -25,6 +25,7 @@
 #include "memory/object_pool.h"
 #include "model/output.h"
 #include "util/containers.h"
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -220,4 +221,7 @@ void feedReverbBackdoorForGrain(int index, q31_t value);
 
 /// returns whether a voice is allowed to start right now - otherwise it should be deferred to the next tick
 bool allowedToStartVoice();
+
+extern std::atomic<bool> muteForSave;
+void waitForMuteFadeOut();
 } // namespace AudioEngine

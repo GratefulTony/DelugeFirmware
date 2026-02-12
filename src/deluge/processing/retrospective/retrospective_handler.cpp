@@ -82,142 +82,118 @@ static SoundDrum* createNewDrumForKit(Kit* kit) {
 }
 
 void handleRetrospectiveSave() {
-	// Check if we're in bar mode and transport is running
-	if (retrospectiveBuffer.isBarMode() && playbackHandler.isEitherClockActive()) {
-		// Bar-synced save - will wait for next downbeat
-		display->displayPopup("WAIT");
+	bool bar_sync = retrospectiveBuffer.isBarMode() && playbackHandler.isEitherClockActive();
 
-		// Use static string to persist across the async save
-		static String filePath;
-		Error error = retrospectiveBuffer.requestBarSyncedSave(&filePath);
-
-		if (error != Error::NONE) {
-			display->displayPopup("FAIL");
-		}
-		// Note: completion display happens in executePendingSave()
-		return;
+	// Show initial feedback
+	if (bar_sync) {
+		display->displayPopup("WAIT", 0);
 	}
-
-	// Time-based mode or transport stopped - immediate save
-	// Show feedback so user knows something is happening
-	if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RetrospectiveSamplerNormalize)) {
+	else if (runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RetrospectiveSamplerNormalize)) {
 		display->displayPopup(l10n::get(l10n::String::STRING_FOR_RETRO_NORMALIZING));
 	}
 	else {
 		display->displayPopup(l10n::get(l10n::String::STRING_FOR_RETRO_SAVING));
 	}
 
-	// Save retrospective buffer to file
+	// Save - bar-sync blocks until downbeat, time-based saves immediately
 	String file_path;
-	Error error = retrospectiveBuffer.saveToFile(&file_path);
+	Error error =
+	    bar_sync ? retrospectiveBuffer.requestBarSyncedSave(&file_path) : retrospectiveBuffer.saveToFile(&file_path);
 
-	if (error == Error::NONE) {
-		// Check if we're in a kit context
-		bool loaded_to_pad = false;
+	if (error != Error::NONE) {
+		display->displayPopup("FAIL");
+		return;
+	}
 
-		if (getCurrentOutputType() == OutputType::KIT) {
-			Kit* kit = getCurrentKit();
+	// Check if we're in a kit context
+	bool loaded_to_pad = false;
 
-			if (kit) {
-				// Show loading popup early - covers drum creation and file loading
-				display->displayPopup(l10n::get(l10n::String::STRING_FOR_RETRO_LOADING));
+	if (getCurrentOutputType() == OutputType::KIT) {
+		Kit* kit = getCurrentKit();
 
-				// Always create a new drum row when in a kit
-				InstrumentClip* clip = getCurrentInstrumentClip();
-				if (clip) {
-					char model_stack_memory[MODEL_STACK_MAX_SIZE];
-					ModelStackWithTimelineCounter* model_stack =
-					    currentSong->setupModelStackWithCurrentClip(model_stack_memory);
+		if (kit) {
+			display->displayPopup(l10n::get(l10n::String::STRING_FOR_RETRO_LOADING));
 
-					// Create a new SoundDrum
-					SoundDrum* sound_drum = createNewDrumForKit(kit);
-					if (sound_drum) {
-						kit->addDrum(sound_drum);
+			InstrumentClip* clip = getCurrentInstrumentClip();
+			if (clip) {
+				char model_stack_memory[MODEL_STACK_MAX_SIZE];
+				ModelStackWithTimelineCounter* model_stack =
+				    currentSong->setupModelStackWithCurrentClip(model_stack_memory);
 
-						// Create a new note row at the end and directly assign our drum to it
-						int32_t note_row_index = clip->noteRows.getNumElements();
-						NoteRow* note_row = clip->noteRows.insertNoteRowAtIndex(note_row_index);
+				SoundDrum* sound_drum = createNewDrumForKit(kit);
+				if (sound_drum) {
+					kit->addDrum(sound_drum);
 
-						if (note_row) {
-							ModelStackWithNoteRow* model_stack_with_note_row =
-							    model_stack->addNoteRow(note_row_index, note_row);
-							note_row->setDrum(sound_drum, kit, model_stack_with_note_row);
+					int32_t note_row_index = clip->noteRows.getNumElements();
+					NoteRow* note_row = clip->noteRows.insertNoteRowAtIndex(note_row_index);
 
-							// Scroll view to show the new drum row at the bottom
-							int32_t y_display = note_row_index - clip->yScroll;
-							if (y_display < 0 || y_display >= kDisplayHeight) {
-								clip->yScroll = note_row_index - (kDisplayHeight - 1);
-								if (clip->yScroll < 0) {
-									clip->yScroll = 0;
-								}
+					if (note_row) {
+						ModelStackWithNoteRow* model_stack_with_note_row =
+						    model_stack->addNoteRow(note_row_index, note_row);
+						note_row->setDrum(sound_drum, kit, model_stack_with_note_row);
+
+						int32_t y_display = note_row_index - clip->yScroll;
+						if (y_display < 0 || y_display >= kDisplayHeight) {
+							clip->yScroll = note_row_index - (kDisplayHeight - 1);
+							if (clip->yScroll < 0) {
+								clip->yScroll = 0;
 							}
 						}
+					}
 
-						kit->beenEdited();
-						instrumentClipView.setSelectedDrum(sound_drum, true);
+					kit->beenEdited();
+					instrumentClipView.setSelectedDrum(sound_drum, true);
 
-						// Load the sample into the new drum
-						Source* source = &sound_drum->sources[0];
-						MultiRange* range = source->getOrCreateFirstRange();
-						if (range) {
-							AudioFileHolder* holder = range->getAudioFileHolder();
-							if (holder) {
-								holder->setAudioFile(nullptr);
-								holder->filePath.set(&file_path);
-								Error load_error = holder->loadFile(false, true, true, CLUSTER_LOAD_IMMEDIATELY);
+					Source* source = &sound_drum->sources[0];
+					MultiRange* range = source->getOrCreateFirstRange();
+					if (range) {
+						AudioFileHolder* holder = range->getAudioFileHolder();
+						if (holder) {
+							holder->setAudioFile(nullptr);
+							holder->filePath.set(&file_path);
+							Error load_error = holder->loadFile(false, true, true, CLUSTER_LOAD_IMMEDIATELY);
 
-								if (load_error == Error::NONE) {
-									// Set appropriate repeat mode based on sample length
-									Sample* sample = static_cast<Sample*>(holder->audioFile);
-									if (sample) {
-										source->repeatMode = (sample->getLengthInMSec() < 2002) ? SampleRepeatMode::ONCE
-										                                                        : SampleRepeatMode::CUT;
-									}
-									loaded_to_pad = true;
-
-									// Set up sound editor context for the waveform editor
-									soundEditor.currentSound = sound_drum;
-									soundEditor.currentSourceIndex = 0;
-									soundEditor.currentSource = source;
-									soundEditor.currentSampleControls = &source->sampleControls;
-									soundEditor.currentMultiRange = static_cast<MultisampleRange*>(range);
-									soundEditor.navigationDepth = 0;
-									soundEditor.shouldGoUpOneLevelOnBegin = false;
-
-									// Open waveform editor at START marker
-									sampleMarkerEditor.markerType = MarkerType::START;
-									display->setNextTransitionDirection(1);
-									bool success = openUI(&sampleMarkerEditor);
-									if (success) {
-										PadLEDs::skipGreyoutFade();
-										PadLEDs::sendOutSidebarColoursSoon();
-									}
-
-									// Request redraw of the clip view
-									uiNeedsRendering(&instrumentClipView);
+							if (load_error == Error::NONE) {
+								Sample* sample = static_cast<Sample*>(holder->audioFile);
+								if (sample) {
+									source->repeatMode = (sample->getLengthInMSec() < 2002) ? SampleRepeatMode::ONCE
+									                                                        : SampleRepeatMode::CUT;
 								}
+								loaded_to_pad = true;
+
+								soundEditor.currentSound = sound_drum;
+								soundEditor.currentSourceIndex = 0;
+								soundEditor.currentSource = source;
+								soundEditor.currentSampleControls = &source->sampleControls;
+								soundEditor.currentMultiRange = static_cast<MultisampleRange*>(range);
+								soundEditor.navigationDepth = 0;
+								soundEditor.shouldGoUpOneLevelOnBegin = false;
+
+								sampleMarkerEditor.markerType = MarkerType::START;
+								display->setNextTransitionDirection(1);
+								bool success = openUI(&sampleMarkerEditor);
+								if (success) {
+									PadLEDs::skipGreyoutFade();
+									PadLEDs::sendOutSidebarColoursSoon();
+								}
+
+								uiNeedsRendering(&instrumentClipView);
 							}
 						}
 					}
 				}
 			}
 		}
-
-		if (!loaded_to_pad) {
-			// Extract just the filename from the path for display
-			// Path format: "SAMPLES/RETRO/RETRXXXX.WAV"
-			const char* full_path = file_path.get();
-			const char* filename = full_path;
-			// Find the last '/' to get just the filename
-			for (const char* p = full_path; *p; p++) {
-				if (*p == '/') {
-					filename = p + 1;
-				}
-			}
-			display->displayPopup(filename);
-		}
 	}
-	else {
-		display->displayPopup("FAIL");
+
+	if (!loaded_to_pad) {
+		const char* full_path = file_path.get();
+		const char* filename = full_path;
+		for (const char* p = full_path; *p; p++) {
+			if (*p == '/') {
+				filename = p + 1;
+			}
+		}
+		display->displayPopup(filename);
 	}
 }

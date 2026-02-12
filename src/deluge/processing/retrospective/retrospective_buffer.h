@@ -55,9 +55,7 @@ public:
 	/// Must be lock-free and fast for real-time safety.
 	/// @param samples Pointer to stereo samples to record
 	/// @param numSamples Number of samples to record
-	/// @param skipPendingSaveCheck If true, skip checking for pending bar-synced saves.
-	///        Set this when calling from interrupt-disabled context (e.g., focused track path).
-	void feedAudio(const StereoSample* samples, size_t numSamples, bool skipPendingSaveCheck = false);
+	void feedAudio(const StereoSample* samples, size_t numSamples);
 
 	/// Feed mono audio samples into the buffer (will be duplicated to stereo if buffer is stereo).
 	/// @param samples Pointer to mono samples to record
@@ -102,22 +100,16 @@ public:
 	/// Check if focused track mode is active.
 	[[nodiscard]] bool isFocusedTrackMode() const;
 
-	/// Request a bar-synced save. Sets up pending state and returns immediately.
-	/// When transport is running, save happens at next downbeat.
-	/// When transport is stopped, falls back to immediate save.
+	/// Bar-synced save. Blocks until the next downbeat, then saves the buffer.
+	/// The audio ISR freezes the buffer at the exact downbeat; this method
+	/// yields to the task scheduler while waiting, then performs the SD save.
+	/// When transport is stopped or not in bar mode, falls back to immediate save.
 	/// @param filePath Output parameter to receive the saved file path
-	/// @return Error::NONE if save scheduled/completed, error code otherwise
+	/// @return Error::NONE on success, error code otherwise
 	Error requestBarSyncedSave(String* filePath);
 
-	/// Check if a bar-synced save is pending
-	[[nodiscard]] bool hasPendingSave() const { return pendingSave_.load(std::memory_order_relaxed); }
-
-	/// Cancel any pending bar-synced save
-	void cancelPendingSave();
-
-	/// Check for pending save and execute if downbeat reached.
-	/// Called from audio thread during feedAudio().
-	void checkAndExecutePendingSave();
+	/// Check if the audio ISR has frozen the buffer for a pending save
+	[[nodiscard]] bool isSaveReady() const { return saveReady_.load(std::memory_order_acquire); }
 
 	/// Clear the buffer contents without deallocating.
 	void clear();
@@ -163,24 +155,26 @@ private:
 	uint8_t numChannels_ = 2;                              ///< Number of channels: 1 (mono) or 2 (stereo)
 	AudioInputChannel source_ = AudioInputChannel::STEREO; ///< Audio source
 
-	// Bar-sync pending save state
-	std::atomic<bool> pendingSave_{false};          ///< True when waiting for downbeat to save
-	std::atomic<int64_t> saveTargetTick_{0};        ///< Tick position of target downbeat
-	std::atomic<float> savedBPM_{0.0f};             ///< BPM captured when save triggered
-	std::atomic<String*> pendingFilePath_{nullptr}; ///< File path output pointer for pending save
+	// Bar-sync save state
+	std::atomic<bool> pendingSave_{false};   ///< True when waiting for downbeat to save
+	std::atomic<int64_t> saveTargetTick_{0}; ///< Tick position of target downbeat
+	std::atomic<bool> saveReady_{false};     ///< True when buffer is frozen at downbeat
 
-	/// Execute the pending save (called when downbeat reached)
-	void executePendingSave();
+	/// Cancel any pending bar-synced save and unfreeze the buffer if needed.
+	void cancelPendingSave();
 
 	/// Calculate number of samples for bar-synced save based on current tempo
 	size_t calculateBarSyncedSamples() const;
 
-	/// Save to file with BPM tag and trimmed to specified sample count
+	/// Save to file with BPM tag and trimmed to specified sample count.
 	/// @param filePath Output parameter to receive the saved file path
 	/// @param maxSamples Maximum samples to save (trims buffer to this)
 	/// @param bpm BPM value to include in filename
-	/// @return Error::NONE on success, or an error code on failure
-	Error saveToFileWithBPM(String* filePath, size_t maxSamples, float bpm);
+	/// @param outGainApplied If non-null, receives the normalization gain multiplier (1.0 = no change)
+	/// @param capturedWritePos Pre-captured write position (0 = read live from writePos_)
+	/// @param capturedSamplesWritten Pre-captured samples written (0 = read live from samplesWritten_)
+	Error saveToFileWithBPM(String* filePath, size_t maxSamples, float bpm, double* outGainApplied = nullptr,
+	                        size_t capturedWritePos = 0, size_t capturedSamplesWritten = 0);
 };
 
 /// Global instance of the retrospective buffer
