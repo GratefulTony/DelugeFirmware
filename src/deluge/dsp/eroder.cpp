@@ -88,7 +88,7 @@ constexpr std::array<phi::PhiTriConfig, 5> kEroderCharBank = {{
     {phi::kPhi175, 0.8f, 0.3f, false},  // [1] SVF resonance (0→1, high = tonal)
     {phi::kPhi100, 0.75f, 0.7f, false}, // [2] S&H blend (0=white, 1=S&H)
     {phi::kPhi075, 0.8f, 0.2f, false},  // [3] Width (0=mono, 1=full stereo)
-    {phi::kPhi200, 0.6f, 0.1f, true},   // [4] Pitched mod offset (bipolar: ±2 octaves)
+    {phi::kPhi075, 0.6f, 0.1f, true},   // [4] Pitched mod offset (bipolar: ±4 octaves, subharmonic range)
 }};
 
 } // anonymous namespace
@@ -198,8 +198,14 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 	FX_BENCH_DECLARE(bench, "eroder");
 	FX_BENCH_SCOPE(bench);
 
-	// Modulation scale: depth already baked into noise, just delay * 0.5 / ONE_Q31
-	float modScale = baseDelay * 0.5f / static_cast<float>(ONE_Q31);
+	// Fixed-point delay: Q16.16 avoids all float ops in the inner-loop delay path
+	// modScaleQ converts Q31 noise → Q16.16 delay offset (baseDelay * 0.5 max excursion)
+	constexpr int32_t kFracBits = 16;
+	constexpr int32_t kFracMask = (1 << kFracBits) - 1;
+	int32_t baseDelayQ16 = static_cast<int32_t>(baseDelay * static_cast<float>(1 << kFracBits));
+	int32_t minDelayQ16 = 1 << kFracBits;
+	int32_t maxDelayQ16 = (kEroderMaxDelay - 1) << kFracBits;
+	int32_t modScaleQ = static_cast<int32_t>(baseDelay * 32768.0f);
 
 	// Pitched triangle modulator: step-based oscillator (no multiply in loop)
 	// Amplitude baked into step size; direction persists between buffers
@@ -207,7 +213,7 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 	bool usePitchedMod = pitchedModDepth > 0.0f;
 	q31_t triPeak = 0;
 	if (usePitchedMod) {
-		float offsetOctaves = charResults[4] * 2.0f; // bipolar ±2 octaves
+		float offsetOctaves = charResults[4] * 4.0f; // bipolar ±4 octaves (subharmonic to +4 oct)
 		float pitchRatioF = static_cast<float>(params.cachedPitchRatioQ16) / 65536.0f;
 		float triFreq = 261.626f * pitchRatioF * knobRatio * fastPow2(offsetOctaves);
 		// Step = 4 * amplitude * freq / sampleRate (4 quarter-cycles per period)
@@ -234,12 +240,10 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 	float hpfAlphaF = std::min(6.2831853f * hpfCutoff / 44100.0f, 0.5f);
 	q31_t hpfAlpha = static_cast<q31_t>(hpfAlphaF * static_cast<float>(ONE_Q31));
 
-	// Wet gain compensation (zero inner-loop cost):
-	//   1. Comb resonance: IIR comb amplifies by 1/(1-g), compensate by (1-g)
-	//   2. Waveshaper drive: shapers amplify ~drive at moderate levels, compensate by 1/drive
-	float mixFloat = static_cast<float>(params.mix) / 127.0f;
-	q31_t rawMixQ = static_cast<q31_t>(mixFloat * static_cast<float>(ONE_Q31));
-	q31_t dryQ = ONE_Q31 - rawMixQ;
+	// Wet level with gain compensation (zero inner-loop cost):
+	//   Additive mix: output = dry + level * wet (dry always passes through)
+	//   Compensation: (1-feedback)/drive tames comb resonance + waveshaper amplification
+	float wetLevel = static_cast<float>(params.mix) / 127.0f;
 	float feedbackFloat = std::max(0.05f, freqResults[1]) * 0.95f;
 	float wetCompensation = 1.0f - feedbackFloat;
 	if (clipIntensity > 0.0f) {
@@ -248,7 +252,7 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 	if (foldIntensity > 0.0f) {
 		wetCompensation /= foldDrive;
 	}
-	q31_t mixQ = static_cast<q31_t>(mixFloat * wetCompensation * static_cast<float>(ONE_Q31));
+	q31_t wetQ = static_cast<q31_t>(wetLevel * wetCompensation * static_cast<float>(ONE_Q31));
 
 	for (auto& sample : buffer) {
 		// Write input + feedback to delay (IIR comb filter topology)
@@ -272,13 +276,14 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 		params.noise.prevFilteredL = params.noise.svfLowL;
 
 		// Noise with depth baked into blend weights
+		// S&H term shared between L and R (same mono held value)
+		q31_t shTerm = multiply_32x32_rshift32(params.noise.heldL, shDepthQ) << 1;
 		// L: 2 mults (depth-scaled white + S&H blend)
-		q31_t noiseL = add_saturate(multiply_32x32_rshift32(whiteL, whiteDepthQ) << 1,
-		                            multiply_32x32_rshift32(params.noise.heldL, shDepthQ) << 1);
-		// R: 3 mults (combined width+blend+depth weights — was 4 mults)
+		q31_t noiseL = add_saturate(multiply_32x32_rshift32(whiteL, whiteDepthQ) << 1, shTerm);
+		// R: 2 mults + shared shTerm (was 3 mults)
 		q31_t noiseR = add_saturate(add_saturate(multiply_32x32_rshift32(whiteL, monoWhiteDepthQ) << 1,
 		                                         multiply_32x32_rshift32(whiteR_ind, widthWhiteDepthQ) << 1),
-		                            multiply_32x32_rshift32(params.noise.heldL, shDepthQ) << 1);
+		                            shTerm);
 
 		// SVF filter (2-pole state variable filter)
 		q31_t highL = noiseL - params.noise.svfLowL - (multiply_32x32_rshift32(params.noise.svfBandL, svfQ) << 1);
@@ -289,7 +294,7 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 		params.noise.svfBandR += multiply_32x32_rshift32(highR, svfF) << 1;
 		params.noise.svfLowR += multiply_32x32_rshift32(params.noise.svfBandR, svfF) << 1;
 
-		// Bandpass + pitched triangle combined in integer, then one float conversion
+		// Bandpass + pitched triangle combined in integer
 		q31_t combinedL = params.noise.svfBandL;
 		q31_t combinedR = params.noise.svfBandR;
 		if (usePitchedMod) {
@@ -305,14 +310,14 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 			combinedL = add_saturate(combinedL, params.triValue);
 			combinedR = add_saturate(combinedR, params.triValue);
 		}
-		float modL = static_cast<float>(combinedL) * modScale;
-		float modR = static_cast<float>(combinedR) * modScale;
+		// Delay modulation in Q16.16 fixed-point (no float ops)
+		int32_t modL = multiply_32x32_rshift32(combinedL, modScaleQ) << 1;
+		int32_t modR = multiply_32x32_rshift32(combinedR, modScaleQ) << 1;
+		int32_t delayLQ16 = std::clamp(baseDelayQ16 + modL, minDelayQ16, maxDelayQ16);
+		int32_t delayRQ16 = std::clamp(baseDelayQ16 + modR, minDelayQ16, maxDelayQ16);
 
-		float delayL = std::clamp(baseDelay + modL, 1.0f, static_cast<float>(kEroderMaxDelay - 1));
-		float delayR = std::clamp(baseDelay + modR, 1.0f, static_cast<float>(kEroderMaxDelay - 1));
-
-		q31_t wetL = params.delay.readL(delayL);
-		q31_t wetR = params.delay.readR(delayR);
+		q31_t wetL = params.delay.readLQ16(delayLQ16);
+		q31_t wetR = params.delay.readRQ16(delayRQ16);
 
 		// Feedback tap BEFORE waveshaping
 		params.feedbackL = wetL;
@@ -336,9 +341,9 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 		params.wetHpfR += multiply_32x32_rshift32(wetR - params.wetHpfR, hpfAlpha) << 1;
 		wetR -= params.wetHpfR;
 
-		// Wet/dry blend
-		sample.l = add_saturate(multiply_32x32_rshift32(sample.l, dryQ) << 1, multiply_32x32_rshift32(wetL, mixQ) << 1);
-		sample.r = add_saturate(multiply_32x32_rshift32(sample.r, dryQ) << 1, multiply_32x32_rshift32(wetR, mixQ) << 1);
+		// Additive wet level (dry always passes through at unity)
+		sample.l = add_saturate(sample.l, multiply_32x32_rshift32(wetL, wetQ) << 1);
+		sample.r = add_saturate(sample.r, multiply_32x32_rshift32(wetR, wetQ) << 1);
 	}
 }
 

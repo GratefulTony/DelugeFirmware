@@ -100,14 +100,27 @@ struct EroderDelayLine {
 		                    multiply_32x32_rshift32(buf[idx1], fracQ) << 1);
 	}
 
-	/// Read L channel at given delay
-	[[gnu::always_inline]] q31_t readL(float delaySamples) const {
-		return readChannel(bufferL, writePos, delaySamples);
+	/// Read single channel from delay line with Q16.16 fixed-point delay (no float ops)
+	[[gnu::always_inline]] static q31_t readChannelQ16(const q31_t* buf, int32_t wp, int32_t delayQ16) {
+		int32_t delayInt = delayQ16 >> 16;
+		int32_t idx0 = (wp - 1 - delayInt) & kEroderDelayMask;
+		int32_t idx1 = (idx0 - 1) & kEroderDelayMask;
+
+		q31_t fracQ = (delayQ16 & 0xFFFF) << 15; // 16-bit frac → Q31
+		q31_t oneMinusFrac = ONE_Q31 - fracQ;
+
+		return add_saturate(multiply_32x32_rshift32(buf[idx0], oneMinusFrac) << 1,
+		                    multiply_32x32_rshift32(buf[idx1], fracQ) << 1);
 	}
 
-	/// Read R channel at given delay
-	[[gnu::always_inline]] q31_t readR(float delaySamples) const {
-		return readChannel(bufferR, writePos, delaySamples);
+	/// Read L channel at given delay (Q16.16 fixed-point)
+	[[gnu::always_inline]] q31_t readLQ16(int32_t delayQ16) const {
+		return readChannelQ16(bufferL, writePos, delayQ16);
+	}
+
+	/// Read R channel at given delay (Q16.16 fixed-point)
+	[[gnu::always_inline]] q31_t readRQ16(int32_t delayQ16) const {
+		return readChannelQ16(bufferR, writePos, delayQ16);
 	}
 };
 
@@ -121,7 +134,7 @@ struct EroderParams {
 	ZoneBasedParam<kEroderNumZones, false> character; // Character zone (continuous across zones)
 
 	// User-facing knob values
-	uint8_t mix{0}; // Wet/dry mix (0=off/bypass, 1-127)
+	uint8_t mix{0}; // Wet level (0=off/bypass, 1-127 additive)
 
 	// DSP state
 	EroderDelayLine delay;
