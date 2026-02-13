@@ -25,6 +25,7 @@
 #include "dsp/zone_param.hpp"
 #include "storage/field_serialization.h"
 #include "util/fixedpoint.h"
+#include <array>
 #include <cstdint>
 #include <span>
 
@@ -58,9 +59,8 @@ struct EroderNoiseState {
 	q31_t svfBandL{0};
 	q31_t svfBandR{0};
 
-	// S&H state (zero-crossing triggered)
+	// S&H state (zero-crossing triggered, mono)
 	q31_t heldL{0};
-	q31_t heldR{0};
 	q31_t prevInputL{0};
 	q31_t prevFilteredL{0};
 
@@ -128,6 +128,10 @@ struct EroderParams {
 	EroderNoiseState noise;
 	q31_t feedbackL{0};
 	q31_t feedbackR{0};
+	q31_t wetHpfL{0}; // 1-pole HPF state for DC blocking on wet path
+	q31_t wetHpfR{0};
+	q31_t triValue{0}; // Pitched triangle oscillator current value
+	q31_t triStep{0};  // Per-sample step (sign encodes direction)
 
 	// Pitch tracking cache (recomputed when noteCode changes)
 	int32_t prevNoteCode{-1};
@@ -141,6 +145,15 @@ struct EroderParams {
 	float freqPhaseOffset{0};
 	float charPhaseOffset{0};
 	float gammaPhase{0};
+
+	// Phi triangle cache (throttled evaluation every N buffers + phase-change detection)
+	static constexpr uint8_t kPhiUpdateInterval = 2;
+	std::array<float, 6> cachedToneResults{};
+	std::array<float, 5> cachedCharResults{};
+	double prevTonePhase{};
+	double prevCharPhase{};
+	uint8_t phiUpdateCounter{0};
+	bool phiCacheValid{false};
 
 	/// Effective phase for freq: freqPhaseOffset + 1024*gammaPhase
 	[[nodiscard]] double effectiveFreq() const {
