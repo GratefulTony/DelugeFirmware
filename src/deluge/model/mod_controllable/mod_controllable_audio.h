@@ -136,8 +136,10 @@ public:
 	deluge::dsp::Disperser disperserDsp;    // DSP processor
 	deluge::dsp::DisperserParams disperser; // All disperser state (freq, stages, zones, smoothing, delay)
 
-	// Eroder (noise-modulated allpass for digital erosion)
-	deluge::dsp::EroderParams eroder;
+	// Eroder (noise-modulated delay line for digital erosion)
+	// Dynamically allocated on first use (menu access, deserialization)
+	deluge::dsp::EroderParams* eroder_{nullptr};
+	deluge::dsp::EroderParams& ensureEroder();
 
 	FilterMode lpfMode;
 	FilterMode hpfMode;

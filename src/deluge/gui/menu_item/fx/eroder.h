@@ -38,8 +38,10 @@ class EroderFreq final : public ZoneBasedDualParam<params::GLOBAL_ERODER_FREQ> {
 public:
 	using ZoneBasedDualParam::ZoneBasedDualParam;
 
-	[[nodiscard]] q31_t getFieldValue() const override { return soundEditor.currentModControllable->eroder.freq.value; }
-	void setFieldValue(q31_t value) override { soundEditor.currentModControllable->eroder.freq.value = value; }
+	[[nodiscard]] q31_t getFieldValue() const override {
+		return soundEditor.currentModControllable->ensureEroder().freq.value;
+	}
+	void setFieldValue(q31_t value) override { soundEditor.currentModControllable->ensureEroder().freq.value = value; }
 
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
@@ -94,9 +96,11 @@ public:
 	using ZoneBasedDualParam::ZoneBasedDualParam;
 
 	[[nodiscard]] q31_t getFieldValue() const override {
-		return soundEditor.currentModControllable->eroder.character.value;
+		return soundEditor.currentModControllable->ensureEroder().character.value;
 	}
-	void setFieldValue(q31_t value) override { soundEditor.currentModControllable->eroder.character.value = value; }
+	void setFieldValue(q31_t value) override {
+		soundEditor.currentModControllable->ensureEroder().character.value = value;
+	}
 
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
@@ -150,7 +154,7 @@ class EroderDepth final : public IntegerWithOff {
 public:
 	using IntegerWithOff::IntegerWithOff;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->eroder.depth); }
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->ensureEroder().depth); }
 	bool usesAffectEntire() override { return true; }
 
 	void writeCurrentValue() override {
@@ -161,12 +165,12 @@ public:
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->eroder.depth = current_value;
+					soundDrum->ensureEroder().depth = current_value;
 				}
 			}
 		}
 		else {
-			soundEditor.currentModControllable->eroder.depth = current_value;
+			soundEditor.currentModControllable->ensureEroder().depth = current_value;
 		}
 	}
 
@@ -189,7 +193,7 @@ class EroderMix final : public Integer {
 public:
 	using Integer::Integer;
 
-	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->eroder.mix); }
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->ensureEroder().mix); }
 	bool usesAffectEntire() override { return true; }
 
 	void writeCurrentValue() override {
@@ -200,12 +204,12 @@ public:
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-					soundDrum->eroder.mix = current_value;
+					soundDrum->ensureEroder().mix = current_value;
 				}
 			}
 		}
 		else {
-			soundEditor.currentModControllable->eroder.mix = current_value;
+			soundEditor.currentModControllable->ensureEroder().mix = current_value;
 		}
 	}
 

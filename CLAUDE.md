@@ -39,6 +39,12 @@
 - When merging upstream, resolve workflow file conflicts by taking upstream's version
 - Source code conflicts need manual review to preserve owlet-labs additions
 
+## Commits
+
+- When the user provides FX benchmark data with a commit request, include it in the commit message body under a `Benchmarks:` section
+- This provides historical performance tracking across commits
+- Format: effect name, character/tag, sample count, median cycles
+
 ## Testing
 
 - Test on actual hardware when possible
