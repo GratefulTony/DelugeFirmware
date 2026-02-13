@@ -1118,10 +1118,10 @@ void processAutomodulator(std::span<StereoSample> buffer, AutomodulatorParams& p
 			// f = cutoff << 1 (extends frequency range, max ~8kHz at kCutoffMax)
 			int32x2_t f = vshl_n_s32(cutoff, 1);
 
-			// SVF processing:
+			// SVF processing (saturating to prevent runaway at high resonance):
 			// high = out - svfLow - (svfBand * filterQ * 2) >> 32
 			int32x2_t bandTimesQ = vqdmulh_s32(svfBand, filterQVec);
-			int32x2_t high = vsub_s32(vsub_s32(out, svfLow), bandTimesQ);
+			int32x2_t high = vqsub_s32(vsub_s32(out, svfLow), bandTimesQ);
 
 			// svfBand += (high * f * 2) >> 32
 			svfBand = vadd_s32(svfBand, vqdmulh_s32(high, f));
@@ -1169,13 +1169,13 @@ void processAutomodulator(std::span<StereoSample> buffer, AutomodulatorParams& p
 			q31_t fL = cutoffL << 1;
 			q31_t fR = cutoffR << 1;
 
-			// Left channel
-			q31_t highL = outL - s.svfLowL - (multiply_32x32_rshift32(s.svfBandL, filterQ) << 1);
+			// Left channel (saturating to prevent runaway at high resonance)
+			q31_t highL = add_saturate(outL - s.svfLowL, -(multiply_32x32_rshift32(s.svfBandL, filterQ) << 1));
 			s.svfBandL += multiply_32x32_rshift32(highL, fL) << 1;
 			s.svfLowL += multiply_32x32_rshift32(s.svfBandL, fL) << 1;
 
-			// Right channel
-			q31_t highR = outR - s.svfLowR - (multiply_32x32_rshift32(s.svfBandR, filterQ) << 1);
+			// Right channel (saturating to prevent runaway at high resonance)
+			q31_t highR = add_saturate(outR - s.svfLowR, -(multiply_32x32_rshift32(s.svfBandR, filterQ) << 1));
 			s.svfBandR += multiply_32x32_rshift32(highR, fR) << 1;
 			s.svfLowR += multiply_32x32_rshift32(s.svfBandR, fR) << 1;
 

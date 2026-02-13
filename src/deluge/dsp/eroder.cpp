@@ -213,15 +213,17 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 	bool usePitchedMod = pitchedModDepth > 0.0f;
 	q31_t triPeak = 0;
 	if (usePitchedMod) {
+		triPeak = static_cast<q31_t>(pitchedModDepth * static_cast<float>(ONE_Q31));
 		float offsetOctaves = charResults[4] * 4.0f; // bipolar ±4 octaves (subharmonic to +4 oct)
 		float pitchRatioF = static_cast<float>(params.cachedPitchRatioQ16) / 65536.0f;
 		float triFreq = 261.626f * pitchRatioF * knobRatio * fastPow2(offsetOctaves);
 		// Step = 4 * amplitude * freq / sampleRate (4 quarter-cycles per period)
-		float stepF = 4.0f * pitchedModDepth * triFreq / 44100.0f;
+		// Clamp to prevent Q31 overflow and ensure single-reflection works per sample
+		float stepF = std::min(4.0f * pitchedModDepth * triFreq / 44100.0f, 0.9f);
 		q31_t stepMag = static_cast<q31_t>(stepF * static_cast<float>(ONE_Q31));
+		stepMag = std::min(stepMag, triPeak);
 		// Preserve direction from previous buffer
 		params.triStep = (params.triStep >= 0) ? stepMag : -stepMag;
-		triPeak = static_cast<q31_t>(pitchedModDepth * static_cast<float>(ONE_Q31));
 		// Clamp value in case peak shrank since last buffer
 		params.triValue = std::clamp(params.triValue, -triPeak, triPeak);
 	}
@@ -285,12 +287,14 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 		                                         multiply_32x32_rshift32(whiteR_ind, widthWhiteDepthQ) << 1),
 		                            shTerm);
 
-		// SVF filter (2-pole state variable filter)
-		q31_t highL = noiseL - params.noise.svfLowL - (multiply_32x32_rshift32(params.noise.svfBandL, svfQ) << 1);
+		// SVF filter (2-pole state variable filter, saturating to prevent runaway at high resonance)
+		q31_t highL =
+		    add_saturate(noiseL - params.noise.svfLowL, -(multiply_32x32_rshift32(params.noise.svfBandL, svfQ) << 1));
 		params.noise.svfBandL += multiply_32x32_rshift32(highL, svfF) << 1;
 		params.noise.svfLowL += multiply_32x32_rshift32(params.noise.svfBandL, svfF) << 1;
 
-		q31_t highR = noiseR - params.noise.svfLowR - (multiply_32x32_rshift32(params.noise.svfBandR, svfQ) << 1);
+		q31_t highR =
+		    add_saturate(noiseR - params.noise.svfLowR, -(multiply_32x32_rshift32(params.noise.svfBandR, svfQ) << 1));
 		params.noise.svfBandR += multiply_32x32_rshift32(highR, svfF) << 1;
 		params.noise.svfLowR += multiply_32x32_rshift32(params.noise.svfBandR, svfF) << 1;
 
