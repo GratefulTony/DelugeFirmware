@@ -69,7 +69,7 @@ public:
 	void processDisperser(std::span<StereoSample> buffer, ParamManager* paramManager, q31_t topoCables = 0,
 	                      q31_t twistCables = 0);
 	void processEroderEffect(std::span<StereoSample> buffer, ParamManager* paramManager, q31_t freqCables = 0,
-	                         q31_t charCables = 0);
+	                         q31_t charCables = 0, q31_t cutoffValue = 0);
 	static void writeParamAttributesToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,
 	                                       int32_t* valuesForOverride = nullptr);
 	static void writeParamTagsToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,

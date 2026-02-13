@@ -164,9 +164,10 @@ enum Global : ParamType {
 	GLOBAL_AUTOMOD_DEPTH,                      // Automodulator modulation depth
 	GLOBAL_AUTOMOD_FREQ,                       // Automodulator filter frequency offset (bipolar)
 	GLOBAL_AUTOMOD_MANUAL,                     // Automodulator manual LFO offset (bipolar)
-	// Eroder zone controls
-	GLOBAL_ERODER_FREQ,      // Eroder frequency zone (clips to boundaries)
+	// Eroder controls
+	GLOBAL_ERODER_FREQ,      // Eroder delay time zone (clips to boundaries)
 	GLOBAL_ERODER_CHARACTER, // Eroder character zone (allows cross-zone)
+	GLOBAL_ERODER_CUTOFF,    // Eroder SVF cutoff frequency (128-step)
 
 	// Global exp params begin
 	FIRST_GLOBAL_EXP,
@@ -236,9 +237,10 @@ enum UnpatchedShared : ParamType {
 	UNPATCHED_AUTOMOD_DEPTH,
 	UNPATCHED_AUTOMOD_FREQ,
 	UNPATCHED_AUTOMOD_MANUAL,
-	// Eroder zone controls
+	// Eroder controls
 	UNPATCHED_ERODER_FREQ,
 	UNPATCHED_ERODER_CHARACTER,
+	UNPATCHED_ERODER_CUTOFF,
 	// Scatter controls
 	UNPATCHED_SCATTER_ZONE_A,
 	UNPATCHED_SCATTER_ZONE_B,
@@ -538,6 +540,8 @@ constexpr int32_t getUnpatchedFallback(ParamType patchedId) {
 		return UNPATCHED_ERODER_FREQ;
 	case GLOBAL_ERODER_CHARACTER:
 		return UNPATCHED_ERODER_CHARACTER;
+	case GLOBAL_ERODER_CUTOFF:
+		return UNPATCHED_ERODER_CUTOFF;
 	default:
 		return -1; // No fallback
 	}

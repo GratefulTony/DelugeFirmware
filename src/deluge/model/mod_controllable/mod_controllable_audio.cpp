@@ -499,7 +499,7 @@ void ModControllableAudio::processDisperser(std::span<StereoSample> buffer, Para
 }
 
 void ModControllableAudio::processEroderEffect(std::span<StereoSample> buffer, ParamManager* paramManager,
-                                               q31_t freqCables, q31_t charCables) {
+                                               q31_t freqCables, q31_t charCables, q31_t cutoffValue) {
 	using namespace deluge::modulation::params;
 	if (!eroder_ || !eroder_->isEnabled()) {
 		return;
@@ -508,7 +508,8 @@ void ModControllableAudio::processEroderEffect(std::span<StereoSample> buffer, P
 	q31_t freqPreset = paramManager ? paramManager->getValueWithFallback(GLOBAL_ERODER_FREQ) : 0;
 	q31_t charPreset = paramManager ? paramManager->getValueWithFallback(GLOBAL_ERODER_CHARACTER) : 0;
 
-	deluge::dsp::processEroder(buffer, *eroder_, freqPreset, freqCables, charPreset, charCables);
+	deluge::dsp::processEroder(buffer, *eroder_, freqPreset, freqCables, charPreset, charCables, cutoffValue,
+	                           getLastNoteCode());
 }
 
 inline void ModControllableAudio::doEQ(bool doBass, bool doTreble, int32_t* inputL, int32_t* inputR, int32_t bassAmount,

@@ -20,6 +20,7 @@
  */
 
 #include "dsp/eroder.h"
+#include "dsp/fast_math.h"
 #include "dsp/phi_triangle.hpp"
 #include "io/debug/fx_benchmark.h"
 #include "util/functions.h"
@@ -35,24 +36,23 @@ namespace {
 // Phi Triangle Banks
 // ============================================================================
 
-// Freq bank: delay time from phi triangle
-constexpr std::array<phi::PhiTriConfig, 1> kEroderFreqBank = {{
-    {phi::kPhi150, 0.7f, 0.0f, false}, // [0] Delay time: maps to [1, kEroderMaxDelay-1]
+// Tone bank: delay time + feedback from phi triangles
+// High duty cycles (0.85/0.8) minimize dead zones where output is 0
+constexpr std::array<phi::PhiTriConfig, 2> kEroderToneBank = {{
+    {phi::kPhi150, 0.85f, 0.0f, false}, // [0] Delay time: maps to [1, kEroderMaxDelay-1]
+    {phi::kPhi125, 0.8f, 0.4f, false},  // [1] Feedback (0→0.95, capped for stability)
 }};
 
-// Character bank: SVF cutoff, resonance, S&H blend, filter output select
-constexpr std::array<phi::PhiTriConfig, 5> kEroderCharBank = {{
-    {phi::kPhi150, 0.7f, 0.0f, false}, // [0] SVF cutoff (0→1, quadratic mapped)
-    {phi::kPhi175, 0.5f, 0.3f, false}, // [1] SVF resonance (0→1, high = tonal)
-    {phi::kPhi100, 0.4f, 0.7f, false}, // [2] S&H blend (0=white, 1=S&H)
-    {phi::kPhi125, 0.6f, 0.1f, true},  // [3] LP↔HP select (bipolar: -1=LP, +1=HP)
-    {phi::kPhi200, 0.4f, 0.5f, true},  // [4] (LP/HP)↔BP select (bipolar: -1=LP/HP, +1=BP)
+// Character bank: depth, resonance, S&H blend, filter output select, stereo width
+// High duty cycles reduce dead zones; depth gets epsilon floor in DSP
+constexpr std::array<phi::PhiTriConfig, 6> kEroderCharBank = {{
+    {phi::kPhi150, 0.85f, 0.25f, false}, // [0] Depth (0→1, noise mod intensity)
+    {phi::kPhi175, 0.8f, 0.3f, false},   // [1] SVF resonance (0→1, high = tonal)
+    {phi::kPhi100, 0.75f, 0.7f, false},  // [2] S&H blend (0=white, 1=S&H)
+    {phi::kPhi125, 0.8f, 0.1f, true},    // [3] LP↔HP select (bipolar: -1=LP, +1=HP)
+    {phi::kPhi200, 0.75f, 0.5f, true},   // [4] (LP/HP)↔BP select (bipolar: -1=LP/HP, +1=BP)
+    {phi::kPhi075, 0.8f, 0.2f, false},   // [5] Width (0=mono, 1=full stereo)
 }};
-
-float computeEroderDelay(double freqPhase) {
-	auto results = phi::evalTriangleBank<1>(freqPhase, 1.0f, kEroderFreqBank);
-	return 1.0f + results[0] * static_cast<float>(kEroderMaxDelay - 2);
-}
 
 } // anonymous namespace
 
@@ -61,7 +61,7 @@ float computeEroderDelay(double freqPhase) {
 // ============================================================================
 
 void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t freqPreset, q31_t freqCables,
-                   q31_t charPreset, q31_t charCables) {
+                   q31_t charPreset, q31_t charCables, q31_t cutoffValue, int32_t noteCode) {
 	if (!params.isEnabled() || buffer.empty()) {
 		return;
 	}
@@ -75,24 +75,51 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 	params.smoothedCharacter += multiply_32x32_rshift32(charValue - params.smoothedCharacter, kEroderSmoothingAlpha)
 	                            << 1;
 
-	// Freq phi phase → delay time
+	// Tone phi phase → delay time + feedback
 	double freqNorm = static_cast<double>(params.smoothedFreq) / static_cast<double>(ONE_Q31);
 	double freqPhase = freqNorm + params.effectiveFreq();
-	float baseDelay = computeEroderDelay(freqPhase);
+	auto freqResults = phi::evalTriangleBank<2>(freqPhase, 1.0f, kEroderToneBank);
+	float baseDelay = 1.0f + std::max(0.05f, freqResults[0]) * static_cast<float>(kEroderMaxDelay - 2);
+	q31_t feedbackQ = static_cast<q31_t>(std::max(0.05f, freqResults[1]) * 0.95f * static_cast<float>(ONE_Q31));
 
-	// Character phi phase → SVF cutoff, resonance, S&H blend, output select
+	// Character phi phase → depth, resonance, S&H blend, output select, width
 	double charNorm = static_cast<double>(params.smoothedCharacter) / static_cast<double>(ONE_Q31);
 	double charPhase = charNorm + params.effectiveChar();
-	auto charResults = phi::evalTriangleBank<5>(charPhase, 1.0f, kEroderCharBank);
+	auto charResults = phi::evalTriangleBank<6>(charPhase, 1.0f, kEroderCharBank);
 
-	// SVF cutoff: quadratic mapping for perceptual linearity
-	// Floor at 0.03 (~200Hz) so filter always passes signal; cap at 0.85 for stability
-	float cutoffRaw = charResults[0];
-	float cutoffMapped = 0.03f + cutoffRaw * cutoffRaw * 0.82f;
+	// === Pitch tracking (cached - only recompute when noteCode changes) ===
+	if (noteCode != params.prevNoteCode) {
+		params.prevNoteCode = noteCode;
+		if (noteCode >= 0 && noteCode < 128) {
+			float pitchOctaves = (static_cast<float>(noteCode) - 60.0f) / 12.0f;
+			float pitchRatio = std::clamp(fastPow2(pitchOctaves), 0.25f, 4.0f);
+			params.cachedPitchRatioQ16 = static_cast<int32_t>(pitchRatio * 65536.0f);
+		}
+		else {
+			params.cachedPitchRatioQ16 = 1 << 16; // 1.0 — no pitch info
+		}
+	}
+
+	// SVF cutoff: knob offset (±2 octaves) + pitch tracking, multiplicative
+	// Reference cutoff at middle C with knob centered = 0.15 (mid SVF range)
+	constexpr float kCutoffReference = 0.15f;
+	constexpr float kCutoffMin = 0.01f;
+	constexpr float kCutoffMax = 0.85f;
+
+	// Knob → octave offset: full bipolar range (±0x80000000) = ±2 octaves
+	float knobOctaves = static_cast<float>(cutoffValue) / static_cast<float>(0x40000000);
+	float knobRatio = std::clamp(fastPow2(knobOctaves), 0.125f, 8.0f);
+
+	// Combine: reference * pitch tracking * knob offset
+	float cutoffMapped = kCutoffReference * (static_cast<float>(params.cachedPitchRatioQ16) / 65536.0f) * knobRatio;
+	cutoffMapped = std::clamp(cutoffMapped, kCutoffMin, kCutoffMax);
 	q31_t svfF = static_cast<q31_t>(cutoffMapped * static_cast<float>(ONE_Q31));
 
+	// Depth from character bank phi triangle [0] (0→1)
+	// Epsilon floor ensures effect never fully dies when mix > 0
+	float depthFloat = std::max(0.05f, charResults[0]);
+
 	// SVF resonance: Q = 1 - resonance (low Q = resonant, near self-oscillation for tonal noise)
-	// Cap at 0.99 so resonant peak dominates over broadband noise excitation
 	float resonance = charResults[1] * 0.99f;
 	q31_t svfQ = static_cast<q31_t>((1.0f - resonance) * static_cast<float>(ONE_Q31));
 
@@ -110,21 +137,35 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 	q31_t hpMixQ = static_cast<q31_t>(h * (1.0f - b) * static_cast<float>(ONE_Q31));
 	q31_t bpMixQ = static_cast<q31_t>(b * static_cast<float>(ONE_Q31));
 
+	// Stereo width: 0=mono (L=R), 1=full stereo (independent L/R noise)
+	q31_t widthQ = static_cast<q31_t>(charResults[5] * static_cast<float>(ONE_Q31));
+	q31_t monoQ = ONE_Q31 - widthQ;
+
 	FX_BENCH_DECLARE(bench, "eroder");
 	FX_BENCH_SCOPE(bench);
 
-	// Depth and mix scaling
-	float depthFloat = static_cast<float>(params.depth) / 127.0f;
+	// Depth scaling: noise modulation intensity from phi triangle
 	float maxMod = baseDelay * 0.5f * depthFloat;
-	q31_t mixWet = static_cast<q31_t>(params.mix) << 24;
-	q31_t mixDry = ONE_Q31 - mixWet;
+
+	// Mix: wet/dry blend from knob (0=bypass, 127=100% wet)
+	float mixFloat = static_cast<float>(params.mix) / 127.0f;
+	q31_t mixQ = static_cast<q31_t>(mixFloat * static_cast<float>(ONE_Q31));
+	q31_t dryQ = ONE_Q31 - mixQ;
 
 	for (auto& sample : buffer) {
-		params.delay.write(sample.l, sample.r);
+		// Write input + feedback to delay (IIR comb filter topology)
+		// Feedback is scaled by feedbackQ (max 0.95) to prevent DC buildup
+		q31_t fbScaledL = multiply_32x32_rshift32(params.feedbackL, feedbackQ) << 1;
+		q31_t fbScaledR = multiply_32x32_rshift32(params.feedbackR, feedbackQ) << 1;
+		q31_t inputL = add_saturate(sample.l, fbScaledL);
+		q31_t inputR = add_saturate(sample.r, fbScaledR);
+		params.delay.write(inputL, inputR);
 
-		// Generate white noise
+		// Generate white noise with stereo width control
 		q31_t whiteL = getNoise();
-		q31_t whiteR = getNoise();
+		q31_t whiteR_ind = getNoise();
+		q31_t whiteR =
+		    add_saturate(multiply_32x32_rshift32(whiteL, monoQ) << 1, multiply_32x32_rshift32(whiteR_ind, widthQ) << 1);
 
 		// S&H: trigger on input or SVF zero crossing
 		bool inputCross = (sample.l ^ params.noise.prevInputL) < 0;
@@ -142,7 +183,7 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 		q31_t noiseR = add_saturate(multiply_32x32_rshift32(whiteR, whiteBlendQ) << 1,
 		                            multiply_32x32_rshift32(params.noise.heldR, shBlendQ) << 1);
 
-		// SVF filter (2-pole, LP output with resonance)
+		// SVF filter (2-pole)
 		q31_t highL = noiseL - params.noise.svfLowL - (multiply_32x32_rshift32(params.noise.svfBandL, svfQ) << 1);
 		params.noise.svfBandL += multiply_32x32_rshift32(highL, svfF) << 1;
 		params.noise.svfLowL += multiply_32x32_rshift32(params.noise.svfBandL, svfF) << 1;
@@ -168,10 +209,12 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 		q31_t wetL = params.delay.readL(delayL);
 		q31_t wetR = params.delay.readR(delayR);
 
-		sample.l =
-		    add_saturate(multiply_32x32_rshift32(sample.l, mixDry) << 1, multiply_32x32_rshift32(wetL, mixWet) << 1);
-		sample.r =
-		    add_saturate(multiply_32x32_rshift32(sample.r, mixDry) << 1, multiply_32x32_rshift32(wetR, mixWet) << 1);
+		params.feedbackL = wetL;
+		params.feedbackR = wetR;
+
+		// Wet/dry blend
+		sample.l = add_saturate(multiply_32x32_rshift32(sample.l, dryQ) << 1, multiply_32x32_rshift32(wetL, mixQ) << 1);
+		sample.r = add_saturate(multiply_32x32_rshift32(sample.r, dryQ) << 1, multiply_32x32_rshift32(wetR, mixQ) << 1);
 	}
 }
 

@@ -39,9 +39,9 @@ namespace deluge::dsp {
 
 inline constexpr int32_t kEroderNumZones = 8;
 
-// Maximum delay line length in samples (~1.45ms at 44.1kHz)
+// Maximum delay line length in samples (~5.8ms at 44.1kHz)
 // Must be power of 2 for fast modulo via bitmask
-inline constexpr int32_t kEroderMaxDelay = 64;
+inline constexpr int32_t kEroderMaxDelay = 256;
 inline constexpr int32_t kEroderDelayMask = kEroderMaxDelay - 1;
 
 // Smoothing alpha per buffer (~0.05)
@@ -121,12 +121,17 @@ struct EroderParams {
 	ZoneBasedParam<kEroderNumZones, false> character; // Character zone (continuous across zones)
 
 	// User-facing knob values
-	uint8_t depth{0}; // Modulation depth (0=off/bypass, 1-127)
-	uint8_t mix{64};  // Wet/dry blend (0=dry, 127=wet)
+	uint8_t mix{0}; // Wet/dry mix (0=off/bypass, 1-127)
 
 	// DSP state
 	EroderDelayLine delay;
 	EroderNoiseState noise;
+	q31_t feedbackL{0};
+	q31_t feedbackR{0};
+
+	// Pitch tracking cache (recomputed when noteCode changes)
+	int32_t prevNoteCode{-1};
+	int32_t cachedPitchRatioQ16{1 << 16}; // 1.0 in Q16.16 fixed point
 
 	// Smoothing state (per-buffer interpolation)
 	q31_t smoothedFreq{0};
@@ -147,11 +152,10 @@ struct EroderParams {
 		return static_cast<double>(charPhaseOffset) + 1024.0 * static_cast<double>(gammaPhase);
 	}
 
-	[[nodiscard]] bool isEnabled() const { return depth > 0; }
+	[[nodiscard]] bool isEnabled() const { return mix > 0; }
 
 	void writeToFile(Serializer& writer) const {
-		WRITE_FIELD(writer, depth, "eroderDepth");
-		WRITE_FIELD_DEFAULT(writer, mix, "eroderMix", 64);
+		WRITE_FIELD(writer, mix, "eroderMix");
 		WRITE_ZONE(writer, freq.value, "eroderFreq");
 		WRITE_ZONE(writer, character.value, "eroderChar");
 		WRITE_FLOAT(writer, freqPhaseOffset, "eroderFreqPhase", 10.0f);
@@ -160,7 +164,6 @@ struct EroderParams {
 	}
 
 	bool readTag(Deserializer& reader, const char* tagName) {
-		READ_FIELD(reader, tagName, depth, "eroderDepth");
 		READ_FIELD(reader, tagName, mix, "eroderMix");
 		READ_ZONE(reader, tagName, freq.value, "eroderFreq");
 		READ_ZONE(reader, tagName, character.value, "eroderChar");
@@ -176,6 +179,6 @@ struct EroderParams {
 // ============================================================================
 
 void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t freqPreset, q31_t freqCables,
-                   q31_t charPreset, q31_t charCables);
+                   q31_t charPreset, q31_t charCables, q31_t cutoffValue, int32_t noteCode = -1);
 
 } // namespace deluge::dsp

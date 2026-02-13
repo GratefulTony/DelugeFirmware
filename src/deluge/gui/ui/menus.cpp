@@ -784,14 +784,14 @@ HorizontalMenu disperserSubMenu{
 };
 
 // Eroder - noise-modulated allpass for digital erosion artifacts
-fx::EroderFreq eroderFreqMenu{STRING_FOR_ERODER_FREQ};
+fx::EroderCutoff eroderCutoffMenu{STRING_FOR_ERODER_CUTOFF, params::GLOBAL_ERODER_CUTOFF};
+fx::EroderTone eroderToneMenu{STRING_FOR_ERODER_FREQ};
 fx::EroderCharacter eroderCharacterMenu{STRING_FOR_ERODER_CHARACTER};
-fx::EroderDepth eroderDepthMenu{STRING_FOR_ERODER_DEPTH};
 fx::EroderMix eroderMixMenu{STRING_FOR_ERODER_MIX};
 
 HorizontalMenu eroderSubMenu{
     STRING_FOR_ERODER_MENU,
-    {&eroderFreqMenu, &eroderCharacterMenu, &eroderDepthMenu, &eroderMixMenu},
+    {&eroderCutoffMenu, &eroderToneMenu, &eroderCharacterMenu, &eroderMixMenu},
 };
 
 // Shaping submenu - contains Sine Shaper, Table Shaper, Automodulator, Disperser, and Eroder

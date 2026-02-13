@@ -182,8 +182,9 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [GLOBAL_AUTOMOD_DEPTH]           = "Automod",
 	    [GLOBAL_AUTOMOD_FREQ]            = "AutoFrq",
 	    [GLOBAL_AUTOMOD_MANUAL]          = "AutoMan",
-	    [GLOBAL_ERODER_FREQ]             = "Erod freq",
+	    [GLOBAL_ERODER_FREQ]             = "Erod tone",
 	    [GLOBAL_ERODER_CHARACTER]        = "Erod char",
+	    [GLOBAL_ERODER_CUTOFF]           = "Erod cut",
 	    [GLOBAL_DELAY_RATE]              = "Delay rate",
 	    [GLOBAL_MOD_FX_RATE]             = "ModFX rate",
 	    [GLOBAL_LFO_FREQ_1]                = "LFO1 rate",
@@ -273,6 +274,7 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [GLOBAL_AUTOMOD_MANUAL] = STRING_FOR_AUTOMOD_MANUAL,
 	    [GLOBAL_ERODER_FREQ] = STRING_FOR_ERODER_FREQ,
 	    [GLOBAL_ERODER_CHARACTER] = STRING_FOR_ERODER_CHARACTER,
+	    [GLOBAL_ERODER_CUTOFF] = STRING_FOR_ERODER_CUTOFF,
 	    [GLOBAL_DELAY_RATE] = STRING_FOR_PARAM_GLOBAL_DELAY_RATE,
 	    [GLOBAL_MOD_FX_RATE] = STRING_FOR_PARAM_GLOBAL_MOD_FX_RATE,
 	    [GLOBAL_LFO_FREQ_1] = STRING_FOR_PARAM_GLOBAL_LFO_FREQ_1,
@@ -334,6 +336,7 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 		    [UNPATCHED_AUTOMOD_MANUAL] = STRING_FOR_AUTOMOD_MANUAL,
 		    [UNPATCHED_ERODER_FREQ] = STRING_FOR_ERODER_FREQ,
 		    [UNPATCHED_ERODER_CHARACTER] = STRING_FOR_ERODER_CHARACTER,
+		    [UNPATCHED_ERODER_CUTOFF] = STRING_FOR_ERODER_CUTOFF,
 		    [UNPATCHED_SCATTER_ZONE_A] = STRING_FOR_SCATTER_PATTERN,
 		    [UNPATCHED_SCATTER_ZONE_B] = STRING_FOR_SCATTER_COLOR,
 		    [UNPATCHED_SCATTER_MACRO_CONFIG] = STRING_FOR_SCATTER_MACRO_CONFIG,
@@ -606,6 +609,8 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 			return "eroderFreq";
 		case UNPATCHED_ERODER_CHARACTER:
 			return "eroderCharacter";
+		case UNPATCHED_ERODER_CUTOFF:
+			return "eroderCutoff";
 
 		case UNPATCHED_ARP_GATE:
 			return "arpGate";
@@ -717,6 +722,8 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 			return "globalEroderFreq";
 		case GLOBAL_ERODER_CHARACTER:
 			return "globalEroderCharacter";
+		case GLOBAL_ERODER_CUTOFF:
+			return "globalEroderCutoff";
 
 		case GLOBAL_SCATTER_ZONE_A:
 			return "globalScatterZoneA";
