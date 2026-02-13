@@ -2648,6 +2648,15 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		                                  voiceCount, timePerTickInv, lastNoteCode, isLegato);
 	}
 
+	// Eroder: zone params have cables only in paramFinalValues, add base value for cutoff
+	{
+		q31_t freqCables = paramFinalValues[params::GLOBAL_ERODER_FREQ - params::FIRST_GLOBAL];
+		q31_t charCables = paramFinalValues[params::GLOBAL_ERODER_CHARACTER - params::FIRST_GLOBAL];
+		q31_t cutoffValue = add_saturate(paramManager->getPatchedParamSet()->getValue(params::GLOBAL_ERODER_CUTOFF),
+		                                 paramFinalValues[params::GLOBAL_ERODER_CUTOFF - params::FIRST_GLOBAL]);
+		processEroderEffect(sound_stereo, paramManager, freqCables, charCables, cutoffValue);
+	}
+
 	// Default order: Automodulator → ModFX → Stutter → DOTT → Reverb
 	// With ModFXPostDOTT: Automodulator → Stutter → DOTT → ModFX → Reverb
 	if (!modFXPostDOTT) {
@@ -4186,6 +4195,20 @@ bool Sound::readParamTagFromFile(Deserializer& reader, char const* tagName, Para
 		reader.exitTag("globalAutomodManual");
 	}
 
+	// Eroder params (patched, Sound context)
+	else if (!strcmp(tagName, "globalEroderFreq")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_ERODER_FREQ, readAutomationUpToPos);
+		reader.exitTag("globalEroderFreq");
+	}
+	else if (!strcmp(tagName, "globalEroderCharacter")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_ERODER_CHARACTER, readAutomationUpToPos);
+		reader.exitTag("globalEroderCharacter");
+	}
+	else if (!strcmp(tagName, "globalEroderCutoff")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_ERODER_CUTOFF, readAutomationUpToPos);
+		reader.exitTag("globalEroderCutoff");
+	}
+
 	// Scatter params (patched, Sound context)
 	else if (!strcmp(tagName, "globalScatterZoneA")) {
 		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_SCATTER_ZONE_A, readAutomationUpToPos);
@@ -4318,6 +4341,13 @@ void Sound::writeParamsToFile(Serializer& writer, ParamManager* paramManager, bo
 	patchedParams->writeParamAsAttribute(writer, "globalAutomodFreq", params::GLOBAL_AUTOMOD_FREQ, writeAutomation,
 	                                     true);
 	patchedParams->writeParamAsAttribute(writer, "globalAutomodManual", params::GLOBAL_AUTOMOD_MANUAL, writeAutomation,
+	                                     true);
+
+	// Eroder params (patched, Sound context)
+	patchedParams->writeParamAsAttribute(writer, "globalEroderFreq", params::GLOBAL_ERODER_FREQ, writeAutomation, true);
+	patchedParams->writeParamAsAttribute(writer, "globalEroderCharacter", params::GLOBAL_ERODER_CHARACTER,
+	                                     writeAutomation, true);
+	patchedParams->writeParamAsAttribute(writer, "globalEroderCutoff", params::GLOBAL_ERODER_CUTOFF, writeAutomation,
 	                                     true);
 
 	// Scatter params (patched, Sound context)
