@@ -79,6 +79,7 @@
 #include "gui/menu_item/fx/automodulator.h"
 #include "gui/menu_item/fx/clipping.h"
 #include "gui/menu_item/fx/disperser.h"
+#include "gui/menu_item/fx/eroder.h"
 #include "gui/menu_item/fx/shaper.h"
 #include "gui/menu_item/fx/sine_shaper.h"
 #include "gui/menu_item/gate/mode.h"
@@ -782,10 +783,21 @@ HorizontalMenu disperserSubMenu{
     {&disperserFreqMenu, &disperserTopoMenu, &disperserTwistMenu, &disperserStagesMenu},
 };
 
-// Shaping submenu - contains Sine Shaper, Table Shaper, Automodulator, and Disperser
+// Eroder - noise-modulated allpass for digital erosion artifacts
+fx::EroderFreq eroderFreqMenu{STRING_FOR_ERODER_FREQ};
+fx::EroderCharacter eroderCharacterMenu{STRING_FOR_ERODER_CHARACTER};
+fx::EroderDepth eroderDepthMenu{STRING_FOR_ERODER_DEPTH};
+fx::EroderMix eroderMixMenu{STRING_FOR_ERODER_MIX};
+
+HorizontalMenu eroderSubMenu{
+    STRING_FOR_ERODER_MENU,
+    {&eroderFreqMenu, &eroderCharacterMenu, &eroderDepthMenu, &eroderMixMenu},
+};
+
+// Shaping submenu - contains Sine Shaper, Table Shaper, Automodulator, Disperser, and Eroder
 submenu::Shaping shapingMenu{
     STRING_FOR_SHAPING,
-    {&sineShaperSubMenu, &tableShaperSubMenu, &automodMenu, &disperserSubMenu},
+    {&sineShaperSubMenu, &tableShaperSubMenu, &automodMenu, &disperserSubMenu, &eroderSubMenu},
 };
 
 // Output MIDI for sound drums --------------------------------------------------------------

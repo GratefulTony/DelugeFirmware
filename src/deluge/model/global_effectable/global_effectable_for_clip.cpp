@@ -171,6 +171,9 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 		                                  true, 0, timePerTickInv);
 	}
 
+	// Eroder (no mod matrix cables in unpatched context)
+	processEroderEffect(global_effectable_audio, paramManagerForClip, 0, 0);
+
 	// Check if ModFX should run after DOTT and stutter
 	bool modFXPostDOTT =
 	    runtimeFeatureSettings.get(RuntimeFeatureSettingType::ModFXPostDOTT) == RuntimeFeatureStateToggle::On;

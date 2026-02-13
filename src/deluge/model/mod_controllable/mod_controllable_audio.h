@@ -24,6 +24,7 @@
 #include "dsp/compressor/rms_feedback.h"
 #include "dsp/delay/delay.h"
 #include "dsp/disperser.h"
+#include "dsp/eroder.h"
 #include "dsp/shaper.h"
 #include "dsp/sine_shaper.hpp"
 #include "dsp/stereo_sample.h"
@@ -67,6 +68,8 @@ public:
 	void processSRRAndBitcrushing(std::span<StereoSample> buffer, int32_t* postFXVolume, ParamManager* paramManager);
 	void processDisperser(std::span<StereoSample> buffer, ParamManager* paramManager, q31_t topoCables = 0,
 	                      q31_t twistCables = 0);
+	void processEroderEffect(std::span<StereoSample> buffer, ParamManager* paramManager, q31_t freqCables = 0,
+	                         q31_t charCables = 0);
 	static void writeParamAttributesToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,
 	                                       int32_t* valuesForOverride = nullptr);
 	static void writeParamTagsToFile(Serializer& writer, ParamManager* paramManager, bool writeAutomation,
@@ -132,6 +135,9 @@ public:
 	// Disperser (allpass cascade with feedback)
 	deluge::dsp::Disperser disperserDsp;    // DSP processor
 	deluge::dsp::DisperserParams disperser; // All disperser state (freq, stages, zones, smoothing, delay)
+
+	// Eroder (noise-modulated allpass for digital erosion)
+	deluge::dsp::EroderParams eroder;
 
 	FilterMode lpfMode;
 	FilterMode hpfMode;

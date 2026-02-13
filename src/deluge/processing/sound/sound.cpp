@@ -2648,6 +2648,13 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		                                  voiceCount, timePerTickInv, lastNoteCode, isLegato);
 	}
 
+	// Eroder modulation cables (for mod matrix support)
+	{
+		q31_t freqCables = paramFinalValues[params::GLOBAL_ERODER_FREQ - params::FIRST_GLOBAL];
+		q31_t charCables = paramFinalValues[params::GLOBAL_ERODER_CHARACTER - params::FIRST_GLOBAL];
+		processEroderEffect(sound_stereo, paramManager, freqCables, charCables);
+	}
+
 	// Default order: Automodulator → ModFX → Stutter → DOTT → Reverb
 	// With ModFXPostDOTT: Automodulator → Stutter → DOTT → ModFX → Reverb
 	if (!modFXPostDOTT) {
