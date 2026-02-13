@@ -25,7 +25,6 @@
 // This file contains all sine shaper waveshaping algorithms, zone logic,
 // harmonic extraction, and buffer processing functions.
 
-#include "dsp/fast_math.h"         // For fastSinHalfPi (rect2 optimization)
 #include "dsp/phi_triangle.hpp"    // For φ-power constants
 #include "dsp/stereo_sample.h"     // For StereoSample type
 #include "dsp/util.hpp"            // For smoothing helpers, polynomial primitives
@@ -391,6 +390,23 @@ struct ShaperWeights {
 	float c5; // Coefficient for x⁵
 	float c7; // Coefficient for x⁷ (from w7 or w9's H9 contribution)
 	float c9; // Coefficient for x⁹ (only when w9 active, else 0)
+
+	// Pre-converted q31 weights for FM zones (avoids per-sample float→q31 VCVT)
+	// Updated at stride rate in buffer loop, used by sineShapeCore/sineShapeCoreStereo
+	q31_t c3q{0}; // static_cast<q31_t>(c3 * ONE_Q31)
+	q31_t c5q{0}; // static_cast<q31_t>(c5 * ONE_Q31)
+	q31_t c7q{0}; // static_cast<q31_t>(c7 * ONE_Q31)
+	q31_t c9q{0}; // static_cast<q31_t>(c9 * ONE_Q31)
+	q31_t c1q{0}; // static_cast<q31_t>(c1 * (ONE_Q31 >> 2)) for FM inputGain
+
+	/// Recompute q31 fields from float fields (call at stride rate, not per-sample)
+	void updateQ31() {
+		c3q = static_cast<q31_t>(c3 * ONE_Q31);
+		c5q = static_cast<q31_t>(c5 * ONE_Q31);
+		c7q = static_cast<q31_t>(c7 * ONE_Q31);
+		c9q = static_cast<q31_t>(c9 * ONE_Q31);
+		c1q = static_cast<q31_t>(c1 * (ONE_Q31 >> 2));
+	}
 };
 
 /**
@@ -463,7 +479,7 @@ inline ShaperWeights computeShaperWeightsFromPos(float posInZone, double gammaPh
  *
  * Zone 0: Width - Stereo spread with animated phase evolution
  * Zone 1: Evens - Asymmetric compression for even harmonics
- * Zone 2: Rect - Blended rectifier (rect + rect2 with overlap)
+ * Zone 2: Rect - Half-wave rectifier blend
  * Zone 3: Feedback - Output→input recirculation
  * Zone 4: Twist - Phase modulator for Harmonic zones (meta-control)
  */
@@ -475,7 +491,6 @@ struct SineShaperTwistParams {
 	float evenAmount{0.0f};           // Evens: positive compression amount
 	float evenDryBlend{0.0f};         // Evens: negative dry blend amount
 	float rectAmount{0.0f};           // Rect: rectifier blend
-	float rect2Amount{0.0f};          // Rect: sine compression
 	float feedbackAmount{0.0f};       // Feedback: depth (0.0 to 0.25)
 	float phaseHarmonic{0.0f};        // Position offset for Harmonic (includes pos * 5.0f)
 	float phaseHarmonicFreqMod{0.0f}; // Frequency modulation offset (just harmonicPhaseOffset + gamma)
@@ -526,11 +541,9 @@ SineShaperTwistParams computeSineShaperTwistParams(q31_t twist, const SineTableS
  * @param evenAmount Positive compression for even harmonics (Twist Zone 1, 0.0 to 1.0)
  * @param evenDryBlend Negative dry blend for even harmonics (Twist Zone 1, 0.0 to 1.0)
  * @param rectAmount Rectifier blend toward |result| (Twist Zone 2, 0.0 to 1.0)
- * @param rect2Amount Sine compression on positive (Twist Zone 2, 0.0 to 1.0)
  */
 q31_t sineShapeCore(q31_t input, float driveGain, int32_t zone, const ShaperWeights* zoneWeights,
-                    float evenAmount = 0.0f, float evenDryBlend = 0.0f, float rectAmount = 0.0f,
-                    float rect2Amount = 0.0f);
+                    float evenAmount = 0.0f, float evenDryBlend = 0.0f, float rectAmount = 0.0f);
 
 /// Stereo output from sineShapeCoreStereo
 struct StereoShaped {
@@ -556,12 +569,10 @@ struct StereoShaped {
  * @param evenAmount Positive compression for even harmonics
  * @param evenDryBlend Negative dry blend for even harmonics
  * @param rectAmount Rectifier blend
- * @param rect2Amount Sine compression on positive
  */
 StereoShaped sineShapeCoreStereo(q31_t inputL, q31_t inputR, float driveGainL, float driveGainR, int32_t zone,
                                  const ShaperWeights* zoneWeightsL, const ShaperWeights* zoneWeightsR,
-                                 float evenAmount = 0.0f, float evenDryBlend = 0.0f, float rectAmount = 0.0f,
-                                 float rect2Amount = 0.0f);
+                                 float evenAmount = 0.0f, float evenDryBlend = 0.0f, float rectAmount = 0.0f);
 
 /**
  * Process a mono buffer through the sine shaper with parameter smoothing
