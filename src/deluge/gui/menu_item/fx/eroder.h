@@ -28,6 +28,8 @@
 #include "modulation/params/param.h"
 #include "processing/sound/sound.h"
 #include "processing/sound/sound_drum.h"
+#include <cmath>
+#include <cstdio>
 
 namespace params = deluge::modulation::params;
 
@@ -42,6 +44,39 @@ public:
 		return soundEditor.currentModControllable->ensureEroder().freq.value;
 	}
 	void setFieldValue(q31_t value) override { soundEditor.currentModControllable->ensureEroder().freq.value = value; }
+
+	// Auto-wrap support for phi triangle phase exploration
+	[[nodiscard]] bool supportsAutoWrap() const override { return true; }
+	[[nodiscard]] float getPhaseOffset() const override {
+		return soundEditor.currentModControllable->ensureEroder().freqPhaseOffset;
+	}
+	void setPhaseOffset(float offset) override {
+		soundEditor.currentModControllable->ensureEroder().freqPhaseOffset = offset;
+	}
+
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			Buttons::selectButtonPressUsedUp = true;
+			float& phase = soundEditor.currentModControllable->ensureEroder().freqPhaseOffset;
+			phase = std::max(0.0f, phase + static_cast<float>(offset) * 128.0f);
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "F:%d", static_cast<int32_t>(phase / 128.0f));
+			display->displayPopup(buffer);
+			renderUIsForOled();
+			suppressNotification_ = true;
+		}
+		else {
+			ZoneBasedDualParam::selectEncoderAction(offset);
+		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
 
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
@@ -88,9 +123,46 @@ public:
 			return "??";
 		}
 	}
+
+	// P:Z coordinate display when phase offset is active
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
+		double phaseOffset = soundEditor.currentModControllable->ensureEroder().effectiveFreq();
+		if (phaseOffset != 0.0) {
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			renderZoneInHorizontalMenu(slot, this->getValue(), 1024, dsp::kEroderNumZones, getCoordName);
+		}
+		else {
+			renderZoneInHorizontalMenu(slot, this->getValue(), 1024, dsp::kEroderNumZones,
+			                           [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+protected:
+	void drawPixelsForOled() override {
+		double phaseOffset = soundEditor.currentModControllable->ensureEroder().effectiveFreq();
+		if (phaseOffset != 0.0) {
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			drawZoneForOled(this->getValue(), 1024, dsp::kEroderNumZones, getCoordName);
+		}
+		else {
+			drawZoneForOled(this->getValue(), 1024, dsp::kEroderNumZones,
+			                [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+private:
+	mutable bool suppressNotification_ = false;
+
+	static inline char coordBuffer_[12] = {};
+	static void cacheCoordDisplay(double phaseOffset, int32_t value) {
+		int32_t p = static_cast<int32_t>(std::floor(phaseOffset));
+		int32_t z = value >> 7; // 0-1023 → 0-7
+		snprintf(coordBuffer_, sizeof(coordBuffer_), "%d:%d", p, z);
+	}
+	static const char* getCoordName([[maybe_unused]] int32_t zoneIndex) { return coordBuffer_; }
 };
 
-// Eroder Character: Noise/modulator type zone (8 zones: White → Smooth)
+// Eroder Character: SVF-filtered noise spectrum (8 zones: Deep → Open)
 class EroderCharacter final : public ZoneBasedDualParam<params::GLOBAL_ERODER_CHARACTER> {
 public:
 	using ZoneBasedDualParam::ZoneBasedDualParam;
@@ -102,24 +174,57 @@ public:
 		soundEditor.currentModControllable->ensureEroder().character.value = value;
 	}
 
+	// Auto-wrap support for phi triangle phase exploration
+	[[nodiscard]] bool supportsAutoWrap() const override { return true; }
+	[[nodiscard]] float getPhaseOffset() const override {
+		return soundEditor.currentModControllable->ensureEroder().charPhaseOffset;
+	}
+	void setPhaseOffset(float offset) override {
+		soundEditor.currentModControllable->ensureEroder().charPhaseOffset = offset;
+	}
+
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			Buttons::selectButtonPressUsedUp = true;
+			float& phase = soundEditor.currentModControllable->ensureEroder().charPhaseOffset;
+			phase = std::max(0.0f, phase + static_cast<float>(offset) * 128.0f);
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "C:%d", static_cast<int32_t>(phase / 128.0f));
+			display->displayPopup(buffer);
+			renderUIsForOled();
+			suppressNotification_ = true;
+		}
+		else {
+			ZoneBasedDualParam::selectEncoderAction(offset);
+		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
 		case 0:
-			return "White";
+			return "Deep";
 		case 1:
-			return "Pink";
+			return "Dark";
 		case 2:
-			return "Brown";
+			return "Warm";
 		case 3:
-			return "Blue";
+			return "Mid";
 		case 4:
-			return "Sine";
+			return "Bright";
 		case 5:
-			return "Ring";
+			return "Crisp";
 		case 6:
-			return "Sparse";
+			return "Air";
 		case 7:
-			return "Smooth";
+			return "Open";
 		default:
 			return "?";
 		}
@@ -128,25 +233,62 @@ public:
 	[[nodiscard]] const char* getShortZoneName(int32_t zoneIndex) const override {
 		switch (zoneIndex) {
 		case 0:
-			return "WH";
+			return "DP";
 		case 1:
-			return "PK";
+			return "DK";
 		case 2:
-			return "BN";
+			return "WM";
 		case 3:
-			return "BL";
+			return "MI";
 		case 4:
-			return "SN";
+			return "BR";
 		case 5:
-			return "RG";
+			return "CR";
 		case 6:
-			return "SP";
+			return "AI";
 		case 7:
-			return "SM";
+			return "OP";
 		default:
 			return "??";
 		}
 	}
+
+	// P:Z coordinate display when phase offset is active
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
+		double phaseOffset = soundEditor.currentModControllable->ensureEroder().effectiveChar();
+		if (phaseOffset != 0.0) {
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			renderZoneInHorizontalMenu(slot, this->getValue(), 1024, dsp::kEroderNumZones, getCoordName);
+		}
+		else {
+			renderZoneInHorizontalMenu(slot, this->getValue(), 1024, dsp::kEroderNumZones,
+			                           [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+protected:
+	void drawPixelsForOled() override {
+		double phaseOffset = soundEditor.currentModControllable->ensureEroder().effectiveChar();
+		if (phaseOffset != 0.0) {
+			cacheCoordDisplay(phaseOffset, this->getValue());
+			drawZoneForOled(this->getValue(), 1024, dsp::kEroderNumZones, getCoordName);
+		}
+		else {
+			drawZoneForOled(this->getValue(), 1024, dsp::kEroderNumZones,
+			                [this](int32_t z) { return this->getZoneName(z); });
+		}
+	}
+
+private:
+	mutable bool suppressNotification_ = false;
+
+	static inline char coordBuffer_[12] = {};
+	static void cacheCoordDisplay(double phaseOffset, int32_t value) {
+		int32_t p = static_cast<int32_t>(std::floor(phaseOffset));
+		int32_t z = value >> 7; // 0-1023 → 0-7
+		snprintf(coordBuffer_, sizeof(coordBuffer_), "%d:%d", p, z);
+	}
+	static const char* getCoordName([[maybe_unused]] int32_t zoneIndex) { return coordBuffer_; }
 };
 
 // Eroder Depth: Modulation intensity (0=off/bypass, 1-127)
@@ -216,6 +358,34 @@ public:
 	[[nodiscard]] int32_t getMinValue() const override { return 0; }
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
+
+	void selectEncoderAction(int32_t offset) override {
+		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)) {
+			// Push+twist: adjust gammaPhase (multiplier for all zone phase offsets)
+			Buttons::selectButtonPressUsedUp = true;
+			float& gamma = soundEditor.currentModControllable->ensureEroder().gammaPhase;
+			gamma = std::max(0.0f, gamma + static_cast<float>(offset));
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "G:%d", static_cast<int32_t>(gamma));
+			display->displayPopup(buffer);
+			renderUIsForOled();
+			suppressNotification_ = true;
+		}
+		else {
+			Integer::selectEncoderAction(offset);
+		}
+	}
+
+	[[nodiscard]] bool showNotification() const override {
+		if (suppressNotification_) {
+			suppressNotification_ = false;
+			return false;
+		}
+		return true;
+	}
+
+private:
+	mutable bool suppressNotification_ = false;
 };
 
 } // namespace deluge::gui::menu_item::fx

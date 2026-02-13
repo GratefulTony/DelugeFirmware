@@ -44,74 +44,25 @@ inline constexpr int32_t kEroderNumZones = 8;
 inline constexpr int32_t kEroderMaxDelay = 64;
 inline constexpr int32_t kEroderDelayMask = kEroderMaxDelay - 1;
 
-// Base delay times per frequency zone (in samples)
-// Shorter delay = higher frequency comb notches
-// First notch at f = sampleRate / delaySamples
-inline constexpr int32_t kEroderBaseDelay[kEroderNumZones] = {
-    60, // Zone 0: Sub    → first notch ~735 Hz
-    44, // Zone 1: Bass   → first notch ~1003 Hz
-    30, // Zone 2: Low    → first notch ~1470 Hz
-    20, // Zone 3: Mid    → first notch ~2205 Hz
-    13, // Zone 4: High   → first notch ~3392 Hz
-    8,  // Zone 5: Air    → first notch ~5513 Hz
-    4,  // Zone 6: Bright → first notch ~11025 Hz
-    30, // Zone 7: Full   → mid delay, wide modulation
-};
-
 // Smoothing alpha per buffer (~0.05)
 inline constexpr q31_t kEroderSmoothingAlpha = static_cast<q31_t>(0.05f * ONE_Q31);
 
-// Pink noise: 4 octave bands via Voss-McCartney
-inline constexpr int32_t kNumPinkBands = 4;
-inline constexpr int32_t kPinkBandShift = 2; // >> 2 = divide by 4 when summing
-
-// Sine character: phase increment for ~1kHz at 44100 Hz sample rate
-inline constexpr uint32_t kSinePhaseInc = 97391472u;
-
 // ============================================================================
-// Character Zones
-// ============================================================================
-
-enum class EroderCharacter : int32_t {
-	WHITE = 0,  // Raw white noise
-	PINK = 1,   // Voss-McCartney pink noise (-3dB/oct)
-	BROWN = 2,  // Integrated white noise (-6dB/oct)
-	BLUE = 3,   // Differentiated white noise (+3dB/oct)
-	SINE = 4,   // Triangle wave modulator (~1kHz)
-	RING = 5,   // Input * noise (signal-dependent erosion)
-	SPARSE = 6, // Sample & hold noise (digital artifacts)
-	SMOOTH = 7, // Lowpass filtered noise (controlled bandwidth)
-};
-
-// ============================================================================
-// Noise State
+// Noise + SVF State
 // ============================================================================
 
 struct EroderNoiseState {
-	// Brown noise integration accumulators
-	q31_t brownL{0};
-	q31_t brownR{0};
+	// SVF filter state (stereo)
+	q31_t svfLowL{0};
+	q31_t svfLowR{0};
+	q31_t svfBandL{0};
+	q31_t svfBandR{0};
 
-	// Blue noise previous samples
-	q31_t prevNoiseL{0};
-	q31_t prevNoiseR{0};
-
-	// Pink noise (Voss-McCartney, 4 octave bands per channel)
-	q31_t pinkBandsL[kNumPinkBands]{};
-	q31_t pinkBandsR[kNumPinkBands]{};
-	uint32_t pinkCounter{0};
-
-	// Sine/triangle oscillator phase
-	uint32_t sinePhase{0};
-
-	// Sparse S&H state
-	q31_t heldValueL{0};
-	q31_t heldValueR{0};
-	uint32_t shCounter{0};
-
-	// Smooth LPF state
-	q31_t smoothL{0};
-	q31_t smoothR{0};
+	// S&H state (zero-crossing triggered)
+	q31_t heldL{0};
+	q31_t heldR{0};
+	q31_t prevInputL{0};
+	q31_t prevFilteredL{0};
 
 	void reset() { *this = EroderNoiseState{}; }
 };
@@ -181,6 +132,21 @@ struct EroderParams {
 	q31_t smoothedFreq{0};
 	q31_t smoothedCharacter{0};
 
+	// Phase offsets (push+twist on zone encoders for phi triangle evaluation)
+	float freqPhaseOffset{0};
+	float charPhaseOffset{0};
+	float gammaPhase{0};
+
+	/// Effective phase for freq: freqPhaseOffset + 1024*gammaPhase
+	[[nodiscard]] double effectiveFreq() const {
+		return static_cast<double>(freqPhaseOffset) + 1024.0 * static_cast<double>(gammaPhase);
+	}
+
+	/// Effective phase for character: charPhaseOffset + 1024*gammaPhase
+	[[nodiscard]] double effectiveChar() const {
+		return static_cast<double>(charPhaseOffset) + 1024.0 * static_cast<double>(gammaPhase);
+	}
+
 	[[nodiscard]] bool isEnabled() const { return depth > 0; }
 
 	void writeToFile(Serializer& writer) const {
@@ -188,6 +154,9 @@ struct EroderParams {
 		WRITE_FIELD_DEFAULT(writer, mix, "eroderMix", 64);
 		WRITE_ZONE(writer, freq.value, "eroderFreq");
 		WRITE_ZONE(writer, character.value, "eroderChar");
+		WRITE_FLOAT(writer, freqPhaseOffset, "eroderFreqPhase", 10.0f);
+		WRITE_FLOAT(writer, charPhaseOffset, "eroderCharPhase", 10.0f);
+		WRITE_FLOAT(writer, gammaPhase, "eroderGamma", 10.0f);
 	}
 
 	bool readTag(Deserializer& reader, const char* tagName) {
@@ -195,6 +164,9 @@ struct EroderParams {
 		READ_FIELD(reader, tagName, mix, "eroderMix");
 		READ_ZONE(reader, tagName, freq.value, "eroderFreq");
 		READ_ZONE(reader, tagName, character.value, "eroderChar");
+		READ_FLOAT(reader, tagName, freqPhaseOffset, "eroderFreqPhase", 10.0f);
+		READ_FLOAT(reader, tagName, charPhaseOffset, "eroderCharPhase", 10.0f);
+		READ_FLOAT(reader, tagName, gammaPhase, "eroderGamma", 10.0f);
 		return false;
 	}
 };

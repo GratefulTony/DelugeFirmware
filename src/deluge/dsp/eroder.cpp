@@ -20,142 +20,39 @@
  */
 
 #include "dsp/eroder.h"
+#include "dsp/phi_triangle.hpp"
 #include "io/debug/fx_benchmark.h"
 #include "util/functions.h"
 #include <algorithm>
-#include <utility>
+
+namespace phi = deluge::dsp::phi;
 
 namespace deluge::dsp {
 
 namespace {
 
 // ============================================================================
-// Noise Generation Helpers
+// Phi Triangle Banks
 // ============================================================================
 
-/// Voss-McCartney pink noise: update one octave band per sample
-q31_t generatePinkNoise(q31_t bands[kNumPinkBands], uint32_t counter) {
-	int band = __builtin_ctz(counter | (1u << kNumPinkBands));
-	if (band < kNumPinkBands) {
-		bands[band] = getNoise();
-	}
-	q31_t sum = 0;
-	for (int32_t i = 0; i < kNumPinkBands; i++) {
-		sum = add_saturate(sum, bands[i] >> kPinkBandShift);
-	}
-	return sum;
+// Freq bank: delay time from phi triangle
+constexpr std::array<phi::PhiTriConfig, 1> kEroderFreqBank = {{
+    {phi::kPhi150, 0.7f, 0.0f, false}, // [0] Delay time: maps to [1, kEroderMaxDelay-1]
+}};
+
+// Character bank: SVF cutoff, resonance, S&H blend, filter output select
+constexpr std::array<phi::PhiTriConfig, 5> kEroderCharBank = {{
+    {phi::kPhi150, 0.7f, 0.0f, false}, // [0] SVF cutoff (0→1, quadratic mapped)
+    {phi::kPhi175, 0.5f, 0.3f, false}, // [1] SVF resonance (0→1, high = tonal)
+    {phi::kPhi100, 0.4f, 0.7f, false}, // [2] S&H blend (0=white, 1=S&H)
+    {phi::kPhi125, 0.6f, 0.1f, true},  // [3] LP↔HP select (bipolar: -1=LP, +1=HP)
+    {phi::kPhi200, 0.4f, 0.5f, true},  // [4] (LP/HP)↔BP select (bipolar: -1=LP/HP, +1=BP)
+}};
+
+float computeEroderDelay(double freqPhase) {
+	auto results = phi::evalTriangleBank<1>(freqPhase, 1.0f, kEroderFreqBank);
+	return 1.0f + results[0] * static_cast<float>(kEroderMaxDelay - 2);
 }
-
-/// Brown noise: leaky integration of white noise (-6dB/oct above ~55Hz)
-q31_t generateBrownNoise(q31_t& state) {
-	q31_t white = getNoise() >> 4;
-	state = add_saturate(state, white);
-	state -= state >> 7;
-	return state;
-}
-
-/// Blue noise: differentiate white noise (+3dB/oct)
-q31_t generateBlueNoise(q31_t& prevNoise) {
-	q31_t white = getNoise();
-	q31_t blue = white - prevNoise;
-	prevNoise = white;
-	return blue;
-}
-
-// ============================================================================
-// Delay Time Computation
-// ============================================================================
-
-/// Compute base delay time from frequency zone value
-/// Interpolates between adjacent zone delays
-float computeEroderDelay(q31_t freqValue) {
-	ZoneInfo zone = computeZoneQ31(freqValue, kEroderNumZones);
-	float baseDelay = static_cast<float>(kEroderBaseDelay[zone.index]);
-
-	if (zone.index < kEroderNumZones - 1) {
-		float nextDelay = static_cast<float>(kEroderBaseDelay[zone.index + 1]);
-		baseDelay += (nextDelay - baseDelay) * zone.position;
-	}
-	return baseDelay;
-}
-
-// ============================================================================
-// Noise Routing
-// ============================================================================
-
-/// Generate stereo noise pair based on character zone
-std::pair<q31_t, q31_t> generateEroderNoise(EroderNoiseState& state, int32_t charZone, q31_t inputL, q31_t inputR) {
-	q31_t noiseL, noiseR;
-
-	switch (static_cast<EroderCharacter>(charZone)) {
-	case EroderCharacter::WHITE:
-		noiseL = getNoise();
-		noiseR = getNoise();
-		break;
-
-	case EroderCharacter::PINK:
-		state.pinkCounter++;
-		noiseL = generatePinkNoise(state.pinkBandsL, state.pinkCounter);
-		noiseR = generatePinkNoise(state.pinkBandsR, state.pinkCounter + 7);
-		break;
-
-	case EroderCharacter::BROWN:
-		noiseL = generateBrownNoise(state.brownL);
-		noiseR = generateBrownNoise(state.brownR);
-		break;
-
-	case EroderCharacter::BLUE:
-		noiseL = generateBlueNoise(state.prevNoiseL);
-		noiseR = generateBlueNoise(state.prevNoiseR);
-		break;
-
-	case EroderCharacter::SINE: {
-		state.sinePhase += kSinePhaseInc;
-		int32_t saw = static_cast<int32_t>(state.sinePhase);
-		q31_t halfTri = saw < 0 ? ~saw : saw;
-		noiseL = halfTri - (ONE_Q31 >> 1);
-		noiseR = noiseL;
-		break;
-	}
-
-	case EroderCharacter::RING:
-		noiseL = multiply_32x32_rshift32(inputL, getNoise()) << 1;
-		noiseR = multiply_32x32_rshift32(inputR, getNoise()) << 1;
-		break;
-
-	case EroderCharacter::SPARSE: {
-		state.shCounter++;
-		if ((state.shCounter & 7) == 0) {
-			state.heldValueL = getNoise();
-			state.heldValueR = getNoise();
-		}
-		noiseL = state.heldValueL;
-		noiseR = state.heldValueR;
-		break;
-	}
-
-	case EroderCharacter::SMOOTH: {
-		constexpr q31_t kSmoothAlpha = 0x08F5C28F;
-		q31_t rawL = getNoise();
-		q31_t rawR = getNoise();
-		state.smoothL += multiply_32x32_rshift32(rawL - state.smoothL, kSmoothAlpha) << 1;
-		state.smoothR += multiply_32x32_rshift32(rawR - state.smoothR, kSmoothAlpha) << 1;
-		noiseL = state.smoothL;
-		noiseR = state.smoothR;
-		break;
-	}
-
-	default:
-		noiseL = getNoise();
-		noiseR = getNoise();
-		break;
-	}
-
-	return {noiseL, noiseR};
-}
-
-// Benchmark tag strings for character zones
-constexpr const char* kCharacterTagNames[] = {"white", "pink", "brown", "blue", "sine", "ring", "sparse", "smooth"};
 
 } // anonymous namespace
 
@@ -178,46 +75,99 @@ void processEroder(std::span<StereoSample> buffer, EroderParams& params, q31_t f
 	params.smoothedCharacter += multiply_32x32_rshift32(charValue - params.smoothedCharacter, kEroderSmoothingAlpha)
 	                            << 1;
 
-	// Compute base delay time from smoothed freq (in fractional samples)
-	float baseDelay = computeEroderDelay(params.smoothedFreq);
+	// Freq phi phase → delay time
+	double freqNorm = static_cast<double>(params.smoothedFreq) / static_cast<double>(ONE_Q31);
+	double freqPhase = freqNorm + params.effectiveFreq();
+	float baseDelay = computeEroderDelay(freqPhase);
 
-	// Get character zone index for noise type selection
-	ZoneInfo charZone = computeZoneQ31(params.smoothedCharacter, kEroderNumZones);
+	// Character phi phase → SVF cutoff, resonance, S&H blend, output select
+	double charNorm = static_cast<double>(params.smoothedCharacter) / static_cast<double>(ONE_Q31);
+	double charPhase = charNorm + params.effectiveChar();
+	auto charResults = phi::evalTriangleBank<5>(charPhase, 1.0f, kEroderCharBank);
 
-	// Benchmark with character zone tag
+	// SVF cutoff: quadratic mapping for perceptual linearity
+	// Floor at 0.03 (~200Hz) so filter always passes signal; cap at 0.85 for stability
+	float cutoffRaw = charResults[0];
+	float cutoffMapped = 0.03f + cutoffRaw * cutoffRaw * 0.82f;
+	q31_t svfF = static_cast<q31_t>(cutoffMapped * static_cast<float>(ONE_Q31));
+
+	// SVF resonance: Q = 1 - resonance (low Q = resonant, near self-oscillation for tonal noise)
+	// Cap at 0.99 so resonant peak dominates over broadband noise excitation
+	float resonance = charResults[1] * 0.99f;
+	q31_t svfQ = static_cast<q31_t>((1.0f - resonance) * static_cast<float>(ONE_Q31));
+
+	// S&H blend: 0 = pure white noise, 1 = pure S&H
+	q31_t shBlendQ = static_cast<q31_t>(charResults[2] * static_cast<float>(ONE_Q31));
+	q31_t whiteBlendQ = ONE_Q31 - shBlendQ;
+
+	// SVF output blend: two bipolar params → three weights (LP, BP, HP) summing to 1.0
+	// Param [3] bipolar: -1=LP, +1=HP → h = (param+1)/2
+	// Param [4] bipolar: -1=LP/HP blend, +1=BP → b = (param+1)/2
+	// Weights: LP=(1-h)(1-b), HP=h(1-b), BP=b
+	float h = (charResults[3] + 1.0f) * 0.5f;
+	float b = (charResults[4] + 1.0f) * 0.5f;
+	q31_t lpMixQ = static_cast<q31_t>((1.0f - h) * (1.0f - b) * static_cast<float>(ONE_Q31));
+	q31_t hpMixQ = static_cast<q31_t>(h * (1.0f - b) * static_cast<float>(ONE_Q31));
+	q31_t bpMixQ = static_cast<q31_t>(b * static_cast<float>(ONE_Q31));
+
 	FX_BENCH_DECLARE(bench, "eroder");
-	FX_BENCH_SET_TAG(bench, 0, kCharacterTagNames[charZone.index]);
 	FX_BENCH_SCOPE(bench);
 
-	// Depth scaling: maps 0-127 to 0.0-1.0 modulation range
-	// At max depth, noise can swing delay by ±baseDelay/2
+	// Depth and mix scaling
 	float depthFloat = static_cast<float>(params.depth) / 127.0f;
 	float maxMod = baseDelay * 0.5f * depthFloat;
-
-	// Mix scaling: 0-127 → q31
 	q31_t mixWet = static_cast<q31_t>(params.mix) << 24;
 	q31_t mixDry = ONE_Q31 - mixWet;
 
 	for (auto& sample : buffer) {
-		// Write current input to delay line
 		params.delay.write(sample.l, sample.r);
 
-		// Generate stereo noise pair
-		auto [noiseL, noiseR] = generateEroderNoise(params.noise, charZone.index, sample.l, sample.r);
+		// Generate white noise
+		q31_t whiteL = getNoise();
+		q31_t whiteR = getNoise();
 
-		// Convert noise from q31 to float modulation offset
-		float modL = static_cast<float>(noiseL) / static_cast<float>(ONE_Q31) * maxMod;
-		float modR = static_cast<float>(noiseR) / static_cast<float>(ONE_Q31) * maxMod;
+		// S&H: trigger on input or SVF zero crossing
+		bool inputCross = (sample.l ^ params.noise.prevInputL) < 0;
+		bool filterCross = (params.noise.svfLowL ^ params.noise.prevFilteredL) < 0;
+		if (inputCross || filterCross) {
+			params.noise.heldL = getNoise();
+			params.noise.heldR = getNoise();
+		}
+		params.noise.prevInputL = sample.l;
+		params.noise.prevFilteredL = params.noise.svfLowL;
 
-		// Compute modulated delay times (clamp to valid range)
+		// Blend white noise and S&H
+		q31_t noiseL = add_saturate(multiply_32x32_rshift32(whiteL, whiteBlendQ) << 1,
+		                            multiply_32x32_rshift32(params.noise.heldL, shBlendQ) << 1);
+		q31_t noiseR = add_saturate(multiply_32x32_rshift32(whiteR, whiteBlendQ) << 1,
+		                            multiply_32x32_rshift32(params.noise.heldR, shBlendQ) << 1);
+
+		// SVF filter (2-pole, LP output with resonance)
+		q31_t highL = noiseL - params.noise.svfLowL - (multiply_32x32_rshift32(params.noise.svfBandL, svfQ) << 1);
+		params.noise.svfBandL += multiply_32x32_rshift32(highL, svfF) << 1;
+		params.noise.svfLowL += multiply_32x32_rshift32(params.noise.svfBandL, svfF) << 1;
+
+		q31_t highR = noiseR - params.noise.svfLowR - (multiply_32x32_rshift32(params.noise.svfBandR, svfQ) << 1);
+		params.noise.svfBandR += multiply_32x32_rshift32(highR, svfF) << 1;
+		params.noise.svfLowR += multiply_32x32_rshift32(params.noise.svfBandR, svfF) << 1;
+
+		// Blend SVF outputs: LP*(1-h)(1-b) + HP*h(1-b) + BP*b
+		q31_t filteredL = add_saturate(add_saturate(multiply_32x32_rshift32(params.noise.svfLowL, lpMixQ) << 1,
+		                                            multiply_32x32_rshift32(highL, hpMixQ) << 1),
+		                               multiply_32x32_rshift32(params.noise.svfBandL, bpMixQ) << 1);
+		q31_t filteredR = add_saturate(add_saturate(multiply_32x32_rshift32(params.noise.svfLowR, lpMixQ) << 1,
+		                                            multiply_32x32_rshift32(highR, hpMixQ) << 1),
+		                               multiply_32x32_rshift32(params.noise.svfBandR, bpMixQ) << 1);
+
+		float modL = static_cast<float>(filteredL) / static_cast<float>(ONE_Q31) * maxMod;
+		float modR = static_cast<float>(filteredR) / static_cast<float>(ONE_Q31) * maxMod;
+
 		float delayL = std::clamp(baseDelay + modL, 1.0f, static_cast<float>(kEroderMaxDelay - 1));
 		float delayR = std::clamp(baseDelay + modR, 1.0f, static_cast<float>(kEroderMaxDelay - 1));
 
-		// Read L and R at their respective modulated delay times
 		q31_t wetL = params.delay.readL(delayL);
 		q31_t wetR = params.delay.readR(delayR);
 
-		// Wet/dry mix
 		sample.l =
 		    add_saturate(multiply_32x32_rshift32(sample.l, mixDry) << 1, multiply_32x32_rshift32(wetL, mixWet) << 1);
 		sample.r =
