@@ -33,6 +33,7 @@ public:
 	int32_t getBytePosToStartPlayback(bool justLooped) override;
 	int32_t getBytePosToEndOrLoopPlayback() override;
 	LoopType getLoopingType(const Source& source) const;
+	void onLoopRestart() override;
 
 	[[nodiscard]] uint32_t getLoopStartPlaybackAtByte() const override { return loopStartPlaybackAtByte; }
 	[[nodiscard]] uint32_t getLoopEndPlaybackAtByte() const override {
@@ -46,4 +47,5 @@ public:
 	int32_t preRollSamples{0}; // Output samples of silence before playback starts (negative start offset)
 
 	bool noteOffReceived;
+	bool pingpongActive{false};
 };

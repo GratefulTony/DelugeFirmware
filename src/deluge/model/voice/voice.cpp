@@ -304,6 +304,7 @@ activenessDetermined:
 		if (oscType == OscType::SAMPLE && guides[s].audioFileHolder) {
 			source->sampleControls.invertReversed = sound.invertReversed; // Copy the temporary flag from the sound
 			guides[s].setupPlaybackBounds(source->sampleControls.isCurrentlyReversed());
+			guides[s].pingpongActive = (source->repeatMode == SampleRepeatMode::PINGPONG);
 
 			// Apply plocked sample start offset — slides the playback window
 			int32_t startOffsetParam =
@@ -341,7 +342,7 @@ activenessDetermined:
 						int32_t byteShift = static_cast<int32_t>(offsetBytes);
 						byteShift = (byteShift / bytesPerFrame) * bytesPerFrame;
 
-						if (source->repeatMode == SampleRepeatMode::LOOP) {
+						if (isLoopingRepeatMode(source->repeatMode)) {
 							// LOOP: modular wrap of start position within the region.
 							// First iteration starts at the offset position. On loop,
 							// playback wraps back to the original start (loopStartPlaybackAtByte
@@ -750,6 +751,7 @@ bool Voice::sampleZoneChanged(ModelStackWithSoundFlags* modelStack, int32_t s, M
 	guides[s].setupPlaybackBounds(source.sampleControls.isCurrentlyReversed());
 
 	LoopType loopingType = guides[s].getLoopingType(sound.sources[s]);
+	guides[s].pingpongActive = (source.repeatMode == SampleRepeatMode::PINGPONG);
 
 	// Check we're still within bounds - for each unison part.
 	// Well, that is, make sure we're not past the new end. Being before the start is ok, because we'll come back into
@@ -2367,6 +2369,11 @@ pitchTooHigh:
 				if (!voiceSample->doneFirstRenderYet && !tryToStartMidNote
 				    && portaEnvelopePos == 0xFFFFFFFF) { // No porta
 
+					// Pingpong mode can't use cache since direction changes mid-playback
+					if (guides[s].pingpongActive) {
+						goto dontUseCache;
+					}
+
 					// If looping, make sure the loop isn't too short. If so, caching just wouldn't sound good /
 					// accurate
 					if (loopingType != LoopType::NONE) {
@@ -2459,6 +2466,15 @@ dontUseCache: {}
 			// allows us to do a special optimization not otherwise available (that is, combining the amplitude
 			// increments for the hop crossfades with the overall voice ones, and having multiple crossfading hops write
 			// directly to the osc buffer).
+
+			// Compute crossfade samples for this source
+			if (loopingType != LoopType::NONE) {
+				auto* holder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
+				voiceSample->loopFadeInSamplesTotal = (holder->loopCrossfadeMs * sample->sampleRate) / 1000;
+			}
+			else {
+				voiceSample->loopFadeInSamplesTotal = 0;
+			}
 
 			bool stillActive = voiceSample->render(
 			    &guides[s], renderBuffer, numSamples, sample, numChannels, loopingType, phaseIncrement,

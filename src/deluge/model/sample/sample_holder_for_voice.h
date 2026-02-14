@@ -45,6 +45,8 @@ public:
 	int8_t cents;
 	/// Whether the loop length should be kept constant when updating the start/end position.
 	bool loopLocked;
+	/// Loop crossfade duration in milliseconds. 0 = no crossfade (hard loop).
+	uint16_t loopCrossfadeMs{0};
 	PhaseIncrementFineTuner fineTuner;
 
 	Cluster* clustersForLoopStart[kNumClustersLoadedAhead];

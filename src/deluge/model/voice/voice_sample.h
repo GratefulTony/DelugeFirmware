@@ -86,6 +86,8 @@ public:
 	bool fudging = false;
 	bool forAudioClip = false;   // This is a wee bit of a hack - but we need to be able to know this
 	bool writingToCache = false; // Value is only valid if cache assigned
+	int32_t loopFadeInSamplesRemaining{0};
+	int32_t loopFadeInSamplesTotal{0};
 
 private:
 	bool weShouldBeTimeStretchingNow(Sample* sample, SamplePlaybackGuide* guide, int32_t numSamples,

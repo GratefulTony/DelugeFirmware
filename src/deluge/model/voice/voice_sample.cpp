@@ -52,6 +52,8 @@ void VoiceSample::noteOn(SamplePlaybackGuide* guide, uint32_t samplesLate, int32
 	timeStretcher = nullptr; // Just in case
 	fudging = false;
 	forAudioClip = false;
+	loopFadeInSamplesRemaining = 0;
+	justLoopedBack = false;
 }
 
 // Returns false if error
@@ -1071,12 +1073,85 @@ readNonTimestretched:
 				return false;
 			}
 
+			// Loop crossfade: detect loop restart and apply fade-in envelope
+			if (justLoopedBack && loopFadeInSamplesTotal > 0) {
+				loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
+				justLoopedBack = false;
+			}
+
+			int32_t renderAmplitude = amplitude;
+			int32_t renderAmplitudeIncrement = amplitudeIncrement;
+
+			// Fade-in envelope (after loop restart)
+			if (loopFadeInSamplesRemaining > 0) {
+				int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
+
+				// Fade scale at start/end of window (Q31: 0 = silent, 0x7FFFFFFF = full)
+				int32_t fadeStart = ((int64_t)fadeProgress << 31) / loopFadeInSamplesTotal;
+				int32_t fadeEnd =
+				    ((int64_t)(fadeProgress + numSamplesThisNonTimestretchedRead) << 31) / loopFadeInSamplesTotal;
+				if (fadeEnd > 0x7FFFFFFF) {
+					fadeEnd = 0x7FFFFFFF;
+				}
+
+				int32_t ampAtStart = multiply_32x32_rshift32(amplitude, fadeStart) << 1;
+				int32_t ampAtEnd = multiply_32x32_rshift32(
+				                       amplitude + amplitudeIncrement * numSamplesThisNonTimestretchedRead, fadeEnd)
+				                   << 1;
+
+				renderAmplitude = ampAtStart;
+				renderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisNonTimestretchedRead;
+
+				loopFadeInSamplesRemaining -= numSamplesThisNonTimestretchedRead;
+				if (loopFadeInSamplesRemaining < 0) {
+					loopFadeInSamplesRemaining = 0;
+				}
+			}
+			// Fade-out envelope (approaching loop boundary)
+			else if (loopFadeInSamplesTotal > 0 && loopingType != LoopType::NONE) {
+				int32_t endByte = guide->getBytePosToEndOrLoopPlayback();
+				if (endByte != 0) {
+					int32_t currentByte = getPlayByteLowLevel(sample, guide);
+					int32_t bytesPerSamp = sample->numChannels * sample->byteDepth;
+					int32_t distBytes = (endByte - currentByte) * guide->playDirection;
+					int32_t distSourceSamples = distBytes / bytesPerSamp;
+
+					int32_t distOutputSamples;
+					if (phaseIncrement == kMaxSampleValue) {
+						distOutputSamples = distSourceSamples;
+					}
+					else {
+						distOutputSamples = ((int64_t)distSourceSamples << 24) / phaseIncrement;
+					}
+
+					if (distOutputSamples >= 0 && distOutputSamples < loopFadeInSamplesTotal) {
+						// Scale: 1.0 at loopFadeInSamplesTotal, 0.0 at loop boundary
+						int32_t scaleAtStart = ((int64_t)distOutputSamples << 31) / loopFadeInSamplesTotal;
+						int32_t distAtEnd = distOutputSamples - numSamplesThisNonTimestretchedRead;
+						if (distAtEnd < 0) {
+							distAtEnd = 0;
+						}
+						int32_t scaleAtEnd = ((int64_t)distAtEnd << 31) / loopFadeInSamplesTotal;
+
+						int32_t ampAtStart = multiply_32x32_rshift32(renderAmplitude, scaleAtStart) << 1;
+						int32_t ampAtEnd =
+						    multiply_32x32_rshift32(renderAmplitude
+						                                + renderAmplitudeIncrement * numSamplesThisNonTimestretchedRead,
+						                            scaleAtEnd)
+						    << 1;
+
+						renderAmplitude = ampAtStart;
+						renderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisNonTimestretchedRead;
+					}
+				}
+			}
+
 			// No pitch adjustment - in which case we know we're not writing to cache either
 			if (phaseIncrement == kMaxSampleValue) {
 
 				readSamplesNative((int32_t**)&outputBufferWritePos, numSamplesThisNonTimestretchedRead, sample,
-				                  jumpAmount, sampleSourceNumChannels, numChannelsInOutputBuffer, &amplitude,
-				                  amplitudeIncrement);
+				                  jumpAmount, sampleSourceNumChannels, numChannelsInOutputBuffer, &renderAmplitude,
+				                  renderAmplitudeIncrement);
 			}
 
 			// Yes pitch adjustment - meaning we might be wanting to write to a cache, too...
@@ -1096,9 +1171,12 @@ readNonTimestretched:
 				// (re-check that?)
 				readSamplesResampled((int32_t**)&outputBufferWritePos, numSamplesThisNonTimestretchedRead, sample,
 				                     jumpAmount, sampleSourceNumChannels, numChannelsInOutputBuffer, phaseIncrement,
-				                     &amplitude, amplitudeIncrement, interpolationBufferSize, (cache != nullptr),
-				                     &cacheWritePos, &doneAnySamplesYet, NULL, false, whichKernel);
+				                     &renderAmplitude, renderAmplitudeIncrement, interpolationBufferSize,
+				                     (cache != nullptr), &cacheWritePos, &doneAnySamplesYet, NULL, false, whichKernel);
 			}
+
+			// Advance the voice amplitude envelope independently of crossfade scaling
+			amplitude += amplitudeIncrement * numSamplesThisNonTimestretchedRead;
 
 			if (cache) {
 				cacheBytePos += numSamplesThisNonTimestretchedRead * kCacheByteDepth * sampleSourceNumChannels;
@@ -1717,6 +1795,8 @@ loopBackToStartCached:
 					// If we're looping, restart it
 					if (loopingType != LoopType::NONE) {
 loopBackToStartUncached:
+						voiceSource->onLoopRestart();
+						justLoopedBack = true;
 						unassignAllReasons(false);
 						setupClusersForInitialPlay(voiceSource, sample, 0, true, priorityRating);
 					}

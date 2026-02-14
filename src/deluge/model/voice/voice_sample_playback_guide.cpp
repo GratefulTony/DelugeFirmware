@@ -21,6 +21,7 @@
 #include "model/sample/sample_holder_for_voice.h"
 #include "processing/source.h"
 #include "storage/multi_range/multisample_range.h"
+#include <utility>
 
 VoiceSamplePlaybackGuide::VoiceSamplePlaybackGuide() {
 }
@@ -97,7 +98,7 @@ LoopType VoiceSamplePlaybackGuide::getLoopingType(const Source& source) const {
 	if (loopEndPlaybackAtByte) {
 		return noteOffReceived ? LoopType::NONE : LoopType::LOW_LEVEL;
 	}
-	if (source.repeatMode == SampleRepeatMode::LOOP) {
+	if (isLoopingRepeatMode(source.repeatMode)) {
 		return LoopType::LOW_LEVEL;
 	}
 	// Enable looping for STRETCH mode when start offset is active,
@@ -106,4 +107,12 @@ LoopType VoiceSamplePlaybackGuide::getLoopingType(const Source& source) const {
 		return LoopType::LOW_LEVEL;
 	}
 	return LoopType::NONE;
+}
+
+void VoiceSamplePlaybackGuide::onLoopRestart() {
+	if (pingpongActive) {
+		playDirection = -playDirection;
+		std::swap(loopStartPlaybackAtByte, loopEndPlaybackAtByte);
+		std::swap(startPlaybackAtByte, endPlaybackAtByte);
+	}
 }

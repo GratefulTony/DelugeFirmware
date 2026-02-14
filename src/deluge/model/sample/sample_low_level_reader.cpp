@@ -419,6 +419,8 @@ bool SampleLowLevelReader::changeClusterIfNecessary(SamplePlaybackGuide* guide, 
 		else { // LOOP_OR_STOP
 			unassignAllReasons(false);
 			if (loopingAtLowLevel) {
+				guide->onLoopRestart();
+				justLoopedBack = true;
 				bool success = setupClusersForInitialPlay(guide, sample, byteOvershoot, true, priorityRating);
 				if (!success) {
 					D_PRINTLN("loop failed");

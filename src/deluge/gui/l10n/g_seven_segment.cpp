@@ -565,6 +565,8 @@ PLACE_SDRAM_DATA Language seven_segment{
         {STRING_FOR_DISPERSER_TOPO, "TOPO"},
         {STRING_FOR_DISPERSER_TWIST, "TWST"},
         {STRING_FOR_RECORD_SOURCE, "SRCE"},
+        {STRING_FOR_LOOP_PINGPONG, "PING"},
+        {STRING_FOR_LOOP_CROSSFADE, "XFAD"},
     },
     &built_in::english,
 };

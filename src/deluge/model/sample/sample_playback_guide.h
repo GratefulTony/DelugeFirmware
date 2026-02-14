@@ -36,6 +36,7 @@ public:
 	virtual void setupPlaybackBounds(bool reversed);
 	[[nodiscard]] virtual uint32_t getLoopStartPlaybackAtByte() const { return startPlaybackAtByte; }
 	[[nodiscard]] virtual uint32_t getLoopEndPlaybackAtByte() const { return endPlaybackAtByte; }
+	virtual void onLoopRestart() {}
 	uint64_t getSyncedNumSamplesIn();
 	int32_t getNumSamplesLaggingBehindSync(VoiceSample* voiceSample);
 	int32_t adjustPitchToCorrectDriftFromSync(VoiceSample* voiceSample, int32_t phaseIncrement);
