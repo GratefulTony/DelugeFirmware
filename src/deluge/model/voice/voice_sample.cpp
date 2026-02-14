@@ -1073,7 +1073,7 @@ readNonTimestretched:
 				return false;
 			}
 
-			// Loop crossfade: detect loop restart and apply fade-in envelope
+			// Loop crossfade: detect loop restart and start fade-in
 			if (justLoopedBack && loopFadeInSamplesTotal > 0) {
 				loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
 				justLoopedBack = false;
@@ -1087,12 +1087,13 @@ readNonTimestretched:
 				int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
 
 				// Fade scale at start/end of window (Q31: 0 = silent, 0x7FFFFFFF = full)
-				int32_t fadeStart = ((int64_t)fadeProgress << 31) / loopFadeInSamplesTotal;
-				int32_t fadeEnd =
-				    ((int64_t)(fadeProgress + numSamplesThisNonTimestretchedRead) << 31) / loopFadeInSamplesTotal;
-				if (fadeEnd > 0x7FFFFFFF) {
-					fadeEnd = 0x7FFFFFFF;
-				}
+				// Compute in int64 and clamp to avoid overflow when fadeProgress + numSamples >= total
+				// (x << 31 == 0x80000000 when x == total, which wraps negative in int32_t)
+				int32_t fadeStart = static_cast<int32_t>(
+				    std::min(((int64_t)fadeProgress << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+				int32_t fadeEnd = static_cast<int32_t>(std::min(
+				    ((int64_t)(fadeProgress + numSamplesThisNonTimestretchedRead) << 31) / loopFadeInSamplesTotal,
+				    (int64_t)0x7FFFFFFF));
 
 				int32_t ampAtStart = multiply_32x32_rshift32(amplitude, fadeStart) << 1;
 				int32_t ampAtEnd = multiply_32x32_rshift32(
@@ -1124,24 +1125,32 @@ readNonTimestretched:
 						distOutputSamples = ((int64_t)distSourceSamples << 24) / phaseIncrement;
 					}
 
-					if (distOutputSamples >= 0 && distOutputSamples < loopFadeInSamplesTotal) {
-						// Scale: 1.0 at loopFadeInSamplesTotal, 0.0 at loop boundary
-						int32_t scaleAtStart = ((int64_t)distOutputSamples << 31) / loopFadeInSamplesTotal;
-						int32_t distAtEnd = distOutputSamples - numSamplesThisNonTimestretchedRead;
-						if (distAtEnd < 0) {
-							distAtEnd = 0;
+					if (distOutputSamples >= 0) {
+						// Clamp to [0, total] so scale is 1.0 when far and 0.0 at boundary
+						int32_t clampedDist = std::min(distOutputSamples, loopFadeInSamplesTotal);
+						int32_t scaleAtStart = static_cast<int32_t>(
+						    std::min(((int64_t)clampedDist << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+
+						int32_t distAfterRead = distOutputSamples - numSamplesThisNonTimestretchedRead;
+						if (distAfterRead < 0) {
+							distAfterRead = 0;
 						}
-						int32_t scaleAtEnd = ((int64_t)distAtEnd << 31) / loopFadeInSamplesTotal;
+						int32_t clampedDistAfter = std::min(distAfterRead, loopFadeInSamplesTotal);
+						int32_t scaleAtEnd = static_cast<int32_t>(
+						    std::min(((int64_t)clampedDistAfter << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
 
-						int32_t ampAtStart = multiply_32x32_rshift32(renderAmplitude, scaleAtStart) << 1;
-						int32_t ampAtEnd =
-						    multiply_32x32_rshift32(renderAmplitude
-						                                + renderAmplitudeIncrement * numSamplesThisNonTimestretchedRead,
-						                            scaleAtEnd)
-						    << 1;
+						// Only modify amplitude when actually within fade zone
+						if (clampedDist < loopFadeInSamplesTotal || clampedDistAfter < loopFadeInSamplesTotal) {
+							int32_t ampAtStart = multiply_32x32_rshift32(renderAmplitude, scaleAtStart) << 1;
+							int32_t ampAtEnd =
+							    multiply_32x32_rshift32(
+							        renderAmplitude + renderAmplitudeIncrement * numSamplesThisNonTimestretchedRead,
+							        scaleAtEnd)
+							    << 1;
 
-						renderAmplitude = ampAtStart;
-						renderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisNonTimestretchedRead;
+							renderAmplitude = ampAtStart;
+							renderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisNonTimestretchedRead;
+						}
 					}
 				}
 			}

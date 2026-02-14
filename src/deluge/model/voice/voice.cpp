@@ -2374,6 +2374,15 @@ pitchTooHigh:
 						goto dontUseCache;
 					}
 
+					// Skip cache when crossfade is active — the crossfade envelope
+					// is only applied in the uncached render path
+					{
+						auto* xfadeHolder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
+						if (xfadeHolder->loopCrossfadeMs > 0 && loopingType != LoopType::NONE) {
+							goto dontUseCache;
+						}
+					}
+
 					// If looping, make sure the loop isn't too short. If so, caching just wouldn't sound good /
 					// accurate
 					if (loopingType != LoopType::NONE) {
