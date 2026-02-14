@@ -74,6 +74,7 @@ public:
 
 	Sound();
 	~Sound() override { std::erase(AudioEngine::sounds, this); }
+	void cloneFrom(ModControllableAudio* other) override;
 
 	Patcher patcher;
 

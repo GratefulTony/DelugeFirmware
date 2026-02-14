@@ -17,6 +17,7 @@
 
 #include "processing/source.h"
 #include "definitions_cxx.hpp"
+#include "dsp/dx/dx7note.h"
 #include "dsp/dx/engine.h"
 #include "dsp/phi_morph.hpp"
 #include "gui/ui/browser/sample_browser.h"
@@ -59,6 +60,90 @@ void Source::destructAllMultiRanges() {
 		AudioEngine::logAction("destructAllMultiRanges()");
 		AudioEngine::routineWithClusterLoading();
 		ranges.getElement(e)->~MultiRange();
+	}
+}
+
+void Source::cloneFrom(Source* other) {
+	// Copy POD fields
+	sampleControls = other->sampleControls;
+	oscType = other->oscType;
+	transpose = other->transpose;
+	cents = other->cents;
+	fineTuner = other->fineTuner;
+	repeatMode = other->repeatMode;
+	timeStretchAmount = other->timeStretchAmount;
+	defaultRangeI = other->defaultRangeI;
+
+	// PHI_MORPH zone parameters
+	phiMorphZoneA = other->phiMorphZoneA;
+	phiMorphZoneB = other->phiMorphZoneB;
+	phiMorphPhaseOffsetA = other->phiMorphPhaseOffsetA;
+	phiMorphPhaseOffsetB = other->phiMorphPhaseOffsetB;
+	phiMorphGamma = other->phiMorphGamma;
+	// phiMorphCache is lazy-allocated, don't clone it
+	delete phiMorphCache;
+	phiMorphCache = nullptr;
+
+	// Deep copy DxPatch
+	if (other->dxPatch) {
+		if (!dxPatch) {
+			dxPatch = new DxPatch();
+		}
+		*dxPatch = *other->dxPatch;
+	}
+	else {
+		delete dxPatch;
+		dxPatch = nullptr;
+	}
+	dxPatchChanged = other->dxPatchChanged;
+
+	// Clone ranges — first clear existing
+	destructAllMultiRanges();
+	ranges.empty();
+
+	int32_t numRanges = other->ranges.getNumElements();
+	if (numRanges > 0) {
+		// Match element size (MultisampleRange vs MultiWaveTableRange)
+		if (ranges.elementSize != other->ranges.elementSize) {
+			ranges.changeType(other->ranges.elementSize);
+		}
+
+		for (int32_t i = 0; i < numRanges; i++) {
+			MultiRange* newRange = ranges.insertMultiRange(i);
+			if (!newRange) {
+				break;
+			}
+			MultiRange* srcRange = other->ranges.getElement(i);
+			newRange->topNote = srcRange->topNote;
+
+			// Clone the audio file holder
+			AudioFileHolder* srcHolder = srcRange->getAudioFileHolder();
+			AudioFileHolder* dstHolder = newRange->getAudioFileHolder();
+			if (srcHolder && dstHolder) {
+				dstHolder->filePath.set(&srcHolder->filePath);
+				if (srcHolder->audioFile) {
+					dstHolder->setAudioFile(srcHolder->audioFile);
+				}
+			}
+
+			// For MultisampleRange, also copy sample-specific fields
+			if (ranges.elementSize == sizeof(MultisampleRange)) {
+				auto* srcSample = static_cast<MultisampleRange*>(srcRange);
+				auto* dstSample = static_cast<MultisampleRange*>(newRange);
+				dstSample->sampleHolder.startPos = srcSample->sampleHolder.startPos;
+				dstSample->sampleHolder.endPos = srcSample->sampleHolder.endPos;
+				dstSample->sampleHolder.waveformViewScroll = srcSample->sampleHolder.waveformViewScroll;
+				dstSample->sampleHolder.waveformViewZoom = srcSample->sampleHolder.waveformViewZoom;
+				dstSample->sampleHolder.loopStartPos = srcSample->sampleHolder.loopStartPos;
+				dstSample->sampleHolder.loopEndPos = srcSample->sampleHolder.loopEndPos;
+				dstSample->sampleHolder.transpose = srcSample->sampleHolder.transpose;
+				dstSample->sampleHolder.cents = srcSample->sampleHolder.cents;
+				dstSample->sampleHolder.loopLocked = srcSample->sampleHolder.loopLocked;
+				dstSample->sampleHolder.fineTuner = srcSample->sampleHolder.fineTuner;
+			}
+		}
+
+		defaultRangeI = other->defaultRangeI;
 	}
 }
 

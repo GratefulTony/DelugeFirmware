@@ -72,6 +72,7 @@
 #include "playback/playback_handler.h"
 #include "processing/audio_output.h"
 #include "processing/engines/audio_engine.h"
+#include "processing/sound/sound_instrument.h"
 #include "processing/stem_export/stem_export.h"
 #include "scheduler_api.h"
 #include "storage/audio/audio_file_manager.h"
@@ -3740,14 +3741,51 @@ Clip* SessionView::gridCreateClip(uint32_t targetSection, Output* targetOutput, 
 			InstrumentClip* newInstrumentClip = (InstrumentClip*)newClip;
 			// Create a new track for the clip
 			if (targetOutput == nullptr) {
-				if (!createNewTrackForInstrumentClip(sourceClip->output->type, newInstrumentClip, false)) {
-					currentSong->sessionClips.deleteAtIndex(0);
-					newClip->~Clip();
-					delugeDealloc(newClip);
-					return nullptr;
-				}
+				if (sourceClip->output->type == OutputType::SYNTH) {
+					// Clone the source SoundInstrument onto a new output
+					void* memory = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(SoundInstrument));
+					if (!memory) {
+						currentSong->sessionClips.deleteAtIndex(0);
+						newClip->~Clip();
+						delugeDealloc(newClip);
+						display->displayError(Error::INSUFFICIENT_RAM);
+						return nullptr;
+					}
+					auto* newInstrument = new (memory) SoundInstrument();
+					auto* srcInstrument = static_cast<SoundInstrument*>(sourceClip->output);
+					newInstrument->cloneFrom(srcInstrument);
+					newInstrument->name.set(&srcInstrument->name);
+					newInstrument->dirPath.set(&srcInstrument->dirPath);
+					newInstrument->editedByUser = true;
 
-				targetOutput = newInstrumentClip->output;
+					// The clip already has a valid ParamManager from gridCloneClip()
+					Error error =
+					    newInstrumentClip->setAudioInstrument(newInstrument, currentSong, true, nullptr, nullptr);
+					if (error != Error::NONE) {
+						newInstrument->~SoundInstrument();
+						delugeDealloc(memory);
+						currentSong->sessionClips.deleteAtIndex(0);
+						newClip->~Clip();
+						delugeDealloc(newClip);
+						display->displayError(error);
+						return nullptr;
+					}
+
+					newInstrument->loadAllAudioFiles(true);
+					currentSong->addOutput(newInstrument);
+					newInstrument->setActiveClip(modelStack, PgmChangeSend::NEVER);
+					targetOutput = newInstrument;
+				}
+				else {
+					// Fall back to existing behavior for Kit, MIDI, CV
+					if (!createNewTrackForInstrumentClip(sourceClip->output->type, newInstrumentClip, false)) {
+						currentSong->sessionClips.deleteAtIndex(0);
+						newClip->~Clip();
+						delugeDealloc(newClip);
+						return nullptr;
+					}
+					targetOutput = newInstrumentClip->output;
+				}
 			}
 
 			// Different instrument, switch the cloned clip to it
@@ -3794,6 +3832,7 @@ Clip* SessionView::gridCreateClip(uint32_t targetSection, Output* targetOutput, 
 	// set it active in the song
 	gridSelectClipForPulsing(*newClip);
 	currentSong->setCurrentClip(newClip);
+	requestRendering(this);
 	return newClip;
 }
 

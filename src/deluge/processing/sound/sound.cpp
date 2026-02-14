@@ -130,6 +130,54 @@ Sound::Sound() : patcher(kPatcherConfigForSound, globalSourceValues, paramFinalV
 	AudioEngine::sounds.push_back(this);
 }
 
+void Sound::cloneFrom(ModControllableAudio* other) {
+	ModControllableAudio::cloneFrom(other);
+
+	Sound* src = static_cast<Sound*>(other);
+
+	synthMode = src->synthMode;
+	oscillatorSync = src->oscillatorSync;
+	modulator1ToModulator0 = src->modulator1ToModulator0;
+
+	polyphonic = src->polyphonic;
+	maxVoiceCount = src->maxVoiceCount;
+	voicePriority = src->voicePriority;
+
+	numUnison = src->numUnison;
+	unisonDetune = src->unisonDetune;
+	unisonStereoSpread = src->unisonStereoSpread;
+
+	transpose = src->transpose;
+	for (int32_t m = 0; m < kNumModulators; m++) {
+		modulatorTranspose[m] = src->modulatorTranspose[m];
+		modulatorCents[m] = src->modulatorCents[m];
+		modulatorTransposers[m] = src->modulatorTransposers[m];
+	}
+
+	for (int32_t s = 0; s < kNumSources; s++) {
+		sources[s].cloneFrom(&src->sources[s]);
+		oscRetriggerPhase[s] = src->oscRetriggerPhase[s];
+	}
+	for (int32_t m = 0; m < kNumModulators; m++) {
+		modulatorRetriggerPhase[m] = src->modulatorRetriggerPhase[m];
+	}
+
+	for (int32_t i = 0; i < LFO_COUNT; i++) {
+		lfoConfig[i] = src->lfoConfig[i];
+	}
+
+	memcpy(modKnobs, src->modKnobs, sizeof(modKnobs));
+
+	sideChainSendLevel = src->sideChainSendLevel;
+
+	gateOpen = src->gateOpen;
+	gateAttack = src->gateAttack;
+	gateRelease = src->gateRelease;
+
+	outputMidiChannel = src->outputMidiChannel;
+	outputMidiNoteForDrum = src->outputMidiNoteForDrum;
+}
+
 void Sound::initParams(ParamManager* paramManager) {
 
 	ModControllableAudio::initParams(paramManager);

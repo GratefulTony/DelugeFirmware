@@ -80,6 +80,7 @@ public:
 	void setOscType(OscType newType);
 
 	DxPatch* ensureDxPatch();
+	void cloneFrom(Source* other);
 
 private:
 	void destructAllMultiRanges();

@@ -39,6 +39,13 @@ namespace params = deluge::modulation::params;
 SoundInstrument::SoundInstrument() : MelodicInstrument(OutputType::SYNTH) {
 }
 
+void SoundInstrument::cloneFrom(ModControllableAudio* other) {
+	Sound::cloneFrom(other);
+
+	auto* src = static_cast<SoundInstrument*>(other);
+	defaultArpSettings.cloneFrom(&src->defaultArpSettings);
+}
+
 bool SoundInstrument::writeDataToFile(Serializer& writer, Clip* clipForSavingOutputOnly, Song* song) {
 
 	// MelodicInstrument::writeDataToFile(writer, clipForSavingOutputOnly, song); // Nope, this gets called within the
