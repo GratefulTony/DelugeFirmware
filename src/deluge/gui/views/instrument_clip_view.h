@@ -141,6 +141,7 @@ public:
 	int32_t setupForExitingScaleMode();
 	void setupChangingOfRootNote(int32_t newRootNote, int32_t yDisplay = (kDisplayHeight / 2));
 	void deleteDrum(SoundDrum* drum);
+	void cloneDrumToBottom(SoundDrum* sourceDrum, Kit* kit, ModelStackWithTimelineCounter* modelStack);
 	void cancelAllAuditioning();
 	void modEncoderButtonAction(uint8_t whichModEncoder, bool on) override;
 
@@ -373,6 +374,9 @@ private:
 	Drum* getAuditionedDrum(int32_t velocity, int32_t yDisplay, bool shiftButtonDown, Instrument* instrument,
 	                        ModelStackWithTimelineCounter* modelStackWithTimelineCounter,
 	                        ModelStackWithNoteRow* modelStackWithNoteRowOnCurrentClip);
+	Drum* getSourceDrumForClone();
+	void cloneDrumToRow(SoundDrum* sourceDrum, int32_t targetYDisplay, Kit* kit,
+	                    ModelStackWithTimelineCounter* modelStack);
 	void potentiallyUpdateMultiRangeMenu(int32_t velocity, int32_t yDisplay, Instrument* instrument);
 	void recordNoteOnEarly(int32_t velocity, int32_t yDisplay, Instrument* instrument, bool isKit,
 	                       ModelStackWithNoteRow* modelStackWithNoteRowOnCurrentClip, Drum* drum);

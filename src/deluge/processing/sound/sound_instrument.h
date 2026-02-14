@@ -30,6 +30,7 @@ class ModelStackWithThreeMainThings;
 class SoundInstrument final : public Sound, public MelodicInstrument {
 public:
 	SoundInstrument();
+	void cloneFrom(ModControllableAudio* other) override;
 	bool writeDataToFile(Serializer& writer, Clip* clipForSavingOutputOnly, Song* song) override;
 	Error readFromFile(Deserializer& reader, Song* song, Clip* clip, int32_t readAutomationUpToPos) override;
 	void cutAllSound() override;

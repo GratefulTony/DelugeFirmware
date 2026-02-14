@@ -33,6 +33,7 @@
 #include "gui/menu_item/audio_interpolation.h"
 #include "gui/menu_item/bend_range/main.h"
 #include "gui/menu_item/bend_range/per_finger.h"
+#include "gui/menu_item/clone_sound.h"
 #include "gui/menu_item/colour.h"
 #include "gui/menu_item/cv/cv2Mapping.h"
 #include "gui/menu_item/cv/selection.h"
@@ -1081,6 +1082,7 @@ HorizontalMenu audioClipSampleMenu{
 audio_clip::Attack audioClipAttackMenu{STRING_FOR_ATTACK};
 
 menu_item::EditName nameEditMenu{STRING_FOR_RENAME_CLIP};
+menu_item::CloneSound cloneSoundMenu{STRING_FOR_CLONE};
 
 PLACE_SDRAM_DATA const MenuItem* midiOrCVParamShortcuts[kDisplayHeight] = {
     &arpRateMenuMIDIOrCV,
@@ -1575,7 +1577,7 @@ Submenu soundFXMenu{
 
 Submenu soundEditorRootActionsMenu{
     STRING_FOR_ACTIONS,
-    {&nameEditMenu, &sample0RecorderMenu, &sample1RecorderMenu},
+    {&nameEditMenu, &cloneSoundMenu, &sample0RecorderMenu, &sample1RecorderMenu},
 };
 
 Submenu soundEditorRootMenu{

@@ -122,6 +122,7 @@ public:
 	int32_t getClipIndexForLayout();
 
 	void copyClipName(Clip* source, Clip* target, Output* targetOutput);
+	bool cloneSynthTrack(Clip* sourceClip);
 
 	// Members for grid layout
 	inline bool gridFirstPadActive() { return (gridFirstPressedX != -1 && gridFirstPressedY != -1); }
