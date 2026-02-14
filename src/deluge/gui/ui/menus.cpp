@@ -171,6 +171,7 @@
 #include "gui/menu_item/record/loop_command.h"
 #include "gui/menu_item/record/quantize.h"
 #include "gui/menu_item/record/threshold_mode.h"
+#include "gui/menu_item/record_source.h"
 #include "gui/menu_item/reverb/amount.h"
 #include "gui/menu_item/reverb/amount_unpatched.h"
 #include "gui/menu_item/reverb/damping.h"
@@ -1083,6 +1084,7 @@ audio_clip::Attack audioClipAttackMenu{STRING_FOR_ATTACK};
 
 menu_item::EditName nameEditMenu{STRING_FOR_RENAME_CLIP};
 menu_item::CloneSound cloneSoundMenu{STRING_FOR_CLONE};
+menu_item::SelectRecordSource selectRecordSourceMenu{STRING_FOR_RECORD_SOURCE};
 
 PLACE_SDRAM_DATA const MenuItem* midiOrCVParamShortcuts[kDisplayHeight] = {
     &arpRateMenuMIDIOrCV,
@@ -1577,7 +1579,7 @@ Submenu soundFXMenu{
 
 Submenu soundEditorRootActionsMenu{
     STRING_FOR_ACTIONS,
-    {&nameEditMenu, &cloneSoundMenu, &sample0RecorderMenu, &sample1RecorderMenu},
+    {&nameEditMenu, &cloneSoundMenu, &selectRecordSourceMenu, &sample0RecorderMenu, &sample1RecorderMenu},
 };
 
 Submenu soundEditorRootMenu{

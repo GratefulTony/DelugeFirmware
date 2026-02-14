@@ -192,6 +192,7 @@ enum Entries {
 186: defaultLoopRecordingCommand
 188: defaultUseSharps
 189: default patch cable polarity
+190: defaultRecordSource
 */
 
 uint8_t defaultScale;
@@ -260,6 +261,8 @@ Polarity defaultPatchCablePolarity = Polarity::BIPOLAR;
 GlobalMIDICommand defaultLoopRecordingCommand = GlobalMIDICommand::LOOP_CONTINUOUS_LAYERING;
 
 bool defaultUseSharps = true;
+
+AudioInputChannel defaultRecordSource = AudioInputChannel::LEFT;
 
 void resetSettings() {
 
@@ -369,6 +372,8 @@ void resetSettings() {
 	defaultLoopRecordingCommand = GlobalMIDICommand::LOOP_CONTINUOUS_LAYERING;
 
 	defaultUseSharps = true;
+
+	defaultRecordSource = AudioInputChannel::LEFT;
 }
 
 void resetMidiFollowSettings() {
@@ -817,6 +822,13 @@ void readSettings() {
 	else {
 		defaultPatchCablePolarity = static_cast<Polarity>(buffer[189]);
 	}
+
+	if (buffer[190] >= util::to_underlying(AudioInputChannel::SPECIFIC_OUTPUT)) {
+		defaultRecordSource = AudioInputChannel::LEFT;
+	}
+	else {
+		defaultRecordSource = static_cast<AudioInputChannel>(buffer[190]);
+	}
 }
 
 static bool areMidiFollowSettingsValid(std::span<uint8_t> buffer) {
@@ -1101,6 +1113,8 @@ void writeSettings() {
 	buffer[188] = defaultUseSharps;
 
 	buffer[189] = util::to_underlying(defaultPatchCablePolarity);
+
+	buffer[190] = util::to_underlying(defaultRecordSource);
 
 	R_SFLASH_EraseSector(0x80000 - 0x1000, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, 1, SPIBSC_OUTPUT_ADDR_24);
 	R_SFLASH_ByteProgram(0x80000 - 0x1000, buffer.data(), 256, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, SPIBSC_1BIT,
