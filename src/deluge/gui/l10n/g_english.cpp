@@ -1065,12 +1065,6 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_AUTOMOD_TYPE, "Type"},
         {STRING_FOR_AUTOMOD_FLAVOR, "Flavor"},
         {STRING_FOR_AUTOMOD_MOD, "Mod"},
-        {STRING_FOR_ERODER_MENU, "Eroder"},
-        {STRING_FOR_ERODER_FREQ, "Tone"},
-        {STRING_FOR_ERODER_CHARACTER, "Character"},
-        {STRING_FOR_ERODER_DEPTH, "Depth"},
-        {STRING_FOR_ERODER_MIX, "Mix"},
-        {STRING_FOR_ERODER_CUTOFF, "Freq"},
         {STRING_FOR_COMMUNITY_FEATURE_DISPERSER_HI_CPU, "Disperser HiCPU"},
         {STRING_FOR_DISPERSER_MENU, "Disperser"},
         {STRING_FOR_DISPERSER_FREQ, "Freq"},
@@ -1079,6 +1073,7 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_DISPERSER_STAGES, "Stages"},
         {STRING_FOR_DISPERSER_TOPO, "Topo"},
         {STRING_FOR_DISPERSER_TWIST, "Twist"},
+        {STRING_FOR_RECORD_SOURCE, "Record source"},
     },
 };
 } // namespace deluge::l10n::built_in
