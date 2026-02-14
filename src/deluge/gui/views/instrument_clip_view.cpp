@@ -5443,6 +5443,7 @@ void InstrumentClipView::cloneDrumToRow(SoundDrum* sourceDrum, int32_t targetYDi
 	if (newNoteRow) {
 		ModelStackWithNoteRow* modelStackWithNoteRow = modelStack->addNoteRow(noteRowIndex, newNoteRow);
 		newNoteRow->setDrum(newDrum, kit, modelStackWithNoteRow);
+		newNoteRow->colourOffset = sourceNoteRow->colourOffset;
 		AudioEngine::mustUpdateReverbParamsBeforeNextRender = true;
 	}
 

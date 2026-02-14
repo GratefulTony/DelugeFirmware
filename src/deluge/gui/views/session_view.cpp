@@ -3795,6 +3795,7 @@ Clip* SessionView::gridCreateClip(uint32_t targetSection, Output* targetOutput, 
 					}
 
 					newInstrument->editedByUser = true;
+					newInstrument->colour = srcInstrument->colour;
 
 					// The clip already has a valid ParamManager from gridCloneClip()
 					Error error =
@@ -3810,7 +3811,16 @@ Clip* SessionView::gridCreateClip(uint32_t targetSection, Output* targetOutput, 
 					}
 
 					newInstrument->loadAllAudioFiles(true);
-					currentSong->addOutput(newInstrument);
+
+					// Insert just before srcInstrument in the output list so the new
+					// track appears one column to the right in grid view
+					Output** prev = &currentSong->firstOutput;
+					while (*prev && *prev != srcInstrument) {
+						prev = &(*prev)->next;
+					}
+					newInstrument->next = *prev;
+					*prev = newInstrument;
+
 					newInstrument->setActiveClip(modelStack, PgmChangeSend::NEVER);
 					targetOutput = newInstrument;
 				}
