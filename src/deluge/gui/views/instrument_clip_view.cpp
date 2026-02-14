@@ -5450,6 +5450,12 @@ void InstrumentClipView::cloneDrumToRow(SoundDrum* sourceDrum, int32_t targetYDi
 	uiNeedsRendering(this, 0xFFFFFFFF, 0xFFFFFFFF);
 }
 
+void InstrumentClipView::cloneDrumToBottom(SoundDrum* sourceDrum, Kit* kit, ModelStackWithTimelineCounter* modelStack) {
+	auto* clip = static_cast<InstrumentClip*>(modelStack->getTimelineCounter());
+	int32_t targetYDisplay = clip->getNumNoteRows() - clip->yScroll;
+	cloneDrumToRow(sourceDrum, targetYDisplay, kit, modelStack);
+}
+
 // sub-function of AuditionPadAction
 // record note on early if count in is on
 void InstrumentClipView::recordNoteOnEarly(int32_t velocity, int32_t yDisplay, Instrument* instrument, bool isKit,

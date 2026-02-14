@@ -3435,6 +3435,19 @@ Clip* SessionView::gridCloneClip(Clip* sourceClip) {
 	return (Clip*)modelStack->getTimelineCounter();
 }
 
+bool SessionView::cloneSynthTrack(Clip* sourceClip) {
+	if (!sourceClip || sourceClip->output->type != OutputType::SYNTH) {
+		return false;
+	}
+	Clip* newClip = gridCreateClip(sourceClip->section, nullptr, sourceClip);
+	if (!newClip) {
+		return false;
+	}
+	display->displayPopup("CLONE");
+	requestRendering(this);
+	return true;
+}
+
 Clip* SessionView::gridCreateClipInTrack(Output* targetOutput) {
 	Clip* sourceClip = nullptr;
 	for (int32_t idxClip = 0; idxClip < currentSong->sessionClips.getNumElements(); ++idxClip) {

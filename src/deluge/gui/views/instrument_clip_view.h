@@ -141,6 +141,7 @@ public:
 	int32_t setupForExitingScaleMode();
 	void setupChangingOfRootNote(int32_t newRootNote, int32_t yDisplay = (kDisplayHeight / 2));
 	void deleteDrum(SoundDrum* drum);
+	void cloneDrumToBottom(SoundDrum* sourceDrum, Kit* kit, ModelStackWithTimelineCounter* modelStack);
 	void cancelAllAuditioning();
 	void modEncoderButtonAction(uint8_t whichModEncoder, bool on) override;
 
