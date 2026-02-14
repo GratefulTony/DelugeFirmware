@@ -373,6 +373,9 @@ private:
 	Drum* getAuditionedDrum(int32_t velocity, int32_t yDisplay, bool shiftButtonDown, Instrument* instrument,
 	                        ModelStackWithTimelineCounter* modelStackWithTimelineCounter,
 	                        ModelStackWithNoteRow* modelStackWithNoteRowOnCurrentClip);
+	Drum* getSourceDrumForClone();
+	void cloneDrumToRow(SoundDrum* sourceDrum, int32_t targetYDisplay, Kit* kit,
+	                    ModelStackWithTimelineCounter* modelStack);
 	void potentiallyUpdateMultiRangeMenu(int32_t velocity, int32_t yDisplay, Instrument* instrument);
 	void recordNoteOnEarly(int32_t velocity, int32_t yDisplay, Instrument* instrument, bool isKit,
 	                       ModelStackWithNoteRow* modelStackWithNoteRowOnCurrentClip, Drum* drum);

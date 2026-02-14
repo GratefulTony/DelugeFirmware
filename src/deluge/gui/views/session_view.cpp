@@ -3756,6 +3756,31 @@ Clip* SessionView::gridCreateClip(uint32_t targetSection, Output* targetOutput, 
 					newInstrument->cloneFrom(srcInstrument);
 					newInstrument->name.set(&srcInstrument->name);
 					newInstrument->dirPath.set(&srcInstrument->dirPath);
+
+					// Make name unique to avoid save/reload conflicts (instruments are matched by name+dirPath)
+					{
+						int32_t originalLength = newInstrument->name.getLength();
+						int32_t suffix = 2;
+						bool nameExists;
+						do {
+							nameExists = false;
+							for (Output* o = currentSong->firstOutput; o; o = o->next) {
+								if (o->type == OutputType::SYNTH
+								    && !strcasecmp(o->name.get(), newInstrument->name.get())
+								    && !strcasecmp(((Instrument*)o)->dirPath.get(), newInstrument->dirPath.get())) {
+									nameExists = true;
+									break;
+								}
+							}
+							if (nameExists) {
+								char numberString[12];
+								intToString(suffix, numberString);
+								newInstrument->name.concatenateAtPos(numberString, originalLength);
+								suffix++;
+							}
+						} while (nameExists);
+					}
+
 					newInstrument->editedByUser = true;
 
 					// The clip already has a valid ParamManager from gridCloneClip()
