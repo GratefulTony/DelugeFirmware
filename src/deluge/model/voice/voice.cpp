@@ -311,6 +311,9 @@ activenessDetermined:
 			    paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SAMPLE_START_OFFSET_A + s);
 			guides[s].preRollSamples = 0;
 			guides[s].wrapSyncPosition = false;
+			guides[s].wrapAroundPending = false;
+			guides[s].loopSplit = false;
+			guides[s].loopWrapPhase = 0;
 			if (startOffsetParam != 0) {
 				bool synced = source->repeatMode == SampleRepeatMode::STRETCH && guides[s].sequenceSyncLengthTicks > 0;
 
@@ -343,10 +346,7 @@ activenessDetermined:
 						byteShift = (byteShift / bytesPerFrame) * bytesPerFrame;
 
 						if (isLoopingRepeatMode(source->repeatMode)) {
-							// LOOP: modular wrap of start position within the region.
-							// First iteration starts at the offset position. On loop,
-							// playback wraps back to the original start (loopStartPlaybackAtByte
-							// was set to the original start by setupPlaybackBounds).
+							// Wrap start within the full start-to-end region
 							int32_t mod = ((byteShift % absRegion) + absRegion) % absRegion;
 							mod = (mod / bytesPerFrame) * bytesPerFrame;
 							if (forward) {
@@ -355,8 +355,53 @@ activenessDetermined:
 							else {
 								guides[s].startPlaybackAtByte = static_cast<uint32_t>(startByte - mod);
 							}
-							// loopStartPlaybackAtByte intentionally NOT updated —
-							// it stays at the original start so the loop wraps around
+
+							// Shift loop markers by the same offset
+							if (guides[s].loopEndPlaybackAtByte != 0 && mod != 0) {
+								int32_t loopStartByte = static_cast<int32_t>(guides[s].loopStartPlaybackAtByte);
+								int32_t loopEndByte = static_cast<int32_t>(guides[s].loopEndPlaybackAtByte);
+
+								int32_t loopStartRel, loopEndRel;
+								if (forward) {
+									loopStartRel = loopStartByte - startByte;
+									loopEndRel = loopEndByte - startByte;
+								}
+								else {
+									loopStartRel = startByte - loopStartByte;
+									loopEndRel = startByte - loopEndByte;
+								}
+
+								int32_t newLoopStartRel = (loopStartRel + mod) % absRegion;
+								int32_t newLoopEndRel = (loopEndRel + mod) % absRegion;
+
+								if (forward) {
+									guides[s].loopStartPlaybackAtByte =
+									    static_cast<uint32_t>(startByte + newLoopStartRel);
+									guides[s].loopEndPlaybackAtByte = static_cast<uint32_t>(startByte + newLoopEndRel);
+								}
+								else {
+									guides[s].loopStartPlaybackAtByte =
+									    static_cast<uint32_t>(startByte - newLoopStartRel);
+									guides[s].loopEndPlaybackAtByte = static_cast<uint32_t>(startByte - newLoopEndRel);
+								}
+
+								// Loop end wrapped past sample boundary but start didn't
+								if (newLoopEndRel < newLoopStartRel) {
+									guides[s].loopSplit = true;
+									guides[s].loopWrapPhase = 1;
+								}
+							}
+
+							// If the shifted start is past the loop end, play through
+							// to the sample end first, then wrap to sample start.
+							if (guides[s].loopEndPlaybackAtByte != 0) {
+								int32_t startPos = static_cast<int32_t>(guides[s].startPlaybackAtByte);
+								int32_t loopEndPos = static_cast<int32_t>(guides[s].loopEndPlaybackAtByte);
+								if ((startPos - loopEndPos) * guides[s].playDirection >= 0) {
+									guides[s].wrapAroundPending = true;
+									guides[s].wrapAroundRestartByte = static_cast<uint32_t>(startByte);
+								}
+							}
 						}
 						else {
 							// CUT/ONCE: window slide with silence for out-of-bounds.

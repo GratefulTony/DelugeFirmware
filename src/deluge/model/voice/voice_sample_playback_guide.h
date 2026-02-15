@@ -48,4 +48,8 @@ public:
 
 	bool noteOffReceived;
 	bool pingpongActive{false};
+	bool wrapAroundPending{false};     // When start offset puts play pos past loop end, play to sample end first
+	uint32_t wrapAroundRestartByte{0}; // Original sample start byte for wrap-around restart
+	bool loopSplit{false};             // Loop region crosses sample boundary after offset shift
+	uint8_t loopWrapPhase{0};          // 0=normal, 1=playing loopStart→sampleEnd, 2=playing sampleStart→loopEnd
 };

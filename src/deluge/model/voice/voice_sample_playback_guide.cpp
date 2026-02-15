@@ -76,22 +76,40 @@ bool VoiceSamplePlaybackGuide::shouldObeyLoopEndPointNow() {
 }
 
 int32_t VoiceSamplePlaybackGuide::getBytePosToStartPlayback(bool justLooped) {
+	if (justLooped && wrapAroundPending) {
+		wrapAroundPending = false;
+		if (loopSplit) {
+			loopWrapPhase = 2; // After initial wrap or phase 1, enter phase 2
+		}
+		return static_cast<int32_t>(wrapAroundRestartByte);
+	}
 	if (!justLooped) {
 		return SamplePlaybackGuide::getBytePosToStartPlayback(justLooped);
 	}
-	else {
+	if (loopWrapPhase == 2) {
+		// Phase 2→1: finished playing sampleStart→loopEnd, restart at loopStart
+		loopWrapPhase = 1;
 		return loopStartPlaybackAtByte;
 	}
+	if (loopWrapPhase == 1) {
+		// Phase 1→2: finished playing loopStart→sampleEnd, restart at sampleStart
+		loopWrapPhase = 2;
+		return static_cast<int32_t>(wrapAroundRestartByte);
+	}
+	return loopStartPlaybackAtByte;
 }
 
 // This is actually an important function whose output is the basis for a lot of stuff
 int32_t VoiceSamplePlaybackGuide::getBytePosToEndOrLoopPlayback() {
-	if (shouldObeyLoopEndPointNow()) {
-		return loopEndPlaybackAtByte;
-	}
-	else {
+	if (wrapAroundPending || loopWrapPhase == 1) {
+		// Phase 1 or initial wrap: play to sample end
 		return SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
 	}
+	if (shouldObeyLoopEndPointNow()) {
+		// Phase 2 or normal: play to loop end
+		return loopEndPlaybackAtByte;
+	}
+	return SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
 }
 
 LoopType VoiceSamplePlaybackGuide::getLoopingType(const Source& source) const {
@@ -110,6 +128,12 @@ LoopType VoiceSamplePlaybackGuide::getLoopingType(const Source& source) const {
 }
 
 void VoiceSamplePlaybackGuide::onLoopRestart() {
+	if (wrapAroundPending) {
+		return; // Flag cleared in getBytePosToStartPlayback
+	}
+	if (loopSplit) {
+		return; // Phase transitions handled in getBytePosToStartPlayback
+	}
 	if (pingpongActive) {
 		playDirection = -playDirection;
 		std::swap(loopStartPlaybackAtByte, loopEndPlaybackAtByte);

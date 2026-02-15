@@ -147,8 +147,16 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 	int32_t endPlaybackAtByte;
 	int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, shouldObeyMarkers(), &endPlaybackAtByte);
 
+	// Are we already past the final Cluster? This can happen when the start
+	// offset puts the play position past the loop end in a different cluster.
+	// Force immediate STOP_OR_LOOP so changeClusterIfNecessary triggers loop-back.
+	if ((currentClusterIndex - finalClusterIndex) * guide->playDirection > 0) {
+		reassessmentLocation = currentPlayPos;
+		reassessmentAction = REASSESSMENT_ACTION_STOP_OR_LOOP;
+	}
+
 	// Is this the final Cluster?
-	if (currentClusterIndex == finalClusterIndex) {
+	else if (currentClusterIndex == finalClusterIndex) {
 		int32_t bytePosWithinClusterToStopAt = endPlaybackAtByte & (Cluster::size - 1);
 		if (guide->playDirection == 1) {
 			if (bytePosWithinClusterToStopAt == 0) {

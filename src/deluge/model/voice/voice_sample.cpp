@@ -1687,11 +1687,16 @@ bool VoiceSample::sampleZoneChanged(SamplePlaybackGuide* voiceSource, Sample* sa
 			}
 		}
 
-		// If no cache, no action necessary!
+		// If no cache, reassess the reassessment location for the new bounds.
+		// This handles stale reassessmentLocation after pingpong direction reset
+		// or marker changes when crossfade disables caching.
+		else {
+			goto justDoReassessment;
+		}
 	}
 
 	else if (markerType == MarkerType::LOOP_START) {
-		// Everything's fine
+		goto justDoReassessment;
 	}
 
 	else if (markerType == MarkerType::LOOP_END) {
