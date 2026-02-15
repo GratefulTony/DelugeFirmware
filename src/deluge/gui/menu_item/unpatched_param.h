@@ -41,7 +41,7 @@ public:
 	ParamDescriptor getLearningThing() final;
 	[[nodiscard]] int32_t getMaxValue() const override { return Param::getMaxValue(); }
 	[[nodiscard]] int32_t getMinValue() const override { return Param::getMinValue(); }
-	MenuItem* selectButtonPress() final { return Param::selectButtonPress(); }
+	MenuItem* selectButtonPress() override { return Param::selectButtonPress(); }
 	// this button action function definition should not be required as it should be inherited
 	// from the param class, however it does not work if the definition is removed, so there
 	// is likely a multi-inheritance issue that needs to be resolved

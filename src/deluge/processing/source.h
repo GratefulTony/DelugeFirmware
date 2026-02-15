@@ -51,6 +51,7 @@ public:
 	DxPatch* dxPatch;
 	bool dxPatchChanged = false;
 	SampleRepeatMode repeatMode;
+	bool offsetShiftsEnd{true}; // Whether start offset also shifts the end marker
 
 	// PHI_MORPH zone parameters and cache (lazily allocated)
 	uint16_t phiMorphZoneA{0};

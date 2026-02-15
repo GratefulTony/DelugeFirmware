@@ -3503,6 +3503,10 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			source->repeatMode = std::min(source->repeatMode, static_cast<SampleRepeatMode>(kNumRepeatModes - 1));
 			reader.exitTag("loopMode");
 		}
+		else if (!strcmp(tagName, "offsetShiftsEnd")) {
+			source->offsetShiftsEnd = reader.readTagOrAttributeValueInt();
+			reader.exitTag("offsetShiftsEnd");
+		}
 		else if (!strcmp(tagName, "oscillatorSync")) {
 			int32_t value = reader.readTagOrAttributeValueInt();
 			oscillatorSync = (value != 0);
@@ -3777,6 +3781,9 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 	if (source->oscType == OscType::SAMPLE
 	    && synthMode != SynthMode::FM) { // Don't combine this with the above "if" - there's an "else" below
 		writer.writeAttribute("loopMode", util::to_underlying(source->repeatMode));
+		if (!source->offsetShiftsEnd) {
+			writer.writeAttribute("offsetShiftsEnd", (int32_t)0);
+		}
 		writer.writeAttribute("reversed", source->sampleControls.reversed);
 		writer.writeAttribute("timeStretchEnable", source->sampleControls.pitchAndSpeedAreIndependent);
 		writer.writeAttribute("timeStretchAmount", source->timeStretchAmount);

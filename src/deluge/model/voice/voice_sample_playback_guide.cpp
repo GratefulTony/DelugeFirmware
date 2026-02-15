@@ -101,20 +101,26 @@ int32_t VoiceSamplePlaybackGuide::getBytePosToStartPlayback(bool justLooped) {
 
 // This is actually an important function whose output is the basis for a lot of stuff
 int32_t VoiceSamplePlaybackGuide::getBytePosToEndOrLoopPlayback() {
-	if (wrapAroundPending || loopWrapPhase == 1) {
-		// Phase 1 or initial wrap: play to sample end
-		return SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
+	if (wrapAroundPending || loopWrapPhase == 1 || (noteOffReceived && releaseWrapPending)) {
+		// Phase 1, initial wrap, or release wrap: play to original sample end
+		return sampleEndByte ? static_cast<int32_t>(sampleEndByte)
+		                     : SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
 	}
 	if (shouldObeyLoopEndPointNow()) {
 		// Phase 2 or normal: play to loop end
 		return loopEndPlaybackAtByte;
 	}
+	// After release wrap completes: endPlaybackAtByte is the shifted end
 	return SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
 }
 
 LoopType VoiceSamplePlaybackGuide::getLoopingType(const Source& source) const {
 	if (loopEndPlaybackAtByte) {
-		return noteOffReceived ? LoopType::NONE : LoopType::LOW_LEVEL;
+		if (noteOffReceived) {
+			// Allow one more wrap cycle so the release tail crosses the sample boundary
+			return releaseWrapPending ? LoopType::LOW_LEVEL : LoopType::NONE;
+		}
+		return LoopType::LOW_LEVEL;
 	}
 	if (isLoopingRepeatMode(source.repeatMode)) {
 		return LoopType::LOW_LEVEL;
@@ -130,6 +136,14 @@ LoopType VoiceSamplePlaybackGuide::getLoopingType(const Source& source) const {
 void VoiceSamplePlaybackGuide::onLoopRestart() {
 	if (wrapAroundPending) {
 		return; // Flag cleared in getBytePosToStartPlayback
+	}
+	if (noteOffReceived && releaseWrapPending) {
+		// Release wrap: played to original sample end, now wrap to sample start
+		releaseWrapPending = false;
+		loopWrapPhase = 0;
+		loopSplit = false;
+		wrapAroundPending = true; // getBytePosToStartPlayback will return sampleStart
+		return;
 	}
 	if (loopSplit) {
 		return; // Phase transitions handled in getBytePosToStartPlayback

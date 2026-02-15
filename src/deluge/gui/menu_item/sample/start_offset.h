@@ -19,6 +19,8 @@
 #include "gui/menu_item/unpatched_param.h"
 #include "gui/menu_item/velocity_encoder.h"
 #include "gui/ui/sound_editor.h"
+#include "hid/buttons.h"
+#include "hid/display/display.h"
 #include "model/voice/voice.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_set.h"
@@ -99,6 +101,16 @@ public:
 
 	void selectEncoderAction(int32_t offset) override {
 		UnpatchedParam::selectEncoderAction(velocity_.getScaledOffset(offset));
+	}
+
+	MenuItem* selectButtonPress() override {
+		if (Buttons::isShiftButtonPressed()) {
+			return UnpatchedParam::selectButtonPress();
+		}
+		Source& source = soundEditor.currentSound->sources[source_id_];
+		source.offsetShiftsEnd = !source.offsetShiftsEnd;
+		display->displayPopup(source.offsetShiftsEnd ? "shift end" : "no shift end");
+		return NO_NAVIGATION;
 	}
 
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }

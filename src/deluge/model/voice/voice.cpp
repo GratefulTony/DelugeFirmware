@@ -314,6 +314,8 @@ activenessDetermined:
 			guides[s].wrapAroundPending = false;
 			guides[s].loopSplit = false;
 			guides[s].loopWrapPhase = 0;
+			guides[s].sampleEndByte = 0;
+			guides[s].releaseWrapPending = false;
 			if (startOffsetParam != 0) {
 				bool synced = source->repeatMode == SampleRepeatMode::STRETCH && guides[s].sequenceSyncLengthTicks > 0;
 
@@ -389,6 +391,14 @@ activenessDetermined:
 								if (newLoopEndRel < newLoopStartRel) {
 									guides[s].loopSplit = true;
 									guides[s].loopWrapPhase = 1;
+								}
+
+								// Shift end marker and store original for split loop / release wrap
+								guides[s].sampleEndByte = static_cast<uint32_t>(endByte);
+								guides[s].wrapAroundRestartByte = static_cast<uint32_t>(startByte);
+								if (source->offsetShiftsEnd && !guides[s].pingpongActive) {
+									guides[s].endPlaybackAtByte = guides[s].startPlaybackAtByte;
+									guides[s].releaseWrapPending = true;
 								}
 							}
 

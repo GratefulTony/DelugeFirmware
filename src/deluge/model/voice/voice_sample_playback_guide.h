@@ -52,4 +52,6 @@ public:
 	uint32_t wrapAroundRestartByte{0}; // Original sample start byte for wrap-around restart
 	bool loopSplit{false};             // Loop region crosses sample boundary after offset shift
 	uint8_t loopWrapPhase{0};          // 0=normal, 1=playing loopStart→sampleEnd, 2=playing sampleStart→loopEnd
+	uint32_t sampleEndByte{0};         // Original pre-offset end byte (for split loop phase 1 and release wrap)
+	bool releaseWrapPending{false};    // On note-off, wrap once more to play release tail past sample boundary
 };

@@ -71,6 +71,7 @@ void Source::cloneFrom(Source* other) {
 	cents = other->cents;
 	fineTuner = other->fineTuner;
 	repeatMode = other->repeatMode;
+	offsetShiftsEnd = other->offsetShiftsEnd;
 	timeStretchAmount = other->timeStretchAmount;
 	defaultRangeI = other->defaultRangeI;
 
