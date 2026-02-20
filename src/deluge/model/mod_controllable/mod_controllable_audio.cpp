@@ -112,6 +112,8 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	shaper = other->shaper;
 	if (shaper.isEnabled()) {
 		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.gammaPhase, shaper.oscHarmonicWeight);
+		shaperDsp.ensureBuffersAllocated();
+		shaperDsp.regenerateIfDirty();
 	}
 	// Sine shaper state (copy params, invalidate cache to force recomputation)
 	sineShaper = other->sineShaper;
@@ -1169,6 +1171,8 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 		// Regenerate table after any shaper param change
 		if (shaper.isEnabled()) {
 			shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.gammaPhase, shaper.oscHarmonicWeight);
+			shaperDsp.ensureBuffersAllocated();
+			shaperDsp.regenerateIfDirty();
 		}
 	}
 

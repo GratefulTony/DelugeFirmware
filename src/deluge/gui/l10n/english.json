@@ -1070,6 +1070,13 @@
     "STRING_FOR_DISPERSER_TOPO": "Topo",
     "STRING_FOR_DISPERSER_TWIST": "Twist",
 
+    "STRING_FOR_ERODER_MENU": "Eroder",
+    "STRING_FOR_ERODER_FREQ": "Freq",
+    "STRING_FOR_ERODER_CHARACTER": "Character",
+    "STRING_FOR_ERODER_DEPTH": "Depth",
+    "STRING_FOR_ERODER_MIX": "Mix",
+    "STRING_FOR_ERODER_CUTOFF": "Cutoff",
+
     "STRING_FOR_RECORD_SOURCE": "Record source"
   }
 }

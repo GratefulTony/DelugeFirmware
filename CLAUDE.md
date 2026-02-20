@@ -45,6 +45,12 @@
 - This provides historical performance tracking across commits
 - Format: effect name, character/tag, sample count, median cycles
 
+## Copyright Headers
+
+- New files that don't exist in upstream (SynthstromAudible/DelugeFirmware) should use the Owlet Records header
+- Reference: `src/deluge/dsp/eroder.h` for the exact format
+- Files that exist upstream keep their original Synthstrom Audible headers
+
 ## Testing
 
 - Test on actual hardware when possible

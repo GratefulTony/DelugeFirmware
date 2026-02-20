@@ -1055,6 +1055,7 @@ Submenu audioClipFXMenu{
         &globalReverbMenu,
         &stutterMenu,
         &globalModFXMenu,
+        &shapingMenu,
         &audioClipDistortionMenu,
         &dott_menu,
     },
