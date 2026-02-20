@@ -304,6 +304,7 @@ activenessDetermined:
 		if (oscType == OscType::SAMPLE && guides[s].audioFileHolder) {
 			source->sampleControls.invertReversed = sound.invertReversed; // Copy the temporary flag from the sound
 			guides[s].setupPlaybackBounds(source->sampleControls.isCurrentlyReversed());
+			guides[s].pingpongActive = (source->repeatMode == SampleRepeatMode::PINGPONG);
 
 			// Apply plocked sample start offset — slides the playback window
 			int32_t startOffsetParam =
@@ -341,7 +342,7 @@ activenessDetermined:
 						int32_t byteShift = static_cast<int32_t>(offsetBytes);
 						byteShift = (byteShift / bytesPerFrame) * bytesPerFrame;
 
-						if (source->repeatMode == SampleRepeatMode::LOOP) {
+						if (isLoopingRepeatMode(source->repeatMode)) {
 							// LOOP: modular wrap of start position within the region.
 							// First iteration starts at the offset position. On loop,
 							// playback wraps back to the original start (loopStartPlaybackAtByte
@@ -702,17 +703,23 @@ void Voice::noteOff(ModelStackWithSoundFlags* modelStack, bool allowReleaseStage
 	if (sound.synthMode != SynthMode::FM) {
 		for (int32_t s = 0; s < kNumSources; s++) {
 			if (sound.sources[s].oscType == OscType::SAMPLE && guides[s].loopEndPlaybackAtByte) {
+				int8_t savedDirection = guides[s].playDirection;
 				for (int32_t u = 0; u < sound.numUnison; u++) {
 					if (unisonParts[u].sources[s].active) {
+						VoiceSample* voiceSample = unisonParts[u].sources[s].voiceSample;
+						// Set per-reader direction for pingpong before reassessing boundaries
+						if (guides[s].pingpongActive && voiceSample) {
+							guides[s].playDirection = voiceSample->pingpongPlayDirection;
+						}
 
-						bool success =
-						    unisonParts[u].sources[s].voiceSample->noteOffWhenLoopEndPointExists(this, &guides[s]);
+						bool success = voiceSample->noteOffWhenLoopEndPointExists(this, &guides[s]);
 
 						if (!success) {
 							unisonParts[u].sources[s].unassign(false);
 						}
 					}
 				}
+				guides[s].playDirection = savedDirection;
 			}
 			else if (sound.sources[s].oscType == OscType::DX7) {
 				for (int u = 0; u < sound.numUnison; u++) {
@@ -748,6 +755,7 @@ bool Voice::sampleZoneChanged(ModelStackWithSoundFlags* modelStack, int32_t s, M
 	Sample* sample = (Sample*)holder->audioFile;
 
 	guides[s].setupPlaybackBounds(source.sampleControls.isCurrentlyReversed());
+	guides[s].pingpongActive = (source.repeatMode == SampleRepeatMode::PINGPONG);
 
 	LoopType loopingType = guides[s].getLoopingType(sound.sources[s]);
 
@@ -761,6 +769,10 @@ bool Voice::sampleZoneChanged(ModelStackWithSoundFlags* modelStack, int32_t s, M
 		VoiceUnisonPartSource* voiceUnisonPartSource = &unisonParts[u].sources[s];
 
 		if (voiceUnisonPartSource->active) {
+			// Reset per-reader pingpong direction to canonical after zone change
+			if (guides[s].pingpongActive && voiceUnisonPartSource->voiceSample) {
+				voiceUnisonPartSource->voiceSample->pingpongPlayDirection = guides[s].playDirection;
+			}
 			bool stillActive = voiceUnisonPartSource->voiceSample->sampleZoneChanged(
 			    &guides[s], sample, source.sampleControls.isCurrentlyReversed(), markerType, loopingType,
 			    getPriorityRating());
@@ -2210,8 +2222,14 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
 			continue;
 		}
 
+		// Save the canonical guide direction for per-reader pingpong tracking.
+		// Each unison reader independently flips direction during pingpong,
+		// so we restore the canonical direction after each render.
+		int8_t savedGuideDirection = guides[s].playDirection;
+
 		if (false) {
 instantUnassign:
+			guides[s].playDirection = savedGuideDirection;
 
 #ifdef TEST_SAMPLE_LOOP_POINTS
 			FREEZE_WITH_ERROR("YEP");
@@ -2258,6 +2276,11 @@ pitchTooHigh:
 
 			Sample* sample = (Sample*)guides[s].audioFileHolder->audioFile;
 			VoiceSample* voiceSample = voiceUnisonPartSource->voiceSample;
+
+			// Apply per-reader pingpong direction before any direction-dependent calls
+			if (guides[s].pingpongActive) {
+				guides[s].playDirection = voiceSample->pingpongPlayDirection;
+			}
 
 			int32_t numChannels = (sample->numChannels == 2) ? 2 : 1;
 
@@ -2366,6 +2389,11 @@ pitchTooHigh:
 				// velocity or note is affecting pitch), and stretch-syncing.
 				if (!voiceSample->doneFirstRenderYet && !tryToStartMidNote
 				    && portaEnvelopePos == 0xFFFFFFFF) { // No porta
+
+					// Pingpong mode can't use cache since direction changes mid-playback
+					if (guides[s].pingpongActive) {
+						goto dontUseCache;
+					}
 
 					// Skip cache when crossfade is active — the crossfade envelope
 					// is only applied in the uncached render path
@@ -2503,6 +2531,12 @@ dontUseCache: {}
 			if (!stillActive) {
 				goto instantUnassign;
 			}
+
+			// Save per-reader pingpong direction (may have been flipped by a bounce)
+			if (guides[s].pingpongActive) {
+				voiceSample->pingpongPlayDirection = guides[s].playDirection;
+			}
+			guides[s].playDirection = savedGuideDirection;
 		}
 
 		// Or echoing input

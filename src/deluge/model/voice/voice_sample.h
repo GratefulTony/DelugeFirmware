@@ -84,8 +84,9 @@ public:
 	SampleCache* cache = nullptr;
 	bool doneFirstRenderYet = false;
 	bool fudging = false;
-	bool forAudioClip = false;   // This is a wee bit of a hack - but we need to be able to know this
-	bool writingToCache = false; // Value is only valid if cache assigned
+	bool forAudioClip = false;       // This is a wee bit of a hack - but we need to be able to know this
+	bool writingToCache = false;     // Value is only valid if cache assigned
+	int8_t pingpongPlayDirection{1}; // Per-reader direction for pingpong mode (1=forward, -1=backward)
 	int32_t loopFadeInSamplesRemaining{0};
 	int32_t loopFadeInSamplesTotal{0};
 

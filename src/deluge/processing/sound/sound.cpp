@@ -2077,9 +2077,9 @@ int32_t Sound::hasCutOrLoopModeSamples(ParamManagerForTimeline* paramManager, in
 		if (sources[s].oscType != OscType::SAMPLE) {
 			return 0;
 		}
-		else if (sources[s].repeatMode == SampleRepeatMode::CUT || sources[s].repeatMode == SampleRepeatMode::LOOP) {
+		else if (sources[s].repeatMode == SampleRepeatMode::CUT || isLoopingRepeatMode(sources[s].repeatMode)) {
 
-			if (anyLooping && sources[s].repeatMode == SampleRepeatMode::LOOP) {
+			if (anyLooping && isLoopingRepeatMode(sources[s].repeatMode)) {
 				*anyLooping = true;
 			}
 			int32_t length = sources[s].getLengthInSamplesAtSystemSampleRate(note);
@@ -3289,7 +3289,15 @@ void Sound::setNumUnison(int32_t newNum, ModelStackWithSoundFlags* modelStack) {
 							// Just clones the SampleLowLevelReader stuff
 							newVoiceSample = SampleLowLevelReader(oldVoiceSample);
 							newVoiceSample.pendingSamplesLate = oldVoiceSample.pendingSamplesLate;
+							newVoiceSample.pingpongPlayDirection = oldVoiceSample.pingpongPlayDirection;
 							newVoiceSample.doneFirstRenderYet = true;
+
+							// Set guide direction to match this reader's pingpong direction
+							// so that stopUsingCache sets up correct boundaries.
+							int8_t savedDirection = voice->guides[s].playDirection;
+							if (voice->guides[s].pingpongActive) {
+								voice->guides[s].playDirection = newVoiceSample.pingpongPlayDirection;
+							}
 
 							// Don't do any caching for new part. Old parts will stop using their cache anyway
 							// because their pitch will have changed
@@ -3298,6 +3306,8 @@ void Sound::setNumUnison(int32_t newNum, ModelStackWithSoundFlags* modelStack) {
 							    voice->getPriorityRating(),
 							    voice->guides[s].getLoopingType(sources[s]) == LoopType::LOW_LEVEL);
 							// TODO: should really check success of that...
+
+							voice->guides[s].playDirection = savedDirection;
 						}
 					}
 					else if (newNum < oldNum) {

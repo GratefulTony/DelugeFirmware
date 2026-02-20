@@ -1082,6 +1082,7 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_RECORD_SOURCE, "Record source"},
         {STRING_FOR_LOOP_CROSSFADE, "XFade Loop"},
         {STRING_FOR_SAMP_LOOP_XFADE_MENU_TITLE, "Osc{} loop xfade"},
+        {STRING_FOR_LOOP_PINGPONG, "PINGPONG"},
     },
 };
 } // namespace deluge::l10n::built_in

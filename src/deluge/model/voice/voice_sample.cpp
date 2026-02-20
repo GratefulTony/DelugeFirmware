@@ -54,6 +54,7 @@ void VoiceSample::noteOn(SamplePlaybackGuide* guide, uint32_t samplesLate, int32
 	forAudioClip = false;
 	loopFadeInSamplesRemaining = 0;
 	justLoopedBack = false;
+	pingpongPlayDirection = guide->playDirection;
 }
 
 // Returns false if error
@@ -1071,6 +1072,12 @@ readNonTimestretched:
 			    priorityRating); // Keep it reading silence forever so we can definitely fill up the cache
 			if (!stillActive) {
 				return false;
+			}
+
+			// Pingpong may have flipped direction inside considerUpcomingWindow
+			if (guide->playDirection != playDirection) {
+				playDirection = guide->playDirection;
+				jumpAmount = sample->byteDepth * sampleSourceNumChannels * playDirection;
 			}
 
 			// Loop crossfade: detect loop restart and start fade-in

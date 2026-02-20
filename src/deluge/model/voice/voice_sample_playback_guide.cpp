@@ -70,34 +70,67 @@ void VoiceSamplePlaybackGuide::setupPlaybackBounds(bool reversed) {
 
 // This is, whether to obey the loop-end point as opposed to the actual end-of-sample point (which sometimes might cause
 // looping too)
+// This is, whether to obey the loop-end point as opposed to the actual end-of-sample point (which sometimes might cause
+// looping too)
 bool VoiceSamplePlaybackGuide::shouldObeyLoopEndPointNow() {
-	return (loopEndPlaybackAtByte && !noteOffReceived);
+	// For pingpong going backward after note-off, keep obeying the loop end
+	// so the voice reaches the boundary, bounces forward, then releases.
+	return (loopEndPlaybackAtByte && (!noteOffReceived || (pingpongActive && playDirection == -1)));
 }
 
 int32_t VoiceSamplePlaybackGuide::getBytePosToStartPlayback(bool justLooped) {
 	if (!justLooped) {
 		return SamplePlaybackGuide::getBytePosToStartPlayback(justLooped);
 	}
-	else {
+	if (pingpongActive) {
+		// Pingpong: flip direction and return the new phase's start.
+		// Direction is per-reader (set on the guide before render by voice.cpp).
+		Sample* sample = static_cast<Sample*>(audioFileHolder->audioFile);
+		int32_t bps = sample->byteDepth * sample->numChannels;
+		playDirection = -playDirection;
+		if (playDirection == -1) {
+			// Was forward, now backward: restart near loop end
+			uint32_t endByte = loopEndPlaybackAtByte ? loopEndPlaybackAtByte : endPlaybackAtByte;
+			return static_cast<int32_t>(endByte) - bps;
+		}
+		// Was backward, now forward: restart at loop start
 		return loopStartPlaybackAtByte;
 	}
+	return loopStartPlaybackAtByte;
 }
 
 // This is actually an important function whose output is the basis for a lot of stuff
 int32_t VoiceSamplePlaybackGuide::getBytePosToEndOrLoopPlayback() {
+	if (pingpongActive) {
+		// Pingpong: boundary depends on current direction.
+		if (playDirection == 1) {
+			// Forward: boundary at loop end (or sample end if note-off)
+			if (shouldObeyLoopEndPointNow()) {
+				return loopEndPlaybackAtByte;
+			}
+			return SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
+		}
+		// Backward: boundary at loop start
+		Sample* sample = static_cast<Sample*>(audioFileHolder->audioFile);
+		int32_t bps = sample->byteDepth * sample->numChannels;
+		return static_cast<int32_t>(loopStartPlaybackAtByte) - bps;
+	}
 	if (shouldObeyLoopEndPointNow()) {
 		return loopEndPlaybackAtByte;
 	}
-	else {
-		return SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
-	}
+	return SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
 }
 
 LoopType VoiceSamplePlaybackGuide::getLoopingType(const Source& source) const {
 	if (loopEndPlaybackAtByte) {
-		return noteOffReceived ? LoopType::NONE : LoopType::LOW_LEVEL;
+		if (noteOffReceived) {
+			// Pingpong going backward: allow one more bounce to forward
+			// before stopping, so the release tail plays naturally.
+			return (pingpongActive && playDirection == -1) ? LoopType::LOW_LEVEL : LoopType::NONE;
+		}
+		return LoopType::LOW_LEVEL;
 	}
-	if (source.repeatMode == SampleRepeatMode::LOOP) {
+	if (isLoopingRepeatMode(source.repeatMode)) {
 		return LoopType::LOW_LEVEL;
 	}
 	// Enable looping for STRETCH mode when start offset is active,
@@ -106,4 +139,12 @@ LoopType VoiceSamplePlaybackGuide::getLoopingType(const Source& source) const {
 		return LoopType::LOW_LEVEL;
 	}
 	return LoopType::NONE;
+}
+
+void VoiceSamplePlaybackGuide::onLoopRestart() {
+	// All phase advancement and pingpong handling is now done inside
+	// getBytePosToStartPlayback(true), which is called by
+	// setupClusersForInitialPlay during loop-back. This avoids mutating
+	// the shared guide from a low-level reader call site, which corrupts
+	// boundaries for other unison readers that haven't hit the boundary yet.
 }

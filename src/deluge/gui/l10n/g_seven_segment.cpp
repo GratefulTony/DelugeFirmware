@@ -572,6 +572,7 @@ PLACE_SDRAM_DATA Language seven_segment{
         {STRING_FOR_ERODER_CUTOFF, "CUTF"},
         {STRING_FOR_RECORD_SOURCE, "SRCE"},
         {STRING_FOR_LOOP_CROSSFADE, "XFAD"},
+        {STRING_FOR_LOOP_PINGPONG, "PING"},
     },
     &built_in::english,
 };
