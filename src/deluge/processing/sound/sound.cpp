@@ -3571,6 +3571,10 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			source->timeStretchAmount = reader.readTagOrAttributeValueInt();
 			reader.exitTag("timeStretchAmount");
 		}
+		else if (!strcmp(tagName, "offsetWraps")) {
+			source->offsetWraps = reader.readTagOrAttributeValueInt();
+			reader.exitTag("offsetWraps");
+		}
 		else if (!strcmp(tagName, "linearInterpolation")) {
 			if (reader.readTagOrAttributeValueInt()) {
 				source->sampleControls.interpolationMode = InterpolationMode::LINEAR;
@@ -3790,6 +3794,9 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 		writer.writeAttribute("reversed", source->sampleControls.reversed);
 		writer.writeAttribute("timeStretchEnable", source->sampleControls.pitchAndSpeedAreIndependent);
 		writer.writeAttribute("timeStretchAmount", source->timeStretchAmount);
+		if (!source->offsetWraps) {
+			writer.writeAttribute("offsetWraps", (int32_t)0);
+		}
 		if (source->sampleControls.interpolationMode == InterpolationMode::LINEAR) {
 			writer.writeAttribute("linearInterpolation", 1);
 		}

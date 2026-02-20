@@ -21,6 +21,7 @@
 #include "model/sample/sample_holder_for_voice.h"
 #include "processing/source.h"
 #include "storage/multi_range/multisample_range.h"
+#include <utility>
 
 VoiceSamplePlaybackGuide::VoiceSamplePlaybackGuide() {
 }
@@ -70,20 +71,54 @@ void VoiceSamplePlaybackGuide::setupPlaybackBounds(bool reversed) {
 
 // This is, whether to obey the loop-end point as opposed to the actual end-of-sample point (which sometimes might cause
 // looping too)
-// This is, whether to obey the loop-end point as opposed to the actual end-of-sample point (which sometimes might cause
-// looping too)
 bool VoiceSamplePlaybackGuide::shouldObeyLoopEndPointNow() {
+	// During split-loop, the loop end defines the phase boundary and must
+	// always be respected (even after note-off) to maintain correct wrapping.
 	// For pingpong going backward after note-off, keep obeying the loop end
 	// so the voice reaches the boundary, bounces forward, then releases.
-	return (loopEndPlaybackAtByte && (!noteOffReceived || (pingpongActive && playDirection == -1)));
+	return (loopEndPlaybackAtByte && (!noteOffReceived || loopSplit || (pingpongActive && playDirection == -1)));
 }
 
 int32_t VoiceSamplePlaybackGuide::getBytePosToStartPlayback(bool justLooped) {
+	if (justLooped && wrapAroundPending) {
+		wrapAroundPending = false;
+		if (loopSplit) {
+			loopWrapPhase = 2; // After initial wrap or phase 1, enter phase 2
+		}
+		return static_cast<int32_t>(wrapAroundRestartByte);
+	}
 	if (!justLooped) {
 		return SamplePlaybackGuide::getBytePosToStartPlayback(justLooped);
 	}
-	if (pingpongActive) {
-		// Pingpong: flip direction and return the new phase's start.
+	if (loopSplit && pingpongActive) {
+		// Advance the phase and return the NEW phase's start position.
+		// This combines what onLoopRestart() used to do (phase advancement)
+		// with the position lookup, so that the guide isn't mutated by a
+		// separate call — important because the guide is shared between
+		// unison readers.
+		Sample* sample = static_cast<Sample*>(audioFileHolder->audioFile);
+		int32_t bps = sample->byteDepth * sample->numChannels;
+		switch (loopWrapPhase) {
+		case 1:
+			loopWrapPhase = 2;
+			return static_cast<int32_t>(wrapAroundRestartByte);
+		case 2:
+			playDirection = -playDirection;
+			loopWrapPhase = 3;
+			return static_cast<int32_t>(loopEndPlaybackAtByte) - bps;
+		case 3:
+			loopWrapPhase = 4;
+			return static_cast<int32_t>(endPlaybackAtByte) - bps;
+		case 4:
+			playDirection = -playDirection;
+			loopWrapPhase = 1;
+			return loopStartPlaybackAtByte;
+		default:
+			return loopStartPlaybackAtByte;
+		}
+	}
+	if (pingpongActive && !loopSplit) {
+		// Non-split-loop pingpong: flip direction and return the new phase's start.
 		// Direction is per-reader (set on the guide before render by voice.cpp).
 		Sample* sample = static_cast<Sample*>(audioFileHolder->audioFile);
 		int32_t bps = sample->byteDepth * sample->numChannels;
@@ -96,13 +131,45 @@ int32_t VoiceSamplePlaybackGuide::getBytePosToStartPlayback(bool justLooped) {
 		// Was backward, now forward: restart at loop start
 		return loopStartPlaybackAtByte;
 	}
+	if (loopWrapPhase == 2) {
+		if (oneShotWrap) {
+			// One full cycle through both phases complete.
+			// Mark done so getLoopingType() returns NONE on the next render.
+			oneShotWrap = false;
+			oneShotComplete = true;
+		}
+		// Phase 2→1: finished playing sampleStart→loopEnd, restart at loopStart
+		loopWrapPhase = 1;
+		return loopStartPlaybackAtByte;
+	}
+	if (loopWrapPhase == 1) {
+		// Phase 1→2: finished playing loopStart→sampleEnd, restart at sampleStart
+		loopWrapPhase = 2;
+		return static_cast<int32_t>(wrapAroundRestartByte);
+	}
 	return loopStartPlaybackAtByte;
 }
 
 // This is actually an important function whose output is the basis for a lot of stuff
 int32_t VoiceSamplePlaybackGuide::getBytePosToEndOrLoopPlayback() {
-	if (pingpongActive) {
-		// Pingpong: boundary depends on current direction.
+	if (loopSplit && pingpongActive) {
+		Sample* sample = static_cast<Sample*>(audioFileHolder->audioFile);
+		int32_t bps = sample->byteDepth * sample->numChannels;
+		switch (loopWrapPhase) {
+		case 1:
+			return SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
+		case 2:
+			return loopEndPlaybackAtByte;
+		case 3:
+			return static_cast<int32_t>(wrapAroundRestartByte) - bps;
+		case 4:
+			return static_cast<int32_t>(loopStartPlaybackAtByte) - bps;
+		default:
+			return SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
+		}
+	}
+	if (pingpongActive && !loopSplit) {
+		// Non-split-loop pingpong: boundary depends on current direction.
 		if (playDirection == 1) {
 			// Forward: boundary at loop end (or sample end if note-off)
 			if (shouldObeyLoopEndPointNow()) {
@@ -115,7 +182,12 @@ int32_t VoiceSamplePlaybackGuide::getBytePosToEndOrLoopPlayback() {
 		int32_t bps = sample->byteDepth * sample->numChannels;
 		return static_cast<int32_t>(loopStartPlaybackAtByte) - bps;
 	}
+	if (wrapAroundPending || loopWrapPhase == 1) {
+		// Phase 1 or initial wrap: play to sample end
+		return SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
+	}
 	if (shouldObeyLoopEndPointNow()) {
+		// Phase 2 or normal: play to loop end
 		return loopEndPlaybackAtByte;
 	}
 	return SamplePlaybackGuide::getBytePosToEndOrLoopPlayback();
@@ -123,6 +195,12 @@ int32_t VoiceSamplePlaybackGuide::getBytePosToEndOrLoopPlayback() {
 
 LoopType VoiceSamplePlaybackGuide::getLoopingType(const Source& source) const {
 	if (loopEndPlaybackAtByte) {
+		if (loopSplit) {
+			if (oneShotComplete) {
+				return LoopType::NONE;
+			}
+			return LoopType::LOW_LEVEL;
+		}
 		if (noteOffReceived) {
 			// Pingpong going backward: allow one more bounce to forward
 			// before stopping, so the release tail plays naturally.

@@ -100,6 +100,8 @@ enum Local : ParamType {
 	LOCAL_TABLE_SHAPER_DRIVE, // Table shaper drive (additive mod: base + mod)
 	LOCAL_SINE_SHAPER_DRIVE,  // Sine shaper drive (additive mod: base + mod)
 	LOCAL_TABLE_SHAPER_MIX,   // Table shaper wet/dry mix
+	LOCAL_OSC_A_START_OFFSET, // Sample start offset for oscillator A (bipolar)
+	LOCAL_OSC_B_START_OFFSET, // Sample start offset for oscillator B (bipolar)
 
 	// Local zone params (pure modulation pass-through, scaling handled by ZoneBasedParam)
 	FIRST_LOCAL_ZONE,
@@ -273,8 +275,6 @@ enum UnpatchedShared : ParamType {
 /// Unpatched params which are only used for Sounds
 enum UnpatchedSound : ParamType {
 	UNPATCHED_PORTAMENTO = UNPATCHED_NUM_SHARED,
-	UNPATCHED_SAMPLE_START_OFFSET_A,
-	UNPATCHED_SAMPLE_START_OFFSET_B,
 	UNPATCHED_SOUND_MAX_NUM,
 };
 

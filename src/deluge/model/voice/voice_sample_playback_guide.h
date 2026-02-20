@@ -48,4 +48,13 @@ public:
 
 	bool noteOffReceived;
 	bool pingpongActive{false};
+	bool wrapAroundPending{false};            // When start offset puts play pos past loop end, play to sample end first
+	uint32_t wrapAroundRestartByte{0};        // Original sample start byte for wrap-around restart
+	bool loopSplit{false};                    // Loop region crosses sample boundary after offset shift
+	bool oneShotWrap{false};                  // Play through split-loop once then stop (CUT/ONCE/STRETCH audition)
+	bool oneShotComplete{false};              // Set after one-shot wrap cycle finishes; getLoopingType returns NONE
+	bool hasStartOffset{false};               // Start offset shifted playback position (disables cache)
+	bool phaseAdvancedByBoundaryCheck{false}; // Boundary check (samplePosBig) already advanced the phase
+	uint8_t loopWrapPhase{0};                 // 0=normal, 1=fwd loopStart→sampleEnd, 2=fwd sampleStart→loopEnd,
+	                                          // 3=rev loopEnd→sampleStart, 4=rev sampleEnd→loopStart
 };

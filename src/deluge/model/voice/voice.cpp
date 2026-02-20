@@ -52,6 +52,7 @@
 #include "dsp/oscillators/basic_waves.h"
 #include "dsp/oscillators/oscillator.h"
 #include "util/misc.h"
+#include <algorithm>
 #include <cstring>
 #include <new>
 
@@ -306,29 +307,27 @@ activenessDetermined:
 			guides[s].setupPlaybackBounds(source->sampleControls.isCurrentlyReversed());
 			guides[s].pingpongActive = (source->repeatMode == SampleRepeatMode::PINGPONG);
 
-			// Apply plocked sample start offset — slides the playback window
-			int32_t startOffsetParam =
-			    paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SAMPLE_START_OFFSET_A + s);
+			// Apply sample start offset (now a patched param — includes velocity/LFO modulation)
+			int32_t startOffsetParam = paramFinalValues[params::LOCAL_OSC_A_START_OFFSET + s];
 			guides[s].preRollSamples = 0;
 			guides[s].wrapSyncPosition = false;
-			if (startOffsetParam != 0) {
+			guides[s].wrapAroundPending = false;
+			guides[s].loopSplit = false;
+			guides[s].loopWrapPhase = 0;
+			guides[s].oneShotWrap = false;
+			guides[s].oneShotComplete = false;
+			guides[s].phaseAdvancedByBoundaryCheck = false;
+			guides[s].hasStartOffset = (startOffsetParam != 0);
+			if (guides[s].hasStartOffset) {
 				bool synced = source->repeatMode == SampleRepeatMode::STRETCH && guides[s].sequenceSyncLengthTicks > 0;
 
 				if (synced) {
-					// For synced modes, apply offset as a tick shift so the phase-lock
-					// seeking starts at the offset position. The wrapSyncPosition flag
-					// makes the time stretcher wrap modularly instead of stopping at the end.
-					int32_t syncLen = static_cast<int32_t>(guides[s].sequenceSyncLengthTicks);
-					int64_t tickShift = ((int64_t)startOffsetParam * (int64_t)syncLen) >> 31;
-					// Normalize negative shifts to equivalent positive position to avoid
-					// uint32_t underflow in getSyncedNumSamplesIn().
-					if (tickShift < 0) {
-						tickShift += syncLen;
-					}
-					guides[s].sequenceSyncStartedAtTick -= static_cast<int32_t>(tickShift);
+					// Enable modular wrapping in getSyncedNumSamplesIn() and
+					// LOW_LEVEL looping so the time stretcher can wrap around.
 					guides[s].wrapSyncPosition = true;
 				}
-				else {
+
+				{
 					Sample* offsetSample = static_cast<Sample*>(guides[s].audioFileHolder->audioFile);
 					int32_t bytesPerFrame = offsetSample->numChannels * offsetSample->byteDepth;
 					int32_t startByte = static_cast<int32_t>(guides[s].startPlaybackAtByte);
@@ -338,78 +337,150 @@ activenessDetermined:
 					bool forward = (regionBytes > 0);
 
 					if (absRegion > 0 && bytesPerFrame > 0) {
-						int64_t offsetBytes = ((int64_t)startOffsetParam * absRegion) >> 31;
+						int32_t audioStart = static_cast<int32_t>(offsetSample->audioDataStartPosBytes);
+						int32_t audioEnd = audioStart + static_cast<int32_t>(offsetSample->audioDataLengthBytes);
+						int32_t physLen = audioEnd - audioStart;
+						// Direction-aware boundaries for split-loop phases:
+						// forward: endPlaybackAtByte=audioEnd, restart=audioStart
+						// reverse: endPlaybackAtByte=audioStart-bpf (before first sample),
+						//          restart=audioEnd-bpf (last sample byte)
+						int32_t farEnd = forward ? audioEnd : (audioStart - bytesPerFrame);
+						int32_t splitRestart = forward ? audioStart : (audioEnd - bytesPerFrame);
+
+						// Shift as fraction of the physical sample so the offset
+						// knob sweeps markers across the entire sample range.
+						// Hybrid params max out at ±2^30, so shift by 30 (not 31)
+						int64_t offsetBytes = ((int64_t)startOffsetParam * physLen) >> 30;
 						int32_t byteShift = static_cast<int32_t>(offsetBytes);
 						byteShift = (byteShift / bytesPerFrame) * bytesPerFrame;
 
-						if (isLoopingRepeatMode(source->repeatMode)) {
-							// LOOP: modular wrap of start position within the region.
-							// First iteration starts at the offset position. On loop,
-							// playback wraps back to the original start (loopStartPlaybackAtByte
-							// was set to the original start by setupPlaybackBounds).
-							int32_t mod = ((byteShift % absRegion) + absRegion) % absRegion;
-							mod = (mod / bytesPerFrame) * bytesPerFrame;
-							if (forward) {
-								guides[s].startPlaybackAtByte = static_cast<uint32_t>(startByte + mod);
+						if (physLen > bytesPerFrame && byteShift != 0) {
+							if (!source->offsetWraps) {
+								// No-wrap mode: linear shift of start, clamp at boundaries.
+								// Playhead stops at sample end instead of wrapping around.
+								int32_t newStart = forward ? (startByte + byteShift) : (startByte - byteShift);
+								newStart = std::clamp(newStart, audioStart, audioEnd - bytesPerFrame);
+								newStart = audioStart + ((newStart - audioStart) / bytesPerFrame) * bytesPerFrame;
+								guides[s].startPlaybackAtByte = static_cast<uint32_t>(newStart);
 							}
 							else {
-								guides[s].startPlaybackAtByte = static_cast<uint32_t>(startByte - mod);
-							}
-							// loopStartPlaybackAtByte intentionally NOT updated —
-							// it stays at the original start so the loop wraps around
-						}
-						else {
-							// CUT/ONCE: window slide with silence for out-of-bounds.
-							// Instead of clamping both edges back, play silence (preRoll)
-							// when start goes before the audio data, and let the voice
-							// stop naturally when end goes past the audio data.
-							int32_t shiftDir = forward ? byteShift : -byteShift;
-							startByte += shiftDir;
-							endByte += shiftDir;
+								// Wrap mode: modular shift with split-loop phases
+								int32_t mod = ((byteShift % physLen) + physLen) % physLen;
+								mod = (mod / bytesPerFrame) * bytesPerFrame;
 
-							int32_t audioStart = static_cast<int32_t>(offsetSample->audioDataStartPosBytes);
-							int32_t audioEnd = audioStart + static_cast<int32_t>(offsetSample->audioDataLengthBytes);
+								if (mod != 0) {
+									auto wrapInSample = [&](int32_t pos) -> int32_t {
+										int32_t rel = ((pos - audioStart + mod) % physLen + physLen) % physLen;
+										return audioStart + (rel / bytesPerFrame) * bytesPerFrame;
+									};
 
-							if (forward) {
-								if (endByte > audioEnd) {
-									endByte = audioStart + ((audioEnd - audioStart) / bytesPerFrame) * bytesPerFrame;
-								}
-								if (startByte < audioStart) {
-									guides[s].preRollSamples = (audioStart - startByte) / bytesPerFrame;
-									startByte = audioStart;
+									int32_t newStart = wrapInSample(startByte);
+									guides[s].startPlaybackAtByte = static_cast<uint32_t>(newStart);
+
+									bool hasExplicitLoop = (guides[s].loopEndPlaybackAtByte != 0);
+									int32_t origLoopStart = static_cast<int32_t>(guides[s].loopStartPlaybackAtByte);
+									int32_t origLoopEnd = static_cast<int32_t>(guides[s].loopEndPlaybackAtByte);
+
+									int32_t newEnd = wrapInSample(endByte);
+									if (forward && newEnd == audioStart) {
+										newEnd = audioEnd;
+									}
+
+									bool windowWraps = forward ? (newEnd <= newStart) : (newStart <= newEnd);
+									bool revPingpong = (!forward && guides[s].pingpongActive);
+
+									if (windowWraps) {
+										guides[s].endPlaybackAtByte =
+										    static_cast<uint32_t>(revPingpong ? audioEnd : farEnd);
+									}
+									else {
+										guides[s].endPlaybackAtByte = static_cast<uint32_t>(newEnd);
+									}
+
+									if (hasExplicitLoop) {
+										int32_t newLoopStart = wrapInSample(origLoopStart);
+										int32_t newLoopEnd = wrapInSample(origLoopEnd);
+										if (forward && newLoopEnd == audioStart) {
+											newLoopEnd = audioEnd;
+										}
+										bool loopWraps =
+										    forward ? (newLoopEnd <= newLoopStart) : (newLoopStart <= newLoopEnd);
+
+										guides[s].loopStartPlaybackAtByte = static_cast<uint32_t>(newLoopStart);
+										guides[s].loopEndPlaybackAtByte = static_cast<uint32_t>(newLoopEnd);
+
+										if (loopWraps) {
+											guides[s].loopSplit = true;
+											if (revPingpong) {
+												guides[s].loopStartPlaybackAtByte =
+												    static_cast<uint32_t>(newLoopEnd + bytesPerFrame);
+												guides[s].loopEndPlaybackAtByte =
+												    static_cast<uint32_t>(newLoopStart + bytesPerFrame);
+												guides[s].loopWrapPhase = 3;
+												guides[s].wrapAroundRestartByte = static_cast<uint32_t>(audioStart);
+												guides[s].endPlaybackAtByte = static_cast<uint32_t>(audioEnd);
+											}
+											else {
+												guides[s].loopWrapPhase = 1;
+												guides[s].wrapAroundRestartByte = static_cast<uint32_t>(splitRestart);
+												guides[s].endPlaybackAtByte = static_cast<uint32_t>(farEnd);
+											}
+										}
+
+										if (!guides[s].pingpongActive) {
+											int32_t sp = static_cast<int32_t>(guides[s].startPlaybackAtByte);
+											int32_t le = static_cast<int32_t>(guides[s].loopEndPlaybackAtByte);
+											if ((sp - le) * guides[s].playDirection >= 0) {
+												guides[s].wrapAroundPending = true;
+												guides[s].wrapAroundRestartByte = static_cast<uint32_t>(splitRestart);
+											}
+										}
+									}
+									else {
+										if (windowWraps) {
+											guides[s].loopSplit = true;
+											if (revPingpong) {
+												guides[s].loopEndPlaybackAtByte =
+												    static_cast<uint32_t>(newStart + bytesPerFrame);
+												guides[s].loopStartPlaybackAtByte =
+												    static_cast<uint32_t>(newEnd + bytesPerFrame);
+												guides[s].loopWrapPhase = 3;
+												guides[s].wrapAroundRestartByte = static_cast<uint32_t>(audioStart);
+												guides[s].endPlaybackAtByte = static_cast<uint32_t>(audioEnd);
+											}
+											else {
+												guides[s].loopEndPlaybackAtByte = static_cast<uint32_t>(newEnd);
+												guides[s].loopStartPlaybackAtByte = static_cast<uint32_t>(newStart);
+												guides[s].loopWrapPhase = 1;
+												guides[s].wrapAroundRestartByte = static_cast<uint32_t>(splitRestart);
+											}
+										}
+										else {
+											guides[s].loopStartPlaybackAtByte = static_cast<uint32_t>(newStart);
+										}
+									}
 								}
 							}
-							else {
-								// Reversed: start is high byte, end is low byte
-								if (endByte < audioStart) {
-									endByte = audioStart;
-								}
-								if (startByte >= audioEnd) {
-									guides[s].preRollSamples = (startByte - (audioEnd - bytesPerFrame)) / bytesPerFrame;
-									startByte = audioEnd - bytesPerFrame;
-								}
-							}
-
-							guides[s].startPlaybackAtByte = static_cast<uint32_t>(startByte);
-							guides[s].endPlaybackAtByte = static_cast<uint32_t>(endByte);
 						}
 					}
 				}
 			}
 
 			// if (source->repeatMode == SampleRepeatMode::STRETCH) samplesLateHere = 0;
-		}
 
-		uint16_t effectiveSamplesLate = samplesLate;
+			if (guides[s].loopSplit && !isLoopingRepeatMode(source->repeatMode)) {
+				guides[s].oneShotWrap = true;
+			}
+		}
 
 		for (int32_t u = 0; u < sound.numUnison; u++) {
 
 			// Check that we already marked this unison-part-source as active. Among other things, this ensures that if
 			// the osc is set to SAMPLE, there actually is a sample loaded.
 			if (unisonParts[u].sources[s].active) {
-				bool success = unisonParts[u].sources[s].noteOn(this, source, &guides[s], effectiveSamplesLate,
-				                                                sound.oscRetriggerPhase[s], resetEnvelopes,
-				                                                sound.synthMode, velocity);
+				bool success =
+				    unisonParts[u].sources[s].noteOn(this, source, &guides[s], samplesLate, sound.oscRetriggerPhase[s],
+				                                     resetEnvelopes, sound.synthMode, velocity);
 				if (!success) [[unlikely]] {
 					return false; // This shouldn't really ever happen I don't think really...
 				}
@@ -755,9 +826,12 @@ bool Voice::sampleZoneChanged(ModelStackWithSoundFlags* modelStack, int32_t s, M
 	Sample* sample = (Sample*)holder->audioFile;
 
 	guides[s].setupPlaybackBounds(source.sampleControls.isCurrentlyReversed());
-	guides[s].pingpongActive = (source.repeatMode == SampleRepeatMode::PINGPONG);
+	guides[s].wrapAroundPending = false;
+	guides[s].loopSplit = false;
+	guides[s].loopWrapPhase = 0;
 
 	LoopType loopingType = guides[s].getLoopingType(sound.sources[s]);
+	guides[s].pingpongActive = (source.repeatMode == SampleRepeatMode::PINGPONG);
 
 	// Check we're still within bounds - for each unison part.
 	// Well, that is, make sure we're not past the new end. Being before the start is ok, because we'll come back into
@@ -2373,6 +2447,11 @@ pitchTooHigh:
 
 			LoopType loopingType = guides[s].getLoopingType(sound.sources[s]);
 
+			// One-shot split-loop completed — stop the voice immediately
+			if (guides[s].oneShotComplete) {
+				goto instantUnassign;
+			}
+
 			int32_t interpolationBufferSize;
 
 			// If pitch adjustment...
@@ -2392,6 +2471,17 @@ pitchTooHigh:
 
 					// Pingpong mode can't use cache since direction changes mid-playback
 					if (guides[s].pingpongActive) {
+						goto dontUseCache;
+					}
+
+					// Split-loop from offset wrapping can't use cache
+					if (guides[s].loopSplit) {
+						goto dontUseCache;
+					}
+
+					// Cache plays from the original sample start, ignoring any
+					// start offset shift. Bypass when any offset is active.
+					if (guides[s].hasStartOffset) {
 						goto dontUseCache;
 					}
 

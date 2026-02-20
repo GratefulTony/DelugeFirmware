@@ -633,6 +633,9 @@ double HorizontalMenu::calcNextKnobSpeed(int8_t offset) {
 }
 
 void HorizontalMenu::handleItemAction(MenuItem* menuItem) {
+	if (menuItem->onHorizontalItemAction()) {
+		return;
+	}
 	if (!menuItem->isSubmenu() && !menuItem->allowToBeginSessionFromHorizontalMenu()) {
 		menuItem->selectButtonPress();
 		return displayNotification(menuItem);

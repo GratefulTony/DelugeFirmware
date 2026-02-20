@@ -72,6 +72,7 @@ void Source::cloneFrom(Source* other) {
 	fineTuner = other->fineTuner;
 	repeatMode = other->repeatMode;
 	timeStretchAmount = other->timeStretchAmount;
+	offsetWraps = other->offsetWraps;
 	defaultRangeI = other->defaultRangeI;
 
 	// PHI_MORPH zone parameters

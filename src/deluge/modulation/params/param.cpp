@@ -27,8 +27,7 @@
 namespace deluge::modulation::params {
 
 bool isParamBipolar(Kind kind, int32_t paramID) {
-	if (kind == Kind::UNPATCHED_SOUND
-	    && (paramID == UNPATCHED_SAMPLE_START_OFFSET_A || paramID == UNPATCHED_SAMPLE_START_OFFSET_B)) {
+	if (kind == Kind::PATCHED && (paramID == LOCAL_OSC_A_START_OFFSET || paramID == LOCAL_OSC_B_START_OFFSET)) {
 		return true;
 	}
 	return (kind == Kind::PATCH_CABLE) || isParamPan(kind, paramID) || isParamPitch(kind, paramID)
@@ -143,6 +142,8 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [LOCAL_TABLE_SHAPER_DRIVE]       = "Shpr drive",
 	    [LOCAL_SINE_SHAPER_DRIVE]        = "Sine drive",
 	    [LOCAL_TABLE_SHAPER_MIX]         = "Shaper mix",
+	    [LOCAL_OSC_A_START_OFFSET]       = "Offset A",
+	    [LOCAL_OSC_B_START_OFFSET]       = "Offset B",
 	    [LOCAL_SINE_SHAPER_TWIST]        = "Sine twist",
 	    [LOCAL_SINE_SHAPER_HARMONIC]     = "Sine harm",
 	    [LOCAL_LPF_FREQ]                 = "LPf freq",
@@ -233,6 +234,8 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [LOCAL_TABLE_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_TABLE_SHAPER_DRIVE,
 	    [LOCAL_SINE_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_SINE_SHAPER_DRIVE,
 	    [LOCAL_TABLE_SHAPER_MIX] = STRING_FOR_PARAM_LOCAL_TABLE_SHAPER_MIX,
+	    [LOCAL_OSC_A_START_OFFSET] = STRING_FOR_START_OFFSET,
+	    [LOCAL_OSC_B_START_OFFSET] = STRING_FOR_START_OFFSET,
 	    [LOCAL_SINE_SHAPER_TWIST] = STRING_FOR_SINE_SHAPER_SYMMETRY, // Reuse existing twist/symmetry string
 	    [LOCAL_SINE_SHAPER_HARMONIC] = STRING_FOR_SINE_SHAPER_HARMONIC,
 	    [LOCAL_LPF_FREQ] = STRING_FOR_PARAM_LOCAL_LPF_FREQ,
@@ -377,8 +380,6 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 		using enum UnpatchedSound;
 		static l10n::String const NAMES[UNPATCHED_SOUND_MAX_NUM - unc] = {
 		    [UNPATCHED_PORTAMENTO - unc] = STRING_FOR_PORTAMENTO,
-		    [UNPATCHED_SAMPLE_START_OFFSET_A - unc] = STRING_FOR_START_OFFSET,
-		    [UNPATCHED_SAMPLE_START_OFFSET_B - unc] = STRING_FOR_START_OFFSET,
 		};
 		return l10n::get(NAMES[p - unc]);
 	}
@@ -452,12 +453,6 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 		switch (static_cast<UnpatchedSound>(param - UNPATCHED_START)) {
 		case UNPATCHED_PORTAMENTO:
 			return "portamento";
-
-		case UNPATCHED_SAMPLE_START_OFFSET_A:
-			return "sampleStartOffsetA";
-
-		case UNPATCHED_SAMPLE_START_OFFSET_B:
-			return "sampleStartOffsetB";
 
 		default:
 		    // Fall through to the other param kind handling
@@ -801,6 +796,12 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 
 		case LOCAL_TABLE_SHAPER_MIX:
 			return "tableShaperMix";
+
+		case LOCAL_OSC_A_START_OFFSET:
+			return "oscAStartOffset";
+
+		case LOCAL_OSC_B_START_OFFSET:
+			return "oscBStartOffset";
 
 		case LOCAL_SINE_SHAPER_TWIST:
 			return "sineShaperTwist";

@@ -304,7 +304,17 @@ bool TimeStretcher::hopEnd(SamplePlaybackGuide* guide, VoiceSample* voiceSample,
 		                       / (uint8_t)(sample->numChannels * sample->byteDepth);
 
 		samplePos = startSample + numSamplesIn * playDirection;
-		// There should be no risk of that passing the end of the sample zone I think...
+
+		// When the start offset has byte-shifted the playback window, samplePos
+		// can exceed the physical sample length (shifted start + wrapped duration).
+		// Wrap within the physical sample so the read head stays in bounds.
+		if (guide->wrapSyncPosition) {
+			int64_t totalPhysSamples =
+			    sample->audioDataLengthBytes / (uint8_t)(sample->numChannels * sample->byteDepth);
+			if (totalPhysSamples > 0) {
+				samplePos = ((samplePos % totalPhysSamples) + totalPhysSamples) % totalPhysSamples;
+			}
+		}
 
 		samplePosBig = (uint64_t)samplePos << 24;
 	}

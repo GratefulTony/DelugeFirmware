@@ -319,6 +319,11 @@ public:
 
 	virtual void renderInHorizontalMenu(const SlotPosition& slot) {};
 
+	/// @brief Called when the instrument button is pressed on an already-selected item in horizontal menu.
+	///
+	/// @return true if the action was handled (skips default handleItemAction behavior).
+	virtual bool onHorizontalItemAction() { return false; }
+
 	deluge::gui::menu_item::HorizontalMenu* parent{nullptr};
 
 	/// @}
