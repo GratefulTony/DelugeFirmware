@@ -1080,6 +1080,8 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_ERODER_MIX, "Mix"},
         {STRING_FOR_ERODER_CUTOFF, "Cutoff"},
         {STRING_FOR_RECORD_SOURCE, "Record source"},
+        {STRING_FOR_LOOP_CROSSFADE, "XFade Loop"},
+        {STRING_FOR_SAMP_LOOP_XFADE_MENU_TITLE, "Osc{} loop xfade"},
     },
 };
 } // namespace deluge::l10n::built_in

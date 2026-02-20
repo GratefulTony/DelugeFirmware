@@ -3630,6 +3630,10 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 					range->sampleHolder.loopEndPos = reader.readTagOrAttributeValueInt();
 					reader.exitTag("endLoopPos");
 				}
+				else if (!strcmp(tagName, "loopCrossfadeMs")) {
+					range->sampleHolder.loopCrossfadeMs = reader.readTagOrAttributeValueInt();
+					reader.exitTag("loopCrossfadeMs");
+				}
 
 				else {
 					reader.exitTag(tagName);
@@ -3688,6 +3692,11 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 										((SampleHolderForVoice*)holder)->loopEndPos =
 										    reader.readTagOrAttributeValueInt();
 										reader.exitTag("endLoopPos");
+									}
+									else if (!strcmp(tagName, "loopCrossfadeMs")) {
+										((SampleHolderForVoice*)holder)->loopCrossfadeMs =
+										    reader.readTagOrAttributeValueInt();
+										reader.exitTag("loopCrossfadeMs");
 									}
 									else {
 										reader.exitTag(tagName);
@@ -3813,6 +3822,9 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 			}
 			if (range->sampleHolder.loopEndPos) {
 				writer.writeAttribute("endLoopPos", range->sampleHolder.loopEndPos);
+			}
+			if (range->sampleHolder.loopCrossfadeMs) {
+				writer.writeAttribute("loopCrossfadeMs", range->sampleHolder.loopCrossfadeMs);
 			}
 			writer.closeTag();
 

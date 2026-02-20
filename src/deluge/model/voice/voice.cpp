@@ -2367,6 +2367,15 @@ pitchTooHigh:
 				if (!voiceSample->doneFirstRenderYet && !tryToStartMidNote
 				    && portaEnvelopePos == 0xFFFFFFFF) { // No porta
 
+					// Skip cache when crossfade is active — the crossfade envelope
+					// is only applied in the uncached render path
+					{
+						auto* xfadeHolder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
+						if (xfadeHolder->loopCrossfadeMs > 0 && loopingType != LoopType::NONE) {
+							goto dontUseCache;
+						}
+					}
+
 					// If looping, make sure the loop isn't too short. If so, caching just wouldn't sound good /
 					// accurate
 					if (loopingType != LoopType::NONE) {
@@ -2459,6 +2468,15 @@ dontUseCache: {}
 			// allows us to do a special optimization not otherwise available (that is, combining the amplitude
 			// increments for the hop crossfades with the overall voice ones, and having multiple crossfading hops write
 			// directly to the osc buffer).
+
+			// Compute crossfade samples for this source
+			if (loopingType != LoopType::NONE) {
+				auto* holder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
+				voiceSample->loopFadeInSamplesTotal = (holder->loopCrossfadeMs * sample->sampleRate) / 1000;
+			}
+			else {
+				voiceSample->loopFadeInSamplesTotal = 0;
+			}
 
 			bool stillActive = voiceSample->render(
 			    &guides[s], renderBuffer, numSamples, sample, numChannels, loopingType, phaseIncrement,
