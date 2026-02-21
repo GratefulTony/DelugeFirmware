@@ -353,3 +353,32 @@ void Patcher::performInitialPatching(Sound& sound, ParamManager& param_manager) 
 		    paramNeutralValues[param], param_final_values_[param - config.firstParam], param);
 	}
 }
+
+int32_t Patcher::getUnisonOffset(int32_t param, int32_t unisonValue, Sound& sound, ParamManager& paramManager) {
+	if (unisonValue == 0) {
+		return 0;
+	}
+
+	PatchCableSet& pcs = *paramManager.getPatchCableSet();
+	Destination* dest = pcs.getDestinationForParam(param);
+	if (!dest || !(dest->sources & (1u << util::to_underlying(PatchSource::UNISON_INDEX)))) {
+		return 0;
+	}
+
+	int32_t saved = source_values_[util::to_underlying(PatchSource::UNISON_INDEX)];
+	source_values_[util::to_underlying(PatchSource::UNISON_INDEX)] = unisonValue;
+
+	int32_t combo = combineCablesExp(dest, param, sound, paramManager);
+
+	int32_t newFinal;
+	if (param >= config.firstExpParam) {
+		newFinal = getFinalParameterValueExpWithDumbEnvelopeHack(paramNeutralValues[param], combo, param);
+	}
+	else {
+		newFinal = getFinalParameterValueHybrid(paramNeutralValues[param], combo);
+	}
+
+	source_values_[util::to_underlying(PatchSource::UNISON_INDEX)] = saved;
+
+	return newFinal - param_final_values_[param - config.firstParam];
+}

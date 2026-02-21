@@ -679,9 +679,9 @@ public:
 			// Secret: push+twist manually adjusts typePhaseOffset
 			Buttons::selectButtonPressUsedUp = true;
 			float& phase = soundEditor.currentModControllable->automod.typePhaseOffset;
-			phase = std::max(0.0f, phase + static_cast<float>(offset) * 1.0f);
+			phase = std::max(0.0f, phase + static_cast<float>(offset) * 0.125f);
 			char buffer[16];
-			snprintf(buffer, sizeof(buffer), "T:%d", static_cast<int32_t>(std::floor(effectivePhaseOffset())));
+			snprintf(buffer, sizeof(buffer), "T:%d", static_cast<int32_t>(phase * 8.0f));
 			display->displayPopup(buffer);
 			renderUIsForOled();
 			suppressNotification_ = true;
@@ -800,9 +800,9 @@ public:
 			// Secret: push+twist manually adjusts flavorPhaseOffset
 			Buttons::selectButtonPressUsedUp = true;
 			float& phase = soundEditor.currentModControllable->automod.flavorPhaseOffset;
-			phase = std::max(0.0f, phase + static_cast<float>(offset) * 1.0f);
+			phase = std::max(0.0f, phase + static_cast<float>(offset) * 0.125f);
 			char buffer[16];
-			snprintf(buffer, sizeof(buffer), "F:%d", static_cast<int32_t>(std::floor(effectivePhaseOffset())));
+			snprintf(buffer, sizeof(buffer), "F:%d", static_cast<int32_t>(phase * 8.0f));
 			display->displayPopup(buffer);
 			renderUIsForOled();
 			suppressNotification_ = true;
@@ -911,9 +911,9 @@ public:
 			// Secret: push+twist adjusts modPhaseOffset
 			Buttons::selectButtonPressUsedUp = true;
 			float& phase = soundEditor.currentModControllable->automod.modPhaseOffset;
-			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 1.0f);
+			phase = std::max(0.0f, phase + static_cast<float>(offset) * 0.125f);
 			char buffer[16];
-			snprintf(buffer, sizeof(buffer), "M:%d", static_cast<int32_t>(std::floor(effectivePhaseOffset())));
+			snprintf(buffer, sizeof(buffer), "M:%d", static_cast<int32_t>(phase * 8.0f));
 			display->displayPopup(buffer);
 			renderUIsForOled();
 			suppressNotification_ = true;

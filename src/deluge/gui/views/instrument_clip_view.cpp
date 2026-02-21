@@ -5308,7 +5308,15 @@ Drum* InstrumentClipView::getAuditionedDrum(int32_t velocity, int32_t yDisplay, 
 
 			setSelectedDrum(nullptr);
 
-			if (currentUIMode == UI_MODE_NONE) {
+			if (isUIModeActive(UI_MODE_AUDITIONING)) {
+				// Another audition pad is held — clone that drum to this empty row
+				Drum* sourceDrum = getSourceDrumForClone();
+				if (sourceDrum && sourceDrum->type == DrumType::SOUND) {
+					cloneDrumToRow((SoundDrum*)sourceDrum, yDisplay, (Kit*)instrument, modelStackWithTimelineCounter);
+					doRender = true;
+				}
+			}
+			else if (currentUIMode == UI_MODE_NONE) {
 				currentUIMode = UI_MODE_ADDING_DRUM_NOTEROW;
 				fileBrowserShouldNotPreview = shiftButtonDown;
 
@@ -5365,6 +5373,88 @@ Drum* InstrumentClipView::getAuditionedDrum(int32_t velocity, int32_t yDisplay, 
 	}
 
 	return drum;
+}
+
+Drum* InstrumentClipView::getSourceDrumForClone() {
+	for (int32_t i = 0; i < kDisplayHeight; i++) {
+		if (auditionPadIsPressed[i]) {
+			NoteRow* noteRow = getCurrentInstrumentClip()->getNoteRowOnScreen(i, currentSong);
+			if (noteRow && noteRow->drum) {
+				return noteRow->drum;
+			}
+		}
+	}
+	return nullptr;
+}
+
+void InstrumentClipView::cloneDrumToRow(SoundDrum* sourceDrum, int32_t targetYDisplay, Kit* kit,
+                                        ModelStackWithTimelineCounter* modelStack) {
+	// Find the source NoteRow to clone its ParamManager
+	NoteRow* sourceNoteRow = nullptr;
+	InstrumentClip* clip = getCurrentInstrumentClip();
+	for (int32_t i = 0; i < kDisplayHeight; i++) {
+		if (auditionPadIsPressed[i]) {
+			sourceNoteRow = clip->getNoteRowOnScreen(i, currentSong);
+			if (sourceNoteRow && sourceNoteRow->drum == sourceDrum) {
+				break;
+			}
+			sourceNoteRow = nullptr;
+		}
+	}
+	if (!sourceNoteRow) {
+		return;
+	}
+
+	// Allocate new SoundDrum
+	void* memory = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(SoundDrum));
+	if (!memory) {
+		display->displayError(Error::INSUFFICIENT_RAM);
+		return;
+	}
+	auto* newDrum = new (memory) SoundDrum();
+
+	// Clone all Sound state from source
+	newDrum->Sound::cloneFrom(sourceDrum);
+
+	// Copy drum-specific fields and make name unique
+	newDrum->name.set(&sourceDrum->name);
+	kit->makeDrumNameUnique(&newDrum->name, 2);
+	newDrum->path.set(&sourceDrum->path);
+	newDrum->nameIsDiscardable = sourceDrum->nameIsDiscardable;
+
+	// Clone ParamManager from source NoteRow and back it up for the new drum
+	ParamManagerForTimeline paramManager;
+	Error error = paramManager.cloneParamCollectionsFrom(&sourceNoteRow->paramManager, true, true);
+	if (error != Error::NONE) {
+		newDrum->~SoundDrum();
+		delugeDealloc(memory);
+		display->displayError(error);
+		return;
+	}
+	currentSong->backUpParamManager(newDrum, (Clip*)modelStack->getTimelineCounter(), &paramManager, true);
+
+	// Add drum to kit and load samples
+	kit->addDrum(newDrum);
+	newDrum->loadAllSamples(true);
+
+	// Create NoteRow at target position and wire the drum to it
+	int32_t noteRowIndex;
+	NoteRow* newNoteRow = getOrCreateEmptyNoteRowForKit(modelStack, targetYDisplay, &noteRowIndex);
+	if (newNoteRow) {
+		ModelStackWithNoteRow* modelStackWithNoteRow = modelStack->addNoteRow(noteRowIndex, newNoteRow);
+		newNoteRow->setDrum(newDrum, kit, modelStackWithNoteRow);
+		newNoteRow->colourOffset = sourceNoteRow->colourOffset;
+		AudioEngine::mustUpdateReverbParamsBeforeNextRender = true;
+	}
+
+	display->displayPopup("CLONE");
+	uiNeedsRendering(this, 0xFFFFFFFF, 0xFFFFFFFF);
+}
+
+void InstrumentClipView::cloneDrumToBottom(SoundDrum* sourceDrum, Kit* kit, ModelStackWithTimelineCounter* modelStack) {
+	auto* clip = static_cast<InstrumentClip*>(modelStack->getTimelineCounter());
+	int32_t targetYDisplay = clip->getNumNoteRows() - clip->yScroll;
+	cloneDrumToRow(sourceDrum, targetYDisplay, kit, modelStack);
 }
 
 // sub-function of AuditionPadAction

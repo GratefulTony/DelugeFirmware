@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2023 Synthstrom Audible Limited
+ * Copyright © 2024-2025 Owlet Records
  *
  * This file is part of The Synthstrom Audible Deluge Firmware.
  *
@@ -13,6 +13,10 @@
  *
  * You should have received a copy of the GNU General Public License along with this program.
  * If not, see <https://www.gnu.org/licenses/>.
+ *
+ * --- Additional terms under GNU GPL version 3 section 7 ---
+ * This file requires preservation of the above copyright notice and author attribution
+ * in all copies or substantial portions of this file.
  */
 #pragma once
 #include "gui/menu_item/integer.h"
@@ -176,9 +180,9 @@ public:
 			// Secret menu: adjust harmonicPhaseOffset
 			Buttons::selectButtonPressUsedUp = true;
 			float& phase = soundEditor.currentModControllable->sineShaper.harmonicPhaseOffset;
-			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
+			phase = std::max(0.0f, phase + static_cast<float>(offset) * 0.125f);
 			char buffer[16];
-			snprintf(buffer, sizeof(buffer), "offset:%d", static_cast<int32_t>(phase * 10.0f));
+			snprintf(buffer, sizeof(buffer), "H:%d", static_cast<int32_t>(phase * 8.0f));
 			display->displayPopup(buffer);
 			renderUIsForOled();
 			suppressNotification_ = true;
@@ -255,9 +259,9 @@ public:
 			// Secret menu: adjust twistPhaseOffset (same scale as gammaPhase for consistency)
 			Buttons::selectButtonPressUsedUp = true;
 			float& phase = soundEditor.currentModControllable->sineShaper.twistPhaseOffset;
-			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 1.0f);
+			phase = std::max(0.0f, phase + static_cast<float>(offset) * 128.0f);
 			char buffer[16];
-			snprintf(buffer, sizeof(buffer), "T:%d", static_cast<int32_t>(std::floor(effectivePhaseOffset())));
+			snprintf(buffer, sizeof(buffer), "T:%d", static_cast<int32_t>(phase / 128.0f));
 			display->displayPopup(buffer);
 			renderUIsForOled();
 			suppressNotification_ = true;
@@ -351,7 +355,7 @@ public:
 			// Secret menu: adjust gammaPhase (same scale as table shaper: 1.0 per velocity-scaled click)
 			Buttons::selectButtonPressUsedUp = true;
 			float& gamma = soundEditor.currentModControllable->sineShaper.gammaPhase;
-			gamma = std::max(0.0f, gamma + static_cast<float>(velocity_.getScaledOffset(offset)) * 1.0f);
+			gamma = std::max(0.0f, gamma + static_cast<float>(offset));
 			char buffer[16];
 			snprintf(buffer, sizeof(buffer), "G:%d", static_cast<int32_t>(gamma));
 			display->displayPopup(buffer);
@@ -372,6 +376,16 @@ public:
 	}
 
 	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
+
+	void renderInHorizontalMenu(const SlotPosition& slot) override {
+		if (this->getValue() == 0) {
+			deluge::hid::display::OLED::main.drawStringCentered("OFF", slot.start_x,
+			                                                    slot.start_y + kHorizontalMenuSlotYOffset,
+			                                                    kTextSpacingX, kTextSpacingY, slot.width);
+			return;
+		}
+		IntegerWithOff::renderInHorizontalMenu(slot);
+	}
 
 private:
 	mutable VelocityEncoder velocity_;

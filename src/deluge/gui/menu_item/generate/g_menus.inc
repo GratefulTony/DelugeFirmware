@@ -46,10 +46,16 @@ HorizontalMenu audioCompMenu{STRING_FOR_COMMUNITY_FEATURE_MASTER_COMPRESSOR, chi
 unison::CountToStereoSpread numUnisonMenu{STRING_FOR_UNISON_NUMBER, STRING_FOR_UNISON_NUMBER_MENU_TITLE};
 unison::Detune unisonDetuneMenu{STRING_FOR_UNISON_DETUNE, STRING_FOR_UNISON_DETUNE_MENU_TITLE};
 unison::StereoSpread unison::stereoSpreadMenu{STRING_FOR_UNISON_STEREO_SPREAD, STRING_FOR_UNISON_STEREO_SPREAD_MENU_TITLE};
-std::array<MenuItem*, 3> child4 = {
+unison::IndexCurve unisonIndexCurveMenu{STRING_FOR_UNISON_INDEX_CURVE, STRING_FOR_UNISON_INDEX_CURVE_MENU_TITLE};
+unison::IndexShape unisonIndexShapeMenu{STRING_FOR_UNISON_INDEX_SHAPE, STRING_FOR_UNISON_INDEX_SHAPE_MENU_TITLE};
+unison::IndexMapping unisonIndexMappingMenu{STRING_FOR_UNISON_INDEX_MAPPING, STRING_FOR_UNISON_INDEX_MAPPING_MENU_TITLE};
+std::array<MenuItem*, 6> child4 = {
     &numUnisonMenu,
     &unisonDetuneMenu,
     &unison::stereoSpreadMenu,
+    &unisonIndexCurveMenu,
+    &unisonIndexShapeMenu,
+    &unisonIndexMappingMenu,
 };
 HorizontalMenu unisonMenu{STRING_FOR_UNISON, child4, HorizontalMenu::Layout::FIXED};
 osc::AudioRecorder sample0RecorderMenu{STRING_FOR_RECORD_TO_SAMPLE, 0};
@@ -70,13 +76,14 @@ osc::source::Feedback source0FeedbackMenu{STRING_FOR_FEEDBACK, STRING_FOR_CARRIE
 osc::RetriggerPhase osc0PhaseMenu{STRING_FOR_RETRIGGER_PHASE, STRING_FOR_OSC_R_PHASE_MENU_TITLE, 0, false};
 sample::Reverse sample0ReverseMenu{STRING_FOR_REVERSE, STRING_FOR_SAMP_REVERSE_MENU_TITLE, 0};
 sample::Repeat sample0RepeatMenu{STRING_FOR_REPEAT_MODE, STRING_FOR_SAMP_REPEAT_MENU_TITLE, 0};
+sample::LoopCrossfade sample0LoopCrossfadeMenu{STRING_FOR_LOOP_CROSSFADE, STRING_FOR_SAMP_LOOP_XFADE_MENU_TITLE, 0};
 sample::TimeStretch sample0TimeStretchMenu{STRING_FOR_SPEED, STRING_FOR_SAMP_SPEED_MENU_TITLE, 0};
 sample::PitchSpeed sample0PitchSpeedMenu{STRING_FOR_PITCH_SPEED, 0};
 sample::Interpolation sample0InterpolationMenu{STRING_FOR_INTERPOLATION, STRING_FOR_SAMP_INTERP_MENU_TITLE, 0};
 sample::Start sample0StartMenu{STRING_FOR_START_POINT, 0};
 sample::End sample0EndMenu{STRING_FOR_END_POINT, 0};
 sample::StartOffset sample0StartOffsetMenu{STRING_FOR_START_OFFSET, 0};
-std::array<MenuItem*, 17> child6 = {
+std::array<MenuItem*, 18> child6 = {
     &osc0TypeMenu,
     &deluge::gui::menu_item::file0SelectorMenu,
     &osc0PhiZoneAMenu,
@@ -88,6 +95,7 @@ std::array<MenuItem*, 17> child6 = {
     &osc0PhaseMenu,
     &sample0ReverseMenu,
     &sample0RepeatMenu,
+    &sample0LoopCrossfadeMenu,
     &sample0TimeStretchMenu,
     &sample0PitchSpeedMenu,
     &sample0InterpolationMenu,
@@ -107,13 +115,14 @@ osc::source::Feedback source1FeedbackMenu{STRING_FOR_FEEDBACK, STRING_FOR_CARRIE
 osc::RetriggerPhase osc1PhaseMenu{STRING_FOR_RETRIGGER_PHASE, STRING_FOR_OSC_R_PHASE_MENU_TITLE, 1, false};
 sample::Reverse sample1ReverseMenu{STRING_FOR_REVERSE, STRING_FOR_SAMP_REVERSE_MENU_TITLE, 1};
 sample::Repeat sample1RepeatMenu{STRING_FOR_REPEAT_MODE, STRING_FOR_SAMP_REPEAT_MENU_TITLE, 1};
+sample::LoopCrossfade sample1LoopCrossfadeMenu{STRING_FOR_LOOP_CROSSFADE, STRING_FOR_SAMP_LOOP_XFADE_MENU_TITLE, 1};
 sample::TimeStretch sample1TimeStretchMenu{STRING_FOR_SPEED, STRING_FOR_SAMP_SPEED_MENU_TITLE, 1};
 sample::PitchSpeed sample1PitchSpeedMenu{STRING_FOR_PITCH_SPEED, 1};
 sample::Interpolation sample1InterpolationMenu{STRING_FOR_INTERPOLATION, STRING_FOR_SAMP_INTERP_MENU_TITLE, 1};
 sample::Start sample1StartMenu{STRING_FOR_START_POINT, 1};
 sample::End sample1EndMenu{STRING_FOR_END_POINT, 1};
 sample::StartOffset sample1StartOffsetMenu{STRING_FOR_START_OFFSET, 1};
-std::array<MenuItem*, 17> child7 = {
+std::array<MenuItem*, 18> child7 = {
     &osc1TypeMenu,
     &deluge::gui::menu_item::file1SelectorMenu,
     &osc1PhiZoneAMenu,
@@ -125,6 +134,7 @@ std::array<MenuItem*, 17> child7 = {
     &osc1PhaseMenu,
     &sample1ReverseMenu,
     &sample1RepeatMenu,
+    &sample1LoopCrossfadeMenu,
     &sample1TimeStretchMenu,
     &sample1PitchSpeedMenu,
     &sample1InterpolationMenu,

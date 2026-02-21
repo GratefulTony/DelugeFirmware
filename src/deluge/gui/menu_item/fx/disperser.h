@@ -135,9 +135,9 @@ public:
 			// Secret menu: adjust gammaPhase (adds 1024*gamma to both topo and twist meta zones)
 			Buttons::selectButtonPressUsedUp = true;
 			float& gamma = soundEditor.currentModControllable->disperser.phases.gammaPhase;
-			gamma = std::max(0.0f, gamma + static_cast<float>(offset) * 0.1f);
+			gamma = std::max(0.0f, gamma + static_cast<float>(offset));
 			char buffer[16];
-			snprintf(buffer, sizeof(buffer), "G:%d", static_cast<int32_t>(gamma * 10.0f));
+			snprintf(buffer, sizeof(buffer), "G:%d", static_cast<int32_t>(gamma));
 			display->displayPopup(buffer);
 			renderUIsForOled(); // Refresh display to show updated coordinate format
 			suppressNotification_ = true;
@@ -262,10 +262,9 @@ public:
 			// Secret menu: adjust topoPhaseOffset (gated ≥0 for fast floor optimization)
 			Buttons::selectButtonPressUsedUp = true;
 			float& phase = soundEditor.currentModControllable->disperser.phases.topoPhaseOffset;
-			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
+			phase = std::max(0.0f, phase + static_cast<float>(offset) * 128.0f);
 			char buffer[16];
-			double eff = soundEditor.currentModControllable->disperser.phases.effectiveTopo();
-			snprintf(buffer, sizeof(buffer), "offset:%d", static_cast<int32_t>(std::floor(eff)));
+			snprintf(buffer, sizeof(buffer), "T:%d", static_cast<int32_t>(phase / 128.0f));
 			display->displayPopup(buffer);
 			renderUIsForOled(); // Refresh display for consistency
 			suppressNotification_ = true;
@@ -367,10 +366,9 @@ public:
 			// Secret menu: adjust twistPhaseOffset (gated ≥0 for fast floor optimization)
 			Buttons::selectButtonPressUsedUp = true;
 			float& phase = soundEditor.currentModControllable->disperser.phases.twistPhaseOffset;
-			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 0.1f);
+			phase = std::max(0.0f, phase + static_cast<float>(offset) * 128.0f);
 			char buffer[16];
-			double eff = soundEditor.currentModControllable->disperser.phases.effectiveMeta();
-			snprintf(buffer, sizeof(buffer), "offset:%d", static_cast<int32_t>(std::floor(eff)));
+			snprintf(buffer, sizeof(buffer), "M:%d", static_cast<int32_t>(phase / 128.0f));
 			display->displayPopup(buffer);
 			renderUIsForOled(); // Refresh display to show updated coordinate format
 			suppressNotification_ = true;

@@ -52,6 +52,9 @@ void VoiceSample::noteOn(SamplePlaybackGuide* guide, uint32_t samplesLate, int32
 	timeStretcher = nullptr; // Just in case
 	fudging = false;
 	forAudioClip = false;
+	loopFadeInSamplesRemaining = 0;
+	justLoopedBack = false;
+	pingpongPlayDirection = guide->playDirection;
 }
 
 // Returns false if error
@@ -524,6 +527,19 @@ bool VoiceSample::render(SamplePlaybackGuide* guide, int32_t* __restrict__ outpu
 
 		// If we should be time stretching now...
 		if (timeStretchRatio != kMaxSampleValue) {
+			// Clusters may not be loaded yet (e.g. start offset shifted
+			// playback outside the pre-loaded region, or a loop restart
+			// couldn't load the next cluster).  Creating a time stretcher
+			// with unloaded clusters causes both read heads to immediately
+			// die, triggering a split-loop phase restart at byte 0 which
+			// produces audio from the wrong position.  Stay alive and let
+			// the late-start mechanism load the cluster on the next render.
+			if (!timeStretcher && (!clusters[0] || !clusters[0]->loaded)) {
+				if (!pendingSamplesLate) {
+					pendingSamplesLate = 1;
+				}
+				return true;
+			}
 			bool stillGoing = weShouldBeTimeStretchingNow(sample, guide, numSamples, phaseIncrement, timeStretchRatio,
 			                                              playDirection, priorityRating, loopingType);
 			if (!stillGoing) {
@@ -963,7 +979,10 @@ uncachedPlayback:
 		else {
 uncachedPlaybackNotWriting:
 
-			// If time stretching but not synced, now is the time to check loop / end point
+			// If time stretching but not synced, now is the time to check loop / end point.
+			// Synced time stretchers handle positioning via hopEnd, which wraps within the
+			// physical sample for offset-shifted playback. Phase transitions via this
+			// boundary check would conflict with hopEnd's sync-based repositioning.
 			if (timeStretcher && !guide->sequenceSyncLengthTicks) {
 				int32_t reassessmentPos = guide->getBytePosToEndOrLoopPlayback();
 
@@ -1012,15 +1031,21 @@ assessLoopPointAgainTimestretched:
 
 							D_PRINTLN("loop point reached, timestretching");
 
-							int32_t newSamplePos =
-							    (uint32_t)(guide->getBytePosToStartPlayback(true) - sample->audioDataStartPosBytes)
-							    / (uint8_t)bytesPerSample; // Not including the overshoot yet
+							int32_t newStartByte = guide->getBytePosToStartPlayback(true);
+							static_cast<VoiceSamplePlaybackGuide*>(guide)->phaseAdvancedByBoundaryCheck = true;
+							int32_t newSamplePos = (uint32_t)(newStartByte - sample->audioDataStartPosBytes)
+							                       / (uint8_t)bytesPerSample; // Not including the overshoot yet
 							int64_t newSamplePosBigOvershot =
 							    ((int64_t)newSamplePos << 24) - combinedIncrementingLeftToDo;
 
 							timeStretcher->reInit(newSamplePosBigOvershot, guide, this, sample, sampleSourceNumChannels,
 							                      timeStretchRatio, phaseIncrement, combinedIncrement, playDirection,
 							                      loopingType, priorityRating);
+
+							// Refresh boundary for new phase — split-loop transitions
+							// change the end position, and the stale value would cause
+							// incorrect overshoot detection on the next iteration.
+							reassessmentPos = guide->getBytePosToEndOrLoopPlayback();
 
 #if ALPHA_OR_BETA_VERSION
 							if (count >= 1024) {
@@ -1068,15 +1093,116 @@ readNonTimestretched:
 			    interpolationBufferSize, (cache != nullptr),
 			    priorityRating); // Keep it reading silence forever so we can definitely fill up the cache
 			if (!stillActive) {
+				auto* vg = static_cast<VoiceSamplePlaybackGuide*>(guide);
+				if (vg->loopSplit && !vg->oneShotComplete) {
+					// Basic reader hit a cluster loading failure during a
+					// split-loop phase transition. The phase was already
+					// advanced by getBytePosToStartPlayback(true) inside
+					// setupClusersForInitialPlay. Defer to late-start.
+					int32_t restartByte = (vg->loopWrapPhase == 2) ? static_cast<int32_t>(vg->wrapAroundRestartByte)
+					                                               : vg->loopStartPlaybackAtByte;
+					unassignAllReasons(false);
+					guide->startPlaybackAtByte = static_cast<uint32_t>(restartByte);
+					pendingSamplesLate = 1;
+					return true;
+				}
 				return false;
+			}
+
+			// Pingpong may have flipped direction inside considerUpcomingWindow
+			if (guide->playDirection != playDirection) {
+				playDirection = guide->playDirection;
+				jumpAmount = sample->byteDepth * sampleSourceNumChannels * playDirection;
+			}
+
+			// Loop crossfade: detect loop restart and start fade-in
+			if (justLoopedBack && loopFadeInSamplesTotal > 0) {
+				loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
+				justLoopedBack = false;
+			}
+
+			int32_t renderAmplitude = amplitude;
+			int32_t renderAmplitudeIncrement = amplitudeIncrement;
+
+			// Fade-in envelope (after loop restart)
+			if (loopFadeInSamplesRemaining > 0) {
+				int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
+
+				// Fade scale at start/end of window (Q31: 0 = silent, 0x7FFFFFFF = full)
+				// Compute in int64 and clamp to avoid overflow when fadeProgress + numSamples >= total
+				// (x << 31 == 0x80000000 when x == total, which wraps negative in int32_t)
+				int32_t fadeStart = static_cast<int32_t>(
+				    std::min(((int64_t)fadeProgress << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+				int32_t fadeEnd = static_cast<int32_t>(std::min(
+				    ((int64_t)(fadeProgress + numSamplesThisNonTimestretchedRead) << 31) / loopFadeInSamplesTotal,
+				    (int64_t)0x7FFFFFFF));
+
+				int32_t ampAtStart = multiply_32x32_rshift32(amplitude, fadeStart) << 1;
+				int32_t ampAtEnd = multiply_32x32_rshift32(
+				                       amplitude + amplitudeIncrement * numSamplesThisNonTimestretchedRead, fadeEnd)
+				                   << 1;
+
+				renderAmplitude = ampAtStart;
+				renderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisNonTimestretchedRead;
+
+				loopFadeInSamplesRemaining -= numSamplesThisNonTimestretchedRead;
+				if (loopFadeInSamplesRemaining < 0) {
+					loopFadeInSamplesRemaining = 0;
+				}
+			}
+			// Fade-out envelope (approaching loop boundary)
+			else if (loopFadeInSamplesTotal > 0 && loopingType != LoopType::NONE) {
+				int32_t endByte = guide->getBytePosToEndOrLoopPlayback();
+				if (endByte != 0) {
+					int32_t currentByte = getPlayByteLowLevel(sample, guide);
+					int32_t bytesPerSamp = sample->numChannels * sample->byteDepth;
+					int32_t distBytes = (endByte - currentByte) * guide->playDirection;
+					int32_t distSourceSamples = distBytes / bytesPerSamp;
+
+					int32_t distOutputSamples;
+					if (phaseIncrement == kMaxSampleValue) {
+						distOutputSamples = distSourceSamples;
+					}
+					else {
+						distOutputSamples = ((int64_t)distSourceSamples << 24) / phaseIncrement;
+					}
+
+					if (distOutputSamples >= 0) {
+						// Clamp to [0, total] so scale is 1.0 when far and 0.0 at boundary
+						int32_t clampedDist = std::min(distOutputSamples, loopFadeInSamplesTotal);
+						int32_t scaleAtStart = static_cast<int32_t>(
+						    std::min(((int64_t)clampedDist << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+
+						int32_t distAfterRead = distOutputSamples - numSamplesThisNonTimestretchedRead;
+						if (distAfterRead < 0) {
+							distAfterRead = 0;
+						}
+						int32_t clampedDistAfter = std::min(distAfterRead, loopFadeInSamplesTotal);
+						int32_t scaleAtEnd = static_cast<int32_t>(
+						    std::min(((int64_t)clampedDistAfter << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+
+						// Only modify amplitude when actually within fade zone
+						if (clampedDist < loopFadeInSamplesTotal || clampedDistAfter < loopFadeInSamplesTotal) {
+							int32_t ampAtStart = multiply_32x32_rshift32(renderAmplitude, scaleAtStart) << 1;
+							int32_t ampAtEnd =
+							    multiply_32x32_rshift32(
+							        renderAmplitude + renderAmplitudeIncrement * numSamplesThisNonTimestretchedRead,
+							        scaleAtEnd)
+							    << 1;
+
+							renderAmplitude = ampAtStart;
+							renderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisNonTimestretchedRead;
+						}
+					}
+				}
 			}
 
 			// No pitch adjustment - in which case we know we're not writing to cache either
 			if (phaseIncrement == kMaxSampleValue) {
 
 				readSamplesNative((int32_t**)&outputBufferWritePos, numSamplesThisNonTimestretchedRead, sample,
-				                  jumpAmount, sampleSourceNumChannels, numChannelsInOutputBuffer, &amplitude,
-				                  amplitudeIncrement);
+				                  jumpAmount, sampleSourceNumChannels, numChannelsInOutputBuffer, &renderAmplitude,
+				                  renderAmplitudeIncrement);
 			}
 
 			// Yes pitch adjustment - meaning we might be wanting to write to a cache, too...
@@ -1096,9 +1222,12 @@ readNonTimestretched:
 				// (re-check that?)
 				readSamplesResampled((int32_t**)&outputBufferWritePos, numSamplesThisNonTimestretchedRead, sample,
 				                     jumpAmount, sampleSourceNumChannels, numChannelsInOutputBuffer, phaseIncrement,
-				                     &amplitude, amplitudeIncrement, interpolationBufferSize, (cache != nullptr),
-				                     &cacheWritePos, &doneAnySamplesYet, NULL, false, whichKernel);
+				                     &renderAmplitude, renderAmplitudeIncrement, interpolationBufferSize,
+				                     (cache != nullptr), &cacheWritePos, &doneAnySamplesYet, NULL, false, whichKernel);
 			}
+
+			// Advance the voice amplitude envelope independently of crossfade scaling
+			amplitude += amplitudeIncrement * numSamplesThisNonTimestretchedRead;
 
 			if (cache) {
 				cacheBytePos += numSamplesThisNonTimestretchedRead * kCacheByteDepth * sampleSourceNumChannels;
@@ -1115,6 +1244,14 @@ readNonTimestretched:
 		else [[likely]] { // TODO: move this all into the TimeStretcher class?
 
 			// AudioEngine::logAction("yes timestretching");
+
+			// For split-loop, disable low-level looping on the time stretcher read heads.
+			// Non-synced: the boundary check (line 968) handles phase transitions.
+			// Synced: hopEnd wraps the position within the physical sample.
+			// Either way, read-head looping would call getBytePosToStartPlayback(true)
+			// and double-advance the phase state machine.
+			bool splitLoopActive = static_cast<VoiceSamplePlaybackGuide*>(guide)->loopSplit;
+			bool tsLowLevelLoop = (loopingType == LoopType::LOW_LEVEL) && !splitLoopActive;
 
 			int32_t* timeStretchResultWritePos;
 			int32_t numChannelsInTimeStretchResult;
@@ -1189,7 +1326,36 @@ readTimestretched:
 							// weShouldBeTimeStretchingNow() will re-create it next render.
 							unassignAllReasons(false);
 							endTimeStretching();
-							setupClusersForInitialPlay(guide, sample, 0, true, priorityRating);
+							if (splitLoopActive) {
+								auto* vg = static_cast<VoiceSamplePlaybackGuide*>(guide);
+								if (vg->oneShotComplete) {
+									return false; // One-shot cycle done
+								}
+								int32_t restartByte;
+								if (vg->phaseAdvancedByBoundaryCheck) {
+									// Boundary check already advanced the phase via
+									// getBytePosToStartPlayback(true). Use current phase start.
+									restartByte = (vg->loopWrapPhase == 2)
+									                  ? static_cast<int32_t>(vg->wrapAroundRestartByte)
+									                  : vg->loopStartPlaybackAtByte;
+									vg->phaseAdvancedByBoundaryCheck = false;
+								}
+								else {
+									// Read heads outran samplePosBig (pitched-down stretching).
+									// Boundary check didn't fire, so advance the phase here.
+									restartByte = vg->getBytePosToStartPlayback(true);
+								}
+								if (!setupClustersForPlayFromByte(guide, sample, restartByte, priorityRating)) {
+									unassignAllReasons(false);
+									guide->startPlaybackAtByte = static_cast<uint32_t>(restartByte);
+									pendingSamplesLate = 1;
+								}
+							}
+							else {
+								if (!setupClusersForInitialPlay(guide, sample, 0, true, priorityRating)) {
+									pendingSamplesLate = 1;
+								}
+							}
 							return true;
 						}
 					}
@@ -1323,8 +1489,8 @@ readNewerHead:
 					bool success = readSamplesForTimeStretching(
 					    timeStretchResultWritePos, guide, sample, numSamplesThisTimestretchedRead,
 					    sampleSourceNumChannels, numChannelsInTimeStretchResult, phaseIncrement,
-					    newerSourceAmplitudeNow, newerAmplitudeIncrementNow, (loopingType == LoopType::LOW_LEVEL),
-					    jumpAmount, interpolationBufferSize, timeStretcher,
+					    newerSourceAmplitudeNow, newerAmplitudeIncrementNow, tsLowLevelLoop, jumpAmount,
+					    interpolationBufferSize, timeStretcher,
 #if TIME_STRETCH_ENABLE_BUFFER
 					    (timeStretcher->bufferFillingMode == BUFFER_FILLING_NEWER),
 #else
@@ -1359,8 +1525,8 @@ readOlderHeadUnbuffered:
 					bool success = timeStretcher->olderPartReader.readSamplesForTimeStretching(
 					    timeStretchResultWritePos, guide, sample, numSamplesThisTimestretchedRead,
 					    sampleSourceNumChannels, numChannelsInTimeStretchResult, phaseIncrement,
-					    olderSourceAmplitudeNow, olderAmplitudeIncrementNow, (loopingType == LoopType::LOW_LEVEL),
-					    jumpAmount, interpolationBufferSize, timeStretcher,
+					    olderSourceAmplitudeNow, olderAmplitudeIncrementNow, tsLowLevelLoop, jumpAmount,
+					    interpolationBufferSize, timeStretcher,
 #if TIME_STRETCH_ENABLE_BUFFER
 					    (timeStretcher->bufferFillingMode == BUFFER_FILLING_OLDER),
 #else
@@ -1440,7 +1606,33 @@ headsFinishedReading:
 				// weShouldBeTimeStretchingNow() will re-create it next render.
 				unassignAllReasons(false);
 				endTimeStretching();
-				setupClusersForInitialPlay(guide, sample, 0, true, priorityRating);
+				if (splitLoopActive) {
+					auto* vg = static_cast<VoiceSamplePlaybackGuide*>(guide);
+					if (vg->oneShotComplete) {
+						return false; // One-shot cycle done
+					}
+					int32_t restartByte;
+					if (vg->phaseAdvancedByBoundaryCheck) {
+						// Boundary check already advanced the phase.
+						restartByte = (vg->loopWrapPhase == 2) ? static_cast<int32_t>(vg->wrapAroundRestartByte)
+						                                       : vg->loopStartPlaybackAtByte;
+						vg->phaseAdvancedByBoundaryCheck = false;
+					}
+					else {
+						// Read heads outran samplePosBig (pitched-down stretching).
+						restartByte = vg->getBytePosToStartPlayback(true);
+					}
+					if (!setupClustersForPlayFromByte(guide, sample, restartByte, priorityRating)) {
+						unassignAllReasons(false);
+						guide->startPlaybackAtByte = static_cast<uint32_t>(restartByte);
+						pendingSamplesLate = 1;
+					}
+				}
+				else {
+					if (!setupClusersForInitialPlay(guide, sample, 0, true, priorityRating)) {
+						pendingSamplesLate = 1;
+					}
+				}
 				return true;
 			}
 
@@ -1600,11 +1792,16 @@ bool VoiceSample::sampleZoneChanged(SamplePlaybackGuide* voiceSource, Sample* sa
 			}
 		}
 
-		// If no cache, no action necessary!
+		// If no cache, reassess the reassessment location for the new bounds.
+		// This handles stale reassessmentLocation after pingpong direction reset
+		// or marker changes when crossfade disables caching.
+		else {
+			goto justDoReassessment;
+		}
 	}
 
 	else if (markerType == MarkerType::LOOP_START) {
-		// Everything's fine
+		goto justDoReassessment;
 	}
 
 	else if (markerType == MarkerType::LOOP_END) {
@@ -1717,6 +1914,10 @@ loopBackToStartCached:
 					// If we're looping, restart it
 					if (loopingType != LoopType::NONE) {
 loopBackToStartUncached:
+						// Don't call onLoopRestart() — the guide is shared between
+						// unison readers. Phase advancement is handled by
+						// getBytePosToStartPlayback(true) inside setupClusersForInitialPlay.
+						justLoopedBack = true;
 						unassignAllReasons(false);
 						setupClusersForInitialPlay(voiceSource, sample, 0, true, priorityRating);
 					}

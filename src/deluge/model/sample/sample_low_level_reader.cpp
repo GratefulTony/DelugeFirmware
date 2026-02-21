@@ -147,8 +147,16 @@ void SampleLowLevelReader::setupReassessmentLocation(SamplePlaybackGuide* guide,
 	int32_t endPlaybackAtByte;
 	int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, shouldObeyMarkers(), &endPlaybackAtByte);
 
+	// Are we already past the final Cluster? This can happen when the start
+	// offset puts the play position past the loop end in a different cluster.
+	// Force immediate STOP_OR_LOOP so changeClusterIfNecessary triggers loop-back.
+	if ((currentClusterIndex - finalClusterIndex) * guide->playDirection > 0) {
+		reassessmentLocation = currentPlayPos;
+		reassessmentAction = REASSESSMENT_ACTION_STOP_OR_LOOP;
+	}
+
 	// Is this the final Cluster?
-	if (currentClusterIndex == finalClusterIndex) {
+	else if (currentClusterIndex == finalClusterIndex) {
 		int32_t bytePosWithinClusterToStopAt = endPlaybackAtByte & (Cluster::size - 1);
 		if (guide->playDirection == 1) {
 			if (bytePosWithinClusterToStopAt == 0) {
@@ -300,9 +308,15 @@ bool SampleLowLevelReader::assignClusters(SamplePlaybackGuide* guide, Sample* sa
 
 	for (int32_t l = 0; l < kNumClustersLoadedAhead; l++) {
 
+		// The first cluster must be loaded before playback can begin.
+		// Use CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE so that clusters outside
+		// the pre-loaded region (e.g. shifted by start offset) get loaded
+		// on demand rather than being enqueued-then-destroyed in a loop.
+		int32_t loadMode = (l == 0) ? CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE : CLUSTER_ENQUEUE;
+
 		// Grab it.
-		clusters[l] = sample->clusters.getElement(clusterIndex)
-		                  ->getCluster(sample, clusterIndex, CLUSTER_ENQUEUE, priorityRating);
+		clusters[l] =
+		    sample->clusters.getElement(clusterIndex)->getCluster(sample, clusterIndex, loadMode, priorityRating);
 
 		// The first one is required to not only have returned an object to us (which it might not have if insufficient
 		// RAM or maybe other reasons), but also to be fully loaded.
@@ -419,6 +433,12 @@ bool SampleLowLevelReader::changeClusterIfNecessary(SamplePlaybackGuide* guide, 
 		else { // LOOP_OR_STOP
 			unassignAllReasons(false);
 			if (loopingAtLowLevel) {
+				// Phase advancement and pingpong direction swaps are handled
+				// by getBytePosToStartPlayback(true) inside setupClusersForInitialPlay.
+				// Do NOT call onLoopRestart() here — the guide is shared between
+				// unison readers, and mutating it (e.g. pingpong boundary swap)
+				// corrupts boundaries for readers that haven't hit the boundary yet.
+				justLoopedBack = true;
 				bool success = setupClusersForInitialPlay(guide, sample, byteOvershoot, true, priorityRating);
 				if (!success) {
 					D_PRINTLN("loop failed");

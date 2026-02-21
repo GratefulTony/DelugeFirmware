@@ -27,6 +27,33 @@ stereo_spread = Menu(
     title="STRING_FOR_UNISON_STEREO_SPREAD_MENU_TITLE",
 )
 
+index_curve = Menu(
+    "unison::IndexCurve",
+    "unisonIndexCurveMenu",
+    ["{name}", "{title}"],
+    "oscillator/unison/index_curve.md",
+    name="STRING_FOR_UNISON_INDEX_CURVE",
+    title="STRING_FOR_UNISON_INDEX_CURVE_MENU_TITLE",
+)
+
+index_shape = Menu(
+    "unison::IndexShape",
+    "unisonIndexShapeMenu",
+    ["{name}", "{title}"],
+    "oscillator/unison/index_shape.md",
+    name="STRING_FOR_UNISON_INDEX_SHAPE",
+    title="STRING_FOR_UNISON_INDEX_SHAPE_MENU_TITLE",
+)
+
+index_mapping = Menu(
+    "unison::IndexMapping",
+    "unisonIndexMappingMenu",
+    ["{name}", "{title}"],
+    "oscillator/unison/index_mapping.md",
+    name="STRING_FOR_UNISON_INDEX_MAPPING",
+    title="STRING_FOR_UNISON_INDEX_MAPPING_MENU_TITLE",
+)
+
 menu = Submenu(
     "HorizontalMenu",
     "unisonMenu",
@@ -36,6 +63,9 @@ menu = Submenu(
         count,
         detune,
         stereo_spread,
+        index_curve,
+        index_shape,
+        index_mapping,
     ],
     name="STRING_FOR_UNISON",
 )

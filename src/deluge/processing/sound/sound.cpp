@@ -65,6 +65,7 @@
 #include <algorithm>
 #include <array>
 #include <bits/ranges_algo.h>
+#include <cmath>
 #include <limits>
 #include <ranges>
 
@@ -128,6 +129,54 @@ Sound::Sound() : patcher(kPatcherConfigForSound, globalSourceValues, paramFinalV
 
 	doneReadingFromFile();
 	AudioEngine::sounds.push_back(this);
+}
+
+void Sound::cloneFrom(ModControllableAudio* other) {
+	ModControllableAudio::cloneFrom(other);
+
+	Sound* src = static_cast<Sound*>(other);
+
+	synthMode = src->synthMode;
+	oscillatorSync = src->oscillatorSync;
+	modulator1ToModulator0 = src->modulator1ToModulator0;
+
+	polyphonic = src->polyphonic;
+	maxVoiceCount = src->maxVoiceCount;
+	voicePriority = src->voicePriority;
+
+	numUnison = src->numUnison;
+	unisonDetune = src->unisonDetune;
+	unisonStereoSpread = src->unisonStereoSpread;
+
+	transpose = src->transpose;
+	for (int32_t m = 0; m < kNumModulators; m++) {
+		modulatorTranspose[m] = src->modulatorTranspose[m];
+		modulatorCents[m] = src->modulatorCents[m];
+		modulatorTransposers[m] = src->modulatorTransposers[m];
+	}
+
+	for (int32_t s = 0; s < kNumSources; s++) {
+		sources[s].cloneFrom(&src->sources[s]);
+		oscRetriggerPhase[s] = src->oscRetriggerPhase[s];
+	}
+	for (int32_t m = 0; m < kNumModulators; m++) {
+		modulatorRetriggerPhase[m] = src->modulatorRetriggerPhase[m];
+	}
+
+	for (int32_t i = 0; i < LFO_COUNT; i++) {
+		lfoConfig[i] = src->lfoConfig[i];
+	}
+
+	memcpy(modKnobs, src->modKnobs, sizeof(modKnobs));
+
+	sideChainSendLevel = src->sideChainSendLevel;
+
+	gateOpen = src->gateOpen;
+	gateAttack = src->gateAttack;
+	gateRelease = src->gateRelease;
+
+	outputMidiChannel = src->outputMidiChannel;
+	outputMidiNoteForDrum = src->outputMidiNoteForDrum;
 }
 
 void Sound::initParams(ParamManager* paramManager) {
@@ -635,6 +684,18 @@ Error Sound::readTagFromFileOrError(Deserializer& reader, char const* tagName, P
 				int32_t contents = reader.readTagOrAttributeValueInt();
 				unisonStereoSpread = std::clamp(contents, 0_i32, kMaxUnisonStereoSpread);
 				reader.exitTag("spread");
+			}
+			else if (!strcmp(tagName, "indexCurve")) {
+				unisonIndexCurve = std::clamp(reader.readTagOrAttributeValueInt(), -50_i32, 50_i32);
+				reader.exitTag("indexCurve");
+			}
+			else if (!strcmp(tagName, "indexShape")) {
+				unisonIndexShape = std::clamp(reader.readTagOrAttributeValueInt(), 0_i32, 8192_i32);
+				reader.exitTag("indexShape");
+			}
+			else if (!strcmp(tagName, "indexMapping")) {
+				unisonIndexMapping = std::clamp(reader.readTagOrAttributeValueInt(), 0_i32, 8192_i32);
+				reader.exitTag("indexMapping");
 			}
 			else {
 				reader.exitTag(tagName);
@@ -1348,6 +1409,34 @@ PatchCableAcceptance Sound::maySourcePatchToParam(PatchSource s, uint8_t p, Para
 		return PatchCableAcceptance::DISALLOWED;
 	}
 
+	if (s == PatchSource::UNISON_INDEX && p != 255) {
+		switch (p) {
+		case params::LOCAL_OSC_A_START_OFFSET:
+		case params::LOCAL_OSC_B_START_OFFSET:
+		case params::LOCAL_OSC_A_WAVE_INDEX:
+		case params::LOCAL_OSC_B_WAVE_INDEX:
+		case params::LOCAL_OSC_A_PHASE_WIDTH:
+		case params::LOCAL_OSC_B_PHASE_WIDTH:
+		case params::LOCAL_OSC_A_PITCH_ADJUST:
+		case params::LOCAL_OSC_B_PITCH_ADJUST:
+		case params::LOCAL_MODULATOR_0_PITCH_ADJUST:
+		case params::LOCAL_MODULATOR_1_PITCH_ADJUST:
+		case params::LOCAL_MODULATOR_0_VOLUME:
+		case params::LOCAL_MODULATOR_1_VOLUME:
+		case params::LOCAL_MODULATOR_0_FEEDBACK:
+		case params::LOCAL_MODULATOR_1_FEEDBACK:
+		case params::LOCAL_CARRIER_0_FEEDBACK:
+		case params::LOCAL_CARRIER_1_FEEDBACK:
+		case params::LOCAL_OSC_A_VOLUME:
+		case params::LOCAL_OSC_B_VOLUME:
+		case params::LOCAL_OSC_A_PHASE:
+		case params::LOCAL_OSC_B_PHASE:
+			break;
+		default:
+			return PatchCableAcceptance::DISALLOWED;
+		}
+	}
+
 	if (p != 255 && s != PatchSource::NOT_AVAILABLE && s >= kFirstLocalSource && p >= params::FIRST_GLOBAL) {
 		return PatchCableAcceptance::DISALLOWED; // Can't patch local source to global param
 	}
@@ -2029,9 +2118,9 @@ int32_t Sound::hasCutOrLoopModeSamples(ParamManagerForTimeline* paramManager, in
 		if (sources[s].oscType != OscType::SAMPLE) {
 			return 0;
 		}
-		else if (sources[s].repeatMode == SampleRepeatMode::CUT || sources[s].repeatMode == SampleRepeatMode::LOOP) {
+		else if (sources[s].repeatMode == SampleRepeatMode::CUT || isLoopingRepeatMode(sources[s].repeatMode)) {
 
-			if (anyLooping && sources[s].repeatMode == SampleRepeatMode::LOOP) {
+			if (anyLooping && isLoopingRepeatMode(sources[s].repeatMode)) {
 				*anyLooping = true;
 			}
 			int32_t length = sources[s].getLengthInSamplesAtSystemSampleRate(note);
@@ -2648,6 +2737,15 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		                                  voiceCount, timePerTickInv, lastNoteCode, isLegato);
 	}
 
+	// Eroder: zone params have cables only in paramFinalValues, add base value for cutoff
+	{
+		q31_t freqCables = paramFinalValues[params::GLOBAL_ERODER_FREQ - params::FIRST_GLOBAL];
+		q31_t charCables = paramFinalValues[params::GLOBAL_ERODER_CHARACTER - params::FIRST_GLOBAL];
+		q31_t cutoffValue = add_saturate(paramManager->getPatchedParamSet()->getValue(params::GLOBAL_ERODER_CUTOFF),
+		                                 paramFinalValues[params::GLOBAL_ERODER_CUTOFF - params::FIRST_GLOBAL]);
+		processEroderEffect(sound_stereo, paramManager, freqCables, charCables, cutoffValue);
+	}
+
 	// Default order: Automodulator → ModFX → Stutter → DOTT → Reverb
 	// With ModFXPostDOTT: Automodulator → Stutter → DOTT → ModFX → Reverb
 	if (!modFXPostDOTT) {
@@ -3058,6 +3156,7 @@ void Sound::doneReadingFromFile() {
 
 	setupUnisonDetuners(nullptr);
 	setupUnisonStereoSpread();
+	setupUnisonIndexSpread();
 
 	for (int32_t m = 0; m < kNumModulators; m++) {
 		recalculateModulatorTransposer(m, nullptr);
@@ -3105,6 +3204,342 @@ void Sound::setupUnisonStereoSpread() {
 
 			unisonPan[u] = sign * (lowestVoice + voiceSpacing * u);
 		}
+	}
+}
+
+void Sound::setupUnisonIndexSpread() {
+	if (numUnison <= 1) {
+		unisonIndexValues[0] = 0;
+		return;
+	}
+
+	// Decode shape zone (0-7) and meta-param (0.0-1.0 within zone)
+	constexpr int32_t kNumZones = 8;
+	constexpr int32_t kZoneSize = 1024;
+	constexpr int32_t kTotalSteps = kNumZones * kZoneSize;
+	int32_t shapeRaw = std::clamp(unisonIndexShape, 0_i32, static_cast<int32_t>(kTotalSteps - 1));
+	int32_t shapeZone = shapeRaw / kZoneSize;
+	float shapeMeta = static_cast<float>(shapeRaw % kZoneSize) / (kZoneSize - 1);
+
+	int32_t N = numUnison;
+
+	// Step 1: Generate raw bipolar values based on shape zone
+	float raw[kMaxNumVoicesUnison];
+	for (int32_t u = 0; u < N; u++) {
+		float t = static_cast<float>(u) / (N - 1); // 0.0 to 1.0
+		float bipolar = t * 2.0f - 1.0f;           // -1.0 to +1.0
+
+		switch (shapeZone) {
+		case 0: {                   // Linear — meta shifts midpoint (bias)
+			float bias = shapeMeta; // 0 (default: symmetric) to +1 (shifted up)
+			raw[u] = std::clamp(bipolar + bias, -1.0f, 1.0f);
+			break;
+		}
+		case 1: { // Power — meta controls exponent (0.5 to 3.0)
+			float exponent = 0.5f + shapeMeta * 2.5f;
+			float sign = bipolar >= 0 ? 1.0f : -1.0f;
+			raw[u] = sign * std::pow(std::abs(bipolar), exponent);
+			break;
+		}
+		case 2: {                              // S-Curve — meta controls steepness
+			float k = 1.0f + shapeMeta * 9.0f; // 1 to 10
+			raw[u] = std::tanh(bipolar * k) / std::tanh(k);
+			break;
+		}
+		case 3: { // Step — meta controls number of levels (2 to 8)
+			int32_t levels = 2 + static_cast<int32_t>(shapeMeta * 6.99f);
+			raw[u] = std::round(bipolar * (levels - 1)) / (levels - 1);
+			break;
+		}
+		case 4: {                   // Triangle — meta shifts peak position
+			float peak = shapeMeta; // 0=first voice, 1=last voice
+			float dist = std::abs(t - peak) / std::max(peak, 1.0f - peak);
+			raw[u] = 1.0f - 2.0f * std::clamp(dist, 0.0f, 1.0f);
+			break;
+		}
+		case 5: { // Sine — meta controls cycles (0.5 to 4)
+			float cycles = 0.5f + shapeMeta * 3.5f;
+			raw[u] = std::sin(bipolar * cycles * 3.14159265f);
+			break;
+		}
+		case 6: { // Random — meta: 0=fresh random, 1=deterministic hash
+			// Use voice index + shape value as seed for deterministic mode
+			uint32_t seed = static_cast<uint32_t>(u * 2654435761u + shapeRaw * 340573321u);
+			seed ^= seed >> 16;
+			seed *= 0x45d9f3bu;
+			seed ^= seed >> 16;
+			float hashVal = static_cast<float>(static_cast<int32_t>(seed)) / 2147483648.0f;
+			raw[u] = std::clamp(hashVal, -1.0f, 1.0f);
+			break;
+		}
+		case 7: { // Drift — initial positions spread by meta amount
+			// Drift rate is handled in updateUnisonIndexDrift(); here just set initial spread
+			float spread = shapeMeta;
+			raw[u] = bipolar * spread;
+			break;
+		}
+		default:
+			raw[u] = bipolar;
+			break;
+		}
+	}
+
+	// Step 2: Apply curve warp (power function from unisonIndexCurve)
+	if (unisonIndexCurve != 0) {
+		float exponent = 1.0f;
+		if (unisonIndexCurve > 0) {
+			exponent = 1.0f + static_cast<float>(unisonIndexCurve) * 0.06f; // up to ~4.0 at +50
+		}
+		else {
+			exponent = 1.0f / (1.0f + static_cast<float>(-unisonIndexCurve) * 0.06f); // down to ~0.25 at -50
+		}
+		for (int32_t u = 0; u < N; u++) {
+			float sign = raw[u] >= 0 ? 1.0f : -1.0f;
+			raw[u] = sign * std::pow(std::abs(raw[u]), exponent);
+		}
+	}
+
+	// Step 3: Apply mapping (reorder values to match stereo/pitch relationship)
+	int32_t mapRaw = std::clamp(unisonIndexMapping, 0_i32, static_cast<int32_t>(kTotalSteps - 1));
+	int32_t mapZone = mapRaw / kZoneSize;
+	float mapMeta = static_cast<float>(mapRaw % kZoneSize) / (kZoneSize - 1);
+
+	// Build an index permutation array
+	int32_t perm[kMaxNumVoicesUnison];
+	for (int32_t u = 0; u < N; u++) {
+		perm[u] = u;
+	}
+
+	switch (mapZone) {
+	case 0: { // Symmetric — meta: tightness of pan-matching
+		// At meta=0: loose mechanical alternation
+		// At meta=1: sort by magnitude, assign highest-magnitude to most-panned voices
+		if (mapMeta < 0.01f) {
+			// Simple alternation
+			for (int32_t u = 0; u < N; u++) {
+				bool isOdd = std::min(u, N - 1 - u) & 1;
+				perm[u] = isOdd ? (N - 1 - u) : u;
+			}
+		}
+		else {
+			// Build magnitude-sorted indices of raw values
+			int32_t magOrder[kMaxNumVoicesUnison];
+			for (int32_t u = 0; u < N; u++) {
+				magOrder[u] = u;
+			}
+			// Sort by ascending magnitude
+			for (int32_t i = 1; i < N; i++) {
+				int32_t key = magOrder[i];
+				float keyMag = std::abs(raw[key]);
+				int32_t j = i - 1;
+				while (j >= 0 && std::abs(raw[magOrder[j]]) > keyMag) {
+					magOrder[j + 1] = magOrder[j];
+					j--;
+				}
+				magOrder[j + 1] = key;
+			}
+			// Pan order: center voices first, edges last (matching stereo spread)
+			int32_t panOrder[kMaxNumVoicesUnison];
+			for (int32_t u = 0; u < N; u++) {
+				panOrder[u] = u;
+			}
+			// Sort by ascending distance from center
+			for (int32_t i = 1; i < N; i++) {
+				int32_t key = panOrder[i];
+				int32_t keyDist = std::abs(2 * key - (N - 1));
+				int32_t j = i - 1;
+				while (j >= 0 && std::abs(2 * panOrder[j] - (N - 1)) > keyDist) {
+					panOrder[j + 1] = panOrder[j];
+					j--;
+				}
+				panOrder[j + 1] = key;
+			}
+			// Assign: voice at panOrder[i] gets raw value at magOrder[i]
+			// Blend with identity based on meta
+			for (int32_t i = 0; i < N; i++) {
+				int32_t looseIdx =
+				    (std::min(panOrder[i], N - 1 - panOrder[i]) & 1) ? (N - 1 - panOrder[i]) : panOrder[i];
+				// Interpolate between loose alternation and tight magnitude-matched
+				float blended = looseIdx * (1.0f - mapMeta) + magOrder[i] * mapMeta;
+				perm[panOrder[i]] = std::clamp(static_cast<int32_t>(blended + 0.5f), 0_i32, N - 1);
+			}
+		}
+		break;
+	}
+	case 1: { // Anti-symmetric — meta: blend from identity to full inversion
+		// At meta=0: identity (no reordering)
+		// At meta=1: full pan-inverted pattern
+		if (mapMeta < 0.01f) {
+			// Identity — perm already initialized
+		}
+		else if (mapMeta > 0.99f) {
+			// Full anti-symmetric
+			for (int32_t u = 0; u < N; u++) {
+				bool isOdd = std::min(u, N - 1 - u) & 1;
+				perm[u] = isOdd ? u : (N - 1 - u);
+			}
+		}
+		else {
+			// Partial: swap voices progressively from edges inward
+			int32_t swapCount = std::max(1_i32, static_cast<int32_t>(mapMeta * (N / 2) + 0.5f));
+			for (int32_t i = 0; i < swapCount && i < N / 2; i++) {
+				perm[i] = N - 1 - i;
+				perm[N - 1 - i] = i;
+			}
+		}
+		break;
+	}
+	case 2: { // Pitch+ — meta: correlation curve (0=linear, 1=exponential)
+		// Values follow detune order; meta warps the distribution
+		// At meta=0: linear spacing (identity). At meta=1: exponential (top voices get more)
+		if (mapMeta > 0.01f) {
+			float exponent = 1.0f + mapMeta * 3.0f; // 1 to 4
+			for (int32_t u = 0; u < N; u++) {
+				float t = static_cast<float>(u) / (N - 1); // 0 to 1
+				float warped = std::pow(t, exponent);
+				perm[u] = std::clamp(static_cast<int32_t>(warped * (N - 1) + 0.5f), 0_i32, N - 1);
+			}
+		}
+		// else identity — perm already initialized
+		break;
+	}
+	case 3: { // Pitch- — meta: correlation curve reversed
+		if (mapMeta < 0.01f) {
+			// Simple reverse
+			for (int32_t u = 0; u < N; u++) {
+				perm[u] = N - 1 - u;
+			}
+		}
+		else {
+			float exponent = 1.0f + mapMeta * 3.0f;
+			for (int32_t u = 0; u < N; u++) {
+				float t = static_cast<float>(N - 1 - u) / (N - 1); // 1 to 0
+				float warped = std::pow(t, exponent);
+				perm[u] = std::clamp(static_cast<int32_t>(warped * (N - 1) + 0.5f), 0_i32, N - 1);
+			}
+		}
+		break;
+	}
+	case 4: {                  // Center-out — meta: focus position (0=first, 0.5=center, 1=last)
+		float focus = mapMeta; // 0.0 to 1.0 mapped to voice position
+		float focusPos = focus * (N - 1);
+		for (int32_t u = 0; u < N; u++) {
+			float dist = std::abs(static_cast<float>(u) - focusPos);
+			float maxDist = std::max(focusPos, static_cast<float>(N - 1) - focusPos);
+			float normalizedDist = (maxDist > 0) ? (dist / maxDist) : 0.0f;
+			// Furthest from focus → index 0 (lowest magnitude), closest → index N-1 (highest)
+			perm[u] = std::clamp(static_cast<int32_t>((1.0f - normalizedDist) * (N - 1) + 0.5f), 0_i32, N - 1);
+		}
+		break;
+	}
+	case 5: { // Rotate — circular rotation of assignments
+		int32_t shift = static_cast<int32_t>(mapMeta * (N - 1));
+		for (int32_t u = 0; u < N; u++) {
+			perm[u] = (u + shift) % N;
+		}
+		break;
+	}
+	case 6: {                                                          // Pairs — adjacent voices share values
+		int32_t groupSize = 2 + static_cast<int32_t>(mapMeta * 2.99f); // 2 to 4
+		for (int32_t u = 0; u < N; u++) {
+			perm[u] = (u / groupSize) * groupSize;
+		}
+		break;
+	}
+	case 7: { // Shuffle — semi-random permutation seeded by meta
+		uint32_t seed = static_cast<uint32_t>(mapRaw * 2654435761u);
+		for (int32_t i = N - 1; i > 0; i--) {
+			seed ^= seed >> 16;
+			seed *= 0x45d9f3bu;
+			seed ^= seed >> 16;
+			int32_t j = static_cast<int32_t>(seed % static_cast<uint32_t>(i + 1));
+			int32_t tmp = perm[i];
+			perm[i] = perm[j];
+			perm[j] = tmp;
+		}
+		break;
+	}
+	default:
+		break;
+	}
+
+	// Step 4: Apply permutation and convert to q31
+	// Sort raw values by ascending value for permutation to work on ordered data
+	float sortedRaw[kMaxNumVoicesUnison];
+	for (int32_t u = 0; u < N; u++) {
+		sortedRaw[u] = raw[u];
+	}
+	// Simple insertion sort (N <= 8)
+	for (int32_t i = 1; i < N; i++) {
+		float key = sortedRaw[i];
+		int32_t j = i - 1;
+		while (j >= 0 && sortedRaw[j] > key) {
+			sortedRaw[j + 1] = sortedRaw[j];
+			j--;
+		}
+		sortedRaw[j + 1] = key;
+	}
+
+	for (int32_t u = 0; u < N; u++) {
+		int32_t srcIdx = std::clamp(perm[u], 0_i32, N - 1);
+		float val = sortedRaw[srcIdx];
+		// Convert float (-1.0 to +1.0) to q31
+		unisonIndexValues[u] = static_cast<int32_t>(val * 2147483647.0f);
+	}
+
+	// Initialize drift state from computed values (so drift starts from current positions)
+	if (shapeZone == 7) {
+		for (int32_t u = 0; u < N; u++) {
+			driftState[u] = unisonIndexValues[u];
+		}
+	}
+
+	// Fill remaining slots with 0
+	for (int32_t u = N; u < kMaxNumVoicesUnison; u++) {
+		unisonIndexValues[u] = 0;
+		driftState[u] = 0;
+	}
+}
+
+void Sound::tickUnisonIndexDrift(uint32_t currentSampleTimer) {
+	// Only update once per render block
+	if (currentSampleTimer == lastDriftSampleTimer) {
+		return;
+	}
+	lastDriftSampleTimer = currentSampleTimer;
+
+	if (numUnison <= 1) {
+		return;
+	}
+
+	// Only drift when shape is zone 7
+	constexpr int32_t kZoneSize = 1024;
+	int32_t shapeZone = unisonIndexShape / kZoneSize;
+	if (shapeZone != 7) {
+		return;
+	}
+
+	// Meta controls drift rate: 0 = glacial, 1 = fast jitter
+	float shapeMeta = static_cast<float>(unisonIndexShape % kZoneSize) / (kZoneSize - 1);
+
+	// Rate: how much random displacement per block (scaled to ~128 sample blocks)
+	// At meta=0: very slow (~0.001% of range per block)
+	// At meta=1: fast jitter (~1% of range per block)
+	int32_t rate = static_cast<int32_t>(shapeMeta * shapeMeta * 20000000.0f) + 50000;
+
+	// Decay: mean reversion factor (keeps drift bounded)
+	// Higher rate needs stronger decay to stay bounded
+	int32_t decay = rate >> 3;
+
+	for (int32_t u = 0; u < numUnison; u++) {
+		// Random displacement — each voice gets independent noise
+		int32_t noise = getNoise();
+		driftState[u] += multiply_32x32_rshift32(noise, rate);
+
+		// Mean reversion — pull back toward zero to keep bounded
+		driftState[u] -= multiply_32x32_rshift32(driftState[u], decay);
+
+		unisonIndexValues[u] = driftState[u];
 	}
 }
 
@@ -3196,6 +3631,7 @@ void Sound::setNumUnison(int32_t newNum, ModelStackWithSoundFlags* modelStack) {
 	numUnison = newNum;
 	setupUnisonDetuners(modelStack); // Can handle NULL. Also calls recalculateAllVoicePhaseIncrements()
 	setupUnisonStereoSpread();
+	setupUnisonIndexSpread();
 	calculateEffectiveVolume();
 
 	// Effective volume has changed. Need to pass that change onto Voices
@@ -3232,7 +3668,15 @@ void Sound::setNumUnison(int32_t newNum, ModelStackWithSoundFlags* modelStack) {
 							// Just clones the SampleLowLevelReader stuff
 							newVoiceSample = SampleLowLevelReader(oldVoiceSample);
 							newVoiceSample.pendingSamplesLate = oldVoiceSample.pendingSamplesLate;
+							newVoiceSample.pingpongPlayDirection = oldVoiceSample.pingpongPlayDirection;
 							newVoiceSample.doneFirstRenderYet = true;
+
+							// Set guide direction to match this reader's pingpong direction
+							// so that stopUsingCache sets up correct boundaries.
+							int8_t savedDirection = voice->guides[s].playDirection;
+							if (voice->guides[s].pingpongActive) {
+								voice->guides[s].playDirection = newVoiceSample.pingpongPlayDirection;
+							}
 
 							// Don't do any caching for new part. Old parts will stop using their cache anyway
 							// because their pitch will have changed
@@ -3241,6 +3685,8 @@ void Sound::setNumUnison(int32_t newNum, ModelStackWithSoundFlags* modelStack) {
 							    voice->getPriorityRating(),
 							    voice->guides[s].getLoopingType(sources[s]) == LoopType::LOW_LEVEL);
 							// TODO: should really check success of that...
+
+							voice->guides[s].playDirection = savedDirection;
 						}
 					}
 					else if (newNum < oldNum) {
@@ -3262,6 +3708,21 @@ void Sound::setUnisonDetune(int32_t newAmount, ModelStackWithSoundFlags* modelSt
 void Sound::setUnisonStereoSpread(int32_t newAmount) {
 	unisonStereoSpread = newAmount;
 	setupUnisonStereoSpread();
+}
+
+void Sound::setUnisonIndexCurve(int32_t newValue) {
+	unisonIndexCurve = std::clamp(newValue, -50_i32, 50_i32);
+	setupUnisonIndexSpread();
+}
+
+void Sound::setUnisonIndexShape(int32_t newValue) {
+	unisonIndexShape = std::clamp(newValue, 0_i32, 8192_i32);
+	setupUnisonIndexSpread();
+}
+
+void Sound::setUnisonIndexMapping(int32_t newValue) {
+	unisonIndexMapping = std::clamp(newValue, 0_i32, 8192_i32);
+	setupUnisonIndexSpread();
 }
 
 bool Sound::anyNoteIsOn() {
@@ -3504,6 +3965,10 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			source->timeStretchAmount = reader.readTagOrAttributeValueInt();
 			reader.exitTag("timeStretchAmount");
 		}
+		else if (!strcmp(tagName, "offsetWraps")) {
+			source->offsetWraps = reader.readTagOrAttributeValueInt();
+			reader.exitTag("offsetWraps");
+		}
 		else if (!strcmp(tagName, "linearInterpolation")) {
 			if (reader.readTagOrAttributeValueInt()) {
 				source->sampleControls.interpolationMode = InterpolationMode::LINEAR;
@@ -3573,6 +4038,10 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 					range->sampleHolder.loopEndPos = reader.readTagOrAttributeValueInt();
 					reader.exitTag("endLoopPos");
 				}
+				else if (!strcmp(tagName, "loopCrossfadeMs")) {
+					range->sampleHolder.loopCrossfadeMs = reader.readTagOrAttributeValueInt();
+					reader.exitTag("loopCrossfadeMs");
+				}
 
 				else {
 					reader.exitTag(tagName);
@@ -3631,6 +4100,11 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 										((SampleHolderForVoice*)holder)->loopEndPos =
 										    reader.readTagOrAttributeValueInt();
 										reader.exitTag("endLoopPos");
+									}
+									else if (!strcmp(tagName, "loopCrossfadeMs")) {
+										((SampleHolderForVoice*)holder)->loopCrossfadeMs =
+										    reader.readTagOrAttributeValueInt();
+										reader.exitTag("loopCrossfadeMs");
 									}
 									else {
 										reader.exitTag(tagName);
@@ -3714,6 +4188,9 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 		writer.writeAttribute("reversed", source->sampleControls.reversed);
 		writer.writeAttribute("timeStretchEnable", source->sampleControls.pitchAndSpeedAreIndependent);
 		writer.writeAttribute("timeStretchAmount", source->timeStretchAmount);
+		if (!source->offsetWraps) {
+			writer.writeAttribute("offsetWraps", (int32_t)0);
+		}
 		if (source->sampleControls.interpolationMode == InterpolationMode::LINEAR) {
 			writer.writeAttribute("linearInterpolation", 1);
 		}
@@ -3756,6 +4233,9 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 			}
 			if (range->sampleHolder.loopEndPos) {
 				writer.writeAttribute("endLoopPos", range->sampleHolder.loopEndPos);
+			}
+			if (range->sampleHolder.loopCrossfadeMs) {
+				writer.writeAttribute("loopCrossfadeMs", range->sampleHolder.loopCrossfadeMs);
 			}
 			writer.closeTag();
 
@@ -4186,6 +4666,20 @@ bool Sound::readParamTagFromFile(Deserializer& reader, char const* tagName, Para
 		reader.exitTag("globalAutomodManual");
 	}
 
+	// Eroder params (patched, Sound context)
+	else if (!strcmp(tagName, "globalEroderFreq")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_ERODER_FREQ, readAutomationUpToPos);
+		reader.exitTag("globalEroderFreq");
+	}
+	else if (!strcmp(tagName, "globalEroderCharacter")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_ERODER_CHARACTER, readAutomationUpToPos);
+		reader.exitTag("globalEroderCharacter");
+	}
+	else if (!strcmp(tagName, "globalEroderCutoff")) {
+		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_ERODER_CUTOFF, readAutomationUpToPos);
+		reader.exitTag("globalEroderCutoff");
+	}
+
 	// Scatter params (patched, Sound context)
 	else if (!strcmp(tagName, "globalScatterZoneA")) {
 		patchedParams->readParam(reader, patchedParamsSummary, params::GLOBAL_SCATTER_ZONE_A, readAutomationUpToPos);
@@ -4320,6 +4814,13 @@ void Sound::writeParamsToFile(Serializer& writer, ParamManager* paramManager, bo
 	patchedParams->writeParamAsAttribute(writer, "globalAutomodManual", params::GLOBAL_AUTOMOD_MANUAL, writeAutomation,
 	                                     true);
 
+	// Eroder params (patched, Sound context)
+	patchedParams->writeParamAsAttribute(writer, "globalEroderFreq", params::GLOBAL_ERODER_FREQ, writeAutomation, true);
+	patchedParams->writeParamAsAttribute(writer, "globalEroderCharacter", params::GLOBAL_ERODER_CHARACTER,
+	                                     writeAutomation, true);
+	patchedParams->writeParamAsAttribute(writer, "globalEroderCutoff", params::GLOBAL_ERODER_CUTOFF, writeAutomation,
+	                                     true);
+
 	// Scatter params (patched, Sound context)
 	patchedParams->writeParamAsAttribute(writer, "globalScatterZoneA", params::GLOBAL_SCATTER_ZONE_A, writeAutomation,
 	                                     true);
@@ -4450,6 +4951,9 @@ void Sound::writeToFile(Serializer& writer, bool savingSong, ParamManager* param
 	writer.writeAttribute("detune", unisonDetune, false);
 	// Community Firmware parameters (always write them after the official ones, just before closing the parent tag)
 	writer.writeAttribute("spread", unisonStereoSpread, false);
+	writer.writeAttribute("indexCurve", unisonIndexCurve, false);
+	writer.writeAttribute("indexShape", unisonIndexShape, false);
+	writer.writeAttribute("indexMapping", unisonIndexMapping, false);
 	writer.closeTag();
 
 	if (paramManager) {

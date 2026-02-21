@@ -544,6 +544,8 @@ bool PatchedParamSet::shouldParamIndicateMiddleValue(ModelStackWithParamId const
 	case params::LOCAL_MODULATOR_1_PITCH_ADJUST:
 	case params::GLOBAL_DELAY_FEEDBACK:
 	case params::GLOBAL_DELAY_RATE:
+	case params::LOCAL_OSC_A_START_OFFSET:
+	case params::LOCAL_OSC_B_START_OFFSET:
 		return true;
 	default:
 		return false;

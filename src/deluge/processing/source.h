@@ -61,6 +61,7 @@ public:
 	deluge::dsp::PhiMorphCache* phiMorphCache{nullptr};
 
 	int8_t timeStretchAmount;
+	bool offsetWraps{true}; // When true, start offset wraps playhead modularly; when false, clamps at boundary
 
 	int16_t defaultRangeI; // -1 means none yet
 
@@ -80,6 +81,7 @@ public:
 	void setOscType(OscType newType);
 
 	DxPatch* ensureDxPatch();
+	void cloneFrom(Source* other);
 
 private:
 	void destructAllMultiRanges();

@@ -86,6 +86,14 @@ ModControllableAudio::ModControllableAudio() {
 ModControllableAudio::~ModControllableAudio() {
 	// delay.discardBuffers(); // No! The DelayBuffers will themselves destruct and do this
 	delete grainFX;
+	delete eroder_;
+}
+
+deluge::dsp::EroderParams& ModControllableAudio::ensureEroder() {
+	if (!eroder_) {
+		eroder_ = new deluge::dsp::EroderParams();
+	}
+	return *eroder_;
 }
 
 void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
@@ -104,6 +112,8 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	shaper = other->shaper;
 	if (shaper.isEnabled()) {
 		shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.gammaPhase, shaper.oscHarmonicWeight);
+		shaperDsp.ensureBuffersAllocated();
+		shaperDsp.regenerateIfDirty();
 	}
 	// Sine shaper state (copy params, invalidate cache to force recomputation)
 	sineShaper = other->sineShaper;
@@ -120,6 +130,10 @@ void ModControllableAudio::cloneFrom(ModControllableAudio* other) {
 	disperser.twist = other->disperser.twist;
 	disperser.phases = other->disperser.phases;
 	disperser.setStages(other->disperser.getStages());
+	// Eroder state (dynamically allocated, copy if source has it)
+	if (other->eroder_) {
+		ensureEroder() = *other->eroder_;
+	}
 }
 
 void ModControllableAudio::initParams(ParamManager* paramManager) {
@@ -486,6 +500,20 @@ void ModControllableAudio::processDisperser(std::span<StereoSample> buffer, Para
 	                              getLastNoteCode());
 }
 
+void ModControllableAudio::processEroderEffect(std::span<StereoSample> buffer, ParamManager* paramManager,
+                                               q31_t freqCables, q31_t charCables, q31_t cutoffValue) {
+	using namespace deluge::modulation::params;
+	if (!eroder_ || !eroder_->isEnabled()) {
+		return;
+	}
+
+	q31_t freqPreset = paramManager ? paramManager->getValueWithFallback(GLOBAL_ERODER_FREQ) : 0;
+	q31_t charPreset = paramManager ? paramManager->getValueWithFallback(GLOBAL_ERODER_CHARACTER) : 0;
+
+	deluge::dsp::processEroder(buffer, *eroder_, freqPreset, freqCables, charPreset, charCables, cutoffValue,
+	                           getLastNoteCode());
+}
+
 inline void ModControllableAudio::doEQ(bool doBass, bool doTreble, int32_t* inputL, int32_t* inputR, int32_t bassAmount,
                                        int32_t trebleAmount) {
 	int32_t trebleOnlyL;
@@ -532,6 +560,10 @@ void ModControllableAudio::writeAttributesToFile(Serializer& writer) {
 	shaper.writeToFile(writer);
 	// Disperser state
 	disperser.writeToFile(writer);
+	// Eroder state (only written if allocated)
+	if (eroder_) {
+		eroder_->writeToFile(writer);
+	}
 	// Sine shaper state
 	sineShaper.writeToFile(writer);
 	// Automodulator state
@@ -1139,11 +1171,18 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 		// Regenerate table after any shaper param change
 		if (shaper.isEnabled()) {
 			shaperDsp.regenerateTable(shaper.shapeX, shaper.shapeY, shaper.gammaPhase, shaper.oscHarmonicWeight);
+			shaperDsp.ensureBuffersAllocated();
+			shaperDsp.regenerateIfDirty();
 		}
 	}
 
 	// Disperser state
 	else if (disperser.readTag(reader, tagName)) {
+		// Reading handled internally
+	}
+
+	// Eroder state (allocates on first tag match)
+	else if (ensureEroder().readTag(reader, tagName)) {
 		// Reading handled internally
 	}
 

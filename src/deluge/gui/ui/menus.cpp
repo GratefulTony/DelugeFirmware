@@ -33,6 +33,7 @@
 #include "gui/menu_item/audio_interpolation.h"
 #include "gui/menu_item/bend_range/main.h"
 #include "gui/menu_item/bend_range/per_finger.h"
+#include "gui/menu_item/clone_sound.h"
 #include "gui/menu_item/colour.h"
 #include "gui/menu_item/cv/cv2Mapping.h"
 #include "gui/menu_item/cv/selection.h"
@@ -79,6 +80,7 @@
 #include "gui/menu_item/fx/automodulator.h"
 #include "gui/menu_item/fx/clipping.h"
 #include "gui/menu_item/fx/disperser.h"
+#include "gui/menu_item/fx/eroder.h"
 #include "gui/menu_item/fx/shaper.h"
 #include "gui/menu_item/fx/sine_shaper.h"
 #include "gui/menu_item/gate/mode.h"
@@ -169,6 +171,7 @@
 #include "gui/menu_item/record/loop_command.h"
 #include "gui/menu_item/record/quantize.h"
 #include "gui/menu_item/record/threshold_mode.h"
+#include "gui/menu_item/record_source.h"
 #include "gui/menu_item/reverb/amount.h"
 #include "gui/menu_item/reverb/amount_unpatched.h"
 #include "gui/menu_item/reverb/damping.h"
@@ -185,6 +188,7 @@
 #include "gui/menu_item/sample/browser_preview/mode.h"
 #include "gui/menu_item/sample/end.h"
 #include "gui/menu_item/sample/interpolation.h"
+#include "gui/menu_item/sample/loop_crossfade.h"
 #include "gui/menu_item/sample/pitch_speed.h"
 #include "gui/menu_item/sample/repeat.h"
 #include "gui/menu_item/sample/reverse.h"
@@ -229,6 +233,9 @@
 #include "gui/menu_item/trigger/out/ppqn.h"
 #include "gui/menu_item/unison/count.h"
 #include "gui/menu_item/unison/detune.h"
+#include "gui/menu_item/unison/indexCurve.h"
+#include "gui/menu_item/unison/indexMapping.h"
+#include "gui/menu_item/unison/indexShape.h"
 #include "gui/menu_item/unison/stereoSpread.h"
 #include "gui/menu_item/unpatched_param.h"
 #include "gui/menu_item/unpatched_param/pan.h"
@@ -782,10 +789,21 @@ HorizontalMenu disperserSubMenu{
     {&disperserFreqMenu, &disperserTopoMenu, &disperserTwistMenu, &disperserStagesMenu},
 };
 
-// Shaping submenu - contains Sine Shaper, Table Shaper, Automodulator, and Disperser
+// Eroder - noise-modulated allpass for digital erosion artifacts
+fx::EroderCutoff eroderCutoffMenu{STRING_FOR_ERODER_CUTOFF, params::GLOBAL_ERODER_CUTOFF};
+fx::EroderTone eroderToneMenu{STRING_FOR_ERODER_FREQ};
+fx::EroderCharacter eroderCharacterMenu{STRING_FOR_ERODER_CHARACTER};
+fx::EroderMix eroderMixMenu{STRING_FOR_ERODER_MIX};
+
+HorizontalMenu eroderSubMenu{
+    STRING_FOR_ERODER_MENU,
+    {&eroderCutoffMenu, &eroderToneMenu, &eroderCharacterMenu, &eroderMixMenu},
+};
+
+// Shaping submenu - contains Sine Shaper, Table Shaper, Automodulator, Disperser, and Eroder
 submenu::Shaping shapingMenu{
     STRING_FOR_SHAPING,
-    {&sineShaperSubMenu, &tableShaperSubMenu, &automodMenu, &disperserSubMenu},
+    {&sineShaperSubMenu, &tableShaperSubMenu, &automodMenu, &disperserSubMenu, &eroderSubMenu},
 };
 
 // Output MIDI for sound drums --------------------------------------------------------------
@@ -1041,6 +1059,7 @@ Submenu audioClipFXMenu{
         &globalReverbMenu,
         &stutterMenu,
         &globalModFXMenu,
+        &shapingMenu,
         &audioClipDistortionMenu,
         &dott_menu,
     },
@@ -1069,6 +1088,8 @@ HorizontalMenu audioClipSampleMenu{
 audio_clip::Attack audioClipAttackMenu{STRING_FOR_ATTACK};
 
 menu_item::EditName nameEditMenu{STRING_FOR_RENAME_CLIP};
+menu_item::CloneSound cloneSoundMenu{STRING_FOR_CLONE};
+menu_item::SelectRecordSource selectRecordSourceMenu{STRING_FOR_RECORD_SOURCE};
 
 PLACE_SDRAM_DATA const MenuItem* midiOrCVParamShortcuts[kDisplayHeight] = {
     &arpRateMenuMIDIOrCV,
@@ -1563,7 +1584,7 @@ Submenu soundFXMenu{
 
 Submenu soundEditorRootActionsMenu{
     STRING_FOR_ACTIONS,
-    {&nameEditMenu, &sample0RecorderMenu, &sample1RecorderMenu},
+    {&nameEditMenu, &cloneSoundMenu, &selectRecordSourceMenu, &sample0RecorderMenu, &sample1RecorderMenu},
 };
 
 Submenu soundEditorRootMenu{

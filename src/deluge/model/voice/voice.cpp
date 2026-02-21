@@ -52,6 +52,7 @@
 #include "dsp/oscillators/basic_waves.h"
 #include "dsp/oscillators/oscillator.h"
 #include "util/misc.h"
+#include <algorithm>
 #include <cstring>
 #include <new>
 
@@ -104,6 +105,153 @@ void Voice::unassignStuff(bool deletingSong) {
 		for (int32_t u = 0; u < this->sound.numUnison; u++) {
 			unisonParts[u].sources[s].unassign(deletingSong);
 		}
+	}
+}
+
+void Voice::applyStartOffsetToGuide(VoiceSamplePlaybackGuide& guide, const Source& source, int32_t startOffsetParam) {
+	guide.preRollSamples = 0;
+	guide.wrapSyncPosition = false;
+	guide.wrapAroundPending = false;
+	guide.loopSplit = false;
+	guide.loopWrapPhase = 0;
+	guide.oneShotWrap = false;
+	guide.oneShotComplete = false;
+	guide.phaseAdvancedByBoundaryCheck = false;
+	guide.hasStartOffset = (startOffsetParam != 0);
+	if (guide.hasStartOffset) {
+		bool synced = source.repeatMode == SampleRepeatMode::STRETCH && guide.sequenceSyncLengthTicks > 0;
+
+		if (synced) {
+			guide.wrapSyncPosition = true;
+		}
+
+		{
+			Sample* offsetSample = static_cast<Sample*>(guide.audioFileHolder->audioFile);
+			int32_t bytesPerFrame = offsetSample->numChannels * offsetSample->byteDepth;
+			int32_t startByte = static_cast<int32_t>(guide.startPlaybackAtByte);
+			int32_t endByte = static_cast<int32_t>(guide.endPlaybackAtByte);
+			int32_t regionBytes = endByte - startByte;
+			int32_t absRegion = std::abs(regionBytes);
+			bool forward = (regionBytes > 0);
+
+			if (absRegion > 0 && bytesPerFrame > 0) {
+				int32_t audioStart = static_cast<int32_t>(offsetSample->audioDataStartPosBytes);
+				int32_t audioEnd = audioStart + static_cast<int32_t>(offsetSample->audioDataLengthBytes);
+				int32_t physLen = audioEnd - audioStart;
+				int32_t farEnd = forward ? audioEnd : (audioStart - bytesPerFrame);
+				int32_t splitRestart = forward ? audioStart : (audioEnd - bytesPerFrame);
+
+				int64_t offsetBytes = ((int64_t)startOffsetParam * physLen) >> 30;
+				int32_t byteShift = static_cast<int32_t>(offsetBytes);
+				byteShift = (byteShift / bytesPerFrame) * bytesPerFrame;
+
+				if (physLen > bytesPerFrame && byteShift != 0) {
+					if (!source.offsetWraps) {
+						int32_t newStart = forward ? (startByte + byteShift) : (startByte - byteShift);
+						newStart = std::clamp(newStart, audioStart, audioEnd - bytesPerFrame);
+						newStart = audioStart + ((newStart - audioStart) / bytesPerFrame) * bytesPerFrame;
+						guide.startPlaybackAtByte = static_cast<uint32_t>(newStart);
+					}
+					else {
+						int32_t mod = ((byteShift % physLen) + physLen) % physLen;
+						mod = (mod / bytesPerFrame) * bytesPerFrame;
+
+						if (mod != 0) {
+							auto wrapInSample = [&](int32_t pos) -> int32_t {
+								int32_t rel = ((pos - audioStart + mod) % physLen + physLen) % physLen;
+								return audioStart + (rel / bytesPerFrame) * bytesPerFrame;
+							};
+
+							int32_t newStart = wrapInSample(startByte);
+							guide.startPlaybackAtByte = static_cast<uint32_t>(newStart);
+
+							bool hasExplicitLoop = (guide.loopEndPlaybackAtByte != 0);
+							int32_t origLoopStart = static_cast<int32_t>(guide.loopStartPlaybackAtByte);
+							int32_t origLoopEnd = static_cast<int32_t>(guide.loopEndPlaybackAtByte);
+
+							int32_t newEnd = wrapInSample(endByte);
+							if (forward && newEnd == audioStart) {
+								newEnd = audioEnd;
+							}
+
+							bool windowWraps = forward ? (newEnd <= newStart) : (newStart <= newEnd);
+							bool revPingpong = (!forward && guide.pingpongActive);
+
+							if (windowWraps) {
+								guide.endPlaybackAtByte = static_cast<uint32_t>(revPingpong ? audioEnd : farEnd);
+							}
+							else {
+								guide.endPlaybackAtByte = static_cast<uint32_t>(newEnd);
+							}
+
+							if (hasExplicitLoop) {
+								int32_t newLoopStart = wrapInSample(origLoopStart);
+								int32_t newLoopEnd = wrapInSample(origLoopEnd);
+								if (forward && newLoopEnd == audioStart) {
+									newLoopEnd = audioEnd;
+								}
+								bool loopWraps = forward ? (newLoopEnd <= newLoopStart) : (newLoopStart <= newLoopEnd);
+
+								guide.loopStartPlaybackAtByte = static_cast<uint32_t>(newLoopStart);
+								guide.loopEndPlaybackAtByte = static_cast<uint32_t>(newLoopEnd);
+
+								if (loopWraps) {
+									guide.loopSplit = true;
+									if (revPingpong) {
+										guide.loopStartPlaybackAtByte =
+										    static_cast<uint32_t>(newLoopEnd + bytesPerFrame);
+										guide.loopEndPlaybackAtByte =
+										    static_cast<uint32_t>(newLoopStart + bytesPerFrame);
+										guide.loopWrapPhase = 3;
+										guide.wrapAroundRestartByte = static_cast<uint32_t>(audioStart);
+										guide.endPlaybackAtByte = static_cast<uint32_t>(audioEnd);
+									}
+									else {
+										guide.loopWrapPhase = 1;
+										guide.wrapAroundRestartByte = static_cast<uint32_t>(splitRestart);
+										guide.endPlaybackAtByte = static_cast<uint32_t>(farEnd);
+									}
+								}
+
+								if (!guide.pingpongActive) {
+									int32_t sp = static_cast<int32_t>(guide.startPlaybackAtByte);
+									int32_t le = static_cast<int32_t>(guide.loopEndPlaybackAtByte);
+									if ((sp - le) * guide.playDirection >= 0) {
+										guide.wrapAroundPending = true;
+										guide.wrapAroundRestartByte = static_cast<uint32_t>(splitRestart);
+									}
+								}
+							}
+							else {
+								if (windowWraps) {
+									guide.loopSplit = true;
+									if (revPingpong) {
+										guide.loopEndPlaybackAtByte = static_cast<uint32_t>(newStart + bytesPerFrame);
+										guide.loopStartPlaybackAtByte = static_cast<uint32_t>(newEnd + bytesPerFrame);
+										guide.loopWrapPhase = 3;
+										guide.wrapAroundRestartByte = static_cast<uint32_t>(audioStart);
+										guide.endPlaybackAtByte = static_cast<uint32_t>(audioEnd);
+									}
+									else {
+										guide.loopEndPlaybackAtByte = static_cast<uint32_t>(newEnd);
+										guide.loopStartPlaybackAtByte = static_cast<uint32_t>(newStart);
+										guide.loopWrapPhase = 1;
+										guide.wrapAroundRestartByte = static_cast<uint32_t>(splitRestart);
+									}
+								}
+								else {
+									guide.loopStartPlaybackAtByte = static_cast<uint32_t>(newStart);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if (guide.loopSplit && !isLoopingRepeatMode(source.repeatMode)) {
+		guide.oneShotWrap = true;
 	}
 }
 
@@ -165,6 +313,9 @@ bool Voice::noteOn(ModelStackWithSoundFlags* modelStack, int32_t newNoteCodeBefo
 
 	// "Random" source
 	sourceValues[util::to_underlying(PatchSource::RANDOM)] = getNoise();
+
+	// "Unison Index" source — set to 0 for initial patching, per-unison values applied in unison loop
+	sourceValues[util::to_underlying(PatchSource::UNISON_INDEX)] = 0;
 
 	for (int32_t m = 0; m < kNumExpressionDimensions; m++) {
 		localExpressionSourceValuesBeforeSmoothing[m] = mpeValues[m] << 16;
@@ -301,114 +452,53 @@ activenessDetermined:
 		// int32_t samplesLateHere = samplesLate; // Make our own copy of this - we're going to deactivate it if we're
 		// in STRETCH mode, cos that works differently
 
+		VoiceSamplePlaybackGuide savedGuide;
+		int32_t startOffsetParam = 0;
+
 		if (oscType == OscType::SAMPLE && guides[s].audioFileHolder) {
 			source->sampleControls.invertReversed = sound.invertReversed; // Copy the temporary flag from the sound
 			guides[s].setupPlaybackBounds(source->sampleControls.isCurrentlyReversed());
+			guides[s].pingpongActive = (source->repeatMode == SampleRepeatMode::PINGPONG);
 
-			// Apply plocked sample start offset — slides the playback window
-			int32_t startOffsetParam =
-			    paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SAMPLE_START_OFFSET_A + s);
-			guides[s].preRollSamples = 0;
-			guides[s].wrapSyncPosition = false;
-			if (startOffsetParam != 0) {
-				bool synced = source->repeatMode == SampleRepeatMode::STRETCH && guides[s].sequenceSyncLengthTicks > 0;
-
-				if (synced) {
-					// For synced modes, apply offset as a tick shift so the phase-lock
-					// seeking starts at the offset position. The wrapSyncPosition flag
-					// makes the time stretcher wrap modularly instead of stopping at the end.
-					int32_t syncLen = static_cast<int32_t>(guides[s].sequenceSyncLengthTicks);
-					int64_t tickShift = ((int64_t)startOffsetParam * (int64_t)syncLen) >> 31;
-					// Normalize negative shifts to equivalent positive position to avoid
-					// uint32_t underflow in getSyncedNumSamplesIn().
-					if (tickShift < 0) {
-						tickShift += syncLen;
-					}
-					guides[s].sequenceSyncStartedAtTick -= static_cast<int32_t>(tickShift);
-					guides[s].wrapSyncPosition = true;
-				}
-				else {
-					Sample* offsetSample = static_cast<Sample*>(guides[s].audioFileHolder->audioFile);
-					int32_t bytesPerFrame = offsetSample->numChannels * offsetSample->byteDepth;
-					int32_t startByte = static_cast<int32_t>(guides[s].startPlaybackAtByte);
-					int32_t endByte = static_cast<int32_t>(guides[s].endPlaybackAtByte);
-					int32_t regionBytes = endByte - startByte;
-					int32_t absRegion = std::abs(regionBytes);
-					bool forward = (regionBytes > 0);
-
-					if (absRegion > 0 && bytesPerFrame > 0) {
-						int64_t offsetBytes = ((int64_t)startOffsetParam * absRegion) >> 31;
-						int32_t byteShift = static_cast<int32_t>(offsetBytes);
-						byteShift = (byteShift / bytesPerFrame) * bytesPerFrame;
-
-						if (source->repeatMode == SampleRepeatMode::LOOP) {
-							// LOOP: modular wrap of start position within the region.
-							// First iteration starts at the offset position. On loop,
-							// playback wraps back to the original start (loopStartPlaybackAtByte
-							// was set to the original start by setupPlaybackBounds).
-							int32_t mod = ((byteShift % absRegion) + absRegion) % absRegion;
-							mod = (mod / bytesPerFrame) * bytesPerFrame;
-							if (forward) {
-								guides[s].startPlaybackAtByte = static_cast<uint32_t>(startByte + mod);
-							}
-							else {
-								guides[s].startPlaybackAtByte = static_cast<uint32_t>(startByte - mod);
-							}
-							// loopStartPlaybackAtByte intentionally NOT updated —
-							// it stays at the original start so the loop wraps around
-						}
-						else {
-							// CUT/ONCE: window slide with silence for out-of-bounds.
-							// Instead of clamping both edges back, play silence (preRoll)
-							// when start goes before the audio data, and let the voice
-							// stop naturally when end goes past the audio data.
-							int32_t shiftDir = forward ? byteShift : -byteShift;
-							startByte += shiftDir;
-							endByte += shiftDir;
-
-							int32_t audioStart = static_cast<int32_t>(offsetSample->audioDataStartPosBytes);
-							int32_t audioEnd = audioStart + static_cast<int32_t>(offsetSample->audioDataLengthBytes);
-
-							if (forward) {
-								if (endByte > audioEnd) {
-									endByte = audioStart + ((audioEnd - audioStart) / bytesPerFrame) * bytesPerFrame;
-								}
-								if (startByte < audioStart) {
-									guides[s].preRollSamples = (audioStart - startByte) / bytesPerFrame;
-									startByte = audioStart;
-								}
-							}
-							else {
-								// Reversed: start is high byte, end is low byte
-								if (endByte < audioStart) {
-									endByte = audioStart;
-								}
-								if (startByte >= audioEnd) {
-									guides[s].preRollSamples = (startByte - (audioEnd - bytesPerFrame)) / bytesPerFrame;
-									startByte = audioEnd - bytesPerFrame;
-								}
-							}
-
-							guides[s].startPlaybackAtByte = static_cast<uint32_t>(startByte);
-							guides[s].endPlaybackAtByte = static_cast<uint32_t>(endByte);
-						}
-					}
-				}
-			}
-
-			// if (source->repeatMode == SampleRepeatMode::STRETCH) samplesLateHere = 0;
+			// Apply sample start offset (now a patched param — includes velocity/LFO modulation)
+			startOffsetParam = paramFinalValues[params::LOCAL_OSC_A_START_OFFSET + s];
+			savedGuide = guides[s];
+			applyStartOffsetToGuide(guides[s], *source, startOffsetParam);
 		}
 
-		uint16_t effectiveSamplesLate = samplesLate;
+		// Check once whether UNISON_INDEX is patched to start offset for this source
+		bool hasUnisonStartOffset = oscType == OscType::SAMPLE && guides[s].audioFileHolder && sound.numUnison > 1
+		                            && (paramManager->getPatchCableSet()->sourcesPatchedToAnything[GLOBALITY_LOCAL]
+		                                & (1u << util::to_underlying(PatchSource::UNISON_INDEX)));
+
+		// Check once whether UNISON_INDEX is patched (for phase offset)
+		bool hasUnisonMod = sound.numUnison > 1
+		                    && (paramManager->getPatchCableSet()->sourcesPatchedToAnything[GLOBALITY_LOCAL]
+		                        & (1u << util::to_underlying(PatchSource::UNISON_INDEX)));
 
 		for (int32_t u = 0; u < sound.numUnison; u++) {
 
 			// Check that we already marked this unison-part-source as active. Among other things, this ensures that if
 			// the osc is set to SAMPLE, there actually is a sample loaded.
 			if (unisonParts[u].sources[s].active) {
-				bool success = unisonParts[u].sources[s].noteOn(this, source, &guides[s], effectiveSamplesLate,
-				                                                sound.oscRetriggerPhase[s], resetEnvelopes,
-				                                                sound.synthMode, velocity);
+				if (hasUnisonStartOffset) {
+					int32_t unisonValue = sound.unisonIndexValues[u];
+					int32_t unisonOffset = patcher.getUnisonOffset(params::LOCAL_OSC_A_START_OFFSET + s, unisonValue,
+					                                               sound, *paramManager);
+					guides[s] = savedGuide;
+					applyStartOffsetToGuide(guides[s], *source, startOffsetParam + unisonOffset);
+				}
+
+				uint32_t retriggerPhase = sound.oscRetriggerPhase[s];
+				if (hasUnisonMod && retriggerPhase != 0xFFFFFFFF) {
+					int32_t unisonValue = sound.unisonIndexValues[u];
+					int32_t unisonPhaseOffset =
+					    patcher.getUnisonOffset(params::LOCAL_OSC_A_PHASE + s, unisonValue, sound, *paramManager);
+					retriggerPhase += static_cast<uint32_t>(unisonPhaseOffset);
+				}
+
+				bool success = unisonParts[u].sources[s].noteOn(this, source, &guides[s], samplesLate, retriggerPhase,
+				                                                resetEnvelopes, sound.synthMode, velocity);
 				if (!success) [[unlikely]] {
 					return false; // This shouldn't really ever happen I don't think really...
 				}
@@ -702,17 +792,23 @@ void Voice::noteOff(ModelStackWithSoundFlags* modelStack, bool allowReleaseStage
 	if (sound.synthMode != SynthMode::FM) {
 		for (int32_t s = 0; s < kNumSources; s++) {
 			if (sound.sources[s].oscType == OscType::SAMPLE && guides[s].loopEndPlaybackAtByte) {
+				int8_t savedDirection = guides[s].playDirection;
 				for (int32_t u = 0; u < sound.numUnison; u++) {
 					if (unisonParts[u].sources[s].active) {
+						VoiceSample* voiceSample = unisonParts[u].sources[s].voiceSample;
+						// Set per-reader direction for pingpong before reassessing boundaries
+						if (guides[s].pingpongActive && voiceSample) {
+							guides[s].playDirection = voiceSample->pingpongPlayDirection;
+						}
 
-						bool success =
-						    unisonParts[u].sources[s].voiceSample->noteOffWhenLoopEndPointExists(this, &guides[s]);
+						bool success = voiceSample->noteOffWhenLoopEndPointExists(this, &guides[s]);
 
 						if (!success) {
 							unisonParts[u].sources[s].unassign(false);
 						}
 					}
 				}
+				guides[s].playDirection = savedDirection;
 			}
 			else if (sound.sources[s].oscType == OscType::DX7) {
 				for (int u = 0; u < sound.numUnison; u++) {
@@ -748,8 +844,12 @@ bool Voice::sampleZoneChanged(ModelStackWithSoundFlags* modelStack, int32_t s, M
 	Sample* sample = (Sample*)holder->audioFile;
 
 	guides[s].setupPlaybackBounds(source.sampleControls.isCurrentlyReversed());
+	guides[s].wrapAroundPending = false;
+	guides[s].loopSplit = false;
+	guides[s].loopWrapPhase = 0;
 
 	LoopType loopingType = guides[s].getLoopingType(sound.sources[s]);
+	guides[s].pingpongActive = (source.repeatMode == SampleRepeatMode::PINGPONG);
 
 	// Check we're still within bounds - for each unison part.
 	// Well, that is, make sure we're not past the new end. Being before the start is ok, because we'll come back into
@@ -761,6 +861,10 @@ bool Voice::sampleZoneChanged(ModelStackWithSoundFlags* modelStack, int32_t s, M
 		VoiceUnisonPartSource* voiceUnisonPartSource = &unisonParts[u].sources[s];
 
 		if (voiceUnisonPartSource->active) {
+			// Reset per-reader pingpong direction to canonical after zone change
+			if (guides[s].pingpongActive && voiceUnisonPartSource->voiceSample) {
+				voiceUnisonPartSource->voiceSample->pingpongPlayDirection = guides[s].playDirection;
+			}
 			bool stillActive = voiceUnisonPartSource->voiceSample->sampleZoneChanged(
 			    &guides[s], sample, source.sampleControls.isCurrentlyReversed(), markerType, loopingType,
 			    getPriorityRating());
@@ -820,6 +924,9 @@ uint32_t Voice::getLocalLFOPhaseIncrement(LFO_ID lfoId, deluge::modulation::para
 
 	ParamManagerForTimeline* paramManager = (ParamManagerForTimeline*)modelStack->paramManager;
 	Sound& sound = *static_cast<Sound*>(modelStack->modControllable);
+
+	// Tick drift shape (block-rate, guarded by sample timer — first voice to render per block wins)
+	sound.tickUnisonIndexDrift(AudioEngine::audioSampleTimer);
 
 	bool didStereoTempBuffer = false;
 
@@ -1391,8 +1498,49 @@ skipAutoRelease: {}
 			didStereoTempBuffer = true;
 		}
 
+		// One bitmask check gates all per-unison modulation — zero cost when UNISON_INDEX isn't patched
+		bool hasUnisonModFM = sound.numUnison > 1
+		                      && (paramManager->getPatchCableSet()->sourcesPatchedToAnything[GLOBALITY_LOCAL]
+		                          & (1u << util::to_underlying(PatchSource::UNISON_INDEX)));
+
 		// For each unison part
 		for (int32_t u = 0; u < sound.numUnison; u++) {
+
+			// Per-unison parameter offsets from UNISON_INDEX modulation
+			int32_t unisonPitchOffsets[kNumSources] = {};
+			int32_t unisonPhaseWidthOffsets[kNumSources] = {};
+			int32_t unisonWaveIndexOffsets[kNumSources] = {};
+			int32_t unisonPhaseOffsets[kNumSources] = {};
+			int32_t unisonCarrierFeedbackOffsets[kNumSources] = {};
+			int32_t unisonCarrierVolumeOffsets[kNumSources] = {};
+			int32_t unisonModPitchOffsets[kNumModulators] = {};
+			int32_t unisonModVolumeOffsets[kNumModulators] = {};
+			int32_t unisonModFeedbackOffsets[kNumModulators] = {};
+			if (hasUnisonModFM) {
+				int32_t unisonValue = sound.unisonIndexValues[u];
+				for (int32_t s = 0; s < kNumSources; s++) {
+					unisonPitchOffsets[s] = patcher.getUnisonOffset(params::LOCAL_OSC_A_PITCH_ADJUST + s, unisonValue,
+					                                                sound, *paramManager);
+					unisonPhaseWidthOffsets[s] =
+					    patcher.getUnisonOffset(params::LOCAL_OSC_A_PHASE_WIDTH + s, unisonValue, sound, *paramManager);
+					unisonWaveIndexOffsets[s] =
+					    patcher.getUnisonOffset(params::LOCAL_OSC_A_WAVE_INDEX + s, unisonValue, sound, *paramManager);
+					unisonPhaseOffsets[s] =
+					    patcher.getUnisonOffset(params::LOCAL_OSC_A_PHASE + s, unisonValue, sound, *paramManager);
+					unisonCarrierFeedbackOffsets[s] = patcher.getUnisonOffset(params::LOCAL_CARRIER_0_FEEDBACK + s,
+					                                                          unisonValue, sound, *paramManager);
+					unisonCarrierVolumeOffsets[s] =
+					    patcher.getUnisonOffset(params::LOCAL_OSC_A_VOLUME + s, unisonValue, sound, *paramManager);
+				}
+				for (int32_t m = 0; m < kNumModulators; m++) {
+					unisonModPitchOffsets[m] = patcher.getUnisonOffset(params::LOCAL_MODULATOR_0_PITCH_ADJUST + m,
+					                                                   unisonValue, sound, *paramManager);
+					unisonModVolumeOffsets[m] = patcher.getUnisonOffset(params::LOCAL_MODULATOR_0_VOLUME + m,
+					                                                    unisonValue, sound, *paramManager);
+					unisonModFeedbackOffsets[m] = patcher.getUnisonOffset(params::LOCAL_MODULATOR_0_FEEDBACK + m,
+					                                                      unisonValue, sound, *paramManager);
+				}
+			}
 
 			int32_t unisonAmplitudeL, unisonAmplitudeR;
 			shouldDoPanning((stereoUnison ? sound.unisonPan[u] : 0), &unisonAmplitudeL, &unisonAmplitudeR);
@@ -1420,9 +1568,10 @@ skipAutoRelease: {}
 				}
 			}
 
-			// If individual source pitch adjusted...
+			// If individual source pitch adjusted (with per-unison offset)...
 			for (int32_t s = 0; s < kNumSources; s++) {
-				if (!adjustPitch(phaseIncrements[s], paramFinalValues[params::LOCAL_OSC_A_PITCH_ADJUST + s])) {
+				if (!adjustPitch(phaseIncrements[s],
+				                 paramFinalValues[params::LOCAL_OSC_A_PITCH_ADJUST + s] + unisonPitchOffsets[s])) {
 					if (synthMode == SynthMode::RINGMOD) {
 						goto skipUnisonPart;
 					}
@@ -1451,10 +1600,15 @@ skipAutoRelease: {}
 cantBeDoingOscSyncForFirstOsc:
 					// Work out pulse width, from parameter. This has no effect if we're not actually using square
 					// waves, but just do it anyway, it's a simple calculation
-					int32_t pulseWidth =
-					    (uint32_t)lshiftAndSaturate<1>(paramFinalValues[params::LOCAL_OSC_A_PHASE_WIDTH + s]);
+					int32_t pulseWidth = (uint32_t)lshiftAndSaturate<1>(
+					    paramFinalValues[params::LOCAL_OSC_A_PHASE_WIDTH + s] + unisonPhaseWidthOffsets[s]);
 
 					OscType oscType = sound.sources[s].oscType;
+
+					uint32_t effectiveRetriggerPhase =
+					    sound.oscRetriggerPhase[s]
+					    + static_cast<uint32_t>(paramFinalValues[params::LOCAL_OSC_A_PHASE + s])
+					    + static_cast<uint32_t>(unisonPhaseOffsets[s]);
 
 					if (oscType == OscType::PHI_MORPH) {
 						auto& source = sound.sources[s];
@@ -1485,19 +1639,19 @@ cantBeDoingOscSyncForFirstOsc:
 								smoothed += (std::abs(diff) < 256) ? diff : (diff >> 2);
 							}
 						}
-						q31_t crossfade = cache.smoothedCrossfade;
+						q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffsets[s];
 						memset(spareRenderingBuffer[s + 2], 0, numSamples * sizeof(int32_t));
 						dsp::renderPhiMorph(cache, spareRenderingBuffer[s + 2],
 						                    spareRenderingBuffer[s + 2] + numSamples, numSamples, phaseIncrements[s],
-						                    &unisonParts[u].sources[s].oscPos, sound.oscRetriggerPhase[s], 0, 0, false,
+						                    &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, 0, 0, false,
 						                    crossfade, pulseWidth);
 					}
 					else {
 						dsp::Oscillator::renderOsc(
 						    oscType, 0, spareRenderingBuffer[s + 2], spareRenderingBuffer[s + 2] + numSamples,
 						    numSamples, phaseIncrements[s], pulseWidth, &unisonParts[u].sources[s].oscPos, false, 0,
-						    doingOscSyncThisOscillator, oscSyncPos[u], phaseIncrements[0], sound.oscRetriggerPhase[s],
-						    sourceWaveIndexIncrements[s], sourceWaveIndexesLastTime[s],
+						    doingOscSyncThisOscillator, oscSyncPos[u], phaseIncrements[0], effectiveRetriggerPhase,
+						    sourceWaveIndexIncrements[s], sourceWaveIndexesLastTime[s] + unisonWaveIndexOffsets[s],
 						    static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile),
 						    &unisonParts[u].sources[s].prevPhaseScaler);
 					}
@@ -1560,11 +1714,12 @@ cantBeDoingOscSyncForFirstOsc:
 					}
 				}
 
-				// Check if individual modulator pitches adjusted
+				// Check if individual modulator pitches adjusted (with per-unison offset)
 				for (int32_t m = 0; m < kNumModulators; m++) {
 					if (modulatorsActive[m]) {
 						if (!adjustPitch(phaseIncrementModulator[m],
-						                 paramFinalValues[params::LOCAL_MODULATOR_0_PITCH_ADJUST + m])) {
+						                 paramFinalValues[params::LOCAL_MODULATOR_0_PITCH_ADJUST + m]
+						                     + unisonModPitchOffsets[m])) {
 							modulatorsActive[m] = false;
 						}
 					}
@@ -1577,6 +1732,42 @@ cantBeDoingOscSyncForFirstOsc:
 					memset(fmOscBuffer, 0, numSamples * sizeof(int32_t));
 				}
 
+				// Per-unison effective modulator amplitude and feedback
+				int32_t effModAmp[kNumModulators];
+				int32_t effModAmpInc[kNumModulators];
+				int32_t effModFeedback[kNumModulators];
+				for (int32_t m = 0; m < kNumModulators; m++) {
+					effModAmp[m] = modulatorAmplitudeLastTime[m] + unisonModVolumeOffsets[m];
+					int32_t effModAmpTarget =
+					    paramFinalValues[params::LOCAL_MODULATOR_0_VOLUME + m] + unisonModVolumeOffsets[m];
+					effModAmpInc[m] = (effModAmpTarget - effModAmp[m]) / numSamples;
+					effModFeedback[m] =
+					    paramFinalValues[params::LOCAL_MODULATOR_0_FEEDBACK + m] + unisonModFeedbackOffsets[m];
+				}
+
+				// Per-unison effective carrier amplitude and feedback
+				// Volume offset is in paramFinalValues space but sourceAmplitudes is scaled down
+				// (multiply by overallOscAmplitude, filterGain, or >>4). Scale offset by the same ratio.
+				int32_t effCarrierAmp[kNumSources];
+				int32_t effCarrierAmpInc[kNumSources];
+				int32_t effCarrierFeedback[kNumSources];
+				for (int32_t s = 0; s < kNumSources; s++) {
+					int32_t scaledVolOffset = 0;
+					if (unisonCarrierVolumeOffsets[s] != 0) {
+						int32_t baseParam = paramFinalValues[params::LOCAL_OSC_A_VOLUME + s];
+						if (baseParam != 0) {
+							scaledVolOffset = static_cast<int32_t>(
+							    (static_cast<int64_t>(unisonCarrierVolumeOffsets[s]) * sourceAmplitudes[s])
+							    / baseParam);
+						}
+					}
+					effCarrierAmp[s] = sourceAmplitudesNow[s] + scaledVolOffset;
+					int32_t effCarrierAmpTarget = sourceAmplitudes[s] + scaledVolOffset;
+					effCarrierAmpInc[s] = (effCarrierAmpTarget - effCarrierAmp[s]) / numSamples;
+					effCarrierFeedback[s] =
+					    paramFinalValues[params::LOCAL_CARRIER_0_FEEDBACK + s] + unisonCarrierFeedbackOffsets[s];
+				}
+
 				// Modulators
 				if (modulatorsActive[1]) {
 
@@ -1587,46 +1778,41 @@ cantBeDoingOscSyncForFirstOsc:
 
 					// Render mod1
 					renderSineWaveWithFeedback(spareRenderingBuffer[2], numSamples, &unisonParts[u].modulatorPhase[1],
-					                           modulatorAmplitudeLastTime[1], phaseIncrementModulator[1],
-					                           paramFinalValues[params::LOCAL_MODULATOR_1_FEEDBACK],
-					                           &unisonParts[u].modulatorFeedback[1], false,
-					                           modulatorAmplitudeIncrements[1]);
+					                           effModAmp[1], phaseIncrementModulator[1], effModFeedback[1],
+					                           &unisonParts[u].modulatorFeedback[1], false, effModAmpInc[1]);
 
 					// If mod1 is modulating mod0...
 					if (sound.modulator1ToModulator0) {
 						// .. render modulator0, receiving the FM from mod1
 						renderFMWithFeedback(spareRenderingBuffer[2], numSamples, nullptr,
-						                     &unisonParts[u].modulatorPhase[0], modulatorAmplitudeLastTime[0],
-						                     phaseIncrementModulator[0],
-						                     paramFinalValues[params::LOCAL_MODULATOR_0_FEEDBACK],
-						                     &unisonParts[u].modulatorFeedback[0], modulatorAmplitudeIncrements[0]);
+						                     &unisonParts[u].modulatorPhase[0], effModAmp[0],
+						                     phaseIncrementModulator[0], effModFeedback[0],
+						                     &unisonParts[u].modulatorFeedback[0], effModAmpInc[0]);
 					}
 
 					// Otherwise, so long as modulator0 is in fact active, render it separately and add it
 					else if (modulatorsActive[0]) {
-						renderSineWaveWithFeedback(
-						    spareRenderingBuffer[2], numSamples, &unisonParts[u].modulatorPhase[0],
-						    modulatorAmplitudeLastTime[0], phaseIncrementModulator[0],
-						    paramFinalValues[params::LOCAL_MODULATOR_0_FEEDBACK], &unisonParts[u].modulatorFeedback[0],
-						    true, modulatorAmplitudeIncrements[0]);
+						renderSineWaveWithFeedback(spareRenderingBuffer[2], numSamples,
+						                           &unisonParts[u].modulatorPhase[0], effModAmp[0],
+						                           phaseIncrementModulator[0], effModFeedback[0],
+						                           &unisonParts[u].modulatorFeedback[0], true, effModAmpInc[0]);
 					}
 				}
 				else {
 					if (modulatorsActive[0]) {
-						renderSineWaveWithFeedback(
-						    spareRenderingBuffer[2], numSamples, &unisonParts[u].modulatorPhase[0],
-						    modulatorAmplitudeLastTime[0], phaseIncrementModulator[0],
-						    paramFinalValues[params::LOCAL_MODULATOR_0_FEEDBACK], &unisonParts[u].modulatorFeedback[0],
-						    false, modulatorAmplitudeIncrements[0]);
+						renderSineWaveWithFeedback(spareRenderingBuffer[2], numSamples,
+						                           &unisonParts[u].modulatorPhase[0], effModAmp[0],
+						                           phaseIncrementModulator[0], effModFeedback[0],
+						                           &unisonParts[u].modulatorFeedback[0], false, effModAmpInc[0]);
 					}
 					else {
 noModulatorsActive:
 						for (int32_t s = 0; s < kNumSources; s++) {
 							if (sourceAmplitudes[s]) {
-								renderSineWaveWithFeedback(
-								    fmOscBuffer, numSamples, &unisonParts[u].sources[s].oscPos, sourceAmplitudesNow[s],
-								    phaseIncrements[s], paramFinalValues[params::LOCAL_CARRIER_0_FEEDBACK + s],
-								    &unisonParts[u].sources[s].carrierFeedback, true, sourceAmplitudeIncrements[s]);
+								renderSineWaveWithFeedback(fmOscBuffer, numSamples, &unisonParts[u].sources[s].oscPos,
+								                           effCarrierAmp[s], phaseIncrements[s], effCarrierFeedback[s],
+								                           &unisonParts[u].sources[s].carrierFeedback, true,
+								                           effCarrierAmpInc[s]);
 							}
 						}
 
@@ -1637,11 +1823,10 @@ noModulatorsActive:
 				// Carriers
 				for (int32_t s = 0; s < kNumSources; s++) {
 					if (sourceAmplitudes[s]) {
-						renderFMWithFeedbackAdd(
-						    fmOscBuffer, numSamples, spareRenderingBuffer[2], &unisonParts[u].sources[s].oscPos,
-						    sourceAmplitudesNow[s], phaseIncrements[s],
-						    paramFinalValues[params::LOCAL_CARRIER_0_FEEDBACK + s],
-						    &unisonParts[u].sources[s].carrierFeedback, sourceAmplitudeIncrements[s]);
+						renderFMWithFeedbackAdd(fmOscBuffer, numSamples, spareRenderingBuffer[2],
+						                        &unisonParts[u].sources[s].oscPos, effCarrierAmp[s], phaseIncrements[s],
+						                        effCarrierFeedback[s], &unisonParts[u].sources[s].carrierFeedback,
+						                        effCarrierAmpInc[s]);
 					}
 				}
 
@@ -2200,6 +2385,11 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
 		}
 	}
 
+	// One bitmask check gates all per-unison modulation — zero cost when UNISON_INDEX isn't patched
+	bool hasUnisonMod = sound.numUnison > 1
+	                    && (paramManager->getPatchCableSet()->sourcesPatchedToAnything[GLOBALITY_LOCAL]
+	                        & (1u << util::to_underlying(PatchSource::UNISON_INDEX)));
+
 	// For each unison part
 	for (int32_t u = 0; u < sound.numUnison; u++) {
 
@@ -2210,8 +2400,14 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
 			continue;
 		}
 
+		// Save the canonical guide direction for per-reader pingpong tracking.
+		// Each unison reader independently flips direction during pingpong,
+		// so we restore the canonical direction after each render.
+		int8_t savedGuideDirection = guides[s].playDirection;
+
 		if (false) {
 instantUnassign:
+			guides[s].playDirection = savedGuideDirection;
 
 #ifdef TEST_SAMPLE_LOOP_POINTS
 			FREEZE_WITH_ERROR("YEP");
@@ -2221,6 +2417,40 @@ instantUnassign:
 			voiceUnisonPartSource->unassign(false);
 			continue;
 		}
+
+		// Per-unison parameter offsets from UNISON_INDEX modulation
+		int32_t unisonPitchOffset = 0;
+		int32_t unisonPhaseWidthOffset = 0;
+		int32_t unisonWaveIndexOffset = 0;
+		int32_t unisonPhaseOffset = 0;
+		int32_t unisonVolumeOffset = 0;
+		if (hasUnisonMod) {
+			int32_t unisonValue = sound.unisonIndexValues[u];
+			unisonPitchOffset =
+			    patcher.getUnisonOffset(params::LOCAL_OSC_A_PITCH_ADJUST + s, unisonValue, sound, *paramManager);
+			unisonPhaseWidthOffset =
+			    patcher.getUnisonOffset(params::LOCAL_OSC_A_PHASE_WIDTH + s, unisonValue, sound, *paramManager);
+			unisonWaveIndexOffset =
+			    patcher.getUnisonOffset(params::LOCAL_OSC_A_WAVE_INDEX + s, unisonValue, sound, *paramManager);
+			unisonPhaseOffset =
+			    patcher.getUnisonOffset(params::LOCAL_OSC_A_PHASE + s, unisonValue, sound, *paramManager);
+			unisonVolumeOffset =
+			    patcher.getUnisonOffset(params::LOCAL_OSC_A_VOLUME + s, unisonValue, sound, *paramManager);
+		}
+
+		// Per-unison effective source amplitude
+		// Volume offset is in paramFinalValues space but sourceAmplitude is scaled down.
+		// Scale offset by ratio: sourceAmplitude / paramFinalValues[VOL]
+		int32_t scaledVolumeOffset = 0;
+		if (unisonVolumeOffset != 0) {
+			int32_t baseParam = paramFinalValues[params::LOCAL_OSC_A_VOLUME + s];
+			if (baseParam != 0) {
+				scaledVolumeOffset =
+				    static_cast<int32_t>((static_cast<int64_t>(unisonVolumeOffset) * sourceAmplitude) / baseParam);
+			}
+		}
+		int32_t effSourceAmplitude = sourceAmplitude + scaledVolumeOffset;
+		int32_t effAmplitudeIncrement = amplitudeIncrement; // offset is constant within block
 
 		uint32_t phaseIncrement = voiceUnisonPartSource->phaseIncrementStoredValue;
 
@@ -2234,8 +2464,8 @@ pitchTooHigh:
 			continue;
 		}
 
-		// Individual source pitch adjustment
-		if (!adjustPitch(phaseIncrement, paramFinalValues[params::LOCAL_OSC_A_PITCH_ADJUST + s])) {
+		// Individual source pitch adjustment (with per-unison offset)
+		if (!adjustPitch(phaseIncrement, paramFinalValues[params::LOCAL_OSC_A_PITCH_ADJUST + s] + unisonPitchOffset)) {
 			goto pitchTooHigh;
 		}
 
@@ -2258,6 +2488,11 @@ pitchTooHigh:
 
 			Sample* sample = (Sample*)guides[s].audioFileHolder->audioFile;
 			VoiceSample* voiceSample = voiceUnisonPartSource->voiceSample;
+
+			// Apply per-reader pingpong direction before any direction-dependent calls
+			if (guides[s].pingpongActive) {
+				guides[s].playDirection = voiceSample->pingpongPlayDirection;
+			}
 
 			int32_t numChannels = (sample->numChannels == 2) ? 2 : 1;
 
@@ -2350,6 +2585,11 @@ pitchTooHigh:
 
 			LoopType loopingType = guides[s].getLoopingType(sound.sources[s]);
 
+			// One-shot split-loop completed — stop the voice immediately
+			if (guides[s].oneShotComplete) {
+				goto instantUnassign;
+			}
+
 			int32_t interpolationBufferSize;
 
 			// If pitch adjustment...
@@ -2366,6 +2606,31 @@ pitchTooHigh:
 				// velocity or note is affecting pitch), and stretch-syncing.
 				if (!voiceSample->doneFirstRenderYet && !tryToStartMidNote
 				    && portaEnvelopePos == 0xFFFFFFFF) { // No porta
+
+					// Pingpong mode can't use cache since direction changes mid-playback
+					if (guides[s].pingpongActive) {
+						goto dontUseCache;
+					}
+
+					// Split-loop from offset wrapping can't use cache
+					if (guides[s].loopSplit) {
+						goto dontUseCache;
+					}
+
+					// Cache plays from the original sample start, ignoring any
+					// start offset shift. Bypass when any offset is active.
+					if (guides[s].hasStartOffset) {
+						goto dontUseCache;
+					}
+
+					// Skip cache when crossfade is active — the crossfade envelope
+					// is only applied in the uncached render path
+					{
+						auto* xfadeHolder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
+						if (xfadeHolder->loopCrossfadeMs > 0 && loopingType != LoopType::NONE) {
+							goto dontUseCache;
+						}
+					}
 
 					// If looping, make sure the loop isn't too short. If so, caching just wouldn't sound good /
 					// accurate
@@ -2460,9 +2725,18 @@ dontUseCache: {}
 			// increments for the hop crossfades with the overall voice ones, and having multiple crossfading hops write
 			// directly to the osc buffer).
 
+			// Compute crossfade samples for this source
+			if (loopingType != LoopType::NONE) {
+				auto* holder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
+				voiceSample->loopFadeInSamplesTotal = (holder->loopCrossfadeMs * sample->sampleRate) / 1000;
+			}
+			else {
+				voiceSample->loopFadeInSamplesTotal = 0;
+			}
+
 			bool stillActive = voiceSample->render(
 			    &guides[s], renderBuffer, numSamples, sample, numChannels, loopingType, phaseIncrement,
-			    timeStretchRatio, sourceAmplitude, amplitudeIncrement, interpolationBufferSize,
+			    timeStretchRatio, effSourceAmplitude, effAmplitudeIncrement, interpolationBufferSize,
 			    sound.sources[s].sampleControls.interpolationMode, getPriorityRating());
 
 			if (stereoUnison) {
@@ -2485,6 +2759,12 @@ dontUseCache: {}
 			if (!stillActive) {
 				goto instantUnassign;
 			}
+
+			// Save per-reader pingpong direction (may have been flipped by a bounce)
+			if (guides[s].pingpongActive) {
+				voiceSample->pingpongPlayDirection = guides[s].playDirection;
+			}
+			guides[s].playDirection = savedGuideDirection;
 		}
 
 		// Or echoing input
@@ -2532,8 +2812,8 @@ dontUseCache: {}
 				int32_t interpolationBufferSize =
 				    sound.sources[s].sampleControls.getInterpolationBufferSize(phaseIncrement);
 
-				source->livePitchShifter->render(oscBuffer, numSamples, phaseIncrement, sourceAmplitude,
-				                                 amplitudeIncrement, interpolationBufferSize);
+				source->livePitchShifter->render(oscBuffer, numSamples, phaseIncrement, effSourceAmplitude,
+				                                 effAmplitudeIncrement, interpolationBufferSize);
 			}
 
 			// No pitch shifting
@@ -2541,8 +2821,8 @@ dontUseCache: {}
 
 				int32_t* __restrict__ oscBufferPos = oscBuffer;
 				int32_t const* __restrict__ inputReadPos = (int32_t const*)AudioEngine::i2sRXBufferPos;
-				int32_t sourceAmplitudeThisUnison = sourceAmplitude;
-				int32_t amplitudeIncrementThisUnison = amplitudeIncrement;
+				int32_t sourceAmplitudeThisUnison = effSourceAmplitude;
+				int32_t amplitudeIncrementThisUnison = effAmplitudeIncrement;
 
 				// Just left, or just right, or if (stereo but there's only the internal, mono mic)
 				if (sound.sources[s].oscType != OscType::INPUT_STEREO
@@ -2564,7 +2844,7 @@ dontUseCache: {}
 
 					int32_t sourceAmplitudeNow = sourceAmplitudeThisUnison;
 					do {
-						sourceAmplitudeNow += amplitudeIncrement;
+						sourceAmplitudeNow += amplitudeIncrementThisUnison;
 
 						// Mono / left channel (or stereo condensed to mono)
 						*(oscBufferPos++) += multiply_32x32_rshift32(inputReadPos[channelOffset], sourceAmplitudeNow)
@@ -2586,7 +2866,7 @@ dontUseCache: {}
 
 					int32_t sourceAmplitudeNow = sourceAmplitudeThisUnison;
 					do {
-						sourceAmplitudeNow += amplitudeIncrement;
+						sourceAmplitudeNow += amplitudeIncrementThisUnison;
 
 						int32_t sampleL = inputReadPos[0];
 						int32_t sampleR = inputReadPos[1];
@@ -2624,7 +2904,7 @@ dontUseCache: {}
 
 			DxPatch* patch = sound.sources[s].ensureDxPatch();
 			DxVoiceCtrl ctrl{};
-			ctrl.ampmod = paramFinalValues[params::LOCAL_OSC_A_PHASE_WIDTH + s] >> 13;
+			ctrl.ampmod = (paramFinalValues[params::LOCAL_OSC_A_PHASE_WIDTH + s] + unisonPhaseWidthOffset) >> 13;
 			// ctrl.ratemod = paramFinalValues[params::LOCAL_CARRIER_0_FEEDBACK + s] >> 16;
 			if (sound.sources[s].dxPatchChanged) {
 				unisonParts[u].sources[s].dxVoice->update(*patch, noteCodeAfterArpeggiation);
@@ -2634,10 +2914,10 @@ dontUseCache: {}
 				goto instantUnassign;
 			}
 
-			int32_t sourceAmplitudeNow = sourceAmplitude;
+			int32_t sourceAmplitudeNow = effSourceAmplitude;
 			if (stereoUnison) {
 				for (int i = 0; i < numSamples; i++) {
-					sourceAmplitudeNow += amplitudeIncrement;
+					sourceAmplitudeNow += effAmplitudeIncrement;
 					int amplified = multiply_32x32_rshift32(uniBuf[i], sourceAmplitudeNow) << 6;
 					oscBuffer[(i << 1)] += multiply_32x32_rshift32(amplified, amplitudeL) << 2;
 					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(amplified, amplitudeR) << 2;
@@ -2645,7 +2925,7 @@ dontUseCache: {}
 			}
 			else {
 				for (int i = 0; i < numSamples; i++) {
-					sourceAmplitudeNow += amplitudeIncrement;
+					sourceAmplitudeNow += effAmplitudeIncrement;
 					oscBuffer[i] += multiply_32x32_rshift32(uniBuf[i], sourceAmplitudeNow) << 6;
 				}
 			}
@@ -2670,7 +2950,7 @@ dontUseCache: {}
 				cache.prevCrossfade = INT32_MIN; // Force effective table rebuild
 			}
 
-			q31_t crossfade = cache.smoothedCrossfade;
+			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
 
 			int32_t* renderBuffer = oscBuffer;
 			if (stereoUnison) {
@@ -2680,11 +2960,15 @@ dontUseCache: {}
 
 			int32_t* oscBufferEnd = renderBuffer + numSamples;
 
-			uint32_t pulseWidth = (uint32_t)lshiftAndSaturate<1>(paramFinalValues[params::LOCAL_OSC_A_PHASE_WIDTH + s]);
+			uint32_t pulseWidth = (uint32_t)lshiftAndSaturate<1>(paramFinalValues[params::LOCAL_OSC_A_PHASE_WIDTH + s]
+			                                                     + unisonPhaseWidthOffset);
 
+			uint32_t effectiveRetriggerPhase = sound.oscRetriggerPhase[s]
+			                                   + static_cast<uint32_t>(paramFinalValues[params::LOCAL_OSC_A_PHASE + s])
+			                                   + static_cast<uint32_t>(unisonPhaseOffset);
 			dsp::renderPhiMorph(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
-			                    &unisonParts[u].sources[s].oscPos, sound.oscRetriggerPhase[s], sourceAmplitude,
-			                    amplitudeIncrement, true, crossfade, pulseWidth);
+			                    &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, effSourceAmplitude,
+			                    effAmplitudeIncrement, true, crossfade, pulseWidth);
 
 			if (stereoUnison) {
 				for (int32_t i = 0; i < numSamples; i++) {
@@ -2697,7 +2981,8 @@ dontUseCache: {}
 			uint32_t oscSyncPosThisUnison;
 			uint32_t oscSyncPhaseIncrementsThisUnison;
 			uint32_t oscRetriggerPhase =
-			    sound.oscRetriggerPhase[s]; // Yes we might need this even if not doing osc sync.
+			    sound.oscRetriggerPhase[s] + static_cast<uint32_t>(paramFinalValues[params::LOCAL_OSC_A_PHASE + s])
+			    + static_cast<uint32_t>(unisonPhaseOffset); // Yes we might need this even if not doing osc sync.
 
 			// If doing osc sync
 			if (doOscSync) {
@@ -2722,14 +3007,16 @@ dontUseCache: {}
 			    renderBuffer + numSamples; // TODO: we don't really want to be calculating this so early do we?
 
 			// Work out pulse width
-			uint32_t pulseWidth = (uint32_t)lshiftAndSaturate<1>(paramFinalValues[params::LOCAL_OSC_A_PHASE_WIDTH + s]);
+			uint32_t pulseWidth = (uint32_t)lshiftAndSaturate<1>(paramFinalValues[params::LOCAL_OSC_A_PHASE_WIDTH + s]
+			                                                     + unisonPhaseWidthOffset);
 
-			dsp::Oscillator::renderOsc(
-			    sound.sources[s].oscType, sourceAmplitude, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
-			    pulseWidth, &unisonParts[u].sources[s].oscPos, true, amplitudeIncrement, doOscSync,
-			    oscSyncPosThisUnison, oscSyncPhaseIncrementsThisUnison, oscRetriggerPhase, waveIndexIncrement,
-			    sourceWaveIndexesLastTime[s], static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile),
-			    &unisonParts[u].sources[s].prevPhaseScaler);
+			dsp::Oscillator::renderOsc(sound.sources[s].oscType, effSourceAmplitude, renderBuffer, oscBufferEnd,
+			                           numSamples, phaseIncrement, pulseWidth, &unisonParts[u].sources[s].oscPos, true,
+			                           effAmplitudeIncrement, doOscSync, oscSyncPosThisUnison,
+			                           oscSyncPhaseIncrementsThisUnison, oscRetriggerPhase, waveIndexIncrement,
+			                           sourceWaveIndexesLastTime[s] + unisonWaveIndexOffset,
+			                           static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile),
+			                           &unisonParts[u].sources[s].prevPhaseScaler);
 
 			if (stereoBuffer) {
 				// TODO: if render buffer was typed we could use addPannedMono()

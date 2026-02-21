@@ -18,17 +18,17 @@
  * This file requires preservation of the above copyright notice and author attribution
  * in all copies or substantial portions of this file.
  */
+
 #pragma once
 
-#include "gui/menu_item/submenu.h"
+#include "gui/menu_item/menu_item.h"
 
-namespace deluge::gui::menu_item::submenu {
+namespace deluge::gui::menu_item {
 
-/// Shaping Submenu containing Sine Shaper, Table Shaper, and other distortion effects.
-/// Enabled for both Sound (synth/kit rows) and GlobalEffectable (audio clips) contexts.
-class Shaping final : public Submenu {
+class CloneSound final : public MenuItem {
 public:
-	using Submenu::Submenu;
+	using MenuItem::MenuItem;
+	void beginSession(MenuItem* navigatedBackwardFrom) override;
 };
 
-} // namespace deluge::gui::menu_item::submenu
+} // namespace deluge::gui::menu_item

@@ -27,8 +27,7 @@
 namespace deluge::modulation::params {
 
 bool isParamBipolar(Kind kind, int32_t paramID) {
-	if (kind == Kind::UNPATCHED_SOUND
-	    && (paramID == UNPATCHED_SAMPLE_START_OFFSET_A || paramID == UNPATCHED_SAMPLE_START_OFFSET_B)) {
+	if (kind == Kind::PATCHED && (paramID == LOCAL_OSC_A_START_OFFSET || paramID == LOCAL_OSC_B_START_OFFSET)) {
 		return true;
 	}
 	return (kind == Kind::PATCH_CABLE) || isParamPan(kind, paramID) || isParamPitch(kind, paramID)
@@ -143,6 +142,10 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [LOCAL_TABLE_SHAPER_DRIVE]       = "Shpr drive",
 	    [LOCAL_SINE_SHAPER_DRIVE]        = "Sine drive",
 	    [LOCAL_TABLE_SHAPER_MIX]         = "Shaper mix",
+	    [LOCAL_OSC_A_START_OFFSET]       = "Offset A",
+	    [LOCAL_OSC_B_START_OFFSET]       = "Offset B",
+	    [LOCAL_OSC_A_PHASE]              = "Osc1 phase",
+	    [LOCAL_OSC_B_PHASE]              = "Osc2 phase",
 	    [LOCAL_SINE_SHAPER_TWIST]        = "Sine twist",
 	    [LOCAL_SINE_SHAPER_HARMONIC]     = "Sine harm",
 	    [LOCAL_LPF_FREQ]                 = "LPf freq",
@@ -182,6 +185,9 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [GLOBAL_AUTOMOD_DEPTH]           = "Automod",
 	    [GLOBAL_AUTOMOD_FREQ]            = "AutoFrq",
 	    [GLOBAL_AUTOMOD_MANUAL]          = "AutoMan",
+	    [GLOBAL_ERODER_FREQ]             = "Erod tone",
+	    [GLOBAL_ERODER_CHARACTER]        = "Erod char",
+	    [GLOBAL_ERODER_CUTOFF]           = "Erod cut",
 	    [GLOBAL_DELAY_RATE]              = "Delay rate",
 	    [GLOBAL_MOD_FX_RATE]             = "ModFX rate",
 	    [GLOBAL_LFO_FREQ_1]                = "LFO1 rate",
@@ -230,6 +236,10 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [LOCAL_TABLE_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_TABLE_SHAPER_DRIVE,
 	    [LOCAL_SINE_SHAPER_DRIVE] = STRING_FOR_PARAM_LOCAL_SINE_SHAPER_DRIVE,
 	    [LOCAL_TABLE_SHAPER_MIX] = STRING_FOR_PARAM_LOCAL_TABLE_SHAPER_MIX,
+	    [LOCAL_OSC_A_START_OFFSET] = STRING_FOR_START_OFFSET,
+	    [LOCAL_OSC_B_START_OFFSET] = STRING_FOR_START_OFFSET,
+	    [LOCAL_OSC_A_PHASE] = STRING_FOR_PARAM_LOCAL_OSC_A_PHASE,
+	    [LOCAL_OSC_B_PHASE] = STRING_FOR_PARAM_LOCAL_OSC_B_PHASE,
 	    [LOCAL_SINE_SHAPER_TWIST] = STRING_FOR_SINE_SHAPER_SYMMETRY, // Reuse existing twist/symmetry string
 	    [LOCAL_SINE_SHAPER_HARMONIC] = STRING_FOR_SINE_SHAPER_HARMONIC,
 	    [LOCAL_LPF_FREQ] = STRING_FOR_PARAM_LOCAL_LPF_FREQ,
@@ -269,6 +279,9 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [GLOBAL_AUTOMOD_DEPTH] = STRING_FOR_AUTOMOD_DEPTH,
 	    [GLOBAL_AUTOMOD_FREQ] = STRING_FOR_AUTOMOD_FREQ,
 	    [GLOBAL_AUTOMOD_MANUAL] = STRING_FOR_AUTOMOD_MANUAL,
+	    [GLOBAL_ERODER_FREQ] = STRING_FOR_ERODER_FREQ,
+	    [GLOBAL_ERODER_CHARACTER] = STRING_FOR_ERODER_CHARACTER,
+	    [GLOBAL_ERODER_CUTOFF] = STRING_FOR_ERODER_CUTOFF,
 	    [GLOBAL_DELAY_RATE] = STRING_FOR_PARAM_GLOBAL_DELAY_RATE,
 	    [GLOBAL_MOD_FX_RATE] = STRING_FOR_PARAM_GLOBAL_MOD_FX_RATE,
 	    [GLOBAL_LFO_FREQ_1] = STRING_FOR_PARAM_GLOBAL_LFO_FREQ_1,
@@ -328,6 +341,9 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 		    [UNPATCHED_AUTOMOD_DEPTH] = STRING_FOR_AUTOMOD_DEPTH,
 		    [UNPATCHED_AUTOMOD_FREQ] = STRING_FOR_AUTOMOD_FREQ,
 		    [UNPATCHED_AUTOMOD_MANUAL] = STRING_FOR_AUTOMOD_MANUAL,
+		    [UNPATCHED_ERODER_FREQ] = STRING_FOR_ERODER_FREQ,
+		    [UNPATCHED_ERODER_CHARACTER] = STRING_FOR_ERODER_CHARACTER,
+		    [UNPATCHED_ERODER_CUTOFF] = STRING_FOR_ERODER_CUTOFF,
 		    [UNPATCHED_SCATTER_ZONE_A] = STRING_FOR_SCATTER_PATTERN,
 		    [UNPATCHED_SCATTER_ZONE_B] = STRING_FOR_SCATTER_COLOR,
 		    [UNPATCHED_SCATTER_MACRO_CONFIG] = STRING_FOR_SCATTER_MACRO_CONFIG,
@@ -368,8 +384,6 @@ char const* getParamDisplayName(Kind kind, int32_t p) {
 		using enum UnpatchedSound;
 		static l10n::String const NAMES[UNPATCHED_SOUND_MAX_NUM - unc] = {
 		    [UNPATCHED_PORTAMENTO - unc] = STRING_FOR_PORTAMENTO,
-		    [UNPATCHED_SAMPLE_START_OFFSET_A - unc] = STRING_FOR_START_OFFSET,
-		    [UNPATCHED_SAMPLE_START_OFFSET_B - unc] = STRING_FOR_START_OFFSET,
 		};
 		return l10n::get(NAMES[p - unc]);
 	}
@@ -443,12 +457,6 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 		switch (static_cast<UnpatchedSound>(param - UNPATCHED_START)) {
 		case UNPATCHED_PORTAMENTO:
 			return "portamento";
-
-		case UNPATCHED_SAMPLE_START_OFFSET_A:
-			return "sampleStartOffsetA";
-
-		case UNPATCHED_SAMPLE_START_OFFSET_B:
-			return "sampleStartOffsetB";
 
 		default:
 		    // Fall through to the other param kind handling
@@ -596,6 +604,13 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 		case UNPATCHED_AUTOMOD_MANUAL:
 			return "clipAutomodManual";
 
+		case UNPATCHED_ERODER_FREQ:
+			return "eroderFreq";
+		case UNPATCHED_ERODER_CHARACTER:
+			return "eroderCharacter";
+		case UNPATCHED_ERODER_CUTOFF:
+			return "eroderCutoff";
+
 		case UNPATCHED_ARP_GATE:
 			return "arpGate";
 
@@ -702,6 +717,13 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 		case GLOBAL_AUTOMOD_MANUAL:
 			return "globalAutomodManual";
 
+		case GLOBAL_ERODER_FREQ:
+			return "globalEroderFreq";
+		case GLOBAL_ERODER_CHARACTER:
+			return "globalEroderCharacter";
+		case GLOBAL_ERODER_CUTOFF:
+			return "globalEroderCutoff";
+
 		case GLOBAL_SCATTER_ZONE_A:
 			return "globalScatterZoneA";
 
@@ -778,6 +800,18 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 
 		case LOCAL_TABLE_SHAPER_MIX:
 			return "tableShaperMix";
+
+		case LOCAL_OSC_A_START_OFFSET:
+			return "oscAStartOffset";
+
+		case LOCAL_OSC_B_START_OFFSET:
+			return "oscBStartOffset";
+
+		case LOCAL_OSC_A_PHASE:
+			return "oscAPhase";
+
+		case LOCAL_OSC_B_PHASE:
+			return "oscBPhase";
 
 		case LOCAL_SINE_SHAPER_TWIST:
 			return "sineShaperTwist";

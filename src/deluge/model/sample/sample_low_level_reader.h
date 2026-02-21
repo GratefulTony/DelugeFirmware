@@ -100,6 +100,7 @@ public:
 	char* clusterStartLocation{}; // You're allowed to read from this location, but not move any further "back" past it
 	uint8_t reassessmentAction{};
 	int8_t interpolationBufferSizeLastTime{}; // 0 if was previously switched off
+	bool justLoopedBack{false};
 
 	deluge::dsp::Interpolator interpolator_{};
 

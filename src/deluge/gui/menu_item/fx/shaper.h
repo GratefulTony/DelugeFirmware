@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Synthstrom Audible Limited
+ * Copyright © 2024-2025 Owlet Records
  *
  * This file is part of The Synthstrom Audible Deluge Firmware.
  *
@@ -13,6 +13,10 @@
  *
  * You should have received a copy of the GNU General Public License along with this program.
  * If not, see <https://www.gnu.org/licenses/>.
+ *
+ * --- Additional terms under GNU GPL version 3 section 7 ---
+ * This file requires preservation of the above copyright notice and author attribution
+ * in all copies or substantial portions of this file.
  */
 #pragma once
 
@@ -192,7 +196,7 @@ public:
 			// Each increment = 1 full Y range (1024 steps) worth of phase rotation
 			Buttons::selectButtonPressUsedUp = true;
 			float& gammaPhase = soundEditor.currentModControllable->shaper.gammaPhase;
-			gammaPhase = std::max(0.0f, gammaPhase + static_cast<float>(velocity_.getScaledOffset(offset)) * 1.0f);
+			gammaPhase = std::max(0.0f, gammaPhase + static_cast<float>(offset));
 			// Regenerate table with new gammaPhase
 			auto* mca = soundEditor.currentModControllable;
 			mca->shaperDsp.regenerateTable(mca->shaper.shapeX, mca->shaper.shapeY, gammaPhase,
@@ -200,7 +204,7 @@ public:
 			shaper_regen::scheduleRegeneration(mca);
 			// Show current value on display
 			char buffer[16];
-			snprintf(buffer, sizeof(buffer), "G:%d", static_cast<int32_t>(gammaPhase * 10.0f));
+			snprintf(buffer, sizeof(buffer), "G:%d", static_cast<int32_t>(gammaPhase));
 			display->displayPopup(buffer);
 			suppressNotification_ = true;
 		}

@@ -171,6 +171,14 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 		                                  true, 0, timePerTickInv);
 	}
 
+	// Eroder (no mod matrix cables in unpatched context, read cutoff from unpatched params)
+	{
+		q31_t cutoffValue = paramManagerForClip ? paramManagerForClip->getUnpatchedParamSet()->getValue(
+		                                              deluge::modulation::params::UNPATCHED_ERODER_CUTOFF)
+		                                        : 0;
+		processEroderEffect(global_effectable_audio, paramManagerForClip, 0, 0, cutoffValue);
+	}
+
 	// Check if ModFX should run after DOTT and stutter
 	bool modFXPostDOTT =
 	    runtimeFeatureSettings.get(RuntimeFeatureSettingType::ModFXPostDOTT) == RuntimeFeatureStateToggle::On;

@@ -159,4 +159,5 @@ private:
 	bool areAllUnisonPartsInactive(ModelStackWithSoundFlags& modelStack) const;
 	void setupPorta(const Sound& sound);
 	int32_t combineExpressionValues(const Sound& sound, int32_t expressionDimension) const;
+	void applyStartOffsetToGuide(VoiceSamplePlaybackGuide& guide, const Source& source, int32_t startOffsetParam);
 };

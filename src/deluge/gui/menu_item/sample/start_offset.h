@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014-2023 Synthstrom Audible Limited
+ * Copyright (c) 2025 Owlet Records
  *
  * This file is part of The Synthstrom Audible Deluge Firmware.
  *
@@ -16,9 +17,10 @@
  */
 #pragma once
 #include "gui/menu_item/sample/utils.h"
-#include "gui/menu_item/unpatched_param.h"
+#include "gui/menu_item/source/patched_param.h"
 #include "gui/menu_item/velocity_encoder.h"
 #include "gui/ui/sound_editor.h"
+#include "hid/display/display.h"
 #include "model/voice/voice.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_set.h"
@@ -26,13 +28,13 @@
 
 namespace deluge::gui::menu_item::sample {
 
-class StartOffset final : public UnpatchedParam {
+class StartOffset final : public source::PatchedParam {
 public:
 	static constexpr int32_t kResolution = 1024;
 	static constexpr int32_t kShift = 21; // 31 - log2(1024) = 21
 
 	StartOffset(l10n::String name, uint8_t source_id)
-	    : UnpatchedParam(name, params::UNPATCHED_SAMPLE_START_OFFSET_A + source_id), source_id_{source_id} {}
+	    : source::PatchedParam(name, params::LOCAL_OSC_A_START_OFFSET, source_id) {}
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t) override {
 		return isSampleModeSample(modControllable, source_id_);
@@ -42,7 +44,7 @@ public:
 	[[nodiscard]] int32_t getMinValue() const override { return -kResolution; }
 
 	void readCurrentValue() override {
-		int32_t q31 = soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(getP());
+		int32_t q31 = soundEditor.currentParamManager->getPatchedParamSet()->getValue(getP());
 		this->setValue(q31 >> kShift);
 	}
 
@@ -57,12 +59,10 @@ public:
 		return v << kShift;
 	}
 
-	void writeCurrentValue() override {
-		// Capture old param value before writing
-		int32_t oldQ31 = soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(getP());
+	void selectEncoderAction(int32_t offset) override {
+		int32_t oldQ31 = soundEditor.currentParamManager->getPatchedParamSet()->getValue(getP());
 
-		// Write the new value through the param system
-		UnpatchedParam::writeCurrentValue();
+		source::PatchedParam::selectEncoderAction(velocity_.getScaledOffset(offset));
 
 		// For STRETCH mode voices, update the guide's tick shift immediately
 		// so the time stretcher crossfades to the new position
@@ -71,7 +71,7 @@ public:
 			return;
 		}
 
-		int32_t newQ31 = soundEditor.currentParamManager->getUnpatchedParamSet()->getValue(getP());
+		int32_t newQ31 = soundEditor.currentParamManager->getPatchedParamSet()->getValue(getP());
 		if (newQ31 == oldQ31) {
 			return;
 		}
@@ -83,7 +83,6 @@ public:
 				int32_t syncLen = static_cast<int32_t>(guide.sequenceSyncLengthTicks);
 				int64_t oldTickShift = ((int64_t)oldQ31 * (int64_t)syncLen) >> 31;
 				int64_t newTickShift = ((int64_t)newQ31 * (int64_t)syncLen) >> 31;
-				// Normalize negative shifts to equivalent positive position
 				if (oldTickShift < 0) {
 					oldTickShift += syncLen;
 				}
@@ -97,14 +96,19 @@ public:
 		}
 	}
 
-	void selectEncoderAction(int32_t offset) override {
-		UnpatchedParam::selectEncoderAction(velocity_.getScaledOffset(offset));
+	bool onHorizontalItemAction() override {
+		Sound* sound = soundEditor.currentSound;
+		if (!sound) {
+			return false;
+		}
+		sound->sources[source_id_].offsetWraps = !sound->sources[source_id_].offsetWraps;
+		display->displayNotification(getName(), sound->sources[source_id_].offsetWraps ? "Wrap" : "No wrap");
+		return true;
 	}
 
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return KNOB; }
 
 private:
-	uint8_t source_id_;
 	mutable VelocityEncoder velocity_;
 };
 } // namespace deluge::gui::menu_item::sample

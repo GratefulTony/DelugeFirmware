@@ -87,6 +87,8 @@ extern GlobalMIDICommand defaultLoopRecordingCommand;
 
 extern bool defaultUseSharps;
 
+extern AudioInputChannel defaultRecordSource;
+
 void readSettings();
 void writeSettings();
 void resetSettings();

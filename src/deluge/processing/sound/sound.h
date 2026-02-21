@@ -74,6 +74,7 @@ public:
 
 	Sound();
 	~Sound() override { std::erase(AudioEngine::sounds, this); }
+	void cloneFrom(ModControllableAudio* other) override;
 
 	Patcher patcher;
 
@@ -120,6 +121,12 @@ public:
 	uint8_t numUnison = 1;
 	int8_t unisonDetune = 8;
 	uint8_t unisonStereoSpread = 0;
+	int8_t unisonIndexCurve{0};                       // -50 to +50, 0 = linear
+	int32_t unisonIndexShape{0};                      // q31_t zone value (8 zones × 1024 steps)
+	int32_t unisonIndexMapping{0};                    // q31_t zone value (8 zones × 1024 steps)
+	int32_t unisonIndexValues[kMaxNumVoicesUnison]{}; // cached spread output
+	int32_t driftState[kMaxNumVoicesUnison]{};        // per-voice drift accumulators
+	uint32_t lastDriftSampleTimer{0};                 // guard: one drift tick per render block
 
 	// For sending MIDI notes for SoundDrums
 	uint8_t outputMidiChannel = MIDI_CHANNEL_NONE;
@@ -202,6 +209,10 @@ public:
 	void setNumUnison(int32_t newNum, ModelStackWithSoundFlags* modelStack);
 	void setUnisonDetune(int32_t newAmount, ModelStackWithSoundFlags* modelStack);
 	void setUnisonStereoSpread(int32_t newAmount);
+	void setUnisonIndexCurve(int32_t newValue);
+	void setUnisonIndexShape(int32_t newValue);
+	void setUnisonIndexMapping(int32_t newValue);
+	void tickUnisonIndexDrift(uint32_t currentSampleTimer);
 	void setModulatorTranspose(int32_t m, int32_t value, ModelStackWithSoundFlags* modelStack);
 	void setModulatorCents(int32_t m, int32_t value, ModelStackWithSoundFlags* modelStack);
 	Error readFromFile(Deserializer& reader, ModelStackWithModControllable* modelStack, int32_t readAutomationUpToPos,
@@ -336,6 +347,7 @@ private:
 	void recalculateModulatorTransposer(uint8_t m, ModelStackWithSoundFlags* modelStack);
 	void setupUnisonDetuners(ModelStackWithSoundFlags* modelStack);
 	void setupUnisonStereoSpread();
+	void setupUnisonIndexSpread();
 	void calculateEffectiveVolume();
 	void ensureKnobReferencesCorrectVolume(Knob& knob);
 	Error readTagFromFileOrError(Deserializer& reader, char const* tagName, ParamManagerForTimeline* paramManager,
