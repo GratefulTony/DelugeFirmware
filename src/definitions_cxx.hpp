@@ -327,6 +327,7 @@ enum class PatchSource : uint8_t {
 	VELOCITY,
 	NOTE,
 	RANDOM,
+	UNISON_INDEX,
 	NONE,
 
 	// Used for shortcuts

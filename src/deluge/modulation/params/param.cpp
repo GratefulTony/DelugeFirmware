@@ -144,6 +144,8 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [LOCAL_TABLE_SHAPER_MIX]         = "Shaper mix",
 	    [LOCAL_OSC_A_START_OFFSET]       = "Offset A",
 	    [LOCAL_OSC_B_START_OFFSET]       = "Offset B",
+	    [LOCAL_OSC_A_PHASE]              = "Osc1 phase",
+	    [LOCAL_OSC_B_PHASE]              = "Osc2 phase",
 	    [LOCAL_SINE_SHAPER_TWIST]        = "Sine twist",
 	    [LOCAL_SINE_SHAPER_HARMONIC]     = "Sine harm",
 	    [LOCAL_LPF_FREQ]                 = "LPf freq",
@@ -236,6 +238,8 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [LOCAL_TABLE_SHAPER_MIX] = STRING_FOR_PARAM_LOCAL_TABLE_SHAPER_MIX,
 	    [LOCAL_OSC_A_START_OFFSET] = STRING_FOR_START_OFFSET,
 	    [LOCAL_OSC_B_START_OFFSET] = STRING_FOR_START_OFFSET,
+	    [LOCAL_OSC_A_PHASE] = STRING_FOR_PARAM_LOCAL_OSC_A_PHASE,
+	    [LOCAL_OSC_B_PHASE] = STRING_FOR_PARAM_LOCAL_OSC_B_PHASE,
 	    [LOCAL_SINE_SHAPER_TWIST] = STRING_FOR_SINE_SHAPER_SYMMETRY, // Reuse existing twist/symmetry string
 	    [LOCAL_SINE_SHAPER_HARMONIC] = STRING_FOR_SINE_SHAPER_HARMONIC,
 	    [LOCAL_LPF_FREQ] = STRING_FOR_PARAM_LOCAL_LPF_FREQ,
@@ -802,6 +806,12 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 
 		case LOCAL_OSC_B_START_OFFSET:
 			return "oscBStartOffset";
+
+		case LOCAL_OSC_A_PHASE:
+			return "oscAPhase";
+
+		case LOCAL_OSC_B_PHASE:
+			return "oscBPhase";
 
 		case LOCAL_SINE_SHAPER_TWIST:
 			return "sineShaperTwist";

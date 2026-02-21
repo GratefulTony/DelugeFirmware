@@ -40,6 +40,7 @@ const PatchSource sourceMenuContents[] = {
     PatchSource::NOTE,
     PatchSource::SIDECHAIN,
     PatchSource::RANDOM,
+    PatchSource::UNISON_INDEX,
     PatchSource::X,
     PatchSource::Y,
     PatchSource::AFTERTOUCH,
@@ -139,6 +140,10 @@ void SourceSelection::drawValue() {
 
 	case PatchSource::RANDOM:
 		text = STRING_FOR_PATCH_SOURCE_RANDOM;
+		break;
+
+	case PatchSource::UNISON_INDEX:
+		text = STRING_FOR_PATCH_SOURCE_UNISON_INDEX;
 		break;
 
 	case PatchSource::AFTERTOUCH:

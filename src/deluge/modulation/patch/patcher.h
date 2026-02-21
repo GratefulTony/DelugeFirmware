@@ -52,6 +52,7 @@ public:
 	void performInitialPatching(Sound& sound, ParamManager& param_manager);
 	void performPatching(uint32_t sources_changed, Sound& sound, ParamManagerForTimeline& param_manager);
 	void recalculateFinalValueForParamWithNoCables(int32_t param, Sound& sound, ParamManagerForTimeline& param_manager);
+	int32_t getUnisonOffset(int32_t param, int32_t unisonValue, Sound& sound, ParamManager& paramManager);
 
 private:
 	int32_t combineCablesLinearForRangeParam(Destination const* destination, ParamManager& param_manager);

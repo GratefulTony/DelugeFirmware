@@ -17,9 +17,14 @@
 #pragma once
 #include "gui/menu_item/decimal.h"
 #include "gui/menu_item/formatted_title.h"
+#include "gui/menu_item/patch_cable_strength/regular.h"
+#include "gui/menu_item/source_selection/regular.h"
 #include "gui/ui/sound_editor.h"
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
+#include "modulation/params/param.h"
+#include "modulation/params/param_set.h"
+#include "modulation/patch/patch_cable_set.h"
 #include "processing/sound/sound.h"
 
 namespace deluge::gui::menu_item::osc {
@@ -134,6 +139,48 @@ public:
 	}
 
 	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return SLIDER; }
+
+	// Mod matrix support — encoder press opens source selection for LOCAL_OSC_A/B_PHASE
+	MenuItem* selectButtonPress() override {
+		if (for_modulator_) {
+			return nullptr; // Modulators don't have phase params
+		}
+		soundEditor.patchingParamSelected = deluge::modulation::params::LOCAL_OSC_A_PHASE + source_id_;
+		return &source_selection::regularMenu;
+	}
+
+	uint8_t shouldDrawDotOnName() override {
+		if (for_modulator_) {
+			return 255;
+		}
+		ParamDescriptor paramDescriptor{};
+		paramDescriptor.setToHaveParamOnly(deluge::modulation::params::LOCAL_OSC_A_PHASE + source_id_);
+		return soundEditor.currentParamManager->getPatchCableSet()->isAnySourcePatchedToParamVolumeInspecific(
+		           paramDescriptor)
+		           ? 3
+		           : 255;
+	}
+
+	uint8_t shouldBlinkPatchingSourceShortcut(PatchSource s, uint8_t* colour) override {
+		if (for_modulator_) {
+			return 255;
+		}
+		ParamDescriptor paramDescriptor{};
+		paramDescriptor.setToHaveParamOnly(deluge::modulation::params::LOCAL_OSC_A_PHASE + source_id_);
+		return soundEditor.currentParamManager->getPatchCableSet()
+		               ->isSourcePatchedToDestinationDescriptorVolumeInspecific(s, paramDescriptor)
+		           ? 3
+		           : 255;
+	}
+
+	MenuItem* patchingSourceShortcutPress(PatchSource s, bool previousPressStillActive = false) override {
+		if (for_modulator_) {
+			return nullptr;
+		}
+		soundEditor.patchingParamSelected = deluge::modulation::params::LOCAL_OSC_A_PHASE + source_id_;
+		source_selection::regularMenu.s = s;
+		return &patch_cable_strength::regularMenu;
+	}
 
 private:
 	bool for_modulator_;

@@ -307,6 +307,9 @@ char const* sourceToString(PatchSource source) {
 	case PatchSource::RANDOM:
 		return "random";
 
+	case PatchSource::UNISON_INDEX:
+		return "unisonIndex";
+
 	case PatchSource::AFTERTOUCH:
 		return "aftertouch";
 
@@ -361,6 +364,9 @@ char const* getSourceDisplayNameForOLED(PatchSource s) {
 
 	case PatchSource::RANDOM:
 		return l10n::get(STRING_FOR_PATCH_SOURCE_RANDOM);
+
+	case PatchSource::UNISON_INDEX:
+		return l10n::get(STRING_FOR_PATCH_SOURCE_UNISON_INDEX);
 
 	case PatchSource::AFTERTOUCH:
 		return l10n::get(STRING_FOR_PATCH_SOURCE_AFTERTOUCH);
@@ -424,6 +430,9 @@ char const* sourceToStringShort(PatchSource source) {
 
 	case PatchSource::RANDOM:
 		return "rand";
+
+	case PatchSource::UNISON_INDEX:
+		return "unis";
 
 	case PatchSource::AFTERTOUCH:
 		return "pres";
