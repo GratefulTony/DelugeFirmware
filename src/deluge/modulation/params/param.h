@@ -102,6 +102,8 @@ enum Local : ParamType {
 	LOCAL_TABLE_SHAPER_MIX,   // Table shaper wet/dry mix
 	LOCAL_OSC_A_START_OFFSET, // Sample start offset for oscillator A (bipolar)
 	LOCAL_OSC_B_START_OFFSET, // Sample start offset for oscillator B (bipolar)
+	LOCAL_OSC_A_PHASE,        // Oscillator A retrigger phase offset (bipolar)
+	LOCAL_OSC_B_PHASE,        // Oscillator B retrigger phase offset (bipolar)
 
 	// Local zone params (pure modulation pass-through, scaling handled by ZoneBasedParam)
 	FIRST_LOCAL_ZONE,

@@ -46,10 +46,16 @@ HorizontalMenu audioCompMenu{STRING_FOR_COMMUNITY_FEATURE_MASTER_COMPRESSOR, chi
 unison::CountToStereoSpread numUnisonMenu{STRING_FOR_UNISON_NUMBER, STRING_FOR_UNISON_NUMBER_MENU_TITLE};
 unison::Detune unisonDetuneMenu{STRING_FOR_UNISON_DETUNE, STRING_FOR_UNISON_DETUNE_MENU_TITLE};
 unison::StereoSpread unison::stereoSpreadMenu{STRING_FOR_UNISON_STEREO_SPREAD, STRING_FOR_UNISON_STEREO_SPREAD_MENU_TITLE};
-std::array<MenuItem*, 3> child4 = {
+unison::IndexCurve unisonIndexCurveMenu{STRING_FOR_UNISON_INDEX_CURVE, STRING_FOR_UNISON_INDEX_CURVE_MENU_TITLE};
+unison::IndexShape unisonIndexShapeMenu{STRING_FOR_UNISON_INDEX_SHAPE, STRING_FOR_UNISON_INDEX_SHAPE_MENU_TITLE};
+unison::IndexMapping unisonIndexMappingMenu{STRING_FOR_UNISON_INDEX_MAPPING, STRING_FOR_UNISON_INDEX_MAPPING_MENU_TITLE};
+std::array<MenuItem*, 6> child4 = {
     &numUnisonMenu,
     &unisonDetuneMenu,
     &unison::stereoSpreadMenu,
+    &unisonIndexCurveMenu,
+    &unisonIndexShapeMenu,
+    &unisonIndexMappingMenu,
 };
 HorizontalMenu unisonMenu{STRING_FOR_UNISON, child4, HorizontalMenu::Layout::FIXED};
 osc::AudioRecorder sample0RecorderMenu{STRING_FOR_RECORD_TO_SAMPLE, 0};
