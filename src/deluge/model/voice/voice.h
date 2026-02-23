@@ -84,6 +84,7 @@ public:
 	std::array<int32_t, kNumSources> sourceAmplitudesLastTime;
 	std::array<int32_t, kNumModulators> modulatorAmplitudeLastTime;
 	std::array<uint32_t, kNumSources> sourceWaveIndexesLastTime;
+	std::array<int32_t, kNumSources> lastAppliedStartOffset{};
 
 	int32_t filterGainLastTime;
 	bool doneFirstRender;

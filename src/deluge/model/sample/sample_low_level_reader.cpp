@@ -1192,14 +1192,11 @@ bool SampleLowLevelReader::readSamplesForTimeStretching(
 		timeStretcher->playHeadStillActive[whichPlayHead] = considerUpcomingWindow(
 		    guide, sample, &samplesNow, phaseIncrement, loopingAtLowLevel, bufferSize, 0, priorityRating);
 		if (!timeStretcher->playHeadStillActive[whichPlayHead]) {
-
-			// If we got false, that can just mean end of waveform. But if clusters[0] has been set to NULL too, that
-			// means (SD card) error
-			if (clusters[0]) {
-				return false;
-			}
-
-			// D_PRINTLN("one head no longer active for timeStretcher");
+			// Head reached end of waveform or cluster wasn't loaded in time.
+			// Just deactivate the head — don't kill the voice. The time stretcher's
+			// both-heads-dead restart logic will handle recovery if needed.
+			// This is important for STRETCH+offset where play heads regularly
+			// cross the physical sample boundary during normal operation.
 			break;
 		}
 

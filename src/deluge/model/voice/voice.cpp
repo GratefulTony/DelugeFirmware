@@ -223,7 +223,13 @@ void Voice::applyStartOffsetToGuide(VoiceSamplePlaybackGuide& guide, const Sourc
 								}
 							}
 							else {
-								if (windowWraps) {
+								// For synced STRETCH, the time stretcher manages position
+								// wrapping via wrapSyncPosition. Don't set up loopSplit —
+								// just let the readers loop at the physical boundary.
+								// Setting loopSplit triggers the oneShotWrap mechanism
+								// (STRETCH isn't a "looping repeat mode"), which would
+								// kill the voice after one split-loop cycle.
+								if (windowWraps && !synced) {
 									guide.loopSplit = true;
 									if (revPingpong) {
 										guide.loopEndPlaybackAtByte = static_cast<uint32_t>(newStart + bytesPerFrame);
@@ -240,7 +246,16 @@ void Voice::applyStartOffsetToGuide(VoiceSamplePlaybackGuide& guide, const Sourc
 									}
 								}
 								else {
-									guide.loopStartPlaybackAtByte = static_cast<uint32_t>(newStart);
+									// For synced STRETCH with wrapping offset, the time
+									// stretcher positions heads anywhere in the sample via
+									// hopEnd(). Loop back to the physical start so the
+									// reader has access to the full sample.
+									if (synced && windowWraps) {
+										guide.loopStartPlaybackAtByte = static_cast<uint32_t>(audioStart);
+									}
+									else {
+										guide.loopStartPlaybackAtByte = static_cast<uint32_t>(newStart);
+									}
 								}
 							}
 						}
@@ -462,6 +477,7 @@ activenessDetermined:
 
 			// Apply sample start offset (now a patched param — includes velocity/LFO modulation)
 			startOffsetParam = paramFinalValues[params::LOCAL_OSC_A_START_OFFSET + s];
+			lastAppliedStartOffset[s] = startOffsetParam;
 			savedGuide = guides[s];
 			applyStartOffsetToGuide(guides[s], *source, startOffsetParam);
 		}
@@ -2385,6 +2401,56 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
 		}
 	}
 
+	// Live offset update: if the start offset param changed since note-on (or last update),
+	// update playback so the change is audible immediately.
+	if (sound.sources[s].oscType == OscType::SAMPLE && guides[s].audioFileHolder
+	    && (isLoopingRepeatMode(sound.sources[s].repeatMode)
+	        || sound.sources[s].repeatMode == SampleRepeatMode::STRETCH)) {
+		int32_t offsetParam = params::LOCAL_OSC_A_START_OFFSET + s;
+		patcher.recalculateFinalValueForParamWithNoCables(offsetParam, sound, *paramManager);
+		int32_t currentOffset = paramFinalValues[offsetParam];
+		if (currentOffset != lastAppliedStartOffset[s]) {
+			bool reversed = sound.sources[s].sampleControls.isCurrentlyReversed();
+			guides[s].setupPlaybackBounds(reversed);
+			guides[s].pingpongActive = (sound.sources[s].repeatMode == SampleRepeatMode::PINGPONG);
+			applyStartOffsetToGuide(guides[s], sound.sources[s], currentOffset);
+
+			// For non-wrapping offset with no explicit loop start marker,
+			// also shift the loop restart point so the loop region moves.
+			if (!sound.sources[s].offsetWraps) {
+				auto* holder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
+				int32_t loopStartMarker = reversed ? holder->loopEndPos : holder->loopStartPos;
+				if (!loopStartMarker) {
+					guides[s].loopStartPlaybackAtByte = guides[s].startPlaybackAtByte;
+				}
+			}
+
+			// For non-STRETCH modes, force-restart readers from the new
+			// position. The time stretcher naturally crossfades between hops,
+			// so STRETCH voices don't need a restart.
+			if (sound.sources[s].repeatMode != SampleRepeatMode::STRETCH) {
+				Sample* offsetSample = static_cast<Sample*>(guides[s].audioFileHolder->audioFile);
+				LoopType lt = guides[s].getLoopingType(sound.sources[s]);
+				for (int32_t iu = 0; iu < sound.numUnison; iu++) {
+					auto* vups = &unisonParts[iu].sources[s];
+					if (vups->active && vups->voiceSample) {
+						VoiceSample* vs = vups->voiceSample;
+						if (vs->cache) {
+							vs->stopUsingCache(&guides[s], offsetSample, getPriorityRating(), lt != LoopType::NONE);
+						}
+						if (vs->timeStretcher) {
+							vs->endTimeStretching();
+						}
+						vs->unassignAllReasons(false);
+						vs->justLoopedBack = true;
+						vs->setupClusersForInitialPlay(&guides[s], offsetSample, 0, true, getPriorityRating());
+					}
+				}
+			}
+			lastAppliedStartOffset[s] = currentOffset;
+		}
+	}
+
 	// One bitmask check gates all per-unison modulation — zero cost when UNISON_INDEX isn't patched
 	bool hasUnisonMod = sound.numUnison > 1
 	                    && (paramManager->getPatchCableSet()->sourcesPatchedToAnything[GLOBALITY_LOCAL]
@@ -2607,29 +2673,9 @@ pitchTooHigh:
 				if (!voiceSample->doneFirstRenderYet && !tryToStartMidNote
 				    && portaEnvelopePos == 0xFFFFFFFF) { // No porta
 
-					// Pingpong mode can't use cache since direction changes mid-playback
-					if (guides[s].pingpongActive) {
-						goto dontUseCache;
-					}
-
 					// Split-loop from offset wrapping can't use cache
 					if (guides[s].loopSplit) {
 						goto dontUseCache;
-					}
-
-					// Cache plays from the original sample start, ignoring any
-					// start offset shift. Bypass when any offset is active.
-					if (guides[s].hasStartOffset) {
-						goto dontUseCache;
-					}
-
-					// Skip cache when crossfade is active — the crossfade envelope
-					// is only applied in the uncached render path
-					{
-						auto* xfadeHolder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
-						if (xfadeHolder->loopCrossfadeMs > 0 && loopingType != LoopType::NONE) {
-							goto dontUseCache;
-						}
 					}
 
 					// If looping, make sure the loop isn't too short. If so, caching just wouldn't sound good /

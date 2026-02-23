@@ -98,9 +98,11 @@ private:
 	bool stopReadingFromCache();
 
 	int32_t cacheBytePos = 0;
+	int8_t cachePlayDirection{1}; // Direction for reading cache in pingpong mode (1=forward, -1=backward)
 	uint32_t cacheLoopLengthBytes = 0;
-	int32_t cacheLoopEndPointBytes = 0; // 2147483647 means no looping. Will be set to sample end-point if looping
-	                                    // there. Gets re-set to 2147483647 when note "released"
+	int32_t cacheLoopStartPointBytes{0}; // Cache byte position of loop start (for pingpong backward boundary)
+	int32_t cacheLoopEndPointBytes = 0;  // 2147483647 means no looping. Will be set to sample end-point if looping
+	                                     // there. Gets re-set to 2147483647 when note "released"
 	int32_t cacheEndPointBytes = 0; // Will sometimes be the whole length of the sample. Wherever the red marker is. Or
 	                                // a little further if it's the full length of the sample, to allow for timestretch
 	                                // / interpolation ring-out
