@@ -148,6 +148,16 @@ void Voice::applyStartOffsetToGuide(VoiceSamplePlaybackGuide& guide, const Sourc
 				if (physLen > bytesPerFrame && byteShift != 0) {
 					if (!source.offsetWraps) {
 						int32_t newStart = forward ? (startByte + byteShift) : (startByte - byteShift);
+						// If the shift pushes before the sample start (negative offset),
+						// convert the overshoot to pre-roll silence samples.
+						if (forward && newStart < audioStart) {
+							guide.preRollSamples = (audioStart - newStart) / bytesPerFrame;
+							newStart = audioStart;
+						}
+						else if (!forward && newStart > audioEnd - bytesPerFrame) {
+							guide.preRollSamples = (newStart - (audioEnd - bytesPerFrame)) / bytesPerFrame;
+							newStart = audioEnd - bytesPerFrame;
+						}
 						newStart = std::clamp(newStart, audioStart, audioEnd - bytesPerFrame);
 						newStart = audioStart + ((newStart - audioStart) / bytesPerFrame) * bytesPerFrame;
 						guide.startPlaybackAtByte = static_cast<uint32_t>(newStart);
@@ -2406,9 +2416,7 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
 	if (sound.sources[s].oscType == OscType::SAMPLE && guides[s].audioFileHolder
 	    && (isLoopingRepeatMode(sound.sources[s].repeatMode)
 	        || sound.sources[s].repeatMode == SampleRepeatMode::STRETCH)) {
-		int32_t offsetParam = params::LOCAL_OSC_A_START_OFFSET + s;
-		patcher.recalculateFinalValueForParamWithNoCables(offsetParam, sound, *paramManager);
-		int32_t currentOffset = paramFinalValues[offsetParam];
+		int32_t currentOffset = paramFinalValues[params::LOCAL_OSC_A_START_OFFSET + s];
 		if (currentOffset != lastAppliedStartOffset[s]) {
 			// Pingpong: the split-loop phase machine and shared playDirection
 			// make it impossible to safely modify guide boundaries mid-bounce.
