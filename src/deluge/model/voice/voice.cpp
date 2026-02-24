@@ -2434,9 +2434,22 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
 					}
 				}
 
+				// STRETCH: kill the time stretcher so it recreates on
+				// the next render with the updated startPlaybackAtByte.
+				// Letting the old one continue would cause its hopEnd()
+				// sync calculation to jump (startSample + numSamplesIn
+				// overflows and wraps to the front of the sample).
+				if (sound.sources[s].repeatMode == SampleRepeatMode::STRETCH) {
+					for (int32_t iu = 0; iu < sound.numUnison; iu++) {
+						auto* vups = &unisonParts[iu].sources[s];
+						if (vups->active && vups->voiceSample && vups->voiceSample->timeStretcher) {
+							vups->voiceSample->endTimeStretching();
+						}
+					}
+				}
+
 				// For LOOP mode, shift each reader's position by the offset delta
 				// so the change is audible immediately.
-				// STRETCH: time stretcher computes position from ticks.
 				if (sound.sources[s].repeatMode != SampleRepeatMode::STRETCH) {
 					Sample* offsetSample = static_cast<Sample*>(guides[s].audioFileHolder->audioFile);
 					int32_t audioStart = static_cast<int32_t>(offsetSample->audioDataStartPosBytes);
