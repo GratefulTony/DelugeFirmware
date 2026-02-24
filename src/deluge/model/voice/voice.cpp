@@ -2410,44 +2410,84 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
 		patcher.recalculateFinalValueForParamWithNoCables(offsetParam, sound, *paramManager);
 		int32_t currentOffset = paramFinalValues[offsetParam];
 		if (currentOffset != lastAppliedStartOffset[s]) {
-			bool reversed = sound.sources[s].sampleControls.isCurrentlyReversed();
-			guides[s].setupPlaybackBounds(reversed);
-			guides[s].pingpongActive = (sound.sources[s].repeatMode == SampleRepeatMode::PINGPONG);
-			applyStartOffsetToGuide(guides[s], sound.sources[s], currentOffset);
-
-			// For non-wrapping offset with no explicit loop start marker,
-			// also shift the loop restart point so the loop region moves.
-			if (!sound.sources[s].offsetWraps) {
-				auto* holder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
-				int32_t loopStartMarker = reversed ? holder->loopEndPos : holder->loopStartPos;
-				if (!loopStartMarker) {
-					guides[s].loopStartPlaybackAtByte = guides[s].startPlaybackAtByte;
-				}
+			// Pingpong: the split-loop phase machine and shared playDirection
+			// make it impossible to safely modify guide boundaries mid-bounce.
+			// Just record the new value — offset takes effect at next note-on.
+			if (sound.sources[s].repeatMode == SampleRepeatMode::PINGPONG) {
+				lastAppliedStartOffset[s] = currentOffset;
 			}
+			else {
+				// Save old start position to compute the byte shift
+				uint32_t oldStartByte = guides[s].startPlaybackAtByte;
 
-			// For non-STRETCH modes, force-restart readers from the new
-			// position. The time stretcher naturally crossfades between hops,
-			// so STRETCH voices don't need a restart.
-			if (sound.sources[s].repeatMode != SampleRepeatMode::STRETCH) {
-				Sample* offsetSample = static_cast<Sample*>(guides[s].audioFileHolder->audioFile);
-				LoopType lt = guides[s].getLoopingType(sound.sources[s]);
-				for (int32_t iu = 0; iu < sound.numUnison; iu++) {
-					auto* vups = &unisonParts[iu].sources[s];
-					if (vups->active && vups->voiceSample) {
-						VoiceSample* vs = vups->voiceSample;
-						if (vs->cache) {
-							vs->stopUsingCache(&guides[s], offsetSample, getPriorityRating(), lt != LoopType::NONE);
-						}
-						if (vs->timeStretcher) {
-							vs->endTimeStretching();
-						}
-						vs->unassignAllReasons(false);
-						vs->justLoopedBack = true;
-						vs->setupClusersForInitialPlay(&guides[s], offsetSample, 0, true, getPriorityRating());
+				bool reversed = sound.sources[s].sampleControls.isCurrentlyReversed();
+				guides[s].setupPlaybackBounds(reversed);
+				applyStartOffsetToGuide(guides[s], sound.sources[s], currentOffset);
+
+				// For non-wrapping offset with no explicit loop start marker,
+				// also shift the loop restart point so the loop region moves.
+				if (!sound.sources[s].offsetWraps) {
+					auto* holder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
+					int32_t loopStartMarker = reversed ? holder->loopEndPos : holder->loopStartPos;
+					if (!loopStartMarker) {
+						guides[s].loopStartPlaybackAtByte = guides[s].startPlaybackAtByte;
 					}
 				}
-			}
-			lastAppliedStartOffset[s] = currentOffset;
+
+				// For LOOP mode, shift each reader's position by the offset delta
+				// so the change is audible immediately.
+				// STRETCH: time stretcher computes position from ticks.
+				if (sound.sources[s].repeatMode != SampleRepeatMode::STRETCH) {
+					Sample* offsetSample = static_cast<Sample*>(guides[s].audioFileHolder->audioFile);
+					int32_t audioStart = static_cast<int32_t>(offsetSample->audioDataStartPosBytes);
+					int32_t physLen = static_cast<int32_t>(offsetSample->audioDataLengthBytes);
+					int32_t bytesPerFrame = offsetSample->numChannels * offsetSample->byteDepth;
+					int32_t byteShift =
+					    static_cast<int32_t>(guides[s].startPlaybackAtByte) - static_cast<int32_t>(oldStartByte);
+
+					for (int32_t iu = 0; iu < sound.numUnison; iu++) {
+						auto* vups = &unisonParts[iu].sources[s];
+						if (vups->active && vups->voiceSample) {
+							VoiceSample* vs = vups->voiceSample;
+							int32_t currentByte = vs->getPlayByteLowLevel(offsetSample, &guides[s]);
+							int32_t newByte = currentByte + byteShift;
+							// Wrap within loop region to prevent excessive
+							// boundary bouncing in changeClusterIfNecessary
+							int32_t loopStart = static_cast<int32_t>(guides[s].loopStartPlaybackAtByte);
+							int32_t loopEnd =
+							    static_cast<int32_t>(guides[s].loopEndPlaybackAtByte ? guides[s].loopEndPlaybackAtByte
+							                                                         : guides[s].endPlaybackAtByte);
+							int32_t loopLen = loopEnd - loopStart;
+							if (loopLen > bytesPerFrame) {
+								int32_t rel = ((newByte - loopStart) % loopLen + loopLen) % loopLen;
+								newByte = loopStart + (rel / bytesPerFrame) * bytesPerFrame;
+							}
+							else if (physLen > 0 && bytesPerFrame > 0) {
+								int32_t rel = ((newByte - audioStart) % physLen + physLen) % physLen;
+								newByte = audioStart + (rel / bytesPerFrame) * bytesPerFrame;
+							}
+							if (vs->cache) {
+								LoopType lt = guides[s].getLoopingType(sound.sources[s]);
+								vs->stopUsingCache(&guides[s], offsetSample, getPriorityRating(), lt != LoopType::NONE);
+							}
+							if (vs->timeStretcher) {
+								vs->endTimeStretching();
+							}
+							vs->unassignAllReasons(false);
+							if (!vs->setupClustersForPlayFromByte(&guides[s], offsetSample, newByte,
+							                                      getPriorityRating())) {
+								vs->pendingSamplesLate = 1;
+							}
+							// Short anti-click fade-in
+							if (vs->loopFadeInSamplesTotal > 0) {
+								vs->loopFadeInSamplesRemaining =
+								    std::min(vs->loopFadeInSamplesTotal, kAntiClickCrossfadeLength);
+							}
+						}
+					}
+				}
+				lastAppliedStartOffset[s] = currentOffset;
+			} // else (non-pingpong)
 		}
 	}
 
