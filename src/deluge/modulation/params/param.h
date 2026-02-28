@@ -576,6 +576,24 @@ constexpr int32_t getHighResOffsetDivisor(UnpatchedShared paramId) {
 	return info.resolution / 128;
 }
 
+/// Get the high-res divisor for any param given its kind and ID.
+/// Returns 1 for standard params, >1 for hi-res zone params.
+constexpr int32_t getHighResDivisorForParam(Kind kind, int32_t paramId) {
+	if (kind == Kind::PATCHED) {
+		auto paramType = static_cast<ParamType>(paramId);
+		if (isHighResZoneParam(paramType)) {
+			return getHighResOffsetDivisor(paramType);
+		}
+	}
+	else if (kind == Kind::UNPATCHED_SOUND || kind == Kind::UNPATCHED_GLOBAL) {
+		auto unpatched = static_cast<UnpatchedShared>(paramId);
+		if (isHighResZoneParam(unpatched)) {
+			return getHighResOffsetDivisor(unpatched);
+		}
+	}
+	return 1;
+}
+
 /// Check if a patched param is a scatter param (supports gamma adjustment via push+twist)
 constexpr bool isScatterParam(ParamType paramId) {
 	return paramId == GLOBAL_SCATTER_MACRO || paramId == GLOBAL_SCATTER_ZONE_A || paramId == GLOBAL_SCATTER_ZONE_B

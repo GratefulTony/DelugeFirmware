@@ -809,14 +809,51 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 		// convert current value to knobPos to compare to cc value being received
 		int32_t knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(currentValue, modelStackWithParam);
 
-		// calculate new knob position based on cc value received and deluge current value
-		int32_t newKnobPos = MidiTakeover::calculateKnobPos(knobPos, ccValue, nullptr, true, ccNumber, isStepEditing);
+		int32_t newValue;
+		bool shouldUpdate;
+		int32_t highResDivisor = params::getHighResDivisorForParam(modelStackWithParam->paramCollection->getParamKind(),
+		                                                           modelStackWithParam->paramId);
+		int32_t newKnobPos;
+		if (highResDivisor > 1) {
+			// Hi-res zone params: CC adds a scaled offset to the current value
+			// Bypass MidiTakeover — PICKUP/SCALE don't apply to additive hi-res stepping
+			int32_t stepSize = (1 << 25) / highResDivisor;
+			int32_t ccDelta;
+			if (midiEngine.midiTakeover == MIDITakeoverMode::RELATIVE) {
+				ccDelta = ccValue;
+				if (ccDelta >= 64) {
+					ccDelta -= 128;
+				}
+			}
+			else {
+				int32_t midiKnobPos = (ccValue < kMaxMIDIValue) ? (ccValue - 64) : 64;
+				if (midiFollow.previousKnobPos[ccNumber] == kNoSelection) {
+					// First CC message: establish baseline, no movement
+					midiFollow.previousKnobPos[ccNumber] = midiKnobPos;
+					ccDelta = 0;
+				}
+				else {
+					ccDelta = midiKnobPos - midiFollow.previousKnobPos[ccNumber];
+					midiFollow.previousKnobPos[ccNumber] = midiKnobPos;
+				}
+			}
+			if (ccDelta == 0) {
+				shouldUpdate = false;
+			}
+			else {
+				int64_t nv = static_cast<int64_t>(currentValue) + static_cast<int64_t>(ccDelta) * stepSize;
+				newValue = static_cast<int32_t>(std::clamp(nv, int64_t{0}, int64_t{2147483647}));
+				shouldUpdate = true;
+				newKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(newValue, modelStackWithParam);
+			}
+		}
+		else {
+			newKnobPos = MidiTakeover::calculateKnobPos(knobPos, ccValue, nullptr, true, ccNumber, isStepEditing);
+			shouldUpdate = (newKnobPos != knobPos);
+			newValue = modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
+		}
 
-		// is the cc being received for the same value as the current knob pos? If so, do nothing
-		if (newKnobPos != knobPos) {
-			// Convert the New Knob Position to a Parameter Value
-			int32_t newValue =
-			    modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
+		if (shouldUpdate) {
 
 			// Set the new Parameter Value for the MIDI Learned Parameter
 			modelStackWithParam->autoParam->setValuePossiblyForRegion(newValue, modelStackWithParam, modPos, modLength);
