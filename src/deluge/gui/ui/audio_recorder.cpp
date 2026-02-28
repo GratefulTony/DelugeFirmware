@@ -223,9 +223,15 @@ void AudioRecorder::process() {
 				// We want to attach that Sample to a Source right away...
 				soundEditor.currentSound->killAllVoices();
 				soundEditor.currentSource->setOscType(OscType::SAMPLE);
-				soundEditor.currentMultiRange->getAudioFileHolder()->filePath.set(&recorder->sample->filePath);
-				soundEditor.currentMultiRange->getAudioFileHolder()->setAudioFile(
-				    recorder->sample, soundEditor.currentSource->sampleControls.isCurrentlyReversed(), true);
+				// setOscType may reallocate ranges, so get the range directly from the source
+				// rather than relying on soundEditor.currentMultiRange which can be stale
+				auto* range = static_cast<MultisampleRange*>(soundEditor.currentSource->getOrCreateFirstRange());
+				if (range) {
+					soundEditor.currentMultiRange = range;
+					range->getAudioFileHolder()->filePath.set(&recorder->sample->filePath);
+					range->getAudioFileHolder()->setAudioFile(
+					    recorder->sample, soundEditor.currentSource->sampleControls.isCurrentlyReversed(), true);
+				}
 			}
 			finishRecording();
 
@@ -267,6 +273,17 @@ void AudioRecorder::finishRecording() {
 	recorder = nullptr;
 	recordingSource = AudioInputChannel::NONE;
 	display->removeLoadingAnimation();
+}
+
+ActionResult AudioRecorder::padAction(int32_t x, int32_t y, int32_t velocity) {
+	// Forward audition pad presses to the root UI so the user can hear notes during recording
+	if (x == kDisplayWidth + 1) {
+		RootUI* rootUI = getRootUI();
+		if (rootUI) {
+			return rootUI->padAction(x, y, velocity);
+		}
+	}
+	return ActionResult::DEALT_WITH;
 }
 
 ActionResult AudioRecorder::buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {
