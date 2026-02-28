@@ -1152,6 +1152,22 @@ uint32_t Voice::getLocalLFOPhaseIncrement(LFO_ID lfoId, deluge::modulation::para
 					int32_t bytesLeft =
 					    (int32_t)((uint32_t)guides[s].endPlaybackAtByte - (uint32_t)bytePos) * guides[s].playDirection;
 
+					// Split-loop (wrapping offset for ONCE): account for total remaining
+					// playback across both phases so auto-release doesn't trigger prematurely
+					// during the short first phase near the sample end.
+					if (guides[s].loopSplit && !guides[s].oneShotComplete) {
+						if (guides[s].loopWrapPhase == 1) {
+							// Phase 1 (near-end → sample end): add phase 2 length
+							bytesLeft += (int32_t)(guides[s].loopEndPlaybackAtByte - guides[s].wrapAroundRestartByte)
+							             * guides[s].playDirection;
+						}
+						else if (guides[s].loopWrapPhase == 2) {
+							// Phase 2 (start → loopEnd): use loopEnd as the actual end
+							bytesLeft = (int32_t)((uint32_t)guides[s].loopEndPlaybackAtByte - (uint32_t)bytePos)
+							            * guides[s].playDirection;
+						}
+					}
+
 					Source* source = &sound.sources[s];
 					int32_t bytesPerSample = sample->byteDepth * sample->numChannels;
 
