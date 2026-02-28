@@ -1857,6 +1857,7 @@ menu_item::Submenu soundEditorRootMenuSongView{
     STRING_FOR_SONG,
     {
         &songMasterMenu,
+        &audioCompMenu,
         &globalFiltersMenu,
         &globalFXMenu,
         &swingIntervalMenu,
