@@ -311,10 +311,16 @@ enum class VoicePriority : uint8_t {
 
 constexpr size_t kNumVoicePriorities = util::to_underlying(VoicePriority::HIGH) + 1;
 
+constexpr int32_t kNumMacros = 4;
+
 enum class PatchSource : uint8_t {
 	LFO_GLOBAL_1,
 	LFO_GLOBAL_2,
 	SIDECHAIN,
+	MACRO_1,
+	MACRO_2,
+	MACRO_3,
+	MACRO_4,
 	ENVELOPE_0,
 	ENVELOPE_1,
 	ENVELOPE_2,

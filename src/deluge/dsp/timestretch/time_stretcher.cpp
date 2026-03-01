@@ -307,7 +307,9 @@ bool TimeStretcher::hopEnd(SamplePlaybackGuide* guide, VoiceSample* voiceSample,
 
 		// When the start offset has byte-shifted the playback window, samplePos
 		// can exceed the physical sample length (shifted start + wrapped duration).
-		// Wrap within the physical sample so the read head stays in bounds.
+		// Wrap within the full physical sample so the read head stays in bounds.
+		// The offset just shifts where the loop starts — the full sample is
+		// still played, wrapping around the physical boundary.
 		if (guide->wrapSyncPosition) {
 			int64_t totalPhysSamples =
 			    sample->audioDataLengthBytes / (uint8_t)(sample->numChannels * sample->byteDepth);
@@ -594,10 +596,21 @@ bool TimeStretcher::hopEnd(SamplePlaybackGuide* guide, VoiceSample* voiceSample,
 		crossfadeIncrement = (uint32_t)kMaxSampleValue / (uint32_t)crossfadeLengthSamples;
 		crossfadeProgress = 0;
 
-		// Make sure we haven't shot past end of waveform. If so, we don't want this new play-head sounding
+		// Make sure we haven't shot past end of waveform.
 		if ((int32_t)(beamBackEdge - waveformEndSample) * playDirection >= 0) {
-			playHeadStillActive[PLAY_HEAD_NEWER] = false;
-			return true; // But don't cut the VoiceSample entirely
+			// For looping stretch with wrapSyncPosition, the beam can overshoot
+			// when samplePos wraps near the sample boundary. Wrap the position
+			// back into the sample instead of killing the play head.
+			if (guide->wrapSyncPosition) {
+				int64_t totalSamples = sample->lengthInSamples;
+				if (totalSamples > 0) {
+					beamBackEdge = ((beamBackEdge % totalSamples) + totalSamples) % totalSamples;
+				}
+			}
+			else {
+				playHeadStillActive[PLAY_HEAD_NEWER] = false;
+				return true; // But don't cut the VoiceSample entirely
+			}
 		}
 
 		newHeadBytePos = sample->audioDataStartPosBytes + beamBackEdge * bytesPerSample;

@@ -563,6 +563,9 @@ ActionResult AudioClipView::padAction(int32_t x, int32_t y, int32_t on) {
 		int32_t effectiveLength = clip->loopLength;
 
 		if (on == 0) {
+			if (sdRoutineLock) {
+				return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE;
+			}
 			// Pad release
 			int32_t idx = findGateHeldPad(x);
 			if (idx >= 0) {
@@ -587,62 +590,67 @@ ActionResult AudioClipView::padAction(int32_t x, int32_t y, int32_t on) {
 						if (rangeEnd > effectiveLength) {
 							rangeEnd = effectiveLength;
 						}
+						if (rangeStart < effectiveLength) {
 
-						// Trim or delete closes that overlap with the range
-						for (int32_t i = clip->gateCloses.getNumElements() - 1; i >= 0; i--) {
-							Note* gate = clip->gateCloses.getElement(i);
-							int32_t gateEnd = gate->pos + gate->getLength();
-							if (gateEnd <= rangeStart || gate->pos >= rangeEnd) {
-								continue;
-							}
-							uint8_t origVelocity = gate->getVelocity();
-							uint8_t origLift = gate->getLift();
-
-							if (gateEnd > rangeEnd) {
-								int32_t tailIdx = clip->gateCloses.insertAtKey(rangeEnd);
-								if (tailIdx >= 0) {
-									Note* tail = clip->gateCloses.getElement(tailIdx);
-									tail->pos = rangeEnd;
-									tail->setLength(gateEnd - rangeEnd);
-									tail->setVelocity(origVelocity);
-									tail->setLift(origLift);
-									tail->setProbability(kNumProbabilityValues);
-									tail->setIterance(Iterance());
-									tail->setFill(FillMode::OFF);
-								}
-								i = clip->gateCloses.search(gate->pos + 1, LESS);
-								if (i < 0) {
+							// Trim or delete closes that overlap with the range
+							for (int32_t i = clip->gateCloses.getNumElements() - 1; i >= 0; i--) {
+								Note* gate = clip->gateCloses.getElement(i);
+								int32_t gatePos = gate->pos;
+								int32_t gateEnd = gatePos + gate->getLength();
+								if (gateEnd <= rangeStart || gatePos >= rangeEnd) {
 									continue;
 								}
-								gate = clip->gateCloses.getElement(i);
-							}
+								uint8_t origVelocity = gate->getVelocity();
+								uint8_t origLift = gate->getLift();
 
-							if (gate->pos < rangeStart) {
-								gate->setLength(rangeStart - gate->pos);
-								gate->setVelocity(0);
-								gate->setLift(0);
-							}
-							else {
-								clip->gateCloses.deleteAtIndex(i);
-							}
-						}
+								if (gateEnd > rangeEnd) {
+									int32_t tailIdx = clip->gateCloses.insertAtKey(rangeEnd);
+									if (tailIdx >= 0) {
+										Note* tail = clip->gateCloses.getElement(tailIdx);
+										tail->pos = rangeEnd;
+										tail->setLength(gateEnd - rangeEnd);
+										tail->setVelocity(origVelocity);
+										tail->setLift(origLift);
+										tail->setProbability(kNumProbabilityValues);
+										tail->setIterance(Iterance());
+										tail->setFill(FillMode::OFF);
+									}
+									// Re-search using saved position since insertAtKey may have
+									// reallocated the array, invalidating the gate pointer
+									i = clip->gateCloses.search(gatePos + 1, LESS);
+									if (i < 0) {
+										continue;
+									}
+									gate = clip->gateCloses.getElement(i);
+								}
 
-						if (gateHeldPads[spanPartner].wasOpen) {
-							int32_t spanLength = rangeEnd - rangeStart;
-							if (spanLength > 0) {
-								int32_t ci = clip->gateCloses.insertAtKey(rangeStart);
-								if (ci >= 0) {
-									Note* gate = clip->gateCloses.getElement(ci);
-									gate->pos = rangeStart;
-									gate->setLength(spanLength);
+								if (gate->pos < rangeStart) {
+									gate->setLength(rangeStart - gate->pos);
 									gate->setVelocity(0);
 									gate->setLift(0);
-									gate->setProbability(kNumProbabilityValues);
-									gate->setIterance(Iterance());
-									gate->setFill(FillMode::OFF);
+								}
+								else {
+									clip->gateCloses.deleteAtIndex(i);
 								}
 							}
-						}
+
+							if (gateHeldPads[spanPartner].wasOpen) {
+								int32_t spanLength = rangeEnd - rangeStart;
+								if (spanLength > 0) {
+									int32_t ci = clip->gateCloses.insertAtKey(rangeStart);
+									if (ci >= 0) {
+										Note* gate = clip->gateCloses.getElement(ci);
+										gate->pos = rangeStart;
+										gate->setLength(spanLength);
+										gate->setVelocity(0);
+										gate->setLift(0);
+										gate->setProbability(kNumProbabilityValues);
+										gate->setIterance(Iterance());
+										gate->setFill(FillMode::OFF);
+									}
+								}
+							}
+						} // rangeStart < effectiveLength
 						gateHeldPads[spanPartner].encoderUsed = true;
 						gateSpanFillDone = true;
 						uiNeedsRendering(this, 0xFFFFFFFF, 0);
@@ -650,59 +658,61 @@ ActionResult AudioClipView::padAction(int32_t x, int32_t y, int32_t on) {
 					else if (y == 0) {
 						// Single pad toggle on bottom row
 						int32_t squareStart = getPosFromSquare(x);
-						uint32_t squareWidth = std::min(effectiveLength, getPosFromSquare(x + 1)) - squareStart;
-						if (held.wasOpen) {
-							// Was open → close it
-							int32_t ci = clip->gateCloses.insertAtKey(squareStart);
-							if (ci >= 0) {
-								Note* gate = clip->gateCloses.getElement(ci);
-								gate->pos = squareStart;
-								gate->setLength(squareWidth);
-								gate->setVelocity(0);
-								gate->setLift(0);
-								gate->setProbability(kNumProbabilityValues);
-								gate->setIterance(Iterance());
-								gate->setFill(FillMode::OFF);
+						if (squareStart < effectiveLength) {
+							uint32_t squareWidth = std::min(effectiveLength, getPosFromSquare(x + 1)) - squareStart;
+							if (held.wasOpen) {
+								// Was open → close it
+								int32_t ci = clip->gateCloses.insertAtKey(squareStart);
+								if (ci >= 0) {
+									Note* gate = clip->gateCloses.getElement(ci);
+									gate->pos = squareStart;
+									gate->setLength(squareWidth);
+									gate->setVelocity(0);
+									gate->setLift(0);
+									gate->setProbability(kNumProbabilityValues);
+									gate->setIterance(Iterance());
+									gate->setFill(FillMode::OFF);
+								}
 							}
-						}
-						else {
-							// Was closed → open it (split the close around this cell)
-							int32_t ci = clip->gateCloses.search(squareStart + 1, LESS);
-							if (ci >= 0) {
-								Note* gate = clip->gateCloses.getElement(ci);
-								int32_t gateEnd = gate->pos + gate->getLength();
-								int32_t cellEnd = squareStart + squareWidth;
-								int32_t origPos = gate->pos;
-								uint8_t origVelocity = gate->getVelocity();
-								uint8_t origLift = gate->getLift();
+							else {
+								// Was closed → open it (split the close around this cell)
+								int32_t ci = clip->gateCloses.search(squareStart + 1, LESS);
+								if (ci >= 0) {
+									Note* gate = clip->gateCloses.getElement(ci);
+									int32_t gateEnd = gate->pos + gate->getLength();
+									int32_t cellEnd = squareStart + squareWidth;
+									int32_t origPos = gate->pos;
+									uint8_t origVelocity = gate->getVelocity();
+									uint8_t origLift = gate->getLift();
 
-								if (cellEnd < gateEnd) {
-									int32_t afterIdx = clip->gateCloses.insertAtKey(cellEnd);
-									if (afterIdx >= 0) {
-										Note* after = clip->gateCloses.getElement(afterIdx);
-										after->pos = cellEnd;
-										after->setLength(gateEnd - cellEnd);
-										after->setVelocity(origVelocity);
-										after->setLift(origLift);
-										after->setProbability(kNumProbabilityValues);
-										after->setIterance(Iterance());
-										after->setFill(FillMode::OFF);
+									if (cellEnd < gateEnd) {
+										int32_t afterIdx = clip->gateCloses.insertAtKey(cellEnd);
+										if (afterIdx >= 0) {
+											Note* after = clip->gateCloses.getElement(afterIdx);
+											after->pos = cellEnd;
+											after->setLength(gateEnd - cellEnd);
+											after->setVelocity(origVelocity);
+											after->setLift(origLift);
+											after->setProbability(kNumProbabilityValues);
+											after->setIterance(Iterance());
+											after->setFill(FillMode::OFF);
+										}
+										ci = clip->gateCloses.search(squareStart + 1, LESS);
 									}
-									ci = clip->gateCloses.search(squareStart + 1, LESS);
-								}
 
-								if (origPos < squareStart) {
-									Note* before = clip->gateCloses.getElement(ci);
-									before->setLength(squareStart - origPos);
-									before->setVelocity(0);
-									before->setLift(0);
-								}
-								else {
-									clip->gateCloses.deleteAtIndex(ci);
+									if (origPos < squareStart) {
+										Note* before = clip->gateCloses.getElement(ci);
+										before->setLength(squareStart - origPos);
+										before->setVelocity(0);
+										before->setLift(0);
+									}
+									else {
+										clip->gateCloses.deleteAtIndex(ci);
+									}
 								}
 							}
+							uiNeedsRendering(this, 0xFFFFFFFF, 0);
 						}
-						uiNeedsRendering(this, 0xFFFFFFFF, 0);
 					}
 				}
 				held.active = false;

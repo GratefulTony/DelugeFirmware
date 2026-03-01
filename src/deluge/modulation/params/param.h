@@ -152,11 +152,15 @@ enum Global : ParamType {
 	FIRST_GLOBAL_NON_VOLUME,
 	GLOBAL_DELAY_FEEDBACK = FIRST_GLOBAL_NON_VOLUME,
 
-	// Global hybrid params begin (none currently - placeholder for future params)
+	// Global hybrid params begin (bipolar additive: base ± modulation)
 	FIRST_GLOBAL_HYBRID,
+	GLOBAL_MACRO_1 = FIRST_GLOBAL_HYBRID, // Macro routing node 1 (source + destination)
+	GLOBAL_MACRO_2,                       // Macro routing node 2
+	GLOBAL_MACRO_3,                       // Macro routing node 3
+	GLOBAL_MACRO_4,                       // Macro routing node 4
 
 	// Global zone params begin (patcher outputs cables only, DSP combines with preset)
-	FIRST_GLOBAL_ZONE = FIRST_GLOBAL_HYBRID,
+	FIRST_GLOBAL_ZONE,
 	GLOBAL_DISPERSER_TOPO = FIRST_GLOBAL_ZONE, // Disperser topology zone (clips to boundaries)
 	GLOBAL_DISPERSER_TWIST,                    // Disperser character zone (allows cross-zone)
 	GLOBAL_SCATTER_MACRO,                      // Scatter macro control (zone param for cable-only output)
@@ -574,6 +578,24 @@ constexpr int32_t getHighResOffsetDivisor(ParamType paramId) {
 constexpr int32_t getHighResOffsetDivisor(UnpatchedShared paramId) {
 	auto info = getZoneParamInfo(paramId);
 	return info.resolution / 128;
+}
+
+/// Get the high-res divisor for any param given its kind and ID.
+/// Returns 1 for standard params, >1 for hi-res zone params.
+constexpr int32_t getHighResDivisorForParam(Kind kind, int32_t paramId) {
+	if (kind == Kind::PATCHED) {
+		auto paramType = static_cast<ParamType>(paramId);
+		if (isHighResZoneParam(paramType)) {
+			return getHighResOffsetDivisor(paramType);
+		}
+	}
+	else if (kind == Kind::UNPATCHED_SOUND || kind == Kind::UNPATCHED_GLOBAL) {
+		auto unpatched = static_cast<UnpatchedShared>(paramId);
+		if (isHighResZoneParam(unpatched)) {
+			return getHighResOffsetDivisor(unpatched);
+		}
+	}
+	return 1;
 }
 
 /// Check if a patched param is a scatter param (supports gamma adjustment via push+twist)

@@ -21,7 +21,6 @@
 #include "gui/menu_item/velocity_encoder.h"
 #include "gui/ui/sound_editor.h"
 #include "hid/display/display.h"
-#include "model/voice/voice.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_set.h"
 #include "processing/sound/sound.h"
@@ -60,40 +59,7 @@ public:
 	}
 
 	void selectEncoderAction(int32_t offset) override {
-		int32_t oldQ31 = soundEditor.currentParamManager->getPatchedParamSet()->getValue(getP());
-
 		source::PatchedParam::selectEncoderAction(velocity_.getScaledOffset(offset));
-
-		// For STRETCH mode voices, update the guide's tick shift immediately
-		// so the time stretcher crossfades to the new position
-		Sound* sound = soundEditor.currentSound;
-		if (!sound || sound->sources[source_id_].repeatMode != SampleRepeatMode::STRETCH) {
-			return;
-		}
-
-		int32_t newQ31 = soundEditor.currentParamManager->getPatchedParamSet()->getValue(getP());
-		if (newQ31 == oldQ31) {
-			return;
-		}
-
-		for (const auto& voicePtr : sound->voices()) {
-			Voice& voice = *voicePtr;
-			auto& guide = voice.guides[source_id_];
-			if (guide.sequenceSyncLengthTicks > 0) {
-				int32_t syncLen = static_cast<int32_t>(guide.sequenceSyncLengthTicks);
-				int64_t oldTickShift = ((int64_t)oldQ31 * (int64_t)syncLen) >> 31;
-				int64_t newTickShift = ((int64_t)newQ31 * (int64_t)syncLen) >> 31;
-				if (oldTickShift < 0) {
-					oldTickShift += syncLen;
-				}
-				if (newTickShift < 0) {
-					newTickShift += syncLen;
-				}
-				int32_t delta = static_cast<int32_t>(newTickShift - oldTickShift);
-				guide.sequenceSyncStartedAtTick -= delta;
-				guide.wrapSyncPosition = (newQ31 != 0);
-			}
-		}
 	}
 
 	bool onHorizontalItemAction() override {

@@ -171,10 +171,14 @@ void Sample::markAsUnloadable() {
 }
 
 SampleCache* Sample::getOrCreateCache(SampleHolder* sampleHolder, int32_t phaseIncrement, int32_t timeStretchRatio,
-                                      bool reversed, bool mayCreate, bool* created) {
+                                      bool reversed, bool mayCreate, bool* created,
+                                      int32_t explicitSkipSamplesAtStart) {
 
 	int32_t skipSamplesAtStart;
-	if (!reversed) {
+	if (explicitSkipSamplesAtStart >= 0) {
+		skipSamplesAtStart = explicitSkipSamplesAtStart;
+	}
+	else if (!reversed) {
 		skipSamplesAtStart = sampleHolder->startPos;
 	}
 	else {

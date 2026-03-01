@@ -33,6 +33,7 @@ public:
 	bool opened() override;
 	bool getGreyoutColsAndRows(uint32_t* cols, uint32_t* rows) override;
 
+	ActionResult padAction(int32_t x, int32_t y, int32_t velocity) override;
 	ActionResult buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) override;
 	bool beginOutputRecording(AudioRecordingFolder folder = AudioRecordingFolder::RESAMPLE,
 	                          AudioInputChannel channel = AudioInputChannel::OUTPUT, bool writeLoopPoints = false,

@@ -174,6 +174,10 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [GLOBAL_REVERB_AMOUNT]           = "Reverb amt",
 	    [GLOBAL_MOD_FX_DEPTH]            = "ModFXdepth",
 	    [GLOBAL_DELAY_FEEDBACK]          = "Delay feed",
+	    [GLOBAL_MACRO_1]                 = "Macro 1",
+	    [GLOBAL_MACRO_2]                 = "Macro 2",
+	    [GLOBAL_MACRO_3]                 = "Macro 3",
+	    [GLOBAL_MACRO_4]                 = "Macro 4",
 	    [GLOBAL_DISPERSER_TOPO]          = "Disp topo",
 	    [GLOBAL_DISPERSER_TWIST]         = "Disp twist",
 	    [GLOBAL_SCATTER_MACRO]           = "Scat macro",
@@ -268,6 +272,10 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [GLOBAL_REVERB_AMOUNT] = STRING_FOR_PARAM_GLOBAL_REVERB_AMOUNT,
 	    [GLOBAL_MOD_FX_DEPTH] = STRING_FOR_PARAM_GLOBAL_MOD_FX_DEPTH,
 	    [GLOBAL_DELAY_FEEDBACK] = STRING_FOR_PARAM_GLOBAL_DELAY_FEEDBACK,
+	    [GLOBAL_MACRO_1] = STRING_FOR_MACRO_1,
+	    [GLOBAL_MACRO_2] = STRING_FOR_MACRO_2,
+	    [GLOBAL_MACRO_3] = STRING_FOR_MACRO_3,
+	    [GLOBAL_MACRO_4] = STRING_FOR_MACRO_4,
 	    [GLOBAL_DISPERSER_TOPO] = STRING_FOR_DISPERSER_TOPO,
 	    [GLOBAL_DISPERSER_TWIST] = STRING_FOR_DISPERSER_TWIST,
 	    [GLOBAL_SCATTER_MACRO] = STRING_FOR_SCATTER_MACRO,
@@ -700,6 +708,18 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 
 		case GLOBAL_DELAY_FEEDBACK:
 			return "delayFeedback";
+
+		case GLOBAL_MACRO_1:
+			return "globalMacro1";
+
+		case GLOBAL_MACRO_2:
+			return "globalMacro2";
+
+		case GLOBAL_MACRO_3:
+			return "globalMacro3";
+
+		case GLOBAL_MACRO_4:
+			return "globalMacro4";
 
 		case GLOBAL_DISPERSER_TOPO:
 			return "globalDisperserTopo";

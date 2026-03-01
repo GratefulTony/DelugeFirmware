@@ -236,6 +236,12 @@ void Sound::initParams(ParamManager* paramManager) {
 	patchedParams->params[params::LOCAL_MODULATOR_0_PITCH_ADJUST].setCurrentValueBasicForSetup(0); // Don't change
 	patchedParams->params[params::LOCAL_MODULATOR_1_PITCH_ADJUST].setCurrentValueBasicForSetup(0); // Don't change
 
+	// Macro routing nodes default to minimum (no modulation output)
+	patchedParams->params[params::GLOBAL_MACRO_1].setCurrentValueBasicForSetup(-2147483648);
+	patchedParams->params[params::GLOBAL_MACRO_2].setCurrentValueBasicForSetup(-2147483648);
+	patchedParams->params[params::GLOBAL_MACRO_3].setCurrentValueBasicForSetup(-2147483648);
+	patchedParams->params[params::GLOBAL_MACRO_4].setCurrentValueBasicForSetup(-2147483648);
+
 	// Scatter params - pWrite/macro default to 0% (min), density defaults to 100% (max)
 	patchedParams->params[params::GLOBAL_SCATTER_PWRITE].setCurrentValueBasicForSetup(-2147483648);
 	patchedParams->params[params::GLOBAL_SCATTER_MACRO].setCurrentValueBasicForSetup(-2147483648);
@@ -1437,6 +1443,15 @@ PatchCableAcceptance Sound::maySourcePatchToParam(PatchSource s, uint8_t p, Para
 		}
 	}
 
+	// Block macro self-routing (MACRO_N → GLOBAL_MACRO_N)
+	if (p != 255 && s >= PatchSource::MACRO_1 && s <= PatchSource::MACRO_4) {
+		int32_t macroParamForSource =
+		    params::GLOBAL_MACRO_1 + (util::to_underlying(s) - util::to_underlying(PatchSource::MACRO_1));
+		if (p == macroParamForSource) {
+			return PatchCableAcceptance::DISALLOWED;
+		}
+	}
+
 	if (p != 255 && s != PatchSource::NOT_AVAILABLE && s >= kFirstLocalSource && p >= params::FIRST_GLOBAL) {
 		return PatchCableAcceptance::DISALLOWED; // Can't patch local source to global param
 	}
@@ -2538,6 +2553,16 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		    output.size(), paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_SIDECHAIN_SHAPE));
 		uint32_t anyChange = (old != globalSourceValues[patchSourceSidechainUnderlying]);
 		sourcesChanged |= anyChange << patchSourceSidechainUnderlying;
+	}
+
+	// Evaluate macros: source value = previous frame's patched param final value
+	// One-frame delay for modulation-of-macro is inaudible (~3ms at 44.1kHz)
+	for (int32_t m = 0; m < kNumMacros; m++) {
+		const auto macroSourceIdx = util::to_underlying(PatchSource::MACRO_1) + m;
+		int32_t old = globalSourceValues[macroSourceIdx];
+		globalSourceValues[macroSourceIdx] = paramFinalValues[params::GLOBAL_MACRO_1 + m - params::FIRST_GLOBAL];
+		uint32_t anyChange = (old != globalSourceValues[macroSourceIdx]);
+		sourcesChanged |= anyChange << macroSourceIdx;
 	}
 
 	// Perform the actual patching

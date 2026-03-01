@@ -36,9 +36,12 @@
 #include "model/instrument/melodic_instrument.h"
 #include "model/note/note_row.h"
 #include "model/song/song.h"
+#include "modulation/knob.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_set.h"
 #include "processing/engines/audio_engine.h"
+#include "processing/sound/sound_drum.h"
+#include "processing/sound/sound_instrument.h"
 #include "storage/storage_manager.h"
 #include "util/d_string.h"
 #include <cstdlib>
@@ -52,6 +55,7 @@ using namespace gui;
 
 #define SETTINGS_FOLDER "SETTINGS"
 #define MIDI_FOLLOW_XML "SETTINGS/MIDIFollow.XML"
+#define MIDI_FOLLOW_PRESET_DIR "SETTINGS/MIDIFollow"
 #define MIDI_DEFAULTS_TAG "defaults"
 #define MIDI_DEFAULTS_CC_TAG "defaultCCMappings"
 
@@ -784,6 +788,13 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 		timelineCounter->possiblyCloneForArrangementRecording(&modelStackWithTimelineCounter);
 	}
 
+	// Check mod knob CC range first — dynamic mapping to mod knob slots
+	uint8_t baseCC = midiEngine.midiFollowModKnobBaseCC;
+	if (baseCC != MIDI_CC_NONE && ccNumber >= baseCC && ccNumber < baseCC + kNumModButtons * kNumPhysicalModKnobs) {
+		handleModKnobCC(modelStackWithTimelineCounter, clip, ccNumber - baseCC, ccNumber, ccValue);
+		return;
+	}
+
 	// directly access the parameter from the CC number
 	uint8_t soundParamId = ccToSoundParam[ccNumber];
 	uint8_t globalParamId = ccToGlobalParam[ccNumber];
@@ -809,14 +820,51 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 		// convert current value to knobPos to compare to cc value being received
 		int32_t knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(currentValue, modelStackWithParam);
 
-		// calculate new knob position based on cc value received and deluge current value
-		int32_t newKnobPos = MidiTakeover::calculateKnobPos(knobPos, ccValue, nullptr, true, ccNumber, isStepEditing);
+		int32_t newValue;
+		bool shouldUpdate;
+		int32_t highResDivisor = params::getHighResDivisorForParam(modelStackWithParam->paramCollection->getParamKind(),
+		                                                           modelStackWithParam->paramId);
+		int32_t newKnobPos;
+		if (highResDivisor > 1) {
+			// Hi-res zone params: CC adds a scaled offset to the current value
+			// Bypass MidiTakeover — PICKUP/SCALE don't apply to additive hi-res stepping
+			int32_t stepSize = (1 << 25) / highResDivisor;
+			int32_t ccDelta;
+			if (midiEngine.midiTakeover == MIDITakeoverMode::RELATIVE) {
+				ccDelta = ccValue;
+				if (ccDelta >= 64) {
+					ccDelta -= 128;
+				}
+			}
+			else {
+				int32_t midiKnobPos = (ccValue < kMaxMIDIValue) ? (ccValue - 64) : 64;
+				if (midiFollow.previousKnobPos[ccNumber] == kNoSelection) {
+					// First CC message: establish baseline, no movement
+					midiFollow.previousKnobPos[ccNumber] = midiKnobPos;
+					ccDelta = 0;
+				}
+				else {
+					ccDelta = midiKnobPos - midiFollow.previousKnobPos[ccNumber];
+					midiFollow.previousKnobPos[ccNumber] = midiKnobPos;
+				}
+			}
+			if (ccDelta == 0) {
+				shouldUpdate = false;
+			}
+			else {
+				int64_t nv = static_cast<int64_t>(currentValue) + static_cast<int64_t>(ccDelta) * stepSize;
+				newValue = static_cast<int32_t>(std::clamp(nv, int64_t{0}, int64_t{2147483647}));
+				shouldUpdate = true;
+				newKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(newValue, modelStackWithParam);
+			}
+		}
+		else {
+			newKnobPos = MidiTakeover::calculateKnobPos(knobPos, ccValue, nullptr, true, ccNumber, isStepEditing);
+			shouldUpdate = (newKnobPos != knobPos);
+			newValue = modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
+		}
 
-		// is the cc being received for the same value as the current knob pos? If so, do nothing
-		if (newKnobPos != knobPos) {
-			// Convert the New Knob Position to a Parameter Value
-			int32_t newValue =
-			    modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
+		if (shouldUpdate) {
 
 			// Set the new Parameter Value for the MIDI Learned Parameter
 			modelStackWithParam->autoParam->setValuePossiblyForRegion(newValue, modelStackWithParam, modPos, modLength);
@@ -849,6 +897,167 @@ void MidiFollow::handleReceivedCC(ModelStackWithTimelineCounter& modelStackWithT
 				params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
 				view.displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos);
 			}
+		}
+	}
+}
+
+/// Handles a CC mapped to a mod knob slot (dynamic mapping).
+/// slotIndex: 0-15, mapping to modKnobs[page][knob] where page=slot/2, knob=slot%2
+/// ccNumber: the original CC number (for takeover state tracking)
+void MidiFollow::handleModKnobCC(ModelStackWithTimelineCounter& modelStackWithTimelineCounter, Clip* clip,
+                                 int32_t slotIndex, int32_t ccNumber, int32_t ccValue) {
+	if (!clip || !clip->output) {
+		return;
+	}
+
+	OutputType outputType = clip->output->type;
+	if (outputType == OutputType::MIDI_OUT || outputType == OutputType::CV || outputType == OutputType::NONE) {
+		return;
+	}
+
+	// Get the Sound that owns the mod knobs
+	Sound* sound = nullptr;
+	if (outputType == OutputType::SYNTH) {
+		sound = static_cast<SoundInstrument*>(clip->output);
+	}
+	else if (outputType == OutputType::KIT) {
+		InstrumentClip* instrumentClip = (InstrumentClip*)clip;
+		if (!instrumentClip->affectEntire) {
+			Kit* kit = (Kit*)clip->output;
+			if (kit->selectedDrum && kit->selectedDrum->type == DrumType::SOUND) {
+				sound = static_cast<SoundDrum*>(kit->selectedDrum);
+			}
+		}
+		// Kit affect-entire and audio clips use GlobalEffectable which has
+		// hardcoded mod knob mapping — not user-assignable, so skip for now
+	}
+
+	if (!sound) {
+		return;
+	}
+
+	int32_t page = slotIndex / kNumPhysicalModKnobs;
+	int32_t knob = slotIndex % kNumPhysicalModKnobs;
+	ModKnob& modKnob = sound->modKnobs[page][knob];
+
+	// Check if this mod knob slot is assigned to a parameter
+	if (modKnob.paramDescriptor.data == 0) {
+		return;
+	}
+
+	// Resolve the mod knob's paramDescriptor to a soundParamId for the existing path
+	// For simple params, reuse getModelStackWithParamForClip; patch cables need direct resolution
+	ModelStackWithAutoParam* modelStackWithParam = nullptr;
+
+	if (modKnob.paramDescriptor.isJustAParam()) {
+		int32_t p = modKnob.paramDescriptor.getJustTheParam();
+		// Simple param — resolve via the existing clip-based path
+		modelStackWithParam = getModelStackWithParamForClip(&modelStackWithTimelineCounter, clip, p, PARAM_ID_NONE);
+	}
+	else {
+		// Patch cable — resolve via Sound's param manager directly
+		ModelStackWithThreeMainThings* modelStack3 =
+		    modelStackWithTimelineCounter.addOtherTwoThingsButNoNoteRow(sound, &clip->paramManager);
+		if (!modelStack3 || !modelStack3->paramManager) {
+			return;
+		}
+		modelStackWithParam = modelStack3->getPatchCableAutoParamFromId(modKnob.paramDescriptor.data);
+	}
+
+	if (!modelStackWithParam || !modelStackWithParam->autoParam) {
+		return;
+	}
+
+	// Apply value — reuse same logic as handleReceivedCC
+	int32_t modPos = 0;
+	int32_t modLength = 0;
+	bool isStepEditing = false;
+
+	if (modelStackWithTimelineCounter.timelineCounterIsSet()) {
+		if (view.modLength
+		    && modelStackWithTimelineCounter.getTimelineCounter()
+		           == view.activeModControllableModelStack.getTimelineCounterAllowNull()) {
+			modPos = view.modPos;
+			modLength = view.modLength;
+			isStepEditing = true;
+		}
+	}
+
+	int32_t currentValue;
+	if (isStepEditing) {
+		currentValue = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
+	}
+	else {
+		currentValue = modelStackWithParam->autoParam->getCurrentValue();
+	}
+
+	int32_t knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(currentValue, modelStackWithParam);
+
+	int32_t newValue;
+	bool shouldUpdate;
+	int32_t newKnobPos;
+
+	int32_t highResDivisor = params::getHighResDivisorForParam(modelStackWithParam->paramCollection->getParamKind(),
+	                                                           modelStackWithParam->paramId);
+	if (highResDivisor > 1) {
+		// Hi-res zone params: CC adds a scaled offset
+		int32_t stepSize = (1 << 25) / highResDivisor;
+		int32_t ccDelta;
+		if (midiEngine.midiTakeover == MIDITakeoverMode::RELATIVE) {
+			ccDelta = ccValue;
+			if (ccDelta >= 64) {
+				ccDelta -= 128;
+			}
+		}
+		else {
+			int32_t midiKnobPos = (ccValue < kMaxMIDIValue) ? (ccValue - 64) : 64;
+			if (previousKnobPos[ccNumber] == kNoSelection) {
+				previousKnobPos[ccNumber] = midiKnobPos;
+				ccDelta = 0;
+			}
+			else {
+				ccDelta = midiKnobPos - previousKnobPos[ccNumber];
+				previousKnobPos[ccNumber] = midiKnobPos;
+			}
+		}
+		if (ccDelta == 0) {
+			shouldUpdate = false;
+		}
+		else {
+			int64_t nv = static_cast<int64_t>(currentValue) + static_cast<int64_t>(ccDelta) * stepSize;
+			newValue = static_cast<int32_t>(std::clamp(nv, int64_t{0}, int64_t{2147483647}));
+			shouldUpdate = true;
+			newKnobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(newValue, modelStackWithParam);
+		}
+	}
+	else {
+		newKnobPos = MidiTakeover::calculateKnobPos(knobPos, ccValue, nullptr, true, ccNumber, isStepEditing);
+		shouldUpdate = (newKnobPos != knobPos);
+		newValue = modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
+	}
+
+	if (shouldUpdate) {
+		modelStackWithParam->autoParam->setValuePossiblyForRegion(newValue, modelStackWithParam, modPos, modLength);
+
+		// UI feedback
+		bool editingParamInAutomationOrPerformanceView = false;
+		RootUI* rootUI = getRootUI();
+		if (rootUI == &automationView || rootUI == &performanceView) {
+			int32_t id = modelStackWithParam->paramId;
+			params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
+			if (rootUI == &automationView) {
+				editingParamInAutomationOrPerformanceView =
+				    automationView.possiblyRefreshAutomationEditorGrid(clip, kind, id);
+			}
+			else {
+				editingParamInAutomationOrPerformanceView =
+				    performanceView.possiblyRefreshPerformanceViewDisplay(kind, id, newKnobPos);
+			}
+		}
+
+		if (midiEngine.midiFollowDisplayParam && !editingParamInAutomationOrPerformanceView) {
+			params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
+			view.displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos);
 		}
 	}
 }
@@ -1034,8 +1243,12 @@ bool MidiFollow::isFeedbackEnabled() {
 /// create default XML file and write defaults
 /// I should check if file exists before creating one
 void MidiFollow::writeDefaultsToFile() {
-	// MidiFollow.xml
-	Error error = StorageManager::createXMLFile(MIDI_FOLLOW_XML, smSerializer, true);
+	writeMappingsToFile(MIDI_FOLLOW_XML);
+}
+
+/// write current CC mappings to a specific XML file path
+void MidiFollow::writeMappingsToFile(char const* filepath) {
+	Error error = StorageManager::createXMLFile(filepath, smSerializer, true);
 	if (error != Error::NONE) {
 		return;
 	}
@@ -1149,6 +1362,8 @@ void MidiFollow::readDefaultsFromFile() {
 	}
 	activeDeserializer->closeWriter();
 	successfullyReadDefaultsFromFile = true;
+
+	ensurePresetDirectory();
 }
 
 /// compares param name tag to the list of params available are midi controllable
@@ -1192,4 +1407,76 @@ void MidiFollow::readDefaultMappingsFromFile(Deserializer& reader) {
 		// exit out of this tag so you can check the next tag
 		reader.exitTag();
 	}
+}
+
+/// Ensure the preset directory exists and contains at least a Standard preset.
+void MidiFollow::ensurePresetDirectory() {
+	// Create directory (OK if it already exists)
+	FRESULT result = f_mkdir(MIDI_FOLLOW_PRESET_DIR);
+	if (result != FR_OK && result != FR_EXIST) {
+		return;
+	}
+
+	// Check if directory is empty
+	DIR dir;
+	FILINFO fno;
+	result = f_opendir(&dir, MIDI_FOLLOW_PRESET_DIR);
+	if (result != FR_OK) {
+		return;
+	}
+	bool hasFiles = false;
+	while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != 0) {
+		if (!(fno.fattrib & AM_DIR)) {
+			hasFiles = true;
+			break;
+		}
+	}
+	f_closedir(&dir);
+
+	if (!hasFiles) {
+		// Save current mappings temporarily
+		auto savedSoundParamToCC = soundParamToCC;
+		auto savedGlobalParamToCC = globalParamToCC;
+		auto savedCcToSoundParam = ccToSoundParam;
+		auto savedCcToGlobalParam = ccToGlobalParam;
+
+		// Write built-in defaults as Standard.XML
+		clearMappings();
+		initDefaultMappings();
+		writeMappingsToFile(MIDI_FOLLOW_PRESET_DIR "/Standard.XML");
+
+		// Restore active mappings
+		soundParamToCC = savedSoundParamToCC;
+		globalParamToCC = savedGlobalParamToCC;
+		ccToSoundParam = savedCcToSoundParam;
+		ccToGlobalParam = savedCcToGlobalParam;
+	}
+}
+
+/// Load a CC mapping preset from a file, replacing the active mappings.
+void MidiFollow::loadPresetFromFile(char const* filepath) {
+	FilePointer fp;
+	if (!StorageManager::fileExists(filepath, &fp)) {
+		return;
+	}
+
+	Error error = StorageManager::openXMLFile(&fp, smDeserializer, MIDI_DEFAULTS_TAG);
+	if (error != Error::NONE) {
+		return;
+	}
+
+	clearMappings();
+
+	Deserializer& reader = *activeDeserializer;
+	char const* tagName;
+	while (*(tagName = reader.readNextTagOrAttributeName())) {
+		if (!strcmp(tagName, MIDI_DEFAULTS_CC_TAG)) {
+			readDefaultMappingsFromFile(reader);
+		}
+		reader.exitTag();
+	}
+	activeDeserializer->closeWriter();
+
+	// Persist as the active mapping
+	writeDefaultsToFile();
 }

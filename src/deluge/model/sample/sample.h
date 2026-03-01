@@ -59,7 +59,8 @@ public:
 	void workOutMIDINote(bool doingSingleCycle, float minFreqHz = 20, float maxFreqHz = 10000, bool doPrimeTest = true);
 	uint32_t getLengthInMSec();
 	SampleCache* getOrCreateCache(SampleHolder* sampleHolder, int32_t phaseIncrement, int32_t timeStretchRatio,
-	                              bool reversed, bool mayCreate, bool* created);
+	                              bool reversed, bool mayCreate, bool* created,
+	                              int32_t explicitSkipSamplesAtStart = -1);
 	void deleteCache(SampleCache* cache);
 	int32_t getFirstClusterIndexWithAudioData();
 	int32_t getFirstClusterIndexWithNoAudioData();

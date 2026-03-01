@@ -124,6 +124,7 @@ void VoiceSample::setupCacheLoopPoints(SamplePlaybackGuide* guide, Sample* sampl
 	// No looping
 	if (loopingType == LoopType::NONE) {
 		cacheLoopEndPointBytes = 2147483647;
+		cacheLoopStartPointBytes = 0;
 	}
 
 	// Yes looping
@@ -137,6 +138,12 @@ void VoiceSample::setupCacheLoopPoints(SamplePlaybackGuide* guide, Sample* sampl
 		        ? loopStartPointBytesRaw - sample->audioDataStartPosBytes
 		        : sample->audioDataStartPosBytes + sample->audioDataLengthBytes - loopStartPointBytesRaw - 1;
 		int32_t loopStartPointSamples = loopStartPointBytes / bytesPerSample - cache->skipSamplesAtStart;
+
+		// Compute cache byte position of loop start (for pingpong backward boundary)
+		uint64_t loopStartPointSamplesBig = (uint64_t)loopStartPointSamples << 24;
+		uint32_t loopStartPointCombinedIncrements =
+		    (loopStartPointSamplesBig + (combinedIncrement >> 1)) / combinedIncrement; // Rounds
+		cacheLoopStartPointBytes = loopStartPointCombinedIncrements * kCacheByteDepth * sample->numChannels;
 
 		// Loop end point
 		int32_t loopEndPointBytesRaw = guide->getLoopEndPlaybackAtByte();
@@ -640,23 +647,56 @@ timeStretchingConsidered:
 readCachedWindow:
 
 		int32_t numSamplesThisCacheRead = numSamples;
+		bool pingpongCacheMode = static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive;
 
-		// If we've reached the loop end point...
-		int32_t bytesTilLoopEndPoint = cacheLoopEndPointBytes - cacheBytePos;
-		if (bytesTilLoopEndPoint <= 0) { // Might be less than 0 if it was just changed... although the code that does
-			                             // that is suppose to also detect that we're past it and restart the loop...
-			D_PRINTLN("Loop endpoint reached, reading cache");
-			// Jump back to the loop start point. We'll find out in a moment whether that Cluster still exists (though
-			// it will if the one we were just at existed)
-			cacheBytePos -= cacheLoopLengthBytes;
-			goto readCachedWindow;
+		// Direction-aware loop boundary detection
+		int32_t bytesTilLoopEndPoint; // Used later for crossfade fade-out distance
+		if (cachePlayDirection == 1) {
+			// Forward: check loop end point
+			bytesTilLoopEndPoint = cacheLoopEndPointBytes - cacheBytePos;
+			if (bytesTilLoopEndPoint <= 0) {
+				D_PRINTLN("Loop endpoint reached, reading cache");
+				if (pingpongCacheMode) {
+					// Pingpong: bounce backward from loop end
+					cachePlayDirection = -1;
+					int32_t frameSizeBytes = kCacheByteDepth * sampleSourceNumChannels;
+					cacheBytePos = cacheLoopEndPointBytes - frameSizeBytes;
+				}
+				else {
+					// Normal loop: wrap back to start
+					cacheBytePos -= cacheLoopLengthBytes;
+				}
+				if (loopFadeInSamplesTotal > 0) {
+					loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
+				}
+				goto readCachedWindow;
+			}
+		}
+		else {
+			// Backward (pingpong): check loop start point
+			if (cacheBytePos <= cacheLoopStartPointBytes) {
+				D_PRINTLN("Loop start reached (pingpong), reading cache");
+				cachePlayDirection = 1;
+				cacheBytePos = cacheLoopStartPointBytes;
+				if (loopFadeInSamplesTotal > 0) {
+					loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
+				}
+				goto readCachedWindow;
+			}
+			// For crossfade fade-out: distance to loop start boundary when going backward
+			bytesTilLoopEndPoint = cacheBytePos - cacheLoopStartPointBytes;
 		}
 
-		// If we've reached the actual end of the (unlooped) waveform
-		int32_t bytesTilWaveformEnd = cacheEndPointBytes - cacheBytePos;
-		if (bytesTilWaveformEnd <= 0) { // Probably couldn't actually get below 0?
-			// D_PRINTLN("waveform end reached, reading cache");
-			return false;
+		// If we've reached the actual end of the (unlooped) waveform (forward only)
+		int32_t bytesTilWaveformEnd;
+		if (cachePlayDirection == 1) {
+			bytesTilWaveformEnd = cacheEndPointBytes - cacheBytePos;
+			if (bytesTilWaveformEnd <= 0) {
+				return false;
+			}
+		}
+		else {
+			bytesTilWaveformEnd = 0x7FFFFFFF; // Not relevant when reading backward in loop
 		}
 
 		// If we've reached the exact end of what's been written to the cache...
@@ -675,6 +715,13 @@ readCachedWindow:
 
 			if (!stopReadingFromCache()) {
 				return false;
+			}
+
+			// Sync guide direction with cache pingpong direction when falling back to uncached
+			if (static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive) {
+				int32_t sourceDir = cache->reversed ? -1 : 1;
+				guide->playDirection = sourceDir * cachePlayDirection;
+				playDirection = guide->playDirection;
 			}
 
 			// If linear interpolation, no cache writing (or anything) allowed
@@ -731,11 +778,21 @@ readCachedWindow:
 
 		sampleRead[0] = *readPos; // Do first read up here so there's time for the processor to access the memory
 
-		int32_t bytesTilCacheClusterEnd = Cluster::size - bytePosWithinCluster;
-
-		int32_t bytesTilThisWindowEnd = std::min(bytesTilCacheClusterEnd, bytesTilCacheEnd);
-		bytesTilThisWindowEnd = std::min(bytesTilThisWindowEnd, bytesTilLoopEndPoint);
-		bytesTilThisWindowEnd = std::min(bytesTilThisWindowEnd, bytesTilWaveformEnd);
+		int32_t frameSizeBytes = kCacheByteDepth * sampleSourceNumChannels;
+		int32_t bytesTilThisWindowEnd;
+		if (cachePlayDirection == 1) {
+			// Forward: limited by cluster end, cache write pos, loop end, waveform end
+			int32_t bytesTilCacheClusterEnd = Cluster::size - bytePosWithinCluster;
+			bytesTilThisWindowEnd = std::min(bytesTilCacheClusterEnd, bytesTilCacheEnd);
+			bytesTilThisWindowEnd = std::min(bytesTilThisWindowEnd, bytesTilLoopEndPoint);
+			bytesTilThisWindowEnd = std::min(bytesTilThisWindowEnd, bytesTilWaveformEnd);
+		}
+		else {
+			// Backward: limited by cluster start and loop start
+			int32_t bytesTilClusterStart = bytePosWithinCluster + frameSizeBytes;
+			int32_t bytesTilLoopStart = cacheBytePos - cacheLoopStartPointBytes + frameSizeBytes;
+			bytesTilThisWindowEnd = std::min(bytesTilClusterStart, bytesTilLoopStart);
+		}
 
 		int32_t samplesTilThisWindowEnd;
 		if constexpr (kCacheByteDepth == 3) {
@@ -759,52 +816,150 @@ readCachedWindow:
 			FREEZE_WITH_ERROR("E156");
 		}
 
+		// Crossfade envelope for cached reads — modulates amplitude around loop boundaries
+		int32_t cacheRenderAmplitude = amplitude;
+		int32_t cacheRenderAmplitudeIncrement = amplitudeIncrement;
+
+		if (loopFadeInSamplesRemaining > 0) {
+			// Fade-in: ramp amplitude up from silence after loop restart
+			int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
+
+			int32_t fadeStart = static_cast<int32_t>(
+			    std::min(((int64_t)fadeProgress << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+			int32_t fadeEnd = static_cast<int32_t>(
+			    std::min(((int64_t)(fadeProgress + numSamplesThisCacheRead) << 31) / loopFadeInSamplesTotal,
+			             (int64_t)0x7FFFFFFF));
+
+			int32_t ampAtStart = multiply_32x32_rshift32(amplitude, fadeStart) << 1;
+			int32_t ampAtEnd =
+			    multiply_32x32_rshift32(amplitude + amplitudeIncrement * numSamplesThisCacheRead, fadeEnd) << 1;
+
+			cacheRenderAmplitude = ampAtStart;
+			cacheRenderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisCacheRead;
+
+			loopFadeInSamplesRemaining -= numSamplesThisCacheRead;
+			if (loopFadeInSamplesRemaining < 0) {
+				loopFadeInSamplesRemaining = 0;
+			}
+		}
+		else if (loopFadeInSamplesTotal > 0 && loopingType != LoopType::NONE) {
+			// Fade-out: ramp amplitude down approaching loop boundary
+			// In cache domain, distance to loop end in output samples is direct
+			int32_t distOutputSamples = bytesTilLoopEndPoint / (kCacheByteDepth * sampleSourceNumChannels);
+
+			if (distOutputSamples >= 0) {
+				int32_t clampedDist = std::min(distOutputSamples, loopFadeInSamplesTotal);
+				int32_t scaleAtStart = static_cast<int32_t>(
+				    std::min(((int64_t)clampedDist << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+
+				int32_t distAfterRead = distOutputSamples - numSamplesThisCacheRead;
+				if (distAfterRead < 0) {
+					distAfterRead = 0;
+				}
+				int32_t clampedDistAfter = std::min(distAfterRead, loopFadeInSamplesTotal);
+				int32_t scaleAtEnd = static_cast<int32_t>(
+				    std::min(((int64_t)clampedDistAfter << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+
+				if (clampedDist < loopFadeInSamplesTotal || clampedDistAfter < loopFadeInSamplesTotal) {
+					int32_t ampAtStart = multiply_32x32_rshift32(cacheRenderAmplitude, scaleAtStart) << 1;
+					int32_t ampAtEnd =
+					    multiply_32x32_rshift32(
+					        cacheRenderAmplitude + cacheRenderAmplitudeIncrement * numSamplesThisCacheRead, scaleAtEnd)
+					    << 1;
+
+					cacheRenderAmplitude = ampAtStart;
+					cacheRenderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisCacheRead;
+				}
+			}
+		}
+
 		// Ok, now we know how many samples we can read from the cache right now. Do it.
 		// Note: I tried putting this loop in another function, but it just wasn't quite as fast, even with it set to
 		// inline.
 		int32_t const* const oscBufferEndNow =
 		    outputBufferWritePos + numSamplesThisCacheRead * numChannelsInOutputBuffer;
 
-		while (true) {
+		if (cachePlayDirection == 1) {
+			// === FORWARD READING ===
+			while (true) {
+				int32_t existingValueL = *outputBufferWritePos;
 
-			int32_t existingValueL = *outputBufferWritePos;
-
-			readPos = (int32_t*)((char*)readPos + kCacheByteDepth);
-
-			if (sampleSourceNumChannels == 2) {
-				sampleRead[1] = *readPos;
 				readPos = (int32_t*)((char*)readPos + kCacheByteDepth);
 
-				// If condensing to mono, do that now
-				if (numChannelsInOutputBuffer == 1) {
-					sampleRead[0] = ((sampleRead[0] >> 1) + (sampleRead[1] >> 1));
+				if (sampleSourceNumChannels == 2) {
+					sampleRead[1] = *readPos;
+					readPos = (int32_t*)((char*)readPos + kCacheByteDepth);
+
+					if (numChannelsInOutputBuffer == 1) {
+						sampleRead[0] = ((sampleRead[0] >> 1) + (sampleRead[1] >> 1));
+					}
 				}
-			}
 
-			amplitude += amplitudeIncrement;
+				cacheRenderAmplitude += cacheRenderAmplitudeIncrement;
 
-			// Mono / left channel (or stereo condensed to mono)
-			*outputBufferWritePos = multiply_accumulate_32x32_rshift32_rounded(existingValueL, sampleRead[0],
-			                                                                   amplitude); // Yup, accumulate is faster
-			outputBufferWritePos++;
-
-			// Right channel. Surprisingly, putting this as an "else" inside the above "numChannels == 2" was slightly
-			// slower
-			if (numChannelsInOutputBuffer == 2) {
-				int32_t existingValueR = *outputBufferWritePos;
 				*outputBufferWritePos =
-				    multiply_accumulate_32x32_rshift32_rounded(existingValueR, sampleRead[1], amplitude);
+				    multiply_accumulate_32x32_rshift32_rounded(existingValueL, sampleRead[0], cacheRenderAmplitude);
 				outputBufferWritePos++;
-			}
 
-			if (outputBufferWritePos == oscBufferEndNow) {
-				break;
-			}
+				if (numChannelsInOutputBuffer == 2) {
+					int32_t existingValueR = *outputBufferWritePos;
+					*outputBufferWritePos =
+					    multiply_accumulate_32x32_rshift32_rounded(existingValueR, sampleRead[1], cacheRenderAmplitude);
+					outputBufferWritePos++;
+				}
 
-			sampleRead[0] = *readPos;
+				if (outputBufferWritePos == oscBufferEndNow) {
+					break;
+				}
+
+				sampleRead[0] = *readPos;
+			}
+		}
+		else {
+			// === BACKWARD READING (pingpong) ===
+			// Each frame is [L][R] in memory (kCacheByteDepth bytes each).
+			// Read L (already prefetched in sampleRead[0]), read R at +kCacheByteDepth offset,
+			// then retreat readPos by one full frame to the previous frame's L.
+			while (true) {
+				int32_t existingValueL = *outputBufferWritePos;
+
+				if (sampleSourceNumChannels == 2) {
+					sampleRead[1] = *(int32_t*)((char*)readPos + kCacheByteDepth);
+
+					if (numChannelsInOutputBuffer == 1) {
+						sampleRead[0] = ((sampleRead[0] >> 1) + (sampleRead[1] >> 1));
+					}
+				}
+
+				cacheRenderAmplitude += cacheRenderAmplitudeIncrement;
+
+				*outputBufferWritePos =
+				    multiply_accumulate_32x32_rshift32_rounded(existingValueL, sampleRead[0], cacheRenderAmplitude);
+				outputBufferWritePos++;
+
+				if (numChannelsInOutputBuffer == 2) {
+					int32_t existingValueR = *outputBufferWritePos;
+					*outputBufferWritePos =
+					    multiply_accumulate_32x32_rshift32_rounded(existingValueR, sampleRead[1], cacheRenderAmplitude);
+					outputBufferWritePos++;
+				}
+
+				// Retreat to previous frame
+				readPos = (int32_t*)((char*)readPos - frameSizeBytes);
+
+				if (outputBufferWritePos == oscBufferEndNow) {
+					break;
+				}
+
+				sampleRead[0] = *readPos;
+			}
 		}
 
-		cacheBytePos += numSamplesThisCacheRead * kCacheByteDepth * sampleSourceNumChannels;
+		// Advance voice amplitude independently of crossfade scaling
+		amplitude += amplitudeIncrement * numSamplesThisCacheRead;
+
+		// Direction-aware position advancement
+		cacheBytePos += numSamplesThisCacheRead * frameSizeBytes * cachePlayDirection;
 
 		// Need to also keep track of the un-cached play-pos so we can switch back if needed
 
@@ -822,7 +977,10 @@ readCachedWindow:
 		uint64_t combinedIncrement = ((uint64_t)(uint32_t)phaseIncrement * (uint32_t)timeStretchRatio) >> 24;
 		uint64_t uncachedSamplePosBig = (uint64_t)cacheSamplePos * combinedIncrement;
 		int32_t uncachedSamplePos = (int32_t)(uncachedSamplePosBig >> 24) + cache->skipSamplesAtStart;
-		int32_t uncachedBytePos = (playDirection == 1)
+		// Use the cache's write direction for source mapping, not the current playDirection
+		// (which flips during pingpong). The cache was written in a fixed direction.
+		int32_t cacheSourceDirection = cache->reversed ? -1 : 1;
+		int32_t uncachedBytePos = (!cache->reversed)
 		                              ? sample->audioDataStartPosBytes + uncachedSamplePos * bytesPerSample
 		                              : sample->audioDataStartPosBytes + sample->audioDataLengthBytes
 		                                    - (uncachedSamplePos + 1) * bytesPerSample;
@@ -848,7 +1006,7 @@ readCachedWindow:
 			// currentPlayPos will end up outside the bounds of that Cluster, that'll soon be picked up on, and a loop
 			// point will get obeyed or something.
 			int32_t finalClusterIndex = guide->getFinalClusterIndex(sample, true);
-			if ((uncachedClusterIndex - finalClusterIndex) * playDirection > 0) {
+			if ((uncachedClusterIndex - finalClusterIndex) * cacheSourceDirection > 0) {
 				uncachedClusterIndex = finalClusterIndex;
 			}
 
@@ -866,7 +1024,7 @@ readCachedWindow:
 					if (nextUncachedClusterIndex == finalClusterIndex) {
 						break; // If no more Clusters
 					}
-					nextUncachedClusterIndex += playDirection;
+					nextUncachedClusterIndex += cacheSourceDirection;
 				}
 			}
 
@@ -1260,10 +1418,22 @@ readNonTimestretched:
 
 			if (cache) { // If writing cache...
 
-				// Because we're writing cache, and if both play-heads have finished up, clearing that cache is all
-				// that's actually required!
+				// Both play-heads finished — either write silence or restart for looping
 				if (!timeStretcher->playHeadStillActive[PLAY_HEAD_OLDER]
 				    && !timeStretcher->playHeadStillActive[PLAY_HEAD_NEWER]) {
+
+					if (loopingType != LoopType::NONE) {
+						// Both heads dead but looping — discard cache and restart
+						// the time stretcher from the loop position. The next render
+						// cycle will re-create the stretcher.
+						cache = nullptr;
+						unassignAllReasons(false);
+						endTimeStretching();
+						if (!setupClusersForInitialPlay(guide, sample, 0, true, priorityRating)) {
+							pendingSamplesLate = 1;
+						}
+						return true;
+					}
 
 					memset(cacheWritePos, 0, numSamplesThisUncachedRead * kCacheByteDepth * sampleSourceNumChannels);
 
@@ -1317,13 +1487,16 @@ readTimestretched:
 
 						// Check this again, cos newer play-head can become inactive in hopEnd(). This probably isn't
 						// really crucial. Added June 2019
-						if (!cache && !timeStretcher->playHeadStillActive[PLAY_HEAD_OLDER]
+						if (!timeStretcher->playHeadStillActive[PLAY_HEAD_OLDER]
 						    && !timeStretcher->playHeadStillActive[PLAY_HEAD_NEWER]) {
 							if (loopingType == LoopType::NONE) {
 								return false;
 							}
 							// Both heads dead but looping — restart the time stretcher.
 							// weShouldBeTimeStretchingNow() will re-create it next render.
+							if (cache) {
+								cache = nullptr;
+							}
 							unassignAllReasons(false);
 							endTimeStretching();
 							if (splitLoopActive) {
@@ -1597,13 +1770,16 @@ headsFinishedReading:
 			}
 #endif
 
-			if (!cache && !timeStretcher->playHeadStillActive[PLAY_HEAD_OLDER]
+			if (!timeStretcher->playHeadStillActive[PLAY_HEAD_OLDER]
 			    && !timeStretcher->playHeadStillActive[PLAY_HEAD_NEWER]) {
 				if (loopingType == LoopType::NONE) {
 					return false;
 				}
 				// Both heads dead but looping — restart the time stretcher.
 				// weShouldBeTimeStretchingNow() will re-create it next render.
+				if (cache) {
+					cache = nullptr;
+				}
 				unassignAllReasons(false);
 				endTimeStretching();
 				if (splitLoopActive) {
@@ -1985,13 +2161,40 @@ bool VoiceSample::possiblySetUpCache(SampleControls* sampleControls, SamplePlayb
 	}
 
 	bool mayCreate = (sampleControls->getInterpolationBufferSize(phaseIncrement) == kInterpolationMaxNumSamples);
-	cache = ((Sample*)(guide->audioFileHolder->audioFile))
-	            ->getOrCreateCache((SampleHolder*)guide->audioFileHolder, phaseIncrement, timeStretchRatio,
-	                               guide->playDirection == -1, mayCreate, &writingToCache);
+
+	// Compute skipSamplesAtStart from the guide's actual start position, which accounts
+	// for dynamic start offset. This produces a different cache key per offset value.
+	Sample* cacheSetupSample = (Sample*)(guide->audioFileHolder->audioFile);
+	int32_t bytesPerSample = cacheSetupSample->numChannels * cacheSetupSample->byteDepth;
+	int32_t skipSamplesAtStart;
+	if (guide->playDirection == 1) {
+		skipSamplesAtStart = (guide->startPlaybackAtByte - cacheSetupSample->audioDataStartPosBytes) / bytesPerSample;
+	}
+	else {
+		skipSamplesAtStart = (cacheSetupSample->audioDataStartPosBytes + cacheSetupSample->audioDataLengthBytes
+		                      - guide->startPlaybackAtByte - 1)
+		                     / bytesPerSample;
+	}
+
+	cache =
+	    cacheSetupSample->getOrCreateCache((SampleHolder*)guide->audioFileHolder, phaseIncrement, timeStretchRatio,
+	                                       guide->playDirection == -1, mayCreate, &writingToCache, skipSamplesAtStart);
 
 	if (cache) {
 		// D_PRINTLN("cache gotten");
+
+		// For time-stretched caches, a pre-existing cache may be partial
+		// (the previous voice's time stretcher stopped before filling it).
+		// We can't resume writing (time stretcher state is per-voice), and
+		// reading partial data produces incorrect audio. Skip the cache;
+		// the time stretcher will handle playback directly.
+		if (!writingToCache && timeStretchRatio != kMaxSampleValue) {
+			cache = nullptr;
+			return true;
+		}
+
 		cacheBytePos = 0;
+		cachePlayDirection = 1; // Cache always starts reading forward (written forward)
 
 		setupCacheLoopPoints(guide, (Sample*)guide->audioFileHolder->audioFile, loopingType);
 		bool result = reassessReassessmentLocation(guide, (Sample*)guide->audioFileHolder->audioFile, priorityRating);
