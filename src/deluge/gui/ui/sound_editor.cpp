@@ -1060,7 +1060,7 @@ void SoundEditor::markInstrumentAsEdited() {
 	if (!inSettingsMenu()) {
 		Instrument* inst = getCurrentInstrument();
 		if (inst) {
-			getCurrentInstrument()->beenEdited();
+			inst->beenEdited();
 		}
 	}
 }

@@ -104,13 +104,15 @@ public:
 
 			if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
 				Kit* kit = getCurrentKit();
-				for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
-					if (thisDrum->type == DrumType::SOUND) {
-						auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
-						soundDrum->stutterConfig.latch = latch;
-						// Switching to momentary while scattering should end scatter
-						if (!latch && stutterer.isStuttering(soundDrum)) {
-							soundDrum->endStutter(nullptr);
+				if (kit != nullptr) {
+					for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
+						if (thisDrum->type == DrumType::SOUND) {
+							auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
+							soundDrum->stutterConfig.latch = latch;
+							// Switching to momentary while scattering should end scatter
+							if (!latch && stutterer.isStuttering(soundDrum)) {
+								soundDrum->endStutter(nullptr);
+							}
 						}
 					}
 				}
@@ -132,6 +134,9 @@ public:
 
 		if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
 			Kit* kit = getCurrentKit();
+			if (kit == nullptr) {
+				return;
+			}
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
