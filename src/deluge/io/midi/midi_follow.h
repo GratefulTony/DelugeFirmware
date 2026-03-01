@@ -76,6 +76,10 @@ public:
 	void sendCCForMidiFollowFeedback(int32_t channel, int32_t ccNumber, int32_t knobPos);
 
 	void handleReceivedCC(ModelStackWithTimelineCounter& modelStack, Clip* clip, int32_t ccNumber, int32_t ccValue);
+	void handleModKnobCC(ModelStackWithTimelineCounter& modelStack, Clip* clip, int32_t slotIndex, int32_t ccNumber,
+	                     int32_t ccValue);
+
+	void loadPresetFromFile(char const* filepath);
 
 private:
 	// initialize
@@ -109,7 +113,11 @@ private:
 
 	// saving
 	void writeDefaultsToFile();
+	void writeMappingsToFile(char const* filepath);
 	void writeDefaultMappingsToFile();
+
+	// presets
+	void ensurePresetDirectory();
 
 	// loading
 	bool successfullyReadDefaultsFromFile;

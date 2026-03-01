@@ -64,10 +64,10 @@ using namespace deluge::gui::menu_item;
 // 255 means none. 254 means soon
 PatchSource modSourceShortcuts[2][8] = {
     {
-        PatchSource::NOT_AVAILABLE,
-        PatchSource::NOT_AVAILABLE,
-        PatchSource::NOT_AVAILABLE,
-        PatchSource::NOT_AVAILABLE,
+        PatchSource::MACRO_1,
+        PatchSource::MACRO_2,
+        PatchSource::MACRO_3,
+        PatchSource::MACRO_4,
         PatchSource::NOT_AVAILABLE,
         PatchSource::LFO_GLOBAL_1,
         PatchSource::ENVELOPE_0,

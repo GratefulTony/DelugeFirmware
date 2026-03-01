@@ -108,6 +108,7 @@ public:
 	MIDIFollowFeedbackAutomationMode midiFollowFeedbackAutomation;
 	bool midiFollowFeedbackFilter;
 	MIDITakeoverMode midiTakeover;
+	uint8_t midiFollowModKnobBaseCC = MIDI_CC_NONE; // disabled by default; when set, CCs baseCC..baseCC+15 → mod knobs
 	bool midiSelectKitRow;
 	TaskID routine_task_id;
 

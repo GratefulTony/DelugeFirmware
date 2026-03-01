@@ -152,11 +152,15 @@ enum Global : ParamType {
 	FIRST_GLOBAL_NON_VOLUME,
 	GLOBAL_DELAY_FEEDBACK = FIRST_GLOBAL_NON_VOLUME,
 
-	// Global hybrid params begin (none currently - placeholder for future params)
+	// Global hybrid params begin (bipolar additive: base ± modulation)
 	FIRST_GLOBAL_HYBRID,
+	GLOBAL_MACRO_1 = FIRST_GLOBAL_HYBRID, // Macro routing node 1 (source + destination)
+	GLOBAL_MACRO_2,                       // Macro routing node 2
+	GLOBAL_MACRO_3,                       // Macro routing node 3
+	GLOBAL_MACRO_4,                       // Macro routing node 4
 
 	// Global zone params begin (patcher outputs cables only, DSP combines with preset)
-	FIRST_GLOBAL_ZONE = FIRST_GLOBAL_HYBRID,
+	FIRST_GLOBAL_ZONE,
 	GLOBAL_DISPERSER_TOPO = FIRST_GLOBAL_ZONE, // Disperser topology zone (clips to boundaries)
 	GLOBAL_DISPERSER_TWIST,                    // Disperser character zone (allows cross-zone)
 	GLOBAL_SCATTER_MACRO,                      // Scatter macro control (zone param for cable-only output)

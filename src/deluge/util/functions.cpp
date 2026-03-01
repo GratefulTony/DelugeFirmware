@@ -310,6 +310,18 @@ char const* sourceToString(PatchSource source) {
 	case PatchSource::UNISON_INDEX:
 		return "unisonIndex";
 
+	case PatchSource::MACRO_1:
+		return "macro1";
+
+	case PatchSource::MACRO_2:
+		return "macro2";
+
+	case PatchSource::MACRO_3:
+		return "macro3";
+
+	case PatchSource::MACRO_4:
+		return "macro4";
+
 	case PatchSource::AFTERTOUCH:
 		return "aftertouch";
 
@@ -367,6 +379,18 @@ char const* getSourceDisplayNameForOLED(PatchSource s) {
 
 	case PatchSource::UNISON_INDEX:
 		return l10n::get(STRING_FOR_PATCH_SOURCE_UNISON_INDEX);
+
+	case PatchSource::MACRO_1:
+		return l10n::get(STRING_FOR_PATCH_SOURCE_MACRO_1);
+
+	case PatchSource::MACRO_2:
+		return l10n::get(STRING_FOR_PATCH_SOURCE_MACRO_2);
+
+	case PatchSource::MACRO_3:
+		return l10n::get(STRING_FOR_PATCH_SOURCE_MACRO_3);
+
+	case PatchSource::MACRO_4:
+		return l10n::get(STRING_FOR_PATCH_SOURCE_MACRO_4);
 
 	case PatchSource::AFTERTOUCH:
 		return l10n::get(STRING_FOR_PATCH_SOURCE_AFTERTOUCH);
@@ -433,6 +457,18 @@ char const* sourceToStringShort(PatchSource source) {
 
 	case PatchSource::UNISON_INDEX:
 		return "unis";
+
+	case PatchSource::MACRO_1:
+		return "mac1";
+
+	case PatchSource::MACRO_2:
+		return "mac2";
+
+	case PatchSource::MACRO_3:
+		return "mac3";
+
+	case PatchSource::MACRO_4:
+		return "mac4";
 
 	case PatchSource::AFTERTOUCH:
 		return "pres";

@@ -381,6 +381,7 @@ void resetMidiFollowSettings() {
 		midiChannelType.clear();
 	}
 	midiEngine.midiFollowKitRootNote = 36;
+	midiEngine.midiFollowModKnobBaseCC = MIDI_CC_NONE;
 	midiEngine.midiFollowDisplayParam = false;
 	midiEngine.midiFollowFeedbackChannelType = MIDIFollowChannelType::NONE;
 	midiEngine.midiFollowFeedbackAutomation = MIDIFollowFeedbackAutomationMode::DISABLED;
@@ -659,6 +660,14 @@ void readSettings() {
 		else {
 			resetMidiFollowSettings();
 		}
+	}
+
+	// midiEngine.midiFollowModKnobBaseCC (MIDI_CC_NONE = disabled, 1-112 = base CC)
+	if (buffer[191] != MIDI_CC_NONE && buffer[191] > kMaxMIDIValue - 15) {
+		midiEngine.midiFollowModKnobBaseCC = MIDI_CC_NONE;
+	}
+	else {
+		midiEngine.midiFollowModKnobBaseCC = buffer[191];
 	}
 
 	gridEmptyPadsCreateRec = buffer[146];
@@ -1115,6 +1124,8 @@ void writeSettings() {
 	buffer[189] = util::to_underlying(defaultPatchCablePolarity);
 
 	buffer[190] = util::to_underlying(defaultRecordSource);
+
+	buffer[191] = midiEngine.midiFollowModKnobBaseCC;
 
 	R_SFLASH_EraseSector(0x80000 - 0x1000, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, 1, SPIBSC_OUTPUT_ADDR_24);
 	R_SFLASH_ByteProgram(0x80000 - 0x1000, buffer.data(), 256, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, SPIBSC_1BIT,
