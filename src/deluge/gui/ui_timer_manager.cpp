@@ -76,11 +76,11 @@ void UITimerManager::routine() {
 					break;
 
 				case TimerName::DEFAULT_ROOT_NOTE:
-					if (getCurrentUI() == &instrumentClipView || getCurrentUI() == &automationView) {
-						instrumentClipView.flashDefaultRootNote();
-					}
-					else if (getCurrentUI() == &keyboardScreen) {
+					if (getCurrentUI() == &keyboardScreen) {
 						keyboardScreen.flashDefaultRootNote();
+					}
+					else if (getCurrentUI()->getUIContextType() == UIType::INSTRUMENT_CLIP) {
+						instrumentClipView.flashDefaultRootNote();
 					}
 					break;
 
@@ -151,8 +151,10 @@ void UITimerManager::routine() {
 					break;
 				}
 				case TimerName::BACK_MENU_EXIT: {
-
-					getCurrentUI()->exitUI();
+					ActionResult result = getCurrentUI()->exitUI();
+					if (result == ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE) {
+						timer.active = true;
+					}
 					break;
 				}
 

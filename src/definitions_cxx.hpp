@@ -230,10 +230,10 @@ enum class UIType : uint8_t {
 	NONE = 255,
 };
 
-enum class AutomationSubType : uint8_t {
-	ARRANGER,
-	INSTRUMENT,
-	AUDIO,
+// used for determining the active mod controllable context for a UI
+enum class UIModControllableContext : uint8_t {
+	SONG,
+	CLIP,
 	NONE = 255,
 };
 
@@ -520,6 +520,7 @@ enum class Error {
 	OUT_OF_BUFFER_SPACE,
 	INVALID_SYSEX_FORMAT,
 	POS_PAST_STRING,
+	FILE_NOT_SAVED,
 };
 
 enum class SampleRepeatMode {

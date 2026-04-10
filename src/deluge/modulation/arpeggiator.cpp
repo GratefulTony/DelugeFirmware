@@ -485,6 +485,7 @@ bool Arpeggiator::handlePendingNotes(ArpeggiatorSettings* settings, ArpReturnIns
 					}
 					else {
 						instruction->arpNoteOn = arp_note;
+						arp_note->noteStatus[0] = ArpNoteStatus::PLAYING;
 						ARP_PRINTLN("found a pending a live note, starting it");
 						return true;
 					}
@@ -1517,6 +1518,7 @@ int32_t ArpeggiatorBase::doTickForward(ArpeggiatorSettings* settings, ArpReturnI
 	if (clipCurrentPos == 0) {
 		notesPlayedFromLockedRandomizer = 0;
 	}
+
 	if (handlePendingNotes(settings, instruction)) {
 		ARP_PRINTLN("pending during tick forward");
 		return 0;
@@ -1525,7 +1527,6 @@ int32_t ArpeggiatorBase::doTickForward(ArpeggiatorSettings* settings, ArpReturnI
 	if (settings->mode == ArpMode::OFF || (settings->syncLevel == 0u)) {
 		return 2147483647;
 	}
-
 	uint32_t ticksPerPeriod = 3 << (9 - settings->syncLevel);
 	if (settings->syncType == SYNC_TYPE_EVEN) {} // Do nothing
 	else if (settings->syncType == SYNC_TYPE_TRIPLET) {
@@ -1656,21 +1657,21 @@ bool ArpeggiatorSettings::readCommonTagsFromFile(Deserializer& reader, char cons
 	else if (!strcmp(tagName, "lastLockedReverseProb")) {
 		lastLockedReverseProbabilityParameterValue = reader.readTagOrAttributeValueInt();
 	}
-	else if (!strcmp(tagName, "lockeReverseProbArray")) {
+	else if (!strcmp(tagName, "lockedReverseProbArray") || !strcmp(tagName, "lockeReverseProbArray")) {
 		int len = reader.readTagOrAttributeValueHexBytes((uint8_t*)lockedReverseProbabilityValues.data(),
 		                                                 lockedReverseProbabilityValues.size());
 	}
 	else if (!strcmp(tagName, "lastLockedChordProb")) {
 		lastLockedChordProbabilityParameterValue = reader.readTagOrAttributeValueInt();
 	}
-	else if (!strcmp(tagName, "lockeChordProbArray")) {
+	else if (!strcmp(tagName, "lockedChordProbArray") || !strcmp(tagName, "lockeChordProbArray")) {
 		int len = reader.readTagOrAttributeValueHexBytes((uint8_t*)lockedChordProbabilityValues.data(),
 		                                                 lockedChordProbabilityValues.size());
 	}
 	else if (!strcmp(tagName, "lastLockedRatchetProb")) {
 		lastLockedRatchetProbabilityParameterValue = reader.readTagOrAttributeValueInt();
 	}
-	else if (!strcmp(tagName, "lockeRatchetProbArray")) {
+	else if (!strcmp(tagName, "lockedRatchetProbArray") || !strcmp(tagName, "lockeRatchetProbArray")) {
 		int len = reader.readTagOrAttributeValueHexBytes((uint8_t*)lockedRatchetProbabilityValues.data(),
 		                                                 lockedRatchetProbabilityValues.size());
 	}

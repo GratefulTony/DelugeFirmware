@@ -553,6 +553,19 @@ ActionResult SoundEditor::buttonAction(deluge::hid::Button b, bool on, bool inCa
 		}
 	}
 
+	// exit menu to arranger view or session view
+	else if (b == SESSION_VIEW) {
+		if (on && currentUIMode == UI_MODE_NONE) {
+			exitCompletely();
+			if (currentSong->lastClipInstanceEnteredStartPos != -1) {
+				changeRootUI(&arrangerView);
+			}
+			else {
+				changeRootUI(&sessionView);
+			}
+		}
+	}
+
 	else if (inNoteEditor()) {
 		return instrumentClipView.handleNoteEditorButtonAction(b, on, inCardRoutine);
 	}
@@ -670,10 +683,16 @@ void SoundEditor::goUpOneLevel() {
 	beginScreen(oldItem);
 }
 
-void SoundEditor::exitCompletely() {
+ActionResult SoundEditor::exitCompletely() {
+
 	if (inSettingsMenu()) {
 		// First, save settings
-
+		if (sdRoutineLock) {
+			return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE;
+		}
+		else {
+			uiTimerManager.unsetTimer(TimerName::BACK_MENU_EXIT);
+		}
 		display->displayLoadingAnimationText("Saving settings");
 
 		FlashStorage::writeSettings();
@@ -702,6 +721,7 @@ void SoundEditor::exitCompletely() {
 	setupKitGlobalFXMenu = false;
 
 	currentUIMode = UI_MODE_NONE;
+	return ActionResult::ACTIONED_AND_CAUSED_CHANGE;
 }
 
 bool SoundEditor::findPatchedParam(int32_t paramLookingFor, int32_t* xout, int32_t* yout, bool* isSecondLayerParamOut) {
@@ -910,9 +930,14 @@ void SoundEditor::endScreen() {
 }
 
 void SoundEditor::possibleChangeToCurrentRangeDisplay() {
-	uiNeedsRendering(&instrumentClipView, 0, 0xFFFFFFFF);
-	uiNeedsRendering(&automationView, 0, 0xFFFFFFFF);
-	uiNeedsRendering(&keyboardScreen, 0xFFFFFFFF, 0);
+	RootUI* rootUI = getRootUI();
+
+	if (rootUI == &keyboardScreen) {
+		uiNeedsRendering(&keyboardScreen, 0xFFFFFFFF, 0);
+	}
+	else if (rootUI->getUIContextType() == UIType::INSTRUMENT_CLIP) {
+		uiNeedsRendering(rootUI, 0, 0xFFFFFFFF);
+	}
 }
 
 void SoundEditor::setupShortcutBlink(int32_t x, int32_t y, int32_t frequency, int32_t colour) {

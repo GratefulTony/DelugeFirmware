@@ -819,195 +819,193 @@ void View::modEncoderAction(int32_t whichModEncoder, int32_t offset) {
 
 		// If non-existent param, still let the ModControllable know
 		if (!modelStackWithParam || !modelStackWithParam->autoParam) {
-			ActionResult result = activeModControllableModelStack.modControllable->modEncoderActionForNonExistentParam(
-			    offset, whichModEncoder, modelStackWithParam);
-
-			if (result == ActionResult::ACTIONED_AND_CAUSED_CHANGE) {
-				setKnobIndicatorLevel(whichModEncoder);
-			}
+			modEncoderAction_nonExistentParam(whichModEncoder, offset, modelStackWithParam);
 		}
 
 		// Or, if normal case - an actual param
 		else {
-			char modelStackTempMemory[MODEL_STACK_MAX_SIZE];
-			copyModelStack(modelStackTempMemory, modelStackWithParam, sizeof(ModelStackWithThreeMainThings));
-			ModelStackWithThreeMainThings* tempModelStack = (ModelStackWithThreeMainThings*)modelStackTempMemory;
-
-			params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
-
-			// Push+twist on gold knob when learned to scatter param: adjust gammaPhase
-			// This provides a "secret" phase evolution control accessible via gold knob
-			hid::Button modEncButton = (whichModEncoder == 0) ? hid::button::MOD_ENCODER_0 : hid::button::MOD_ENCODER_1;
-			if (Buttons::isButtonPressed(modEncButton)) {
-				bool isScatter = false;
-				if (kind == params::Kind::PATCHED) {
-					isScatter = params::isScatterParam(static_cast<params::ParamType>(modelStackWithParam->paramId));
-				}
-				else if (kind == params::Kind::UNPATCHED_SOUND || kind == params::Kind::UNPATCHED_GLOBAL) {
-					isScatter =
-					    params::isScatterParam(static_cast<params::UnpatchedShared>(modelStackWithParam->paramId));
-				}
-
-				if (isScatter && activeModControllableModelStack.modControllable) {
-					auto* mca = static_cast<ModControllableAudio*>(activeModControllableModelStack.modControllable);
-					float& gamma = mca->stutterConfig.gammaPhase;
-					gamma = std::max(0.0f, gamma + static_cast<float>(offset) * 0.1f);
-					// Display gamma value
-					char buffer[16];
-					snprintf(buffer, sizeof(buffer), "gamma:%d", static_cast<int32_t>(gamma * 10.0f));
-					display->displayPopup(buffer);
-					return;
-				}
-			}
-
-			int32_t value = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
-			int32_t knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(value, modelStackWithParam);
-			int32_t lowerLimit;
-
-			if (kind == params::Kind::PATCH_CABLE) {
-				lowerLimit = std::min(-192_i32, knobPos);
-			}
-			else {
-				lowerLimit = std::min(-64_i32, knobPos);
-			}
-
-			// Check if this is a high-resolution zone param (1024 steps instead of 128)
-			// For these params, use finer control by applying smaller deltas
-			// Zone params can be either patched (in Sound context) or unpatched (in GlobalEffectable context)
-			bool isHighResParam = false;
-			int32_t highResDivisor = 1;
-			if (kind == params::Kind::PATCHED) {
-				auto paramType = static_cast<params::ParamType>(modelStackWithParam->paramId);
-				if (params::isHighResZoneParam(paramType)) {
-					isHighResParam = true;
-					highResDivisor = params::getHighResOffsetDivisor(paramType);
-				}
-			}
-			else if (kind == params::Kind::UNPATCHED_SOUND || kind == params::Kind::UNPATCHED_GLOBAL) {
-				auto paramId = static_cast<params::UnpatchedShared>(modelStackWithParam->paramId);
-				if (params::isHighResZoneParam(paramId)) {
-					isHighResParam = true;
-					highResDivisor = params::getHighResOffsetDivisor(paramId);
-				}
-			}
-
-			int32_t newKnobPos = knobPos + offset;
-			newKnobPos = std::clamp(newKnobPos, lowerLimit, 64_i32);
-
-			// ignore modEncoderTurn for Midi CC if current or new knobPos exceeds 127
-			// if current knobPos exceeds 127, e.g. it's 128, then it needs to drop to 126 before a value change
-			// gets recorded if newKnobPos exceeds 127, then it means current knobPos was 127 and it was increased
-			// to 128. In which case, ignore value change
-			if (kind == params::Kind::MIDI && (newKnobPos == 64)) {
-				return;
-			}
-
-			// if you had selected a parameter in performance view and the parameter name
-			// and current value is displayed on the screen, don't show pop-up as the display
-			// already shows it
-			// this checks that the param displayed on the screen in performance view
-			// is the same param currently being edited with mod encoder
-			bool editingParamInPerformanceView = false;
-			if (getRootUI() == &performanceView) {
-				editingParamInPerformanceView = performanceView.possiblyRefreshPerformanceViewDisplay(
-				    kind, modelStackWithParam->paramId, newKnobPos);
-			}
-
-			// let's see if we're editing the same param in the menu, if so, don't show pop-up
-			bool editingParamInMenu = false;
-			if (getCurrentUI() == &soundEditor) {
-				if ((soundEditor.getCurrentMenuItem()->getParamKind() == kind)
-				    && (soundEditor.getCurrentMenuItem()->getParamIndex() == modelStackWithParam->paramId)) {
-					editingParamInMenu = true;
-				}
-			}
-
-			// let's see if we're browsing for a song
-			bool inSongBrowser = getCurrentUI() == &loadSongUI;
-
-			if (!editingParamInPerformanceView && !editingParamInMenu && !inSongBrowser) {
-				PatchSource source1 = PatchSource::NONE;
-				PatchSource source2 = PatchSource::NONE;
-				if (kind == params::Kind::PATCH_CABLE) {
-					ParamDescriptor paramDescriptor;
-					paramDescriptor.data = modelStackWithParam->paramId;
-					source1 = paramDescriptor.getBottomLevelSource();
-					if (!paramDescriptor.hasJustOneSource()) {
-						source2 = paramDescriptor.getTopLevelSource();
-					}
-				}
-				displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos, source1, source2);
-			}
-
-			// For standard params, skip if knobPos hasn't changed
-			// For high-res zone params, always proceed since value changes with finer granularity
-			if (!isHighResParam && newKnobPos == knobPos) {
-				return;
-			}
-
-			// midi follow and midi feedback enabled
-			// re-send midi cc because learned parameter value has changed
-			sendMidiFollowFeedback(modelStackWithParam, newKnobPos);
-
-			char newModelStackMemory[MODEL_STACK_MAX_SIZE];
-
-			// Hack to make it so stutter can't be automated
-			if (modelStackWithParam->timelineCounterIsSet()
-			    && !modelStackWithParam->paramCollection->doesParamIdAllowAutomation(modelStackWithParam)) {
-				copyModelStack(newModelStackMemory, modelStackWithParam, sizeof(ModelStackWithAutoParam));
-				modelStackWithParam = (ModelStackWithAutoParam*)newModelStackMemory;
-				modelStackWithParam->setTimelineCounter(nullptr);
-			}
-
-			int32_t newValue;
-			if (isHighResParam && highResDivisor > 1) {
-				// High-res zone params: use finer delta (1024 steps instead of 128)
-				// Standard: each knob step = 2^25 (~33.5M) in q31
-				// High-res: each step = 2^25 / divisor (~4.2M for 1024-step)
-				int32_t stepSize = (1 << 25) / highResDivisor;
-				newValue = value + (offset * stepSize);
-				// Clamp to valid q31 range
-				if (newValue < 0) {
-					newValue = 0;
-				}
-				if (newValue > 2147483647) {
-					newValue = 2147483647;
-				}
-			}
-			else {
-				newValue = modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
-			}
-
-			// Perform the actual change
-			modelStackWithParam->autoParam->setValuePossiblyForRegion(newValue, modelStackWithParam, modPos, modLength);
-
-			if (activeModControllableModelStack.timelineCounterIsSet()) {
-				bool noteTailsAllowedAfter =
-				    modelStackWithParam->modControllable->allowNoteTails(tempModelStack->addSoundFlags());
-
-				if (noteTailsAllowedBefore != noteTailsAllowedAfter) {
-					if (getRootUI() && getRootUI()->toTimelineView() != nullptr) {
-						uiNeedsRendering(getRootUI(), 0xFFFFFFFF, 0);
-					}
-				}
-			}
-
-			// if the newKnobPos == 0, and we're dealing with a param that param that should
-			// indicate (blink) middle value
-			// then blink that middle value and make it harder to turn the knob past middle
-			potentiallyMakeItHarderToTurnKnob(whichModEncoder, modelStackWithParam, newKnobPos);
-
-			// if you're updating a param's value while in the sound editor menu
-			// and it's the same param displayed in the automation editor open underneath
-			// then refresh the automation editor grid
-			if ((getCurrentUI() == &soundEditor) && (getRootUI() == &automationView)) {
-				automationView.possiblyRefreshAutomationEditorGrid(getCurrentClip(), kind,
-				                                                   modelStackWithParam->paramId);
-			}
+			modEncoderAction_existentParam(whichModEncoder, offset, modelStackWithParam, noteTailsAllowedBefore);
 		}
 	}
 
 	instrumentBeenEdited();
+}
+
+void View::modEncoderAction_nonExistentParam(int32_t whichModEncoder, int32_t offset,
+                                             ModelStackWithAutoParam* modelStackWithParam) {
+	ActionResult result = activeModControllableModelStack.modControllable->modEncoderActionForNonExistentParam(
+	    offset, whichModEncoder, modelStackWithParam);
+
+	if (result == ActionResult::ACTIONED_AND_CAUSED_CHANGE) {
+		setKnobIndicatorLevel(whichModEncoder);
+	}
+}
+
+void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offset,
+                                          ModelStackWithAutoParam* modelStackWithParam, bool noteTailsAllowedBefore) {
+	char modelStackTempMemory[MODEL_STACK_MAX_SIZE];
+	copyModelStack(modelStackTempMemory, modelStackWithParam, sizeof(ModelStackWithThreeMainThings));
+	ModelStackWithThreeMainThings* tempModelStack = (ModelStackWithThreeMainThings*)modelStackTempMemory;
+
+	params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
+
+	// TODO: move scatter gamma phase handling to ModControllableAudio or stutter code
+	// Push+twist on gold knob when learned to scatter param: adjust gammaPhase
+	hid::Button modEncButton = (whichModEncoder == 0) ? hid::button::MOD_ENCODER_0 : hid::button::MOD_ENCODER_1;
+	if (Buttons::isButtonPressed(modEncButton)) {
+		bool isScatter = false;
+		if (kind == params::Kind::PATCHED) {
+			isScatter = params::isScatterParam(static_cast<params::ParamType>(modelStackWithParam->paramId));
+		}
+		else if (kind == params::Kind::UNPATCHED_SOUND || kind == params::Kind::UNPATCHED_GLOBAL) {
+			isScatter = params::isScatterParam(static_cast<params::UnpatchedShared>(modelStackWithParam->paramId));
+		}
+
+		if (isScatter && activeModControllableModelStack.modControllable) {
+			auto* mca = static_cast<ModControllableAudio*>(activeModControllableModelStack.modControllable);
+			float& gamma = mca->stutterConfig.gammaPhase;
+			gamma = std::max(0.0f, gamma + static_cast<float>(offset) * 0.1f);
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "gamma:%d", static_cast<int32_t>(gamma * 10.0f));
+			display->displayPopup(buffer);
+			return;
+		}
+	}
+
+	int32_t value = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
+	int32_t knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(value, modelStackWithParam);
+	int32_t lowerLimit;
+
+	if (kind == params::Kind::PATCH_CABLE) {
+		lowerLimit = std::min(-192_i32, knobPos);
+	}
+	else {
+		lowerLimit = std::min(-64_i32, knobPos);
+	}
+	// Check if this is a high-resolution zone param (1024 steps instead of 128)
+	bool isHighResParam = false;
+	int32_t highResDivisor = 1;
+	if (kind == params::Kind::PATCHED) {
+		auto paramType = static_cast<params::ParamType>(modelStackWithParam->paramId);
+		if (params::isHighResZoneParam(paramType)) {
+			isHighResParam = true;
+			highResDivisor = params::getHighResOffsetDivisor(paramType);
+		}
+	}
+	else if (kind == params::Kind::UNPATCHED_SOUND || kind == params::Kind::UNPATCHED_GLOBAL) {
+		auto paramId = static_cast<params::UnpatchedShared>(modelStackWithParam->paramId);
+		if (params::isHighResZoneParam(paramId)) {
+			isHighResParam = true;
+			highResDivisor = params::getHighResOffsetDivisor(paramId);
+		}
+	}
+
+	int32_t newKnobPos = knobPos + offset;
+	newKnobPos = std::clamp(newKnobPos, lowerLimit, 64_i32);
+
+	// ignore modEncoderTurn for Midi CC if current or new knobPos exceeds 127
+	// if current knobPos exceeds 127, e.g. it's 128, then it needs to drop to 126 before a value change
+	// gets recorded if newKnobPos exceeds 127, then it means current knobPos was 127 and it was increased
+	// to 128. In which case, ignore value change
+	if (kind == params::Kind::MIDI && (newKnobPos == 64)) {
+		return;
+	}
+
+	// if you had selected a parameter in performance view and the parameter name
+	// and current value is displayed on the screen, don't show pop-up as the display
+	// already shows it
+	// this checks that the param displayed on the screen in performance view
+	// is the same param currently being edited with mod encoder
+	bool editingParamInPerformanceView = false;
+	if (getRootUI() == &performanceView) {
+		editingParamInPerformanceView =
+		    performanceView.possiblyRefreshPerformanceViewDisplay(kind, modelStackWithParam->paramId, newKnobPos);
+	}
+
+	// let's see if we're editing the same param in the menu, if so, don't show pop-up
+	bool editingParamInMenu = false;
+	if (getCurrentUI() == &soundEditor) {
+		if ((soundEditor.getCurrentMenuItem()->getParamKind() == kind)
+		    && (soundEditor.getCurrentMenuItem()->getParamIndex() == modelStackWithParam->paramId)) {
+			editingParamInMenu = true;
+		}
+	}
+
+	// let's see if we're browsing for a song
+	bool inSongBrowser = getCurrentUI() == &loadSongUI;
+
+	if (!editingParamInPerformanceView && !editingParamInMenu && !inSongBrowser) {
+		PatchSource source1 = PatchSource::NONE;
+		PatchSource source2 = PatchSource::NONE;
+		if (kind == params::Kind::PATCH_CABLE) {
+			ParamDescriptor paramDescriptor;
+			paramDescriptor.data = modelStackWithParam->paramId;
+			source1 = paramDescriptor.getBottomLevelSource();
+			if (!paramDescriptor.hasJustOneSource()) {
+				source2 = paramDescriptor.getTopLevelSource();
+			}
+		}
+		displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos, source1, source2);
+	}
+
+	if (!isHighResParam && newKnobPos == knobPos) {
+		return;
+	}
+
+	// midi follow and midi feedback enabled
+	// re-send midi cc because learned parameter value has changed
+	sendMidiFollowFeedback(modelStackWithParam, newKnobPos);
+
+	char newModelStackMemory[MODEL_STACK_MAX_SIZE];
+
+	// Hack to make it so stutter can't be automated
+	if (modelStackWithParam->timelineCounterIsSet()
+	    && !modelStackWithParam->paramCollection->doesParamIdAllowAutomation(modelStackWithParam)) {
+		copyModelStack(newModelStackMemory, modelStackWithParam, sizeof(ModelStackWithAutoParam));
+		modelStackWithParam = (ModelStackWithAutoParam*)newModelStackMemory;
+		modelStackWithParam->setTimelineCounter(nullptr);
+	}
+
+	int32_t newValue;
+	if (isHighResParam && highResDivisor > 1) {
+		int32_t stepSize = (1 << 25) / highResDivisor;
+		newValue = value + (offset * stepSize);
+		if (newValue < 0) {
+			newValue = 0;
+		}
+		if (newValue > 2147483647) {
+			newValue = 2147483647;
+		}
+	}
+	else {
+		newValue = modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
+	}
+
+	// Perform the actual change
+	modelStackWithParam->autoParam->setValuePossiblyForRegion(newValue, modelStackWithParam, modPos, modLength);
+
+	if (activeModControllableModelStack.timelineCounterIsSet()) {
+		bool noteTailsAllowedAfter =
+		    modelStackWithParam->modControllable->allowNoteTails(tempModelStack->addSoundFlags());
+
+		if (noteTailsAllowedBefore != noteTailsAllowedAfter) {
+			if (getRootUI() && getRootUI()->toTimelineView() != nullptr) {
+				uiNeedsRendering(getRootUI(), 0xFFFFFFFF, 0);
+			}
+		}
+	}
+
+	// if the newKnobPos == 0, and we're dealing with a param that param that should
+	// indicate (blink) middle value
+	// then blink that middle value and make it harder to turn the knob past middle
+	potentiallyMakeItHarderToTurnKnob(whichModEncoder, modelStackWithParam, newKnobPos);
+
+	// if you're updating a param's value while in the sound editor menu
+	// and it's the same param displayed in the automation editor open underneath
+	// then refresh the automation editor grid
+	if ((getCurrentUI() == &soundEditor) && (getRootUI() == &automationView)) {
+		automationView.possiblyRefreshAutomationEditorGrid(getCurrentClip(), kind, modelStackWithParam->paramId);
+	}
 }
 
 // get's modelStackWithParam for use with Gold Knobs and ModEncoderAction above
@@ -1374,33 +1372,39 @@ void View::modEncoderButtonAction(uint8_t whichModEncoder, bool on) {
 	if (activeModControllableModelStack.modControllable) {
 
 		if (Buttons::isShiftButtonPressed() && on) {
-
-			ModelStackWithAutoParam* modelStackWithParam =
-			    activeModControllableModelStack.modControllable->getParamFromModEncoder(
-			        whichModEncoder, &activeModControllableModelStack);
-
-			if (modelStackWithParam && modelStackWithParam->autoParam) {
-				Action* action = actionLogger.getNewAction(ActionType::AUTOMATION_DELETE, ActionAddition::NOT_ALLOWED);
-				modelStackWithParam->autoParam->deleteAutomation(action, modelStackWithParam);
-				display->displayPopup(deluge::l10n::get(deluge::l10n::String::STRING_FOR_AUTOMATION_DELETED));
-			}
-
-			return;
+			modEncoderButtonAction_deleteAutomation(whichModEncoder);
 		}
-
-		char modelStackMemory[MODEL_STACK_MAX_SIZE];
-		copyModelStack(modelStackMemory, &activeModControllableModelStack, sizeof(ModelStackWithThreeMainThings));
-		ModelStackWithThreeMainThings* modelStack = (ModelStackWithThreeMainThings*)modelStackMemory;
-
-		bool anyEditingDone =
-		    activeModControllableModelStack.modControllable->modEncoderButtonAction(whichModEncoder, on, modelStack);
-		if (anyEditingDone) {
-			instrumentBeenEdited();
+		else {
+			modEncoderButtonAction_changeModControllable(whichModEncoder, on);
 		}
-		setKnobIndicatorLevels(); // These might have changed as a result
-		if (getCurrentUI() == &soundEditor) {
-			soundEditor.getCurrentMenuItem()->readValueAgain();
-		}
+	}
+}
+
+void View::modEncoderButtonAction_deleteAutomation(uint8_t whichModEncoder) {
+	ModelStackWithAutoParam* modelStackWithParam =
+	    activeModControllableModelStack.modControllable->getParamFromModEncoder(whichModEncoder,
+	                                                                            &activeModControllableModelStack);
+
+	if (modelStackWithParam && modelStackWithParam->autoParam) {
+		Action* action = actionLogger.getNewAction(ActionType::AUTOMATION_DELETE, ActionAddition::NOT_ALLOWED);
+		modelStackWithParam->autoParam->deleteAutomation(action, modelStackWithParam);
+		display->displayPopup(deluge::l10n::get(deluge::l10n::String::STRING_FOR_AUTOMATION_DELETED));
+	}
+}
+
+void View::modEncoderButtonAction_changeModControllable(uint8_t whichModEncoder, bool on) {
+	char modelStackMemory[MODEL_STACK_MAX_SIZE];
+	copyModelStack(modelStackMemory, &activeModControllableModelStack, sizeof(ModelStackWithThreeMainThings));
+	ModelStackWithThreeMainThings* modelStack = (ModelStackWithThreeMainThings*)modelStackMemory;
+
+	bool anyEditingDone =
+	    activeModControllableModelStack.modControllable->modEncoderButtonAction(whichModEncoder, on, modelStack);
+	if (anyEditingDone) {
+		instrumentBeenEdited();
+	}
+	setKnobIndicatorLevels(); // These might have changed as a result
+	if (getCurrentUI() == &soundEditor) {
+		soundEditor.getCurrentMenuItem()->readValueAgain();
 	}
 }
 
@@ -1577,47 +1581,14 @@ void View::setModLedStates() {
 
 	RootUI* rootUI = getRootUI();
 	UIType uiType = UIType::NONE;
+	UIType uiContextType = UIType::NONE;
 	if (rootUI) {
 		uiType = rootUI->getUIType();
-	}
-	AutomationSubType automationSubType = AutomationSubType::NONE;
-	if (uiType == UIType::AUTOMATION) {
-		automationSubType = automationView.getAutomationSubType();
+		uiContextType = rootUI->getUIContextType();
 	}
 
 	// here we will set a boolean flag to let the function know whether we are dealing with the Song context
-	bool itsTheSong = (activeModControllableModelStack.getTimelineCounterAllowNull() == currentSong);
-
-	// let's check if we're in any of the song UI's
-	if (!itsTheSong && !activeModControllableModelStack.timelineCounterIsSet()) {
-		switch (uiType) {
-		case UIType::SESSION:
-			itsTheSong = true;
-			break;
-
-		case UIType::ARRANGER:
-			itsTheSong = true;
-			break;
-
-		case UIType::PERFORMANCE:
-			itsTheSong = true;
-			break;
-
-		case UIType::AUTOMATION:
-			if (automationSubType == AutomationSubType::ARRANGER) {
-				itsTheSong = true;
-			}
-			break;
-
-		default:
-		    // fallthrough for everything else -- to many UIs to list explicitly
-		    ;
-		}
-	}
-
-	// here we will set a boolean flag to let the function know whether we are dealing with the Clip context
-	bool itsAClip = activeModControllableModelStack.timelineCounterIsSet()
-	                && activeModControllableModelStack.getTimelineCounter() != currentSong;
+	bool itsTheSong = !isClipContext();
 
 	// here we will set a boolean flag to let the function know if affect entire is enabled
 	// so that it can correctly illuminate the affect entire LED indicator
@@ -1631,37 +1602,21 @@ void View::setModLedStates() {
 		// if you're in an instrument clip, get affectEntire status from clip class
 		// otherwise you're in an audio clip or automation view for an audio clip, in which case affect entire is always
 		// enabled
-		switch (uiType) {
-		case UIType::INSTRUMENT_CLIP:
-			affectEntire = ((InstrumentClip*)clip)->affectEntire;
-			break;
-		case UIType::KEYBOARD_SCREEN:
-			affectEntire = ((InstrumentClip*)clip)->affectEntire;
-			break;
-		case UIType::AUTOMATION:
-			if (automationSubType == AutomationSubType::INSTRUMENT) {
-				affectEntire = ((InstrumentClip*)clip)->affectEntire;
-			}
-			// if it's not an instrument clip, then it's an audio clip
-			else {
-				affectEntire = true;
-			}
-			break;
-		case UIType::AUDIO_CLIP:
-			affectEntire = true;
-			break;
-		default:
-		    // fallthrough for everything else -- to many UIs to list explicitly
-		    ;
-		}
+		affectEntire = (uiContextType == UIType::INSTRUMENT_CLIP) ? ((InstrumentClip*)clip)->affectEntire : true;
 	}
 	indicator_leds::setLedState(IndicatorLED::AFFECT_ENTIRE, affectEntire);
 
 	bool onAutomationClipView = false;
 
 	// turn off Clip LED indicator if we're in a song UI
+	// unless you're in automation arranger view, where we blink the Clip LED indicator
 	if (itsTheSong) {
-		indicator_leds::setLedState(IndicatorLED::CLIP_VIEW, false);
+		if ((uiType == UIType::AUTOMATION) || (uiContextType == UIType::ARRANGER && automationView.onArrangerView)) {
+			indicator_leds::blinkLed(IndicatorLED::CLIP_VIEW);
+		}
+		else {
+			indicator_leds::setLedState(IndicatorLED::CLIP_VIEW, false);
+		}
 	}
 	// we're in a clip or we've selected a clip
 	// here we're going to see if we should blink the CLIP LED if we're in automation view
@@ -1715,23 +1670,9 @@ void View::setModLedStates() {
 			indicator_leds::blinkLed(IndicatorLED::SESSION_VIEW, 255, 1);
 		}
 		else {
-			switch (uiType) {
+			switch (uiContextType) {
 			case UIType::ARRANGER:
 				indicator_leds::blinkLed(IndicatorLED::SESSION_VIEW);
-				break;
-			case UIType::AUTOMATION:
-				if (automationSubType == AutomationSubType::ARRANGER) {
-					indicator_leds::blinkLed(IndicatorLED::SESSION_VIEW);
-				}
-				break;
-			case UIType::PERFORMANCE:
-				// if performanceView was entered from arranger
-				if (currentSong->lastClipInstanceEnteredStartPos != -1) {
-					indicator_leds::blinkLed(IndicatorLED::SESSION_VIEW);
-				}
-				else {
-					indicator_leds::setLedState(IndicatorLED::SESSION_VIEW, true);
-				}
 				break;
 			case UIType::SESSION:
 				indicator_leds::setLedState(IndicatorLED::SESSION_VIEW, true);
@@ -2090,7 +2031,7 @@ void View::displayOutputName(Output* output, bool doBlink, Clip* clip) {
 	bool editedByUser = true;
 	if (output->type != OutputType::AUDIO) {
 		Instrument* instrument = (Instrument*)output;
-		editedByUser = !instrument->existsOnCard;
+		editedByUser = !instrument->mightExistOnCard;
 		switch (output->type) {
 		case OutputType::MIDI_OUT:
 			channelSuffix = ((MIDIInstrument*)instrument)->channelSuffix;
@@ -2497,8 +2438,8 @@ void View::navigateThroughPresetsForInstrumentClip(int32_t offset, ModelStackWit
 					break;
 				}
 				else if (availabilityRequirement == Availability::INSTRUMENT_AVAILABLE_IN_SESSION) {
-					if (!modelStack->song->doesNonAudioSlotHaveActiveClipInSession(outputType, newChannel,
-					                                                               newChannelSuffix)) {
+					if (!modelStack->song->doesNonAudioSlotHaveClipInSession(outputType, newChannel,
+					                                                         newChannelSuffix)) {
 						break;
 					}
 				}
@@ -2691,14 +2632,8 @@ getOut:
 			AudioEngine::routineWithClusterLoading();
 
 			instrumentClipView.recalculateColours();
-		}
 
-		if (getCurrentUI() == &instrumentClipView) {
-			uiNeedsRendering(&instrumentClipView);
-		}
-
-		else if (getCurrentUI() == &automationView) {
-			uiNeedsRendering(&automationView);
+			uiNeedsRendering(rootUI);
 		}
 
 		display->removeLoadingAnimation();
