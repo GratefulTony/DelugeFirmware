@@ -918,7 +918,7 @@ readCachedWindow:
 		    outputBufferWritePos + numSamplesThisCacheRead * numChannelsInOutputBuffer;
 
 		if (cachePlayDirection == 1) {
-			if (crossfadeActive && xfadeAmplitude != 0) {
+			if (crossfadeActive) {
 				// === FORWARD READING WITH CROSSFADE ===
 				int32_t xfCachedClusterIndex = crossfadeCacheBytePos >> Cluster::size_magnitude;
 				int32_t xfBytePosWithinCluster = crossfadeCacheBytePos & (Cluster::size - 1);
@@ -980,7 +980,27 @@ readCachedWindow:
 					}
 				}
 				else {
-					// Crossfade cluster not available — fall back to main-only read
+					// Crossfade cluster not available — deactivate and fall back to fade-out
+					crossfadeActive = false;
+					loopFadeInSamplesRemaining = 0;
+
+					// Apply simple fade-out using distance to loop end
+					int32_t distSamples = bytesTilLoopEndPoint / frameSizeBytes;
+					if (distSamples > 0 && distSamples < loopFadeInSamplesTotal) {
+						int32_t scaleStart = static_cast<int32_t>(
+						    std::min(((int64_t)distSamples << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+						int32_t distAfter = distSamples - numSamplesThisCacheRead;
+						if (distAfter < 0) {
+							distAfter = 0;
+						}
+						int32_t scaleEnd = static_cast<int32_t>(
+						    std::min(((int64_t)distAfter << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+						cacheRenderAmplitude = multiply_32x32_rshift32(amplitude, scaleStart) << 1;
+						int32_t ampEnd =
+						    multiply_32x32_rshift32(amplitude + amplitudeIncrement * numSamplesThisCacheRead, scaleEnd)
+						    << 1;
+						cacheRenderAmplitudeIncrement = (ampEnd - cacheRenderAmplitude) / numSamplesThisCacheRead;
+					}
 					goto normalForwardLoop;
 				}
 			}
@@ -1071,6 +1091,12 @@ normalForwardLoop:
 		// Advance crossfade read head in sync
 		if (crossfadeActive) {
 			crossfadeCacheBytePos += numSamplesThisCacheRead * frameSizeBytes;
+
+			// If crossfade is complete, hand off to crossfade head
+			if (loopFadeInSamplesRemaining == 0) {
+				cacheBytePos = crossfadeCacheBytePos;
+				crossfadeActive = false;
+			}
 		}
 
 		// Need to also keep track of the un-cached play-pos so we can switch back if needed
