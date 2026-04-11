@@ -74,7 +74,6 @@ struct HarmParams {
 	float currentFreq{0.0f};      // Portamento-smoothed frequency (as phase increment)
 	float targetFreq{0.0f};       // Target frequency
 	bool voicesWereActive{false}; // For trigger detection
-	bool envReleasing{true};      // True when in release phase (prevents zero-crossing during attack)
 	// Notch biquad state (direct form II transposed), per channel, Q31
 	q31_t notchZ1L{0}; // z^-1 delay left
 	q31_t notchZ2L{0}; // z^-2 delay left
@@ -318,39 +317,21 @@ struct HarmParams {
 			releaseRate = 1.0f / releaseTimeSamples;
 		}
 
-		// Envelope state: once voices are held, stay in attack/sustain until
-		// voices are explicitly released. Prevents momentary voice gaps from
-		// cutting the envelope during legato transitions.
-		if (voicesActive) {
-			envReleasing = false;
-		}
-		else if (voicesWereActive && !voicesActive) {
-			envReleasing = true;
-		}
-
 		// --- Per-sample processing ---
 		for (auto& sample : buffer) {
-			// Update AR envelope
-			if (!envReleasing) {
+			// Update AR envelope — simple: voicesActive = attack/sustain, else release
+			if (voicesActive) {
 				// Attack / sustain
 				envelope += (1.0f - envelope) * attackRate;
 				if (envelope > 1.0f) {
 					envelope = 1.0f;
 				}
 			}
-			else {
+			else if (envelope > 0.0f) {
 				// Release
 				envelope -= envelope * releaseRate;
-
-				// Zero-crossing shutoff: snap to zero when envelope is tiny
-				// and phase accumulator crosses 0 or pi
 				if (envelope < kHarmEnvThreshold) {
-					uint32_t prevPhase = phaseAccumL - phaseIncrement;
-					bool crossedZero = (phaseAccumL < phaseIncrement);
-					bool crossedPi = ((prevPhase ^ phaseAccumL) & 0x80000000u) != 0;
-					if (crossedZero || crossedPi) {
-						envelope = 0.0f;
-					}
+					envelope = 0.0f;
 				}
 			}
 
