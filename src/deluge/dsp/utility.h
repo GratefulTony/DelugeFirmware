@@ -54,13 +54,15 @@ inline constexpr q31_t kUtilityUnityQ29 = ONE_Q31 >> 2; // 1.0 in Q2.29
 
 struct UtilityParams {
 	uint8_t volume{kUtilityDefault}; // 0=off(-inf), 64=unity(0dB), 127=+12dB
-	uint8_t panL{kUtilityDefault};   // 0=silence, 64=center, 127=hard right
-	uint8_t panR{kUtilityDefault};   // 0=silence, 64=center, 127=hard left
+	uint8_t panL{0};                 // 0=hard left (default), 64=center, 127=hard right
+	uint8_t panR{127};               // 0=hard left, 64=center, 127=hard right (default)
 	uint8_t width{kUtilityDefault};  // 0=mono(0%), 64=normal(100%), 127=wide(~200%)
 
+	static constexpr uint8_t kPanLDefault = 0;
+	static constexpr uint8_t kPanRDefault = 127;
+
 	[[nodiscard]] bool isEnabled() const {
-		return volume != kUtilityDefault || panL != kUtilityDefault || panR != kUtilityDefault
-		       || width != kUtilityDefault;
+		return volume != kUtilityDefault || panL != kPanLDefault || panR != kPanRDefault || width != kUtilityDefault;
 	}
 
 	/// Apply utility processing to a stereo buffer in-place.
@@ -110,48 +112,30 @@ struct UtilityParams {
 		}
 
 		bool needWidth = (width != kUtilityDefault);
-		bool needPan = (panL != kUtilityDefault || panR != kUtilityDefault);
+		bool needPan = (panL != kPanLDefault || panR != kPanRDefault);
 		bool needVolume = (volume != kUtilityDefault);
 
 		// Pre-compute pan gains in Q31
-		// panL: controls left channel placement. 64=keep left, 0=silence left, 127=move left to right
-		// panR: controls right channel placement. 64=keep right, 0=silence right, 127=move right to left
-		// Each pan knob produces two gains: how much stays in-channel vs crosses over
-		q31_t panL_stayL, panL_toR; // Left input: stays in L, crosses to R
-		q31_t panR_stayR, panR_toL; // Right input: stays in R, crosses to L
+		// panL: pans the left input. 0=hard left (default), 64=center, 127=hard right
+		// panR: pans the right input. 0=hard left, 64=center, 127=hard right (default)
+		// Each pan knob produces two gains: how much goes to L output vs R output
+		q31_t panL_toL, panL_toR; // Left input: goes to L, goes to R
+		q31_t panR_toL, panR_toR; // Right input: goes to L, goes to R
 
 		if (needPan) {
-			if (panL <= kUtilityDefault) {
-				// 0=silence, 64=full left (L stays, nothing to R)
-				panL_stayL = static_cast<q31_t>((static_cast<int64_t>(panL) * ONE_Q31) / kUtilityDefault);
-				panL_toR = 0;
-			}
-			else {
-				// 64=full left, 127=full right (L fades out, R fades in)
-				int32_t above = panL - kUtilityDefault;
-				panL_stayL =
-				    ONE_Q31 - static_cast<q31_t>((static_cast<int64_t>(above) * ONE_Q31) / (127 - kUtilityDefault));
-				panL_toR = static_cast<q31_t>((static_cast<int64_t>(above) * ONE_Q31) / (127 - kUtilityDefault));
-			}
+			// panL: 0=all left, 64=equal both, 127=all right
+			panL_toR = static_cast<q31_t>((static_cast<int64_t>(panL) * ONE_Q31) / 127);
+			panL_toL = ONE_Q31 - panL_toR;
 
-			if (panR <= kUtilityDefault) {
-				// 0=silence, 64=full right (R stays, nothing to L)
-				panR_stayR = static_cast<q31_t>((static_cast<int64_t>(panR) * ONE_Q31) / kUtilityDefault);
-				panR_toL = 0;
-			}
-			else {
-				// 64=full right, 127=full left (R fades out, L fades in)
-				int32_t above = panR - kUtilityDefault;
-				panR_stayR =
-				    ONE_Q31 - static_cast<q31_t>((static_cast<int64_t>(above) * ONE_Q31) / (127 - kUtilityDefault));
-				panR_toL = static_cast<q31_t>((static_cast<int64_t>(above) * ONE_Q31) / (127 - kUtilityDefault));
-			}
+			// panR: 0=all left, 64=equal both, 127=all right
+			panR_toR = static_cast<q31_t>((static_cast<int64_t>(panR) * ONE_Q31) / 127);
+			panR_toL = ONE_Q31 - panR_toR;
 		}
 		else {
-			panL_stayL = ONE_Q31;
+			panL_toL = ONE_Q31;
 			panL_toR = 0;
-			panR_stayR = ONE_Q31;
 			panR_toL = 0;
+			panR_toR = ONE_Q31;
 		}
 
 		for (auto& sample : buffer) {
@@ -178,10 +162,10 @@ struct UtilityParams {
 			// Pan processing
 			if (needPan) {
 				// Apply pan: each input channel distributes to both outputs
-				q31_t newL = add_saturate(multiply_32x32_rshift32(left, panL_stayL) << 1,
+				q31_t newL = add_saturate(multiply_32x32_rshift32(left, panL_toL) << 1,
 				                          multiply_32x32_rshift32(right, panR_toL) << 1);
-				q31_t newR = add_saturate(multiply_32x32_rshift32(right, panR_stayR) << 1,
-				                          multiply_32x32_rshift32(left, panL_toR) << 1);
+				q31_t newR = add_saturate(multiply_32x32_rshift32(left, panL_toR) << 1,
+				                          multiply_32x32_rshift32(right, panR_toR) << 1);
 				left = newL;
 				right = newR;
 			}
@@ -199,8 +183,8 @@ struct UtilityParams {
 
 	void writeToFile(Serializer& writer) const {
 		WRITE_FIELD_DEFAULT(writer, volume, "utilityVolume", kUtilityDefault);
-		WRITE_FIELD_DEFAULT(writer, panL, "utilityPanL", kUtilityDefault);
-		WRITE_FIELD_DEFAULT(writer, panR, "utilityPanR", kUtilityDefault);
+		WRITE_FIELD(writer, panL, "utilityPanL");
+		WRITE_FIELD_DEFAULT(writer, panR, "utilityPanR", kPanRDefault);
 		WRITE_FIELD_DEFAULT(writer, width, "utilityWidth", kUtilityDefault);
 	}
 
