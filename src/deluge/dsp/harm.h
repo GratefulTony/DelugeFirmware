@@ -157,7 +157,7 @@ struct HarmParams {
 	// When hpf==0, caller should skip this entirely.
 	// Coefficients computed in float per-buffer, inner loop in Q31.
 
-	void renderHpf(std::span<StereoSample> buffer, int32_t noteCode) {
+	void renderHpf(std::span<StereoSample> buffer, int32_t noteCode, float bendSemitones = 0.0f) {
 		if (!isHpfEnabled()) {
 			return;
 		}
@@ -167,7 +167,7 @@ struct HarmParams {
 		float ratio = isOscEnabled()
 		                  ? kHarmonicTable[std::min(static_cast<int32_t>(harmonic) - 1, kNumHarmonics - 1)].ratio
 		                  : 1.0f;
-		float fineSemitones = (static_cast<float>(fine) - 64.0f) * (12.0f / 63.0f);
+		float fineSemitones = (static_cast<float>(fine) - 64.0f) * (12.0f / 63.0f) + bendSemitones;
 		float fineMul = std::exp2f(fineSemitones / 12.0f);
 		float centerFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;
 		float w0 = centerFreq * (6.2831853f / 4294967296.0f); // 2*pi*fc/fs
@@ -222,7 +222,7 @@ struct HarmParams {
 	// Generates a sine at a harmonic of the note frequency, with AR envelope,
 	// portamento, and phase/spread control. Mixes additively into buffer.
 
-	void renderOsc(std::span<StereoSample> buffer, int32_t noteCode, bool voicesActive) {
+	void renderOsc(std::span<StereoSample> buffer, int32_t noteCode, bool voicesActive, float bendSemitones = 0.0f) {
 		if (!isOscEnabled()) {
 			return;
 		}
@@ -235,8 +235,8 @@ struct HarmParams {
 		// Pink noise loudness scaling: -3dB/octave, calibrated at 40Hz = unity (no boost below)
 		// Computed after portamento so we use the actual output frequency
 
-		// Apply fine tune: direct knob 0=-12st, 64=0st, 127=+12st
-		float fineSemitones = (static_cast<float>(fine) - 64.0f) * (12.0f / 63.0f);
+		// Apply fine tune + pitch bend: direct knob 0=-12st, 64=0st, 127=+12st
+		float fineSemitones = (static_cast<float>(fine) - 64.0f) * (12.0f / 63.0f) + bendSemitones;
 		float fineMul = std::exp2f(fineSemitones / 12.0f);
 
 		float newTargetFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;

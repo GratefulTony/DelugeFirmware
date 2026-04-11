@@ -2829,16 +2829,28 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		}
 	}
 
+	// Harm: compute pitch bend in semitones
+	float harmBendSemitones = 0.0f;
+	if (harm.isEnabled() && monophonicExpressionValues[0] != 0) {
+		ExpressionParamSet* expressionParams = paramManager->getExpressionParamSet();
+		if (expressionParams) {
+			// monophonicExpressionValues[0] is Q31 representing +-1.0
+			// Multiply by bend range to get semitones
+			harmBendSemitones = (static_cast<float>(monophonicExpressionValues[0]) / static_cast<float>(ONE_Q31))
+			                    * static_cast<float>(expressionParams->bendRanges[BEND_RANGE_MAIN]);
+		}
+	}
+
 	// Harm notch - strip the harmonic frequency pre-reverb
 	if (harm.isHpfEnabled()) {
-		harm.renderHpf(sound_stereo, harmNoteCode);
+		harm.renderHpf(sound_stereo, harmNoteCode, harmBendSemitones);
 	}
 
 	processReverbSendAndVolume(sound_stereo, reverbBuffer, postFXVolume, postReverbVolume, reverbSendAmount, 0, true);
 
 	// Harm oscillator - add clean harmonic back post-reverb (dry)
 	if (harm.isOscEnabled()) {
-		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld);
+		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmBendSemitones);
 	}
 
 	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
