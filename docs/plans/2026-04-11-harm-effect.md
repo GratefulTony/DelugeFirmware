@@ -175,7 +175,11 @@ Where `levelFinalValue` and `fineFinalValue` come from `paramFinalValues[]` in S
 - Release: `envelope -= releaseRate` per sample, clamped to 0.0
 - Zero-crossing shutoff: when `envelope < threshold && (phaseAccum crossed 0 or 0x80000000)`, snap to 0
 
-**Level=0 behavior:** Keep oscillator running (phase advancing, envelope tracking) but skip the output mix. Avoids click on modulation crossing zero.
+**Enable/disable logic:**
+- **Harmonic knob = 0**: oscillator truly OFF — no sine lookup, no phase, no envelope. Zero CPU. `isOscEnabled()` returns false. Menu shows "OFF" via `IntegerWithOff`.
+- **Harmonic knob >= 1**: oscillator runs. Even if patched Level is modulated to 0, keep phase accumulator and envelope running (cheap), just skip the output mix. Avoids clicks when modulation crosses zero. The direct knob is the master enable gate, not the patched param.
+- **HPF knob = 0**: filter truly OFF — no processing. `isHpfEnabled()` returns false. Menu shows "OFF" via `IntegerWithOff`.
+- **HPF knob >= 1**: filter always runs regardless of other param values.
 
 **Signal flow (in Sound::render):**
 ```
@@ -418,7 +422,7 @@ Use Owlet Records copyright header. Namespace: `deluge::gui::menu_item::fx`.
 Create these classes:
 
 **Direct-access menu items (like utility pattern):**
-- `HarmHarmonic` — extends `Integer`, reads/writes `harm.harmonic`, max=11 (display as ratio names: "OFF", "1/4", "1/3", "1/2", "1", "2", "3", "4", "5", "6", "7", "8"). Override `getDisplayValue()` or rendering to show ratio names instead of raw numbers.
+- `HarmHarmonic` — extends `IntegerWithOff`, reads/writes `harm.harmonic`, max=11. Value 0 = OFF (no sine lookup). Display as ratio names: "OFF", "1/4", "1/3", "1/2", "1", "2", "3", "4", "5", "6", "7", "8". Override rendering to show ratio names instead of raw numbers.
 - `HarmPhase` — extends `Integer`, reads/writes `harm.phase`, max=127, BAR style
 - `HarmAttack` — extends `Integer`, reads/writes `harm.attack`, max=127, BAR style
 - `HarmRelease` — extends `Integer`, reads/writes `harm.release`, max=127, BAR style
