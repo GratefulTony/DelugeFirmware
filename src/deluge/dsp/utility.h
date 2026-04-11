@@ -23,6 +23,7 @@
 #include "dsp/stereo_sample.h"
 #include "storage/field_serialization.h"
 #include "util/fixedpoint.h"
+#include <algorithm>
 #include <cstdint>
 #include <span>
 
@@ -104,7 +105,8 @@ struct UtilityParams {
 			// 64→0x40000000, 127→0x7FFFFFFF (~2.0)
 			int32_t above = width - kUtilityDefault;
 			q31_t halfQ31 = ONE_Q31 >> 1; // 0x40000000 = 1.0 in Q1.30
-			widthQ30 = halfQ31 + static_cast<q31_t>((static_cast<int64_t>(above) * halfQ31) / 63);
+			int64_t result = static_cast<int64_t>(halfQ31) + (static_cast<int64_t>(above) * halfQ31) / 63;
+			widthQ30 = static_cast<q31_t>(std::min(result, static_cast<int64_t>(ONE_Q31)));
 		}
 
 		bool needWidth = (width != kUtilityDefault);
