@@ -546,9 +546,8 @@ git commit -m "feat: register Harm effect in Sound FX menu"
 - 0-64: on trigger, set `phaseAccumL = phaseAccumR = (knob * 0xFFFFFFFF) / 64`
 - 65-127: `spread = ((knob - 65) * 0x80000000) / 62`. On trigger: `phaseAccumL = +spread/2`, `phaseAccumR = -spread/2` (relative to 0). Both use same phaseIncrement.
 
-**Fine tune range and snap:**
+**Fine tune:**
 - Range: -12 to +12 semitones (bipolar, hybrid patched param, center = 0)
-- Default behavior: snaps to whole semitones when turning encoder
-- Encoder press: unlocks fine continuous tuning (cents resolution)
-- Frequency multiplier: `2^(semitones/12)` — use `noteIntervalTable[]` for exact semitone ratios, interpolate for fine cents
-- The snap/fine behavior is a menu item UX concern (HarmFine menu class), not a DSP concern — the param value itself is continuous, snap is just encoder step quantization
+- Continuous — no snap, user dials by ear
+- Encoder press opens mod matrix (standard patched param behavior)
+- Frequency multiplier: `2^(semitones/12)` — use `noteIntervalTable[]` for exact semitone ratios, interpolate for fractional values
