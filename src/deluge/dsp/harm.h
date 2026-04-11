@@ -155,14 +155,20 @@ struct HarmParams {
 	// When hpf==0, caller should skip this entirely.
 	// Coefficients computed in float per-buffer, inner loop in Q31.
 
-	void renderHpf(std::span<StereoSample> buffer, int32_t noteCode) {
+	void renderHpf(std::span<StereoSample> buffer, int32_t noteCode, q31_t fineFinalValue) {
 		if (!isHpfEnabled()) {
 			return;
 		}
 
-		// Compute notch center frequency
-		uint32_t centerPhaseInc = noteCodeToPhaseIncrement(noteCode);
-		float w0 = static_cast<float>(centerPhaseInc) * (6.2831853f / 4294967296.0f); // 2*pi*fc/fs
+		// Compute notch center frequency — track the oscillator's actual pitch
+		uint32_t basePhaseInc = noteCodeToPhaseIncrement(noteCode);
+		float ratio = isOscEnabled()
+		                  ? kHarmonicTable[std::min(static_cast<int32_t>(harmonic) - 1, kNumHarmonics - 1)].ratio
+		                  : 1.0f;
+		float fineSemitones = (static_cast<float>(fineFinalValue) / static_cast<float>(ONE_Q31)) * 12.0f;
+		float fineMul = std::exp2f(fineSemitones / 12.0f);
+		float centerFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;
+		float w0 = centerFreq * (6.2831853f / 4294967296.0f); // 2*pi*fc/fs
 
 		// Q from hpf knob: 1=narrow (Q=30), 127=wide (Q=0.5)
 		float Q = 30.0f - (static_cast<float>(hpf - 1) / 126.0f) * 29.5f;

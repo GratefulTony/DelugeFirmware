@@ -2829,16 +2829,18 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		}
 	}
 
-	// Harm HPF - strip fundamental pre-reverb so reverb only gets harmonics
+	// Harm: read fine tune param once for both notch and oscillator
+	int32_t harmFine = paramFinalValues[params::GLOBAL_HARM_FINE - params::FIRST_GLOBAL];
+
+	// Harm notch - strip the harmonic frequency pre-reverb
 	if (harm.isHpfEnabled()) {
-		harm.renderHpf(sound_stereo, harmNoteCode);
+		harm.renderHpf(sound_stereo, harmNoteCode, harmFine);
 	}
 
 	processReverbSendAndVolume(sound_stereo, reverbBuffer, postFXVolume, postReverbVolume, reverbSendAmount, 0, true);
 
-	// Harm oscillator - add clean sub harmonic back post-reverb (dry)
+	// Harm oscillator - add clean harmonic back post-reverb (dry)
 	if (harm.isOscEnabled()) {
-		int32_t harmFine = paramFinalValues[params::GLOBAL_HARM_FINE - params::FIRST_GLOBAL];
 		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmFine);
 	}
 
