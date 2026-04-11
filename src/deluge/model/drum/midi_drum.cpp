@@ -40,6 +40,7 @@ void MIDIDrum::noteOn(ModelStackWithThreeMainThings* modelStack, uint8_t velocit
 				break;
 			}
 			noteOnPostArp(instruction.arpNoteOn->noteCodeOnPostArp[n], instruction.arpNoteOn, n);
+			instruction.arpNoteOn->noteStatus[n] = ArpNoteStatus::PLAYING;
 		}
 	}
 }
@@ -146,10 +147,7 @@ int8_t MIDIDrum::modEncoderAction(ModelStackWithThreeMainThings* modelStack, int
 
 	NonAudioDrum::modEncoderAction(modelStack, offset, whichModEncoder);
 
-	if ((getCurrentUI() == &instrumentClipView
-	     || (getCurrentUI() == &automationView
-	         && automationView.getAutomationSubType() == AutomationSubType::INSTRUMENT))
-	    && currentUIMode == UI_MODE_AUDITIONING) {
+	if ((getCurrentUI()->getUIContextType() == UIType::INSTRUMENT_CLIP) && (currentUIMode == UI_MODE_AUDITIONING)) {
 		if (whichModEncoder == 1) {
 			modChange(modelStack, offset, &noteEncoderCurrentOffset, &note, 128);
 		}

@@ -411,16 +411,7 @@ ActionResult AudioClipView::buttonAction(deluge::hid::Button b, bool on, bool in
 
 			uiTimerManager.unsetTimer(TimerName::UI_SPECIFIC);
 
-			if (currentSong->lastClipInstanceEnteredStartPos != -1 || getCurrentClip()->isArrangementOnlyClip()) {
-				bool success = arrangerView.transitionToArrangementEditor();
-				if (!success) {
-					goto doOther;
-				}
-			}
-			else {
-doOther:
-				sessionView.transitionToSessionView();
-			}
+			ClipMinder::transitionToArrangerOrSession();
 		}
 	}
 
@@ -994,8 +985,14 @@ void AudioClipView::selectEncoderAction(int8_t offset) {
 	if (currentUIMode) {
 		return;
 	}
-	auto ao = (AudioOutput*)getCurrentAudioClip()->output;
-	ao->scrollAudioOutputMode(offset);
+	// allows you to assign an audio clip to a different audio track
+	if (Buttons::isShiftButtonPressed()) {
+		view.navigateThroughAudioOutputsForAudioClip(offset, getCurrentAudioClip());
+	}
+	else {
+		auto ao = (AudioOutput*)getCurrentAudioClip()->output;
+		ao->scrollAudioOutputMode(offset);
+	}
 }
 
 void AudioClipView::setClipLengthEqualToSampleLength() {

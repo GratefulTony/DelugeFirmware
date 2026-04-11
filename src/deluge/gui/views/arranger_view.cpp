@@ -208,16 +208,23 @@ ActionResult ArrangerView::buttonAction(deluge::hid::Button b, bool on, bool inC
 				return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE;
 			}
 			if (currentUIMode == UI_MODE_NONE) {
-				if (Buttons::isShiftButtonPressed()) {
-					automationView.onArrangerView = true;
-					changeRootUI(&automationView);
-				}
-				else {
-					goToSongView();
-				}
+				goToSongView();
 			}
 			else if (currentUIMode == UI_MODE_HOLDING_ARRANGEMENT_ROW) {
 				moveClipToSession();
+			}
+		}
+	}
+
+	// Clip button
+	else if (b == CLIP_VIEW) {
+		if (on) {
+			if (inCardRoutine) {
+				return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE;
+			}
+			if (currentUIMode == UI_MODE_NONE) {
+				automationView.onArrangerView = true;
+				changeRootUI(&automationView);
 			}
 		}
 	}
@@ -503,6 +510,7 @@ void ArrangerView::clearArrangement() {
 }
 
 bool ArrangerView::opened() {
+	automationView.onArrangerView = false;
 
 	mustRedrawTickSquares = true;
 
@@ -986,7 +994,7 @@ ActionResult ArrangerView::handleEditPadAction(int32_t x, int32_t y, int32_t vel
 	Output* output = outputsOnScreen[y];
 
 	if (currentUIMode == UI_MODE_HOLDING_ARRANGEMENT_ROW_AUDITION) {
-		if (velocity) {
+		if (velocity != 0) {
 			// NAME shortcut
 			if (x == 11 && y == 5) {
 				Output* output = outputsOnScreen[yPressedEffective];
@@ -1015,7 +1023,7 @@ ActionResult ArrangerView::handleStatusPadAction(int32_t y, int32_t velocity, UI
 		return ActionResult::DEALT_WITH;
 	}
 
-	if (velocity) {
+	if (velocity != 0) {
 		uint32_t rowsToRedraw = 1 << y;
 
 		switch (currentUIMode) {
@@ -1147,7 +1155,7 @@ ActionResult ArrangerView::handleAuditionPadAction(int32_t y, int32_t velocity, 
 	case UI_MODE_MIDI_LEARN:
 		if (output) {
 			if (output->type == OutputType::AUDIO) {
-				if (velocity) {
+				if (velocity != 0) {
 					view.endMIDILearn();
 					context_menu::audioInputSelector.audioOutput = (AudioOutput*)output;
 					context_menu::audioInputSelector.setupAndCheckAvailability();
@@ -2783,81 +2791,9 @@ ActionResult ArrangerView::horizontalEncoderAction(int32_t offset) {
 					action = actionLogger.getNewAction(actionType, ActionAddition::NOT_ALLOWED);
 				}
 
-				// if this setting is on, shifting of automation is restricted to automation view
-				if (!FlashStorage::automationShift) {
-					ParamCollectionSummary* unpatchedParamsSummary =
-					    currentSong->paramManager.getUnpatchedParamSetSummary();
-					UnpatchedParamSet* unpatchedParams = (UnpatchedParamSet*)unpatchedParamsSummary->paramCollection;
+				shiftAutomationHorizontally(offset, scroll_amount, action);
 
-					char modelStackMemory[MODEL_STACK_MAX_SIZE];
-					ModelStackWithParamCollection* modelStackWithUnpatchedParams =
-					    currentSong->setupModelStackWithSongAsTimelineCounter(modelStackMemory)
-					        ->addParamCollection(unpatchedParams, unpatchedParamsSummary);
-
-					if (offset >= 0) {
-						void* consMemory =
-						    GeneralMemoryAllocator::get().allocLowSpeed(sizeof(ConsequenceArrangerParamsTimeInserted));
-						if (consMemory) {
-							ConsequenceArrangerParamsTimeInserted* consequence = new (consMemory)
-							    ConsequenceArrangerParamsTimeInserted(currentSong->xScroll[NAVIGATION_ARRANGEMENT],
-							                                          scroll_amount);
-							action->addConsequence(consequence);
-						}
-						unpatchedParams->insertTime(modelStackWithUnpatchedParams,
-						                            currentSong->xScroll[NAVIGATION_ARRANGEMENT], scroll_amount);
-					}
-					else {
-						if (action) {
-							unpatchedParams->backUpAllAutomatedParamsToAction(action, modelStackWithUnpatchedParams);
-						}
-						unpatchedParams->deleteTime(modelStackWithUnpatchedParams,
-						                            currentSong->xScroll[NAVIGATION_ARRANGEMENT], -scroll_amount);
-					}
-				}
-
-				for (Output* thisOutput = currentSong->firstOutput; thisOutput; thisOutput = thisOutput->next) {
-					int32_t i = thisOutput->clipInstances.search(currentSong->xScroll[NAVIGATION_ARRANGEMENT],
-					                                             GREATER_OR_EQUAL);
-
-					bool movedOneYet = false;
-
-					// And move the successive ones.
-					while (i < thisOutput->clipInstances.getNumElements()) {
-						ClipInstance* instance = thisOutput->clipInstances.getElement(i);
-
-						// If contracting time and this bit has to be deleted...
-						if (offset < 0
-						    && instance->pos + scroll_amount < currentSong->xScroll[NAVIGATION_ARRANGEMENT]) {
-							deleteClipInstance(thisOutput, i, instance, action);
-							// Don't increment i, because we deleted an element
-						}
-
-						// Otherwise, just move it
-						else {
-
-							int32_t new_pos = instance->pos + scroll_amount;
-
-							// If contracting time, shorten the previous ClipInstance only if the ClipInstances we're
-							// moving will eat into its tail. Otherwise, leave the tail there. Perhaps it'd make more
-							// sense to cut the tail off regardless, but possibly just due to me not thinking about it,
-							// this was not done in pre-V4 firmware, and actually having it this way probably helps
-							// users.
-							if (!movedOneYet && offset < 0 && i > 0) {
-								movedOneYet = true;
-								ClipInstance* prevInstance = (ClipInstance*)thisOutput->clipInstances.getElement(i - 1);
-								int32_t maxLength = new_pos - prevInstance->pos;
-								if (prevInstance->length > maxLength) {
-									prevInstance->change(action, thisOutput, prevInstance->pos, maxLength,
-									                     prevInstance->clip);
-								}
-							}
-
-							instance->change(action, thisOutput, new_pos, instance->length, instance->clip);
-
-							i++;
-						}
-					}
-				}
+				shiftClipsHorizontally(offset, scroll_amount, action);
 
 				lastInteractedPos += scroll_amount;
 
@@ -2897,6 +2833,79 @@ ActionResult ArrangerView::horizontalEncoderAction(int32_t offset) {
 	}
 
 	return ActionResult::DEALT_WITH;
+}
+
+// This function will shift automation horizontally at a specific point in time by inserting / deleting time
+void ArrangerView::shiftAutomationHorizontally(int32_t offset, int32_t scroll_amount, Action* action) {
+	ParamCollectionSummary* unpatchedParamsSummary = currentSong->paramManager.getUnpatchedParamSetSummary();
+	UnpatchedParamSet* unpatchedParams = (UnpatchedParamSet*)unpatchedParamsSummary->paramCollection;
+
+	char modelStackMemory[MODEL_STACK_MAX_SIZE];
+	ModelStackWithParamCollection* modelStackWithUnpatchedParams =
+	    currentSong->setupModelStackWithSongAsTimelineCounter(modelStackMemory)
+	        ->addParamCollection(unpatchedParams, unpatchedParamsSummary);
+
+	if (offset >= 0) {
+		void* consMemory = GeneralMemoryAllocator::get().allocLowSpeed(sizeof(ConsequenceArrangerParamsTimeInserted));
+		if (consMemory) {
+			ConsequenceArrangerParamsTimeInserted* consequence = new (consMemory)
+			    ConsequenceArrangerParamsTimeInserted(currentSong->xScroll[NAVIGATION_ARRANGEMENT], scroll_amount);
+			action->addConsequence(consequence);
+		}
+		unpatchedParams->insertTime(modelStackWithUnpatchedParams, currentSong->xScroll[NAVIGATION_ARRANGEMENT],
+		                            scroll_amount);
+	}
+	else {
+		if (action) {
+			unpatchedParams->backUpAllAutomatedParamsToAction(action, modelStackWithUnpatchedParams);
+		}
+		unpatchedParams->deleteTime(modelStackWithUnpatchedParams, currentSong->xScroll[NAVIGATION_ARRANGEMENT],
+		                            -scroll_amount);
+	}
+}
+
+// This function will shift clips horizontally at a specific point in time by inserting / deleting time
+void ArrangerView::shiftClipsHorizontally(int32_t offset, int32_t scroll_amount, Action* action) {
+	for (Output* thisOutput = currentSong->firstOutput; thisOutput; thisOutput = thisOutput->next) {
+		int32_t i = thisOutput->clipInstances.search(currentSong->xScroll[NAVIGATION_ARRANGEMENT], GREATER_OR_EQUAL);
+
+		bool movedOneYet = false;
+
+		// And move the successive ones.
+		while (i < thisOutput->clipInstances.getNumElements()) {
+			ClipInstance* instance = thisOutput->clipInstances.getElement(i);
+
+			// If contracting time and this bit has to be deleted...
+			if (offset < 0 && instance->pos + scroll_amount < currentSong->xScroll[NAVIGATION_ARRANGEMENT]) {
+				deleteClipInstance(thisOutput, i, instance, action);
+				// Don't increment i, because we deleted an element
+			}
+
+			// Otherwise, just move it
+			else {
+
+				int32_t new_pos = instance->pos + scroll_amount;
+
+				// If contracting time, shorten the previous ClipInstance only if the ClipInstances we're
+				// moving will eat into its tail. Otherwise, leave the tail there. Perhaps it'd make more
+				// sense to cut the tail off regardless, but possibly just due to me not thinking about it,
+				// this was not done in pre-V4 firmware, and actually having it this way probably helps
+				// users.
+				if (!movedOneYet && offset < 0 && i > 0) {
+					movedOneYet = true;
+					ClipInstance* prevInstance = (ClipInstance*)thisOutput->clipInstances.getElement(i - 1);
+					int32_t maxLength = new_pos - prevInstance->pos;
+					if (prevInstance->length > maxLength) {
+						prevInstance->change(action, thisOutput, prevInstance->pos, maxLength, prevInstance->clip);
+					}
+				}
+
+				instance->change(action, thisOutput, new_pos, instance->length, instance->clip);
+
+				i++;
+			}
+		}
+	}
 }
 
 ActionResult ArrangerView::horizontalScrollOneSquare(int32_t direction) {
@@ -3066,17 +3075,10 @@ ActionResult ArrangerView::verticalEncoderAction(int32_t offset, bool inCardRout
 
 	if (Buttons::isButtonPressed(deluge::hid::button::Y_ENC)) {
 		if (currentUIMode == UI_MODE_NONE) {
-			if (Buttons::isShiftButtonPressed()) {
-				currentSong->adjustMasterTransposeInterval(offset);
-			}
-			else {
-				currentSong->transpose(offset);
-			}
+			currentSong->commandTranspose(offset);
 		}
-		return ActionResult::DEALT_WITH;
 	}
-
-	if (isUIModeWithinRange(verticalEncoderUIModes)) {
+	else if (isUIModeWithinRange(verticalEncoderUIModes)) {
 		if (inCardRoutine && !allowSomeUserActionsEvenWhenInCardRoutine) {
 			return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE; // Allow sometimes.
 		}

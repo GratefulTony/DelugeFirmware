@@ -103,9 +103,9 @@ public:
 	static char const* filenameToStartSearchAt;
 
 	// ui
-	bool exitUI() override {
-		Browser::close();
-		return true;
+	ActionResult exitUI() override {
+		exitAction();
+		return ActionResult::ACTIONED_AND_CAUSED_CHANGE;
 	}
 
 protected:
