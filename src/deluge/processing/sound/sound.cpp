@@ -2829,27 +2829,9 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		}
 	}
 
-	// Harm: combine fine tune param with pitch bend for both notch and oscillator
+	// Harm: read fine tune param for both notch and oscillator
+	// TODO: add pitch bend support (reverted for now to isolate click source)
 	int32_t harmFine = paramFinalValues[params::GLOBAL_HARM_FINE - params::FIRST_GLOBAL];
-	// Add pitch bend: monophonicExpressionValues[0] / 192 * bendRange gives semitones
-	// Convert to same scale as harmFine (bipolar Q31 where ONE_Q31 = 12 semitones)
-	if (monophonicExpressionValues[0] != 0) {
-		ExpressionParamSet* expressionParams = paramManager->getExpressionParamSet();
-		if (expressionParams) {
-			int32_t bendRange = expressionParams->bendRanges[BEND_RANGE_MAIN];
-			// monophonicExpressionValues[0] is full Q31 range for +-192 semitones
-			// We need to scale to our fine range: ONE_Q31 = 12 semitones
-			// bendSemitones = expr[0] / 192 * bendRange
-			// In our fine scale: bendFine = bendSemitones * ONE_Q31 / 12
-			//                            = expr[0] * bendRange / (192 * 12) * ONE_Q31
-			//                            = expr[0] * bendRange / 2304
-			int64_t bendContrib = (static_cast<int64_t>(monophonicExpressionValues[0]) * bendRange) / 2304;
-			harmFine = add_saturate(
-			    harmFine,
-			    static_cast<int32_t>(std::clamp(bendContrib, static_cast<int64_t>(std::numeric_limits<int32_t>::min()),
-			                                    static_cast<int64_t>(std::numeric_limits<int32_t>::max()))));
-		}
-	}
 
 	// Harm notch - strip the harmonic frequency pre-reverb
 	if (harm.isHpfEnabled()) {
@@ -2860,8 +2842,7 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 
 	// Harm oscillator - add clean harmonic back post-reverb (dry)
 	if (harm.isOscEnabled()) {
-		int32_t harmLevel = paramFinalValues[params::GLOBAL_HARM_LEVEL - params::FIRST_GLOBAL];
-		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmLevel, harmFine);
+		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmFine);
 	}
 
 	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
