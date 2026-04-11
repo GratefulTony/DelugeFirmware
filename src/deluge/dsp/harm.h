@@ -43,7 +43,7 @@ inline constexpr float kHarmSampleRate = 44100.0f;
 inline constexpr float kHarmTwoPi = 6.283185307f;
 
 // Envelope thresholds
-inline constexpr float kHarmEnvThreshold = 1.0e-6f;
+inline constexpr float kHarmEnvThreshold = 0.063f; // -24dB, zero-crossing shutoff threshold
 
 // Portamento rate mapping: knob 0 = instant, 127 = very slow glide
 // Rate = 1.0 - exp(-1/(time_samples)), approximated as simple division
@@ -72,11 +72,12 @@ struct HarmParams {
 	float currentFreq{0.0f};      // Portamento-smoothed frequency (as phase increment)
 	float targetFreq{0.0f};       // Target frequency
 	bool voicesWereActive{false}; // For trigger detection
-	// Notch biquad state (direct form II transposed), per channel
-	float notchZ1L{0.0f}; // z^-1 delay left
-	float notchZ2L{0.0f}; // z^-2 delay left
-	float notchZ1R{0.0f}; // z^-1 delay right
-	float notchZ2R{0.0f}; // z^-2 delay right
+	bool envReleasing{true};      // True when in release phase (prevents zero-crossing during attack)
+	// Notch biquad state (direct form II transposed), per channel, Q31
+	q31_t notchZ1L{0}; // z^-1 delay left
+	q31_t notchZ2L{0}; // z^-2 delay left
+	q31_t notchZ1R{0}; // z^-1 delay right
+	q31_t notchZ2R{0}; // z^-2 delay right
 
 	// Harmonic ratio table: sorted unique fractions with denominators {1,2,3,4,8}
 	// Index 0 is unused (0=OFF), indices 1-102 map to ratios
@@ -152,7 +153,7 @@ struct HarmParams {
 	// Biquad notch filter tuned to the note frequency.
 	// hpf knob 1..127 controls notch width: 1=narrow (surgical), 127=wide.
 	// When hpf==0, caller should skip this entirely.
-	// Uses Direct Form II Transposed for numerical stability with float.
+	// Coefficients computed in float per-buffer, inner loop in Q31.
 
 	void renderHpf(std::span<StereoSample> buffer, int32_t noteCode) {
 		if (!isHpfEnabled()) {
@@ -163,48 +164,47 @@ struct HarmParams {
 		uint32_t centerPhaseInc = noteCodeToPhaseIncrement(noteCode);
 		float w0 = static_cast<float>(centerPhaseInc) * (6.2831853f / 4294967296.0f); // 2*pi*fc/fs
 
-		// Q from hpf knob: 1=wide (Q=0.5), 127=narrow (Q=30)
-		// Invert: low knob = narrow surgical, high knob = wide
-		// Actually: 1=narrow, 127=wide is more intuitive (turn up = more effect)
-		float Q = 30.0f - (static_cast<float>(hpf - 1) / 126.0f) * 29.5f; // 30 down to 0.5
+		// Q from hpf knob: 1=narrow (Q=30), 127=wide (Q=0.5)
+		float Q = 30.0f - (static_cast<float>(hpf - 1) / 126.0f) * 29.5f;
 
-		// Biquad notch coefficients (cookbook: Audio EQ Cookbook by Robert Bristow-Johnson)
-		float alpha = std::sinf(w0) / (2.0f * Q);
+		// Biquad notch coefficients (Audio EQ Cookbook, Bristow-Johnson)
+		float sinw0 = std::sinf(w0);
 		float cosw0 = std::cosf(w0);
+		float alpha = sinw0 / (2.0f * Q);
 
-		float b0 = 1.0f;
-		float b1 = -2.0f * cosw0;
-		float b2 = 1.0f;
-		float a0 = 1.0f + alpha;
-		float a1 = -2.0f * cosw0;
-		float a2 = 1.0f - alpha;
+		// Notch: b0=1, b1=-2cos(w0), b2=1, a0=1+alpha, a1=-2cos(w0), a2=1-alpha
+		// Note: b1 == a1 (before normalization) for a notch
+		float inv_a0 = 1.0f / (1.0f + alpha);
+		float fb0 = inv_a0; // 1 / (1+alpha)
+		float fb1 = -2.0f * cosw0 * inv_a0;
+		// fb2 = fb0 (same as b0 normalized)
+		float fa1 = fb1; // a1/a0 == b1/a0 for notch
+		float fa2 = (1.0f - alpha) * inv_a0;
 
-		// Normalize by a0
-		float inv_a0 = 1.0f / a0;
-		b0 *= inv_a0;
-		b1 *= inv_a0;
-		b2 *= inv_a0;
-		a1 *= inv_a0;
-		a2 *= inv_a0;
-
-		// Scale factor for int32_t <-> float conversion
-		constexpr float kToFloat = 1.0f / 2147483648.0f;
-		constexpr float kToQ31 = 2147483648.0f;
+		// Convert to Q31 coefficients
+		// These are all in range [-2, 2], so use Q1.30 (multiply result needs <<2 to recover)
+		constexpr float kQ30Scale = 1073741824.0f; // 2^30
+		q31_t qb0 = static_cast<q31_t>(fb0 * kQ30Scale);
+		q31_t qb1 = static_cast<q31_t>(fb1 * kQ30Scale);
+		// qb2 == qb0
+		q31_t qa1 = qb1; // same for notch
+		q31_t qa2 = static_cast<q31_t>(fa2 * kQ30Scale);
 
 		for (auto& sample : buffer) {
-			// Left channel — Direct Form II Transposed
-			float inL = static_cast<float>(sample.l) * kToFloat;
-			float outL = b0 * inL + notchZ1L;
-			notchZ1L = b1 * inL - a1 * outL + notchZ2L;
-			notchZ2L = b2 * inL - a2 * outL;
-			sample.l = static_cast<int32_t>(outL * kToQ31);
+			// Left channel — Direct Form II Transposed in Q31
+			// out = b0*in + z1  (all Q1.30 multiplies, <<2 to recover Q31)
+			q31_t outL = (multiply_32x32_rshift32(qb0, sample.l) << 2) + notchZ1L;
+			notchZ1L =
+			    (multiply_32x32_rshift32(qb1, sample.l) << 2) - (multiply_32x32_rshift32(qa1, outL) << 2) + notchZ2L;
+			notchZ2L = (multiply_32x32_rshift32(qb0, sample.l) << 2) - (multiply_32x32_rshift32(qa2, outL) << 2);
+			sample.l = outL;
 
 			// Right channel
-			float inR = static_cast<float>(sample.r) * kToFloat;
-			float outR = b0 * inR + notchZ1R;
-			notchZ1R = b1 * inR - a1 * outR + notchZ2R;
-			notchZ2R = b2 * inR - a2 * outR;
-			sample.r = static_cast<int32_t>(outR * kToQ31);
+			q31_t outR = (multiply_32x32_rshift32(qb0, sample.r) << 2) + notchZ1R;
+			notchZ1R =
+			    (multiply_32x32_rshift32(qb1, sample.r) << 2) - (multiply_32x32_rshift32(qa1, outR) << 2) + notchZ2R;
+			notchZ2R = (multiply_32x32_rshift32(qb0, sample.r) << 2) - (multiply_32x32_rshift32(qa2, outR) << 2);
+			sample.r = outR;
 		}
 	}
 
@@ -304,10 +304,20 @@ struct HarmParams {
 			releaseRate = 1.0f / releaseTimeSamples;
 		}
 
+		// Envelope state: once voices are held, stay in attack/sustain until
+		// voices are explicitly released. Prevents momentary voice gaps from
+		// cutting the envelope during legato transitions.
+		if (voicesActive) {
+			envReleasing = false;
+		}
+		else if (voicesWereActive && !voicesActive) {
+			envReleasing = true;
+		}
+
 		// --- Per-sample processing ---
 		for (auto& sample : buffer) {
 			// Update AR envelope
-			if (voicesActive || triggered) {
+			if (!envReleasing) {
 				// Attack / sustain
 				envelope += (1.0f - envelope) * attackRate;
 				if (envelope > 1.0f) {
@@ -322,8 +332,7 @@ struct HarmParams {
 				// and phase accumulator crosses 0 or pi
 				if (envelope < kHarmEnvThreshold) {
 					uint32_t prevPhase = phaseAccumL - phaseIncrement;
-					// Check if we crossed 0 or 0x80000000
-					bool crossedZero = (phaseAccumL < phaseIncrement); // wrapped around 0
+					bool crossedZero = (phaseAccumL < phaseIncrement);
 					bool crossedPi = ((prevPhase ^ phaseAccumL) & 0x80000000u) != 0;
 					if (crossedZero || crossedPi) {
 						envelope = 0.0f;

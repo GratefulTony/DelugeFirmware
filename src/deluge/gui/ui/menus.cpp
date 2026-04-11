@@ -822,7 +822,7 @@ fx::HarmLevel harmLevelMenu{STRING_FOR_HARM_LEVEL};
 fx::HarmPhase harmPhaseMenu{STRING_FOR_HARM_PHASE};
 fx::HarmAttack harmAttackMenu{STRING_FOR_HARM_ATTACK};
 fx::HarmRelease harmReleaseMenu{STRING_FOR_HARM_RELEASE};
-fx::HarmHpf harmHpfMenu{STRING_FOR_HARM_HPF};
+fx::HarmHpf harmHpfMenu{STRING_FOR_HARM_NOTCH};
 fx::HarmPorta harmPortaMenu{STRING_FOR_HARM_PORTA};
 
 HorizontalMenu harmSubMenu{

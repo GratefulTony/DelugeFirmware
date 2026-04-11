@@ -1107,7 +1107,7 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_HARM_PHASE, "Phase"},
         {STRING_FOR_HARM_ATTACK, "Attack"},
         {STRING_FOR_HARM_RELEASE, "Release"},
-        {STRING_FOR_HARM_HPF, "Notch"},
+        {STRING_FOR_HARM_NOTCH, "Notch"},
         {STRING_FOR_HARM_PORTA, "Porta"},
         {STRING_FOR_PARAM_GLOBAL_HARM_LEVEL, "Harm Level"},
         {STRING_FOR_PARAM_GLOBAL_HARM_FINE, "Harm Fine"},
