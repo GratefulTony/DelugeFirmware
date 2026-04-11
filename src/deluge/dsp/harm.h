@@ -184,7 +184,7 @@ struct HarmParams {
 
 		// --- Pitch calculation ---
 		uint32_t basePhaseInc = noteCodeToPhaseIncrement(noteCode);
-		float ratio = kHarmonicRatios[std::min(static_cast<int>(harmonic), kNumHarmonics - 1)];
+		float ratio = kHarmonicRatios[std::min(static_cast<int32_t>(harmonic), kNumHarmonics - 1)];
 
 		// Apply fine tune: fineFinalValue is bipolar Q31, map to +/-12 semitones
 		// fineFinalValue: -ONE_Q31 = -12st, 0 = 0st, +ONE_Q31 = +12st
