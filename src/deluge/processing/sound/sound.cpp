@@ -2790,6 +2790,9 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 	};
 	processStutter(sound_stereo, paramManager, modulatedScatterValues);
 
+	// Utility (volume, pan, stereo width) - gain staging before DOTT
+	utility.render(sound_stereo);
+
 	// DOTT (multiband compressor) - runs after stutter
 	if (dottEnabled) {
 		applyMultibandCompressorParams(paramManager);

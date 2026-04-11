@@ -193,6 +193,9 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 
 	processStutter(global_effectable_audio, paramManagerForClip);
 
+	// Utility (volume, pan, stereo width) - gain staging before DOTT
+	utility.render(global_effectable_audio);
+
 	// DOTT (multiband compressor) - runs after stutter
 	if (dottEnabled) {
 		applyMultibandCompressorParams(paramManagerForClip);
