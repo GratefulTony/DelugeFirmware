@@ -4,7 +4,7 @@
 
 **Goal:** Add a post-FX "Harm" effect: note-tracking HPF (cleans muddy fundamental from FX'd signal) + mono sine sub oscillator (adds clean harmonic back). HPF and oscillator operate independently.
 
-**Architecture:** Inline params struct on ModControllableAudio with standalone AR envelope, phase accumulator, and single-pole HPF. Two patched params (Level, Fine) for mod matrix; six direct params (Harmonic, Phase/Spread, Attack, Release, HPF, Porta). Signal flow: Input -> HPF -> mix in sub sine -> Output. Placed post-reverb so HPF cleans reverb mud. Sound-only (needs voice/note info).
+**Architecture:** Inline params struct on ModControllableAudio with standalone AR envelope, phase accumulator, and cascaded single-pole HPF. Two patched params (Level, Fine) for mod matrix; six direct params (Harmonic, Phase/Spread, Attack, Release, HPF, Porta). Split render: HPF runs pre-reverb (strips fundamental before reverb), sub oscillator mixes in post-reverb (adds clean harmonic back dry). Sound-only (needs voice/note info).
 
 **Tech Stack:** C++, Q31 fixed-point, getSine() from waves.h, noteFrequencyTable[] for pitch, patched param system for Level+Fine.
 
@@ -136,43 +136,52 @@ struct HarmParams {
 };
 ```
 
-**Render method signature:**
+**Two separate render methods** (split around reverb send in Sound::render):
 
 ```cpp
-void render(std::span<StereoSample> buffer, int32_t noteCode, bool voicesActive,
-            int32_t levelFinalValue, int32_t fineFinalValue);
+// Called PRE-reverb: strips fundamental from signal before it hits reverb
+void renderHpf(std::span<StereoSample> buffer, int32_t noteCode);
+
+// Called POST-reverb: generates sub sine and mixes into buffer
+void renderOsc(std::span<StereoSample> buffer, int32_t noteCode, bool voicesActive,
+               int32_t levelFinalValue, int32_t fineFinalValue);
 ```
 
 Where `levelFinalValue` and `fineFinalValue` come from `paramFinalValues[]` in Sound::render().
 
-**Oscillator DSP:**
+**renderHpf() — pre-reverb HPF:**
+- 12dB note-tracking HPF (two cascaded single-pole)
+- Cutoff frequency derived from noteCode, HPF knob controls offset (3 octave range)
+- Bypass when hpf==0
+- Strips the fundamental/low-end so reverb only processes harmonics
+- Has its own on/off independent of oscillator
+
+**renderOsc() — post-reverb sub oscillator:**
+
+*Oscillator DSP:*
 - Convert noteCode to base frequency using `noteFrequencyTable[]`
 - Multiply by harmonic ratio
-- Apply fine tune from `fineFinalValue` (convert cents to frequency multiplier)
+- Apply fine tune from `fineFinalValue` (convert semitones to frequency multiplier)
 - Portamento: exponentially smooth toward target frequency
-- Phase accumulator: `phaseAccumL += phaseIncrement * numSamples` (per sample)
+- Phase accumulator: `phaseAccumL += phaseIncrement` per sample
 - Waveform: `getSine(phaseAccumL)` returns int32_t Q31
 - Apply AR envelope and level
 - Phase/Spread: if knob <= 64, set start phase on trigger. If > 64, offset L/R phase accumulators
 
-**AR envelope:**
+*AR envelope:*
 - On trigger (voicesActive transitions false->true): start attack ramp
 - Attack: `envelope += attackRate` per sample, clamped to 1.0
 - Sustain: hold at 1.0 while voicesActive
 - Release: `envelope -= releaseRate` per sample, clamped to 0.0
 - Zero-crossing shutoff: when `envelope < threshold && (phaseAccum crossed 0 or 0x80000000)`, snap to 0
 
-**HPF (independent of oscillator):**
-- 12dB note-tracking HPF (2-pole or cascaded single-pole)
-- Cutoff frequency derived from noteCode, HPF knob controls offset (3 octave range)
-- Bypass when hpf==0
-- Applied to input buffer BEFORE sub oscillator is mixed in
-
-**Signal flow in render():**
-1. If HPF enabled: apply HPF to buffer
-2. If oscillator enabled: generate sine, apply envelope, mix into buffer
-
 **Level=0 behavior:** Keep oscillator running (phase advancing, envelope tracking) but skip the output mix. Avoids click on modulation crossing zero.
+
+**Signal flow (in Sound::render):**
+```
+...DOTT -> harm.renderHpf(buffer) -> processReverbSendAndVolume() -> harm.renderOsc(buffer) -> compressor
+```
+HPF strips fundamental pre-reverb. Reverb only gets harmonics. Sub oscillator adds clean fundamental back dry post-reverb.
 
 **Serialization:**
 
@@ -336,36 +345,57 @@ git commit -m "feat: wire Harm effect into ModControllableAudio with serializati
 
 ---
 
-### Task 5: Insert into signal chain (Sound only)
+### Task 5: Insert into signal chain (Sound only — split around reverb)
 
 **Files:**
-- Modify: `src/deluge/processing/sound/sound.cpp` (~line 2793, after processStutter and before utility.render)
+- Modify: `src/deluge/processing/sound/sound.cpp`
 
-**Step 1: Add Harm processing call**
-
-Find `processReverbSendAndVolume()` in sound.cpp. AFTER the reverb send and BEFORE the per-clip compressor, add:
+The Harm effect is split into two calls that straddle the reverb send. Read sound.cpp around line 2809 to see:
 
 ```cpp
-// Harm (note-tracking HPF + clean sub oscillator) - post reverb so HPF cleans reverb mud
-if (harm.isEnabled()) {
-    int32_t harmLevel = paramFinalValues[params::GLOBAL_HARM_LEVEL - params::FIRST_GLOBAL];
-    int32_t harmFine = paramFinalValues[params::GLOBAL_HARM_FINE - params::FIRST_GLOBAL];
-    harm.render(sound_stereo, lastNoteCode, !voices_.empty(), harmLevel, harmFine);
+// Current code (after DOTT and ModFX-post-DOTT):
+processReverbSendAndVolume(sound_stereo, reverbBuffer, postFXVolume, postReverbVolume, reverbSendAmount, 0, true);
+
+q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
+```
+
+**Step 1: Add HPF call BEFORE processReverbSendAndVolume()**
+
+Right before `processReverbSendAndVolume()` (line 2809), add:
+
+```cpp
+// Harm HPF - strip fundamental pre-reverb so reverb only gets harmonics
+if (harm.isHpfEnabled()) {
+    harm.renderHpf(sound_stereo, lastNoteCode);
 }
 ```
 
-The signal chain becomes: `...Stutter -> Utility -> DOTT -> Reverb -> **Harm** -> Compressor`
+**Step 2: Add oscillator call AFTER processReverbSendAndVolume()**
 
-Post-reverb means: HPF strips low-end mud from reverb tails, sub adds clean fundamental back. Sub output is dry (doesn't go to reverb).
+Right after `processReverbSendAndVolume()` and before the compressor threshold code, add:
+
+```cpp
+// Harm oscillator - add clean sub harmonic back post-reverb (dry)
+if (harm.isOscEnabled()) {
+    int32_t harmLevel = paramFinalValues[params::GLOBAL_HARM_LEVEL - params::FIRST_GLOBAL];
+    int32_t harmFine = paramFinalValues[params::GLOBAL_HARM_FINE - params::FIRST_GLOBAL];
+    harm.renderOsc(sound_stereo, lastNoteCode, !voices_.empty(), harmLevel, harmFine);
+}
+```
+
+The signal chain becomes:
+```
+...DOTT -> ModFX(post-DOTT) -> harm.renderHpf() -> processReverbSendAndVolume() -> harm.renderOsc() -> compressor
+```
+
+HPF strips fundamental before reverb send. Reverb only processes harmonics (clean tails). Sub oscillator adds clean fundamental back dry after reverb. Sub doesn't go through reverb or compressor sidechain.
 
 **Note:** Harm is Sound-only (not in GlobalEffectable) because it needs `lastNoteCode` and `voices_` for pitch tracking and envelope triggering.
 
-**Important:** The implementer must read sound.cpp carefully to find the exact insertion point after reverb send. Look for `processReverbSendAndVolume()` and the per-clip compressor section.
-
-**Step 2: Build and commit**
+**Step 3: Build and commit**
 
 ```bash
-git commit -m "feat: insert Harm effect into Sound signal chain"
+git commit -m "feat: insert Harm effect into Sound signal chain (split around reverb)"
 ```
 
 ---

@@ -17,13 +17,17 @@ A post-FX mono sine oscillator for clean harmonic reinforcement. Tracks pitch vi
 | 7 | HPF | direct | amount | Note-tracking high-pass cutoff |
 | 8 | Porta | direct | time | Pitch glide time |
 
-## Signal Chain Placement
+## Signal Chain Placement (split around reverb)
 
-`...Stutter -> Utility -> DOTT -> Reverb Send -> Harm -> Compressor`
+```
+...DOTT -> ModFX(post-DOTT) -> harm.renderHpf() -> processReverbSendAndVolume() -> harm.renderOsc() -> compressor
+```
 
-Post-reverb: HPF cleans reverb mud, sub output stays dry (doesn't go to reverb).
+- HPF runs pre-reverb: strips fundamental so reverb only processes harmonics (clean tails)
+- Sub oscillator runs post-reverb: adds clean fundamental back dry
+- HPF and oscillator operate independently (HPF has its own on/off)
 
-Available on Sound (synth tracks and kit rows) only — not GlobalEffectable (the sub needs voice/note information).
+Available on Sound (synth tracks and kit rows) only — not GlobalEffectable (needs voice/note information).
 
 ## Oscillator
 
