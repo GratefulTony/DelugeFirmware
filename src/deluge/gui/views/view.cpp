@@ -65,6 +65,7 @@
 #include "model/instrument/kit.h"
 #include "model/instrument/melodic_instrument.h"
 #include "model/instrument/midi_instrument.h"
+#include "model/mod_controllable/mod_controllable_audio.h"
 #include "model/model_stack.h"
 #include "model/note/note_row.h"
 #include "model/settings/runtime_feature_settings.h"
@@ -79,6 +80,8 @@
 #include "playback/mode/session.h"
 #include "processing/audio_output.h"
 #include "processing/engines/audio_engine.h"
+#include "processing/retrospective/retrospective_buffer.h"
+#include "processing/retrospective/retrospective_handler.h"
 #include "processing/sound/sound.h"
 #include "processing/sound/sound_drum.h"
 #include "processing/sound/sound_instrument.h"
@@ -328,9 +331,19 @@ doEndMidiLearnPressSession:
 	}
 
 	// Sync-scaling button - can be repurposed as Fill Mode in community settings
+	// Also used as RECORD + SYNC_SCALING combo for retrospective sampler
 	else if (b == SYNC_SCALING) {
-		if ((runtimeFeatureSettings.get(RuntimeFeatureSettingType::SyncScalingAction)
-		     == RuntimeFeatureStateSyncScalingAction::Fill)) {
+		// RECORD + SYNC_SCALING combo - trigger retrospective save if enabled
+		// Don't trigger if threshold recording mode popup is active (RECORD shows that popup)
+		if (on && Buttons::isButtonPressed(RECORD) && !display->hasPopupOfType(PopupType::THRESHOLD_RECORDING_MODE)
+		    && runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RetrospectiveSampler)
+		    && retrospectiveBuffer.hasAudio()) {
+			Buttons::recordButtonPressUsedUp = true; // Prevent normal record action on release
+			handleRetrospectiveSave();
+			return ActionResult::DEALT_WITH;
+		}
+		else if ((runtimeFeatureSettings.get(RuntimeFeatureSettingType::SyncScalingAction)
+		          == RuntimeFeatureStateSyncScalingAction::Fill)) {
 			currentSong->changeFillMode(on);
 		}
 		else if (on && currentUIMode == UI_MODE_NONE) {
@@ -836,6 +849,29 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 
 	params::Kind kind = modelStackWithParam->paramCollection->getParamKind();
 
+	// TODO: move scatter gamma phase handling to ModControllableAudio or stutter code
+	// Push+twist on gold knob when learned to scatter param: adjust gammaPhase
+	hid::Button modEncButton = (whichModEncoder == 0) ? hid::button::MOD_ENCODER_0 : hid::button::MOD_ENCODER_1;
+	if (Buttons::isButtonPressed(modEncButton)) {
+		bool isScatter = false;
+		if (kind == params::Kind::PATCHED) {
+			isScatter = params::isScatterParam(static_cast<params::ParamType>(modelStackWithParam->paramId));
+		}
+		else if (kind == params::Kind::UNPATCHED_SOUND || kind == params::Kind::UNPATCHED_GLOBAL) {
+			isScatter = params::isScatterParam(static_cast<params::UnpatchedShared>(modelStackWithParam->paramId));
+		}
+
+		if (isScatter && activeModControllableModelStack.modControllable) {
+			auto* mca = static_cast<ModControllableAudio*>(activeModControllableModelStack.modControllable);
+			float& gamma = mca->stutterConfig.gammaPhase;
+			gamma = std::max(0.0f, gamma + static_cast<float>(offset) * 0.1f);
+			char buffer[16];
+			snprintf(buffer, sizeof(buffer), "gamma:%d", static_cast<int32_t>(gamma * 10.0f));
+			display->displayPopup(buffer);
+			return;
+		}
+	}
+
 	int32_t value = modelStackWithParam->autoParam->getValuePossiblyAtPos(modPos, modelStackWithParam);
 	int32_t knobPos = modelStackWithParam->paramCollection->paramValueToKnobPos(value, modelStackWithParam);
 	int32_t lowerLimit;
@@ -846,6 +882,24 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 	else {
 		lowerLimit = std::min(-64_i32, knobPos);
 	}
+	// Check if this is a high-resolution zone param (1024 steps instead of 128)
+	bool isHighResParam = false;
+	int32_t highResDivisor = 1;
+	if (kind == params::Kind::PATCHED) {
+		auto paramType = static_cast<params::ParamType>(modelStackWithParam->paramId);
+		if (params::isHighResZoneParam(paramType)) {
+			isHighResParam = true;
+			highResDivisor = params::getHighResOffsetDivisor(paramType);
+		}
+	}
+	else if (kind == params::Kind::UNPATCHED_SOUND || kind == params::Kind::UNPATCHED_GLOBAL) {
+		auto paramId = static_cast<params::UnpatchedShared>(modelStackWithParam->paramId);
+		if (params::isHighResZoneParam(paramId)) {
+			isHighResParam = true;
+			highResDivisor = params::getHighResOffsetDivisor(paramId);
+		}
+	}
+
 	int32_t newKnobPos = knobPos + offset;
 	newKnobPos = std::clamp(newKnobPos, lowerLimit, 64_i32);
 
@@ -894,7 +948,7 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 		displayModEncoderValuePopup(kind, modelStackWithParam->paramId, newKnobPos, source1, source2);
 	}
 
-	if (newKnobPos == knobPos) {
+	if (!isHighResParam && newKnobPos == knobPos) {
 		return;
 	}
 
@@ -912,7 +966,20 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 		modelStackWithParam->setTimelineCounter(nullptr);
 	}
 
-	int32_t newValue = modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
+	int32_t newValue;
+	if (isHighResParam && highResDivisor > 1) {
+		int32_t stepSize = (1 << 25) / highResDivisor;
+		newValue = value + (offset * stepSize);
+		if (newValue < 0) {
+			newValue = 0;
+		}
+		if (newValue > 2147483647) {
+			newValue = 2147483647;
+		}
+	}
+	else {
+		newValue = modelStackWithParam->paramCollection->knobPosToParamValue(newKnobPos, modelStackWithParam);
+	}
 
 	// Perform the actual change
 	modelStackWithParam->autoParam->setValuePossiblyForRegion(newValue, modelStackWithParam, modPos, modLength);

@@ -50,6 +50,7 @@ public:
 			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
+					soundDrum->killAllVoices();
 					Source* source = &soundDrum->sources[source_id_];
 					source->sampleControls.pitchAndSpeedAreIndependent = this->getValue();
 				}
@@ -57,6 +58,7 @@ public:
 		}
 		// Or, the normal case of just one sound
 		else {
+			soundEditor.currentSound->killAllVoices();
 			auto& sampleControls = getCurrentSampleControls(source_id_);
 			sampleControls.pitchAndSpeedAreIndependent = this->getValue();
 		}

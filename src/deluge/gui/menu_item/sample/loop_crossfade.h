@@ -67,18 +67,16 @@ public:
 				if (thisDrum->type == DrumType::SOUND) {
 					auto* soundDrum = static_cast<SoundDrum*>(thisDrum);
 					Source* source = &soundDrum->sources[source_id_];
-					if (source->ranges.getNumElements() && source->oscType == OscType::SAMPLE) {
-						auto* multiRange = static_cast<MultisampleRange*>(source->ranges.getElement(0));
-						multiRange->sampleHolder.loopCrossfadeMs = static_cast<uint16_t>(val);
+					if (source->oscType == OscType::SAMPLE) {
+						applyToAllRanges(*source, val);
 					}
 				}
 			}
 		}
 		else {
 			Source& source = soundEditor.currentSound->sources[source_id_];
-			if (source.ranges.getNumElements() && source.oscType == OscType::SAMPLE) {
-				auto* multiRange = static_cast<MultisampleRange*>(source.ranges.getElement(0));
-				multiRange->sampleHolder.loopCrossfadeMs = static_cast<uint16_t>(val);
+			if (source.oscType == OscType::SAMPLE) {
+				applyToAllRanges(source, val);
 			}
 		}
 	}
@@ -87,6 +85,13 @@ public:
 	[[nodiscard]] int32_t getMaxValue() const override { return 1000; }
 
 private:
+	void applyToAllRanges(Source& source, int32_t val) {
+		for (int32_t i = 0; i < source.ranges.getNumElements(); i++) {
+			auto* range = static_cast<MultisampleRange*>(source.ranges.getElement(i));
+			range->sampleHolder.loopCrossfadeMs = static_cast<uint16_t>(val);
+		}
+	}
+
 	uint8_t source_id_;
 };
 } // namespace deluge::gui::menu_item::sample

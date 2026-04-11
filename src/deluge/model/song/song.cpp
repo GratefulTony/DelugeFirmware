@@ -100,12 +100,19 @@ AudioClip* getCurrentAudioClip() {
 
 /// Do not call in static/global constructors, song won't exist yet
 Output* getCurrentOutput() {
-	return currentSong->getCurrentClip()->output;
+	Clip* currentClip = currentSong->getCurrentClip();
+	if (currentClip == nullptr) {
+		return nullptr;
+	}
+	return currentClip->output;
 }
 
 /// Do not call in static/global constructors, song won't exist yet
 Kit* getCurrentKit() {
 	Clip* currentClip = currentSong->getCurrentClip();
+	if (currentClip == nullptr || currentClip->output == nullptr) {
+		return nullptr;
+	}
 	if (currentClip->output->type == OutputType::KIT) {
 		return static_cast<Kit*>(currentClip->output);
 	}
@@ -114,7 +121,11 @@ Kit* getCurrentKit() {
 
 /// Do not call in static/global constructors, song won't exist yet
 Instrument* getCurrentInstrument() {
-	auto output = currentSong->getCurrentClip()->output;
+	Clip* currentClip = currentSong->getCurrentClip();
+	if (currentClip == nullptr) {
+		return nullptr;
+	}
+	auto output = currentClip->output;
 	if (output == nullptr) {
 		return nullptr;
 	}
@@ -128,7 +139,11 @@ Instrument* getCurrentInstrument() {
 
 /// Do not call in static/global constructors, song won't exist yet
 OutputType getCurrentOutputType() {
-	return currentSong->getCurrentClip()->output->type;
+	Clip* currentClip = currentSong->getCurrentClip();
+	if (currentClip == nullptr || currentClip->output == nullptr) {
+		return OutputType::NONE;
+	}
+	return currentClip->output->type;
 }
 
 using namespace deluge;

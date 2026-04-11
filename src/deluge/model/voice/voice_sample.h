@@ -89,6 +89,8 @@ public:
 	int8_t pingpongPlayDirection{1}; // Per-reader direction for pingpong mode (1=forward, -1=backward)
 	int32_t loopFadeInSamplesRemaining{0};
 	int32_t loopFadeInSamplesTotal{0};
+	int32_t crossfadeCacheBytePos{0};
+	bool crossfadeActive{false};
 
 private:
 	bool weShouldBeTimeStretchingNow(Sample* sample, SamplePlaybackGuide* guide, int32_t numSamples,
