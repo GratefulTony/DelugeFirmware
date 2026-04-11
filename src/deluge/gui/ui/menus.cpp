@@ -81,6 +81,7 @@
 #include "gui/menu_item/fx/clipping.h"
 #include "gui/menu_item/fx/disperser.h"
 #include "gui/menu_item/fx/eroder.h"
+#include "gui/menu_item/fx/harm.h"
 #include "gui/menu_item/fx/shaper.h"
 #include "gui/menu_item/fx/sine_shaper.h"
 #include "gui/menu_item/fx/utility.h"
@@ -812,6 +813,23 @@ fx::UtilityWidth utilityWidthMenu{STRING_FOR_UTILITY_WIDTH};
 HorizontalMenu utilitySubMenu{
     STRING_FOR_UTILITY_MENU,
     {&utilityVolumeMenu, &utilityPanLMenu, &utilityPanRMenu, &utilityWidthMenu},
+};
+
+// Harm - note-tracking HPF + clean sub oscillator
+fx::HarmHarmonic harmHarmonicMenu{STRING_FOR_HARM_HARMONIC};
+patched_param::Integer harmFineMenu{STRING_FOR_HARM_FINE, STRING_FOR_HARM_FINE, params::GLOBAL_HARM_FINE};
+patched_param::Integer harmLevelMenu{STRING_FOR_HARM_LEVEL, STRING_FOR_HARM_LEVEL, params::GLOBAL_HARM_LEVEL};
+fx::HarmPhase harmPhaseMenu{STRING_FOR_HARM_PHASE};
+fx::HarmAttack harmAttackMenu{STRING_FOR_HARM_ATTACK};
+fx::HarmRelease harmReleaseMenu{STRING_FOR_HARM_RELEASE};
+fx::HarmHpf harmHpfMenu{STRING_FOR_HARM_HPF};
+fx::HarmPorta harmPortaMenu{STRING_FOR_HARM_PORTA};
+
+HorizontalMenu harmSubMenu{
+    STRING_FOR_HARM_MENU,
+    {&harmHarmonicMenu, &harmFineMenu, &harmLevelMenu, &harmPhaseMenu, &harmAttackMenu, &harmReleaseMenu, &harmHpfMenu,
+     &harmPortaMenu},
+    HorizontalMenu::Layout::DYNAMIC,
 };
 
 // Shaping submenu - contains Sine Shaper, Table Shaper, Automodulator, Disperser, and Eroder
@@ -1610,6 +1628,7 @@ Submenu soundFXMenu{
         &soundDistortionMenu,
         &noiseMenu,
         &dott_menu,
+        &harmSubMenu,
         &utilitySubMenu,
     },
 };
