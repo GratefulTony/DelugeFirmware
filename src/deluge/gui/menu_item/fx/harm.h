@@ -90,6 +90,32 @@ private:
 	}
 };
 
+class HarmFine final : public Integer {
+public:
+	using Integer::Integer;
+
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->harm.fine); }
+	bool usesAffectEntire() override { return true; }
+
+	void writeCurrentValue() override {
+		int32_t current_value = this->getValue();
+		if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
+			Kit* kit = getCurrentKit();
+			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
+				if (thisDrum->type == DrumType::SOUND) {
+					static_cast<SoundDrum*>(thisDrum)->harm.fine = current_value;
+				}
+			}
+		}
+		else {
+			soundEditor.currentModControllable->harm.fine = current_value;
+		}
+	}
+
+	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
+};
+
 class HarmLevel final : public Integer {
 public:
 	using Integer::Integer;

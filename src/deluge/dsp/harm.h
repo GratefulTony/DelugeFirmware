@@ -59,6 +59,7 @@ struct HarmParams {
 	static constexpr uint8_t kHarmDefault = 10; // 1:1 fundamental
 	uint8_t harmonic{kHarmDefault};             // 0=off, 1-102=ratio from kHarmonicTable, default=10 (1:1)
 	uint8_t level{0};                           // 0=silence(default), 64=mid, 127=full
+	uint8_t fine{64};                           // 0=-12st, 64=0st(default), 127=+12st
 	uint8_t phase{0};    // 0-64: start phase (0-360 deg, mono). 65-127: stereo spread (0-180 deg)
 	uint8_t attack{0};   // AR envelope attack (0=instant)
 	uint8_t release{64}; // AR envelope release
@@ -156,7 +157,7 @@ struct HarmParams {
 	// When hpf==0, caller should skip this entirely.
 	// Coefficients computed in float per-buffer, inner loop in Q31.
 
-	void renderHpf(std::span<StereoSample> buffer, int32_t noteCode, q31_t fineFinalValue) {
+	void renderHpf(std::span<StereoSample> buffer, int32_t noteCode) {
 		if (!isHpfEnabled()) {
 			return;
 		}
@@ -166,7 +167,7 @@ struct HarmParams {
 		float ratio = isOscEnabled()
 		                  ? kHarmonicTable[std::min(static_cast<int32_t>(harmonic) - 1, kNumHarmonics - 1)].ratio
 		                  : 1.0f;
-		float fineSemitones = (static_cast<float>(fineFinalValue) / static_cast<float>(ONE_Q31)) * 12.0f;
+		float fineSemitones = (static_cast<float>(fine) - 64.0f) * (12.0f / 63.0f);
 		float fineMul = std::exp2f(fineSemitones / 12.0f);
 		float centerFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;
 		float w0 = centerFreq * (6.2831853f / 4294967296.0f); // 2*pi*fc/fs
@@ -221,7 +222,7 @@ struct HarmParams {
 	// Generates a sine at a harmonic of the note frequency, with AR envelope,
 	// portamento, and phase/spread control. Mixes additively into buffer.
 
-	void renderOsc(std::span<StereoSample> buffer, int32_t noteCode, bool voicesActive, q31_t fineFinalValue) {
+	void renderOsc(std::span<StereoSample> buffer, int32_t noteCode, bool voicesActive) {
 		if (!isOscEnabled()) {
 			return;
 		}
@@ -234,10 +235,8 @@ struct HarmParams {
 		// Pink noise loudness scaling: -3dB/octave, calibrated at 40Hz = unity (no boost below)
 		// Computed after portamento so we use the actual output frequency
 
-		// Apply fine tune: fineFinalValue is bipolar Q31, map to +/-12 semitones
-		// fineFinalValue: -ONE_Q31 = -12st, 0 = 0st, +ONE_Q31 = +12st
-		// Frequency multiplier = 2^(semitones/12)
-		float fineSemitones = (static_cast<float>(fineFinalValue) / static_cast<float>(ONE_Q31)) * 12.0f;
+		// Apply fine tune: direct knob 0=-12st, 64=0st, 127=+12st
+		float fineSemitones = (static_cast<float>(fine) - 64.0f) * (12.0f / 63.0f);
 		float fineMul = std::exp2f(fineSemitones / 12.0f);
 
 		float newTargetFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;
@@ -403,6 +402,7 @@ struct HarmParams {
 	void writeToFile(Serializer& writer) const {
 		WRITE_FIELD_DEFAULT(writer, harmonic, "harmHarmonic", kHarmDefault);
 		WRITE_FIELD(writer, level, "harmLevel");
+		WRITE_FIELD_DEFAULT(writer, fine, "harmFine", 64);
 		WRITE_FIELD(writer, phase, "harmPhase");
 		WRITE_FIELD(writer, attack, "harmAttack");
 		WRITE_FIELD_DEFAULT(writer, release, "harmRelease", 64);
@@ -413,6 +413,7 @@ struct HarmParams {
 	bool readTag(Deserializer& reader, const char* tagName) {
 		READ_FIELD(reader, tagName, harmonic, "harmHarmonic");
 		READ_FIELD(reader, tagName, level, "harmLevel");
+		READ_FIELD(reader, tagName, fine, "harmFine");
 		READ_FIELD(reader, tagName, phase, "harmPhase");
 		READ_FIELD(reader, tagName, attack, "harmAttack");
 		READ_FIELD(reader, tagName, release, "harmRelease");

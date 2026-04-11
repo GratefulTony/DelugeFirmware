@@ -2829,20 +2829,16 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		}
 	}
 
-	// Harm: read fine tune param for both notch and oscillator
-	// TODO: add pitch bend support (reverted for now to isolate click source)
-	int32_t harmFine = paramFinalValues[params::GLOBAL_HARM_FINE - params::FIRST_GLOBAL];
-
 	// Harm notch - strip the harmonic frequency pre-reverb
 	if (harm.isHpfEnabled()) {
-		harm.renderHpf(sound_stereo, harmNoteCode, harmFine);
+		harm.renderHpf(sound_stereo, harmNoteCode);
 	}
 
 	processReverbSendAndVolume(sound_stereo, reverbBuffer, postFXVolume, postReverbVolume, reverbSendAmount, 0, true);
 
 	// Harm oscillator - add clean harmonic back post-reverb (dry)
 	if (harm.isOscEnabled()) {
-		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmFine);
+		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld);
 	}
 
 	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
