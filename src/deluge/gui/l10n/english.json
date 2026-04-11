@@ -1099,6 +1099,18 @@
     "STRING_FOR_UTILITY_PAN_R": "Pan R",
     "STRING_FOR_UTILITY_WIDTH": "Width",
 
+    "STRING_FOR_HARM_MENU": "Harm",
+    "STRING_FOR_HARM_HARMONIC": "Harmonic",
+    "STRING_FOR_HARM_FINE": "Fine",
+    "STRING_FOR_HARM_LEVEL": "Level",
+    "STRING_FOR_HARM_PHASE": "Phase",
+    "STRING_FOR_HARM_ATTACK": "Attack",
+    "STRING_FOR_HARM_RELEASE": "Release",
+    "STRING_FOR_HARM_HPF": "HPF",
+    "STRING_FOR_HARM_PORTA": "Porta",
+    "STRING_FOR_PARAM_GLOBAL_HARM_LEVEL": "Harm Level",
+    "STRING_FOR_PARAM_GLOBAL_HARM_FINE": "Harm Fine",
+
     "STRING_FOR_MACRO_1": "Macro 1",
     "STRING_FOR_MACRO_2": "Macro 2",
     "STRING_FOR_MACRO_3": "Macro 3",
