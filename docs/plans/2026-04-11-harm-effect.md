@@ -368,9 +368,18 @@ q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNP
 Right before `processReverbSendAndVolume()` (line 2809), add:
 
 ```cpp
+// Harm: compute lowest active note for pitch tracking (sub reinforces bass note)
+int32_t harmNoteCode = lastNoteCode; // fallback when no voices active
+if (harm.isEnabled() && !voices_.empty()) {
+    harmNoteCode = std::numeric_limits<int32_t>::max();
+    for (auto& voice : voices_) {
+        harmNoteCode = std::min(harmNoteCode, voice->noteCodeAfterArpeggiation);
+    }
+}
+
 // Harm HPF - strip fundamental pre-reverb so reverb only gets harmonics
 if (harm.isHpfEnabled()) {
-    harm.renderHpf(sound_stereo, lastNoteCode);
+    harm.renderHpf(sound_stereo, harmNoteCode);
 }
 ```
 
@@ -383,7 +392,7 @@ Right after `processReverbSendAndVolume()` and before the compressor threshold c
 if (harm.isOscEnabled()) {
     int32_t harmLevel = paramFinalValues[params::GLOBAL_HARM_LEVEL - params::FIRST_GLOBAL];
     int32_t harmFine = paramFinalValues[params::GLOBAL_HARM_FINE - params::FIRST_GLOBAL];
-    harm.renderOsc(sound_stereo, lastNoteCode, !voices_.empty(), harmLevel, harmFine);
+    harm.renderOsc(sound_stereo, harmNoteCode, !voices_.empty(), harmLevel, harmFine);
 }
 ```
 
