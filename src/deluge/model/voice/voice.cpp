@@ -2851,7 +2851,15 @@ dontUseCache: {}
 			// Compute crossfade samples for this source
 			if (loopingType != LoopType::NONE) {
 				auto* holder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
-				voiceSample->loopFadeInSamplesTotal = (holder->loopCrossfadeMs * sample->sampleRate) / 1000;
+				int32_t crossfadeSamples = (holder->loopCrossfadeMs * sample->sampleRate) / 1000;
+
+				// Clamp to half the loop length
+				if (holder->loopEndPos > 0 && holder->loopEndPos > holder->loopStartPos) {
+					int32_t loopLengthSamples = holder->loopEndPos - holder->loopStartPos;
+					crossfadeSamples = std::min(crossfadeSamples, loopLengthSamples / 2);
+				}
+
+				voiceSample->loopFadeInSamplesTotal = crossfadeSamples;
 			}
 			else {
 				voiceSample->loopFadeInSamplesTotal = 0;

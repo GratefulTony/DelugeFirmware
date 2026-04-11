@@ -62,6 +62,10 @@ void VoiceSample::noteOn(SamplePlaybackGuide* guide, uint32_t samplesLate, int32
 // Returns false if error
 bool VoiceSample::noteOffWhenLoopEndPointExists(Voice* voice, VoiceSamplePlaybackGuide* guide) {
 
+	// If crossfade is active when note releases, reset it
+	crossfadeActive = false;
+	crossfadeCacheBytePos = 0;
+
 	if (cache) {
 		cacheLoopEndPointBytes = 2147483647;
 		return true;
@@ -369,6 +373,8 @@ bool VoiceSample::stopReadingFromCache() {
 
 	// .. we have to get reading to read normally, un-cached, so set some stuff up
 	interpolationBufferSizeLastTime = 0;
+	crossfadeActive = false;
+	crossfadeCacheBytePos = 0;
 	return true;
 }
 
