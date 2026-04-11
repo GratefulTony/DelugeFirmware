@@ -2,14 +2,14 @@
 
 ## Summary
 
-A post-FX mono sine oscillator for clean harmonic reinforcement. Tracks pitch via `lastNoteCode` using harmonic ratios. Has its own standalone AR envelope triggered by voice activity, note-tracking HPF, portamento, and zero-crossing release logic to prevent clicks. Level and Fine are patched params (mod matrix targets). Placed before the utility effect in the signal chain.
+A post-FX mono sine oscillator for clean harmonic reinforcement. Tracks pitch via `lastNoteCode` using harmonic ratios. Has its own standalone AR envelope triggered by voice activity, note-tracking HPF, portamento, and zero-crossing release logic to prevent clicks. Level and Fine are patched params (mod matrix targets). Placed post-reverb in the signal chain (after DOTT and reverb send, before per-clip compressor).
 
 ## Parameters (8 knobs, 2 menu pages)
 
 | # | Knob | Type | Range | Purpose |
 |---|------|------|-------|---------|
 | 1 | Harmonic | direct | 1/4, 1/3, 1/2, 1, 2, 3, 4, 5, 6, 7, 8 | Harmonic ratio selection |
-| 2 | Fine | patched | -50 to +50 cents | Detune for thickness |
+| 2 | Fine | patched | -12 to +12 semitones | Pitch offset, snaps to semitones. Encoder press unlocks fine continuous tuning |
 | 3 | Level | patched | 0 to max | Mix amount |
 | 4 | Phase/Spread | direct | 0-127 | Lower half: start phase 0-360. Upper half: stereo L/R phase spread 0-180 |
 | 5 | Attack | direct | time | AR envelope attack |
@@ -19,7 +19,9 @@ A post-FX mono sine oscillator for clean harmonic reinforcement. Tracks pitch vi
 
 ## Signal Chain Placement
 
-`...Stutter -> Sub Osc -> Utility -> DOTT -> Reverb Send -> Compressor`
+`...Stutter -> Utility -> DOTT -> Reverb Send -> Harm -> Compressor`
+
+Post-reverb: HPF cleans reverb mud, sub output stays dry (doesn't go to reverb).
 
 Available on Sound (synth tracks and kit rows) only — not GlobalEffectable (the sub needs voice/note information).
 
