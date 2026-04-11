@@ -809,6 +809,13 @@ readCachedWindow:
 			bytesTilThisWindowEnd = std::min(bytesTilCacheClusterEnd, bytesTilCacheEnd);
 			bytesTilThisWindowEnd = std::min(bytesTilThisWindowEnd, bytesTilLoopEndPoint);
 			bytesTilThisWindowEnd = std::min(bytesTilThisWindowEnd, bytesTilWaveformEnd);
+
+			// Also limit by crossfade reader's cluster boundary
+			if (crossfadeActive) {
+				int32_t xfBytePosWithinCluster = crossfadeCacheBytePos & (Cluster::size - 1);
+				int32_t bytesTilXfClusterEnd = Cluster::size - xfBytePosWithinCluster;
+				bytesTilThisWindowEnd = std::min(bytesTilThisWindowEnd, bytesTilXfClusterEnd);
+			}
 		}
 		else {
 			// Backward: limited by cluster start and loop start
@@ -842,57 +849,59 @@ readCachedWindow:
 		// Crossfade envelope for cached reads — modulates amplitude around loop boundaries
 		int32_t cacheRenderAmplitude = amplitude;
 		int32_t cacheRenderAmplitudeIncrement = amplitudeIncrement;
+		int32_t xfadeAmplitude = 0;
+		int32_t xfadeAmplitudeIncrement = 0;
 
-		if (loopFadeInSamplesRemaining > 0) {
-			// Fade-in: ramp amplitude up from silence after loop restart
+		if (crossfadeActive && loopFadeInSamplesRemaining > 0) {
+			// True crossfade: main fades out, crossfade read fades in
 			int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
 
-			int32_t fadeStart = static_cast<int32_t>(
+			int32_t fadeInStart = static_cast<int32_t>(
 			    std::min(((int64_t)fadeProgress << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
-			int32_t fadeEnd = static_cast<int32_t>(
+			int32_t fadeInEnd = static_cast<int32_t>(
 			    std::min(((int64_t)(fadeProgress + numSamplesThisCacheRead) << 31) / loopFadeInSamplesTotal,
 			             (int64_t)0x7FFFFFFF));
 
-			int32_t ampAtStart = multiply_32x32_rshift32(amplitude, fadeStart) << 1;
-			int32_t ampAtEnd =
-			    multiply_32x32_rshift32(amplitude + amplitudeIncrement * numSamplesThisCacheRead, fadeEnd) << 1;
+			// Main read fades OUT
+			int32_t fadeOutStart = 0x7FFFFFFF - fadeInStart;
+			int32_t fadeOutEnd = 0x7FFFFFFF - fadeInEnd;
 
-			cacheRenderAmplitude = ampAtStart;
-			cacheRenderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisCacheRead;
+			int32_t mainAmpStart = multiply_32x32_rshift32(amplitude, fadeOutStart) << 1;
+			int32_t mainAmpEnd =
+			    multiply_32x32_rshift32(amplitude + amplitudeIncrement * numSamplesThisCacheRead, fadeOutEnd) << 1;
+
+			cacheRenderAmplitude = mainAmpStart;
+			cacheRenderAmplitudeIncrement = (mainAmpEnd - mainAmpStart) / numSamplesThisCacheRead;
+
+			// Crossfade read fades IN
+			int32_t xfadeAmpStart = multiply_32x32_rshift32(amplitude, fadeInStart) << 1;
+			int32_t xfadeAmpEnd =
+			    multiply_32x32_rshift32(amplitude + amplitudeIncrement * numSamplesThisCacheRead, fadeInEnd) << 1;
+
+			xfadeAmplitude = xfadeAmpStart;
+			xfadeAmplitudeIncrement = (xfadeAmpEnd - xfadeAmpStart) / numSamplesThisCacheRead;
 
 			loopFadeInSamplesRemaining -= numSamplesThisCacheRead;
 			if (loopFadeInSamplesRemaining < 0) {
 				loopFadeInSamplesRemaining = 0;
 			}
 		}
-		else if (loopFadeInSamplesTotal > 0 && loopingType != LoopType::NONE) {
-			// Fade-out: ramp amplitude down approaching loop boundary
-			// In cache domain, distance to loop end in output samples is direct
-			int32_t distOutputSamples = bytesTilLoopEndPoint / (kCacheByteDepth * sampleSourceNumChannels);
-
-			if (distOutputSamples >= 0) {
-				int32_t clampedDist = std::min(distOutputSamples, loopFadeInSamplesTotal);
-				int32_t scaleAtStart = static_cast<int32_t>(
-				    std::min(((int64_t)clampedDist << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
-
-				int32_t distAfterRead = distOutputSamples - numSamplesThisCacheRead;
-				if (distAfterRead < 0) {
-					distAfterRead = 0;
-				}
-				int32_t clampedDistAfter = std::min(distAfterRead, loopFadeInSamplesTotal);
-				int32_t scaleAtEnd = static_cast<int32_t>(
-				    std::min(((int64_t)clampedDistAfter << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
-
-				if (clampedDist < loopFadeInSamplesTotal || clampedDistAfter < loopFadeInSamplesTotal) {
-					int32_t ampAtStart = multiply_32x32_rshift32(cacheRenderAmplitude, scaleAtStart) << 1;
-					int32_t ampAtEnd =
-					    multiply_32x32_rshift32(
-					        cacheRenderAmplitude + cacheRenderAmplitudeIncrement * numSamplesThisCacheRead, scaleAtEnd)
-					    << 1;
-
-					cacheRenderAmplitude = ampAtStart;
-					cacheRenderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisCacheRead;
-				}
+		else if (loopFadeInSamplesRemaining > 0) {
+			// Non-crossfade fade-in (pingpong or other cases)
+			int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
+			int32_t fadeStart = static_cast<int32_t>(
+			    std::min(((int64_t)fadeProgress << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+			int32_t fadeEnd = static_cast<int32_t>(
+			    std::min(((int64_t)(fadeProgress + numSamplesThisCacheRead) << 31) / loopFadeInSamplesTotal,
+			             (int64_t)0x7FFFFFFF));
+			int32_t ampAtStart = multiply_32x32_rshift32(amplitude, fadeStart) << 1;
+			int32_t ampAtEnd =
+			    multiply_32x32_rshift32(amplitude + amplitudeIncrement * numSamplesThisCacheRead, fadeEnd) << 1;
+			cacheRenderAmplitude = ampAtStart;
+			cacheRenderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisCacheRead;
+			loopFadeInSamplesRemaining -= numSamplesThisCacheRead;
+			if (loopFadeInSamplesRemaining < 0) {
+				loopFadeInSamplesRemaining = 0;
 			}
 		}
 
@@ -903,39 +912,108 @@ readCachedWindow:
 		    outputBufferWritePos + numSamplesThisCacheRead * numChannelsInOutputBuffer;
 
 		if (cachePlayDirection == 1) {
-			// === FORWARD READING ===
-			while (true) {
-				int32_t existingValueL = *outputBufferWritePos;
+			if (crossfadeActive && xfadeAmplitude != 0) {
+				// === FORWARD READING WITH CROSSFADE ===
+				int32_t xfCachedClusterIndex = crossfadeCacheBytePos >> Cluster::size_magnitude;
+				int32_t xfBytePosWithinCluster = crossfadeCacheBytePos & (Cluster::size - 1);
+				Cluster* xfCluster = cache->getCluster(xfCachedClusterIndex);
 
-				readPos = (int32_t*)((char*)readPos + kCacheByteDepth);
+				if (xfCluster) {
+					int32_t* xfReadPos = (int32_t*)&xfCluster->data[xfBytePosWithinCluster - 4 + kCacheByteDepth];
+					int32_t xfSampleRead[2];
+					xfSampleRead[0] = *xfReadPos;
 
-				if (sampleSourceNumChannels == 2) {
-					sampleRead[1] = *readPos;
-					readPos = (int32_t*)((char*)readPos + kCacheByteDepth);
+					while (true) {
+						int32_t existingValueL = *outputBufferWritePos;
 
-					if (numChannelsInOutputBuffer == 1) {
-						sampleRead[0] = ((sampleRead[0] >> 1) + (sampleRead[1] >> 1));
+						// Main read
+						readPos = (int32_t*)((char*)readPos + kCacheByteDepth);
+						if (sampleSourceNumChannels == 2) {
+							sampleRead[1] = *readPos;
+							readPos = (int32_t*)((char*)readPos + kCacheByteDepth);
+							if (numChannelsInOutputBuffer == 1) {
+								sampleRead[0] = ((sampleRead[0] >> 1) + (sampleRead[1] >> 1));
+							}
+						}
+
+						// Crossfade read
+						xfReadPos = (int32_t*)((char*)xfReadPos + kCacheByteDepth);
+						if (sampleSourceNumChannels == 2) {
+							xfSampleRead[1] = *xfReadPos;
+							xfReadPos = (int32_t*)((char*)xfReadPos + kCacheByteDepth);
+							if (numChannelsInOutputBuffer == 1) {
+								xfSampleRead[0] = ((xfSampleRead[0] >> 1) + (xfSampleRead[1] >> 1));
+							}
+						}
+
+						cacheRenderAmplitude += cacheRenderAmplitudeIncrement;
+						xfadeAmplitude += xfadeAmplitudeIncrement;
+
+						// Write main (fading out) + crossfade (fading in)
+						*outputBufferWritePos = multiply_accumulate_32x32_rshift32_rounded(
+						    existingValueL, sampleRead[0], cacheRenderAmplitude);
+						*outputBufferWritePos = multiply_accumulate_32x32_rshift32_rounded(
+						    *outputBufferWritePos, xfSampleRead[0], xfadeAmplitude);
+						outputBufferWritePos++;
+
+						if (numChannelsInOutputBuffer == 2) {
+							int32_t existingValueR = *outputBufferWritePos;
+							*outputBufferWritePos = multiply_accumulate_32x32_rshift32_rounded(
+							    existingValueR, sampleRead[1], cacheRenderAmplitude);
+							*outputBufferWritePos = multiply_accumulate_32x32_rshift32_rounded(
+							    *outputBufferWritePos, xfSampleRead[1], xfadeAmplitude);
+							outputBufferWritePos++;
+						}
+
+						if (outputBufferWritePos == oscBufferEndNow) {
+							break;
+						}
+
+						sampleRead[0] = *readPos;
+						xfSampleRead[0] = *xfReadPos;
 					}
 				}
+				else {
+					// Crossfade cluster not available — fall back to main-only read
+					goto normalForwardLoop;
+				}
+			}
+			else {
+normalForwardLoop:
+				// === NORMAL FORWARD READING (no crossfade) ===
+				while (true) {
+					int32_t existingValueL = *outputBufferWritePos;
 
-				cacheRenderAmplitude += cacheRenderAmplitudeIncrement;
+					readPos = (int32_t*)((char*)readPos + kCacheByteDepth);
 
-				*outputBufferWritePos =
-				    multiply_accumulate_32x32_rshift32_rounded(existingValueL, sampleRead[0], cacheRenderAmplitude);
-				outputBufferWritePos++;
+					if (sampleSourceNumChannels == 2) {
+						sampleRead[1] = *readPos;
+						readPos = (int32_t*)((char*)readPos + kCacheByteDepth);
 
-				if (numChannelsInOutputBuffer == 2) {
-					int32_t existingValueR = *outputBufferWritePos;
+						if (numChannelsInOutputBuffer == 1) {
+							sampleRead[0] = ((sampleRead[0] >> 1) + (sampleRead[1] >> 1));
+						}
+					}
+
+					cacheRenderAmplitude += cacheRenderAmplitudeIncrement;
+
 					*outputBufferWritePos =
-					    multiply_accumulate_32x32_rshift32_rounded(existingValueR, sampleRead[1], cacheRenderAmplitude);
+					    multiply_accumulate_32x32_rshift32_rounded(existingValueL, sampleRead[0], cacheRenderAmplitude);
 					outputBufferWritePos++;
-				}
 
-				if (outputBufferWritePos == oscBufferEndNow) {
-					break;
-				}
+					if (numChannelsInOutputBuffer == 2) {
+						int32_t existingValueR = *outputBufferWritePos;
+						*outputBufferWritePos = multiply_accumulate_32x32_rshift32_rounded(
+						    existingValueR, sampleRead[1], cacheRenderAmplitude);
+						outputBufferWritePos++;
+					}
 
-				sampleRead[0] = *readPos;
+					if (outputBufferWritePos == oscBufferEndNow) {
+						break;
+					}
+
+					sampleRead[0] = *readPos;
+				}
 			}
 		}
 		else {
@@ -983,6 +1061,11 @@ readCachedWindow:
 
 		// Direction-aware position advancement
 		cacheBytePos += numSamplesThisCacheRead * frameSizeBytes * cachePlayDirection;
+
+		// Advance crossfade read head in sync
+		if (crossfadeActive) {
+			crossfadeCacheBytePos += numSamplesThisCacheRead * frameSizeBytes;
+		}
 
 		// Need to also keep track of the un-cached play-pos so we can switch back if needed
 
