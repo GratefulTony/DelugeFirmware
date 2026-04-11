@@ -53,6 +53,8 @@ void VoiceSample::noteOn(SamplePlaybackGuide* guide, uint32_t samplesLate, int32
 	fudging = false;
 	forAudioClip = false;
 	loopFadeInSamplesRemaining = 0;
+	crossfadeActive = false;
+	crossfadeCacheBytePos = 0;
 	justLoopedBack = false;
 	pingpongPlayDirection = guide->playDirection;
 }
@@ -649,24 +651,46 @@ readCachedWindow:
 		int32_t numSamplesThisCacheRead = numSamples;
 		bool pingpongCacheMode = static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive;
 
+		int32_t frameSizeBytes = kCacheByteDepth * sampleSourceNumChannels;
+		int32_t crossfadeLengthCacheBytes = loopFadeInSamplesTotal * frameSizeBytes;
+		// Clamp crossfade to half the loop length
+		if (crossfadeLengthCacheBytes > 0 && (int32_t)cacheLoopLengthBytes > 0) {
+			crossfadeLengthCacheBytes = std::min(crossfadeLengthCacheBytes, (int32_t)(cacheLoopLengthBytes / 2));
+		}
+
 		// Direction-aware loop boundary detection
 		int32_t bytesTilLoopEndPoint; // Used later for crossfade fade-out distance
 		if (cachePlayDirection == 1) {
 			// Forward: check loop end point
 			bytesTilLoopEndPoint = cacheLoopEndPointBytes - cacheBytePos;
+
+			// Enter crossfade region when approaching loop end (forward only, non-pingpong)
+			if (!crossfadeActive && !pingpongCacheMode && crossfadeLengthCacheBytes > 0 && bytesTilLoopEndPoint > 0
+			    && bytesTilLoopEndPoint <= crossfadeLengthCacheBytes) {
+				crossfadeActive = true;
+				crossfadeCacheBytePos = cacheLoopStartPointBytes;
+				loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
+			}
+
 			if (bytesTilLoopEndPoint <= 0) {
 				D_PRINTLN("Loop endpoint reached, reading cache");
 				if (pingpongCacheMode) {
 					// Pingpong: bounce backward from loop end
 					cachePlayDirection = -1;
-					int32_t frameSizeBytes = kCacheByteDepth * sampleSourceNumChannels;
 					cacheBytePos = cacheLoopEndPointBytes - frameSizeBytes;
 				}
 				else {
-					// Normal loop: wrap back to start
-					cacheBytePos -= cacheLoopLengthBytes;
+					// Normal loop: if crossfade was active, take over from crossfade head
+					if (crossfadeActive) {
+						cacheBytePos = crossfadeCacheBytePos;
+						crossfadeActive = false;
+						loopFadeInSamplesRemaining = 0;
+					}
+					else {
+						cacheBytePos -= cacheLoopLengthBytes;
+					}
 				}
-				if (loopFadeInSamplesTotal > 0) {
+				if (pingpongCacheMode && loopFadeInSamplesTotal > 0) {
 					loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
 				}
 				goto readCachedWindow;
@@ -778,7 +802,6 @@ readCachedWindow:
 
 		sampleRead[0] = *readPos; // Do first read up here so there's time for the processor to access the memory
 
-		int32_t frameSizeBytes = kCacheByteDepth * sampleSourceNumChannels;
 		int32_t bytesTilThisWindowEnd;
 		if (cachePlayDirection == 1) {
 			// Forward: limited by cluster end, cache write pos, loop end, waveform end
