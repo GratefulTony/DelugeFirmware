@@ -572,6 +572,7 @@ void ModControllableAudio::writeAttributesToFile(Serializer& writer) {
 	multibandCompressor.writeToFile(writer);
 	// Utility (volume, pan, width)
 	utility.writeToFile(writer);
+	harm.writeToFile(writer);
 }
 
 void ModControllableAudio::writeTagsToFile(Serializer& writer) {
@@ -1204,6 +1205,10 @@ Error ModControllableAudio::readTagFromFile(Deserializer& reader, char const* ta
 	}
 
 	else if (utility.readTag(reader, tagName)) {
+		// Reading handled internally
+	}
+
+	else if (harm.readTag(reader, tagName)) {
 		// Reading handled internally
 	}
 

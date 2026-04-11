@@ -25,6 +25,7 @@
 #include "dsp/delay/delay.h"
 #include "dsp/disperser.h"
 #include "dsp/eroder.h"
+#include "dsp/harm.h"
 #include "dsp/shaper.h"
 #include "dsp/sine_shaper.hpp"
 #include "dsp/stereo_sample.h"
@@ -152,6 +153,7 @@ public:
 	RMSFeedbackCompressor compressor;
 	deluge::dsp::MultibandCompressor multibandCompressor;
 	deluge::dsp::UtilityParams utility;
+	deluge::dsp::HarmParams harm;
 	CompressorMode compressorMode{CompressorMode::SINGLE};
 
 	/// Apply modulated params from UnpatchedParamSet to multiband compressor before rendering
