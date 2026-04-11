@@ -83,6 +83,7 @@
 #include "gui/menu_item/fx/eroder.h"
 #include "gui/menu_item/fx/shaper.h"
 #include "gui/menu_item/fx/sine_shaper.h"
+#include "gui/menu_item/fx/utility.h"
 #include "gui/menu_item/gate/mode.h"
 #include "gui/menu_item/gate/off_time.h"
 #include "gui/menu_item/gate/selection.h"
@@ -802,6 +803,17 @@ HorizontalMenu eroderSubMenu{
     {&eroderCutoffMenu, &eroderToneMenu, &eroderCharacterMenu, &eroderMixMenu},
 };
 
+// Utility - channel strip (volume, pan, width)
+fx::UtilityVolume utilityVolumeMenu{STRING_FOR_UTILITY_VOLUME};
+fx::UtilityPanL utilityPanLMenu{STRING_FOR_UTILITY_PAN_L};
+fx::UtilityPanR utilityPanRMenu{STRING_FOR_UTILITY_PAN_R};
+fx::UtilityWidth utilityWidthMenu{STRING_FOR_UTILITY_WIDTH};
+
+HorizontalMenu utilitySubMenu{
+    STRING_FOR_UTILITY_MENU,
+    {&utilityVolumeMenu, &utilityPanLMenu, &utilityPanRMenu, &utilityWidthMenu},
+};
+
 // Shaping submenu - contains Sine Shaper, Table Shaper, Automodulator, Disperser, and Eroder
 submenu::Shaping shapingMenu{
     STRING_FOR_SHAPING,
@@ -1018,6 +1030,7 @@ Submenu globalFXMenu{
         &globalModFXMenu,
         &globalDistortionMenu,
         &dott_menu,
+        &utilitySubMenu,
     },
 };
 
@@ -1075,6 +1088,7 @@ Submenu audioClipFXMenu{
         &shapingMenu,
         &audioClipDistortionMenu,
         &dott_menu,
+        &utilitySubMenu,
     },
 };
 
@@ -1596,6 +1610,7 @@ Submenu soundFXMenu{
         &soundDistortionMenu,
         &noiseMenu,
         &dott_menu,
+        &utilitySubMenu,
     },
 };
 
