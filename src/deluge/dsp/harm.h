@@ -72,10 +72,11 @@ struct HarmParams {
 	float currentFreq{0.0f};      // Portamento-smoothed frequency (as phase increment)
 	float targetFreq{0.0f};       // Target frequency
 	bool voicesWereActive{false}; // For trigger detection
-	q31_t hpfStateL1{0};          // Cascaded HPF state (1st pole, left)
-	q31_t hpfStateR1{0};          // 1st pole, right
-	q31_t hpfStateL2{0};          // 2nd pole, left
-	q31_t hpfStateR2{0};          // 2nd pole, right
+	// Notch biquad state (direct form II transposed), per channel
+	float notchZ1L{0.0f}; // z^-1 delay left
+	float notchZ2L{0.0f}; // z^-2 delay left
+	float notchZ1R{0.0f}; // z^-1 delay right
+	float notchZ2R{0.0f}; // z^-2 delay right
 
 	// Harmonic ratio table: sorted unique fractions with denominators {1,2,3,4,8}
 	// Index 0 is unused (0=OFF), indices 1-102 map to ratios
@@ -146,55 +147,64 @@ struct HarmParams {
 	}
 
 	// ========================================================================
-	// renderHpf — 12dB note-tracking high-pass filter (PRE-reverb)
+	// renderNotch — note-tracking notch filter (PRE-reverb)
 	// ========================================================================
-	// Two cascaded single-pole HPF stages.
-	// Cutoff derived from noteCode: hpf knob 1..127 maps cutoff from
-	// 3 octaves below the note (knob=1) up to the note frequency (knob=127).
+	// Biquad notch filter tuned to the note frequency.
+	// hpf knob 1..127 controls notch width: 1=narrow (surgical), 127=wide.
 	// When hpf==0, caller should skip this entirely.
+	// Uses Direct Form II Transposed for numerical stability with float.
 
 	void renderHpf(std::span<StereoSample> buffer, int32_t noteCode) {
 		if (!isHpfEnabled()) {
 			return;
 		}
 
-		// Compute cutoff frequency as phase increment
-		// hpf knob 1..127 -> cutoff at (note - 3_octaves) .. (note)
-		// That's noteCode - 36 .. noteCode
-		// Linear interpolation: cutoffNote = noteCode - 36 + (hpf - 1) * 36 / 126
-		int32_t cutoffOffset = 36 - ((hpf - 1) * 36) / 126; // 36 down to 0
-		int32_t cutoffNote = noteCode - cutoffOffset;
+		// Compute notch center frequency
+		uint32_t centerPhaseInc = noteCodeToPhaseIncrement(noteCode);
+		float w0 = static_cast<float>(centerPhaseInc) * (6.2831853f / 4294967296.0f); // 2*pi*fc/fs
 
-		uint32_t cutoffPhaseInc = noteCodeToPhaseIncrement(cutoffNote);
+		// Q from hpf knob: 1=wide (Q=0.5), 127=narrow (Q=30)
+		// Invert: low knob = narrow surgical, high knob = wide
+		// Actually: 1=narrow, 127=wide is more intuitive (turn up = more effect)
+		float Q = 30.0f - (static_cast<float>(hpf - 1) / 126.0f) * 29.5f; // 30 down to 0.5
 
-		// alpha for single-pole LPF: alpha ≈ 2*pi*fc/fs (valid when fc << fs)
-		// phaseIncrement = fc * 2^32 / fs
-		// So: alpha = phaseInc * 2*pi / 2^32
-		// In Q31: alpha_q31 = phaseInc * 2*pi * 2^31 / 2^32 = phaseInc * pi
-		// Approximate pi as 3: alpha_q31 = phaseInc * 3
-		// Use 64-bit to avoid overflow, clamp for stability
-		q31_t alpha =
-		    static_cast<q31_t>(std::min(static_cast<int64_t>(cutoffPhaseInc) * 3, static_cast<int64_t>(ONE_Q31 >> 1)));
+		// Biquad notch coefficients (cookbook: Audio EQ Cookbook by Robert Bristow-Johnson)
+		float alpha = std::sinf(w0) / (2.0f * Q);
+		float cosw0 = std::cosf(w0);
+
+		float b0 = 1.0f;
+		float b1 = -2.0f * cosw0;
+		float b2 = 1.0f;
+		float a0 = 1.0f + alpha;
+		float a1 = -2.0f * cosw0;
+		float a2 = 1.0f - alpha;
+
+		// Normalize by a0
+		float inv_a0 = 1.0f / a0;
+		b0 *= inv_a0;
+		b1 *= inv_a0;
+		b2 *= inv_a0;
+		a1 *= inv_a0;
+		a2 *= inv_a0;
+
+		// Scale factor for int32_t <-> float conversion
+		constexpr float kToFloat = 1.0f / 2147483648.0f;
+		constexpr float kToQ31 = 2147483648.0f;
 
 		for (auto& sample : buffer) {
-			// Left channel — 1st pole
-			q31_t hpOutL = sample.l - hpfStateL1;
-			hpfStateL1 += multiply_32x32_rshift32(alpha, hpOutL) << 1;
+			// Left channel — Direct Form II Transposed
+			float inL = static_cast<float>(sample.l) * kToFloat;
+			float outL = b0 * inL + notchZ1L;
+			notchZ1L = b1 * inL - a1 * outL + notchZ2L;
+			notchZ2L = b2 * inL - a2 * outL;
+			sample.l = static_cast<int32_t>(outL * kToQ31);
 
-			// Left channel — 2nd pole
-			q31_t hpOutL2 = hpOutL - hpfStateL2;
-			hpfStateL2 += multiply_32x32_rshift32(alpha, hpOutL2) << 1;
-
-			// Right channel — 1st pole
-			q31_t hpOutR = sample.r - hpfStateR1;
-			hpfStateR1 += multiply_32x32_rshift32(alpha, hpOutR) << 1;
-
-			// Right channel — 2nd pole
-			q31_t hpOutR2 = hpOutR - hpfStateR2;
-			hpfStateR2 += multiply_32x32_rshift32(alpha, hpOutR2) << 1;
-
-			sample.l = hpOutL2;
-			sample.r = hpOutR2;
+			// Right channel
+			float inR = static_cast<float>(sample.r) * kToFloat;
+			float outR = b0 * inR + notchZ1R;
+			notchZ1R = b1 * inR - a1 * outR + notchZ2R;
+			notchZ2R = b2 * inR - a2 * outR;
+			sample.r = static_cast<int32_t>(outR * kToQ31);
 		}
 	}
 
