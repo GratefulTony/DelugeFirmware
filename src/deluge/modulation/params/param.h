@@ -147,11 +147,11 @@ enum Global : ParamType {
 	GLOBAL_VOLUME_POST_REVERB_SEND,
 	GLOBAL_REVERB_AMOUNT,
 	GLOBAL_MOD_FX_DEPTH,
-	GLOBAL_HARM_LEVEL, // Harm sub oscillator output level
 
 	// Global non-volume params begin
 	FIRST_GLOBAL_NON_VOLUME,
 	GLOBAL_DELAY_FEEDBACK = FIRST_GLOBAL_NON_VOLUME,
+	GLOBAL_HARM_LEVEL, // Harm sub oscillator output level (non-volume: independent gain)
 
 	// Global hybrid params begin (bipolar additive: base ± modulation)
 	FIRST_GLOBAL_HYBRID,
