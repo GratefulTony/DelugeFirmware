@@ -43,7 +43,7 @@ inline constexpr float kHarmSampleRate = 44100.0f;
 inline constexpr float kHarmTwoPi = 6.283185307f;
 
 // Envelope thresholds
-inline constexpr float kHarmEnvThreshold = 0.063f; // -24dB, zero-crossing shutoff threshold
+inline constexpr float kHarmEnvThreshold = 1.0e-7f; // ~-140dB, effectively just denormal prevention
 
 // Portamento rate mapping: knob 0 = instant, 127 = very slow glide
 // Rate = 1.0 - exp(-1/(time_samples)), approximated as simple division
@@ -68,6 +68,8 @@ struct HarmParams {
 	// DSP state (NOT serialized)
 	uint32_t phaseAccumL{0};
 	uint32_t phaseAccumR{0};
+	int32_t phaseCatchupL{0}; // Phase error to correct (signed, decreases exponentially)
+	int32_t phaseCatchupR{0};
 	float envelope{0.0f};         // AR envelope, 0.0-1.0
 	float currentFreq{0.0f};      // Portamento-smoothed frequency (as phase increment)
 	float targetFreq{0.0f};       // Target frequency
@@ -268,20 +270,26 @@ struct HarmParams {
 		float outputHz = currentFreq * (kHarmSampleRate / 4294967296.0f);
 		float pinkScale = (outputHz > 40.0f) ? std::sqrtf(40.0f / outputHz) : 1.0f;
 
-		// --- Phase/Spread on trigger ---
+		// --- Phase catchup on trigger ---
+		// Instead of snapping phase (which clicks), compute the error between
+		// current phase and desired phase, then gradually correct over ~24 cycles.
 		if (triggered) {
+			uint32_t targetPhaseL, targetPhaseR;
 			if (phase <= 64) {
 				// Mono start phase: 0..64 -> 0..2pi
 				uint32_t startPhase = (static_cast<uint64_t>(phase) * 0xFFFFFFFFu) / 64u;
-				phaseAccumL = startPhase;
-				phaseAccumR = startPhase;
+				targetPhaseL = startPhase;
+				targetPhaseR = startPhase;
 			}
 			else {
 				// Stereo spread: 65..127 -> 0..180 degrees spread
 				uint32_t spread = (static_cast<uint64_t>(phase - 65) * 0x80000000u) / 62u;
-				phaseAccumL = spread / 2;
-				phaseAccumR = static_cast<uint32_t>(0u - spread / 2);
+				targetPhaseL = spread / 2;
+				targetPhaseR = static_cast<uint32_t>(0u - spread / 2);
 			}
+			// Compute signed phase error (what we need to add to reach target)
+			phaseCatchupL = static_cast<int32_t>(targetPhaseL - phaseAccumL);
+			phaseCatchupR = static_cast<int32_t>(targetPhaseR - phaseAccumR);
 		}
 
 		bool isStereo = (phase > 64);
@@ -346,13 +354,39 @@ struct HarmParams {
 				}
 			}
 
-			// Advance phase accumulators
+			// Advance phase accumulators with catchup correction
+			// Catchup: exponential decay of phase error over ~24 wave cycles
+			// Per-sample decay: error * phaseIncrement / (24 * 2^32) ≈ error * phaseInc >> 27
+			// (24 * 2^32 ≈ 2^4.6 * 2^32 ≈ 2^36.6, so shift ~5 gives per-cycle,
+			//  but we want per-sample so divide by samples-per-cycle = 2^32/phaseInc)
+			// Simpler: correction = phaseCatchup * phaseInc / (24 * 2^32)
+			// In integer: multiply_32x32_rshift32(phaseCatchup, phaseInc) / 24
+			if (phaseCatchupL != 0) {
+				int32_t corrL = multiply_32x32_rshift32(phaseCatchupL, static_cast<int32_t>(phaseIncrement));
+				corrL = corrL / 12; // ~24 cycles (divide by 12 because multiply already shifted by 32)
+				if (corrL == 0) {
+					corrL = (phaseCatchupL > 0) ? 1 : -1; // ensure convergence
+				}
+				phaseAccumL += static_cast<uint32_t>(corrL);
+				phaseCatchupL -= corrL;
+			}
 			phaseAccumL += phaseIncrement;
+
 			if (isStereo) {
+				if (phaseCatchupR != 0) {
+					int32_t corrR = multiply_32x32_rshift32(phaseCatchupR, static_cast<int32_t>(phaseIncrement));
+					corrR = corrR / 12;
+					if (corrR == 0) {
+						corrR = (phaseCatchupR > 0) ? 1 : -1;
+					}
+					phaseAccumR += static_cast<uint32_t>(corrR);
+					phaseCatchupR -= corrR;
+				}
 				phaseAccumR += phaseIncrement;
 			}
 			else {
 				phaseAccumR = phaseAccumL;
+				phaseCatchupR = phaseCatchupL;
 			}
 
 			// Generate sine — scale to EFFECTIVE_0DBFS_Q31 (internal 0dBFS = ONE_Q31/128)
