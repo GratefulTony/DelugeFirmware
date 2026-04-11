@@ -2806,12 +2806,26 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		          !voices_.empty(), reverbSendAmount >> 1);
 	}
 
-	// Harm: compute lowest active note for pitch tracking (sub reinforces bass note)
-	int32_t harmNoteCode = lastNoteCode; // fallback when no voices active
+	// Harm: last-note priority with fallback to any held note
+	int32_t harmNoteCode = lastNoteCode;
+	bool harmVoicesHeld = false;
 	if (harm.isEnabled() && !voices_.empty()) {
-		harmNoteCode = std::numeric_limits<int32_t>::max();
+		bool lastNoteStillHeld = false;
+		int32_t fallbackHeldNote = lastNoteCode;
 		for (auto& voice : voices_) {
-			harmNoteCode = std::min(harmNoteCode, voice->noteCodeAfterArpeggiation);
+			auto envState = voice->envelopes[0].state;
+			if (envState != EnvelopeStage::RELEASE && envState != EnvelopeStage::FAST_RELEASE
+			    && envState != EnvelopeStage::OFF) {
+				harmVoicesHeld = true;
+				fallbackHeldNote = voice->noteCodeAfterArpeggiation;
+				if (voice->noteCodeAfterArpeggiation == lastNoteCode) {
+					lastNoteStillHeld = true;
+				}
+			}
+		}
+		if (harmVoicesHeld && !lastNoteStillHeld) {
+			// Last played note was released, fall back to a still-held note
+			harmNoteCode = fallbackHeldNote;
 		}
 	}
 
@@ -2824,9 +2838,8 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 
 	// Harm oscillator - add clean sub harmonic back post-reverb (dry)
 	if (harm.isOscEnabled()) {
-		int32_t harmLevel = paramFinalValues[params::GLOBAL_HARM_LEVEL - params::FIRST_GLOBAL];
 		int32_t harmFine = paramFinalValues[params::GLOBAL_HARM_FINE - params::FIRST_GLOBAL];
-		harm.renderOsc(sound_stereo, harmNoteCode, !voices_.empty(), harmLevel, harmFine);
+		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmFine);
 	}
 
 	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);

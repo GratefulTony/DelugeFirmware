@@ -56,7 +56,9 @@ inline constexpr float kHarmPortaMaxRate = 1.0f;     // instant snap
 
 struct HarmParams {
 	// Direct params (serialized)
-	uint8_t harmonic{0}; // 0=off, 1=1/4, 2=1/3, 3=1/2, 4=1, 5=2, 6=3, 7=4, 8=5, 9=6, 10=7, 11=8
+	static constexpr uint8_t kHarmDefault = 10; // 1:1 fundamental
+	uint8_t harmonic{kHarmDefault};             // 0=off, 1-102=ratio from kHarmonicTable, default=10 (1:1)
+	uint8_t level{0};                           // 0=silence(default), 64=mid, 127=full
 	uint8_t phase{0};    // 0-64: start phase (0-360 deg, mono). 65-127: stereo spread (0-180 deg)
 	uint8_t attack{0};   // AR envelope attack (0=instant)
 	uint8_t release{64}; // AR envelope release
@@ -75,11 +77,44 @@ struct HarmParams {
 	q31_t hpfStateL2{0};          // 2nd pole, left
 	q31_t hpfStateR2{0};          // 2nd pole, right
 
-	// Harmonic ratio table: index maps to frequency multiplier
-	static constexpr float kHarmonicRatios[] = {
-	    0.0f, 0.25f, 1.0f / 3.0f, 0.5f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f,
+	// Harmonic ratio table: sorted unique fractions with denominators {1,2,3,4,8}
+	// Index 0 is unused (0=OFF), indices 1-102 map to ratios
+	struct HarmonicEntry {
+		uint8_t num;
+		uint8_t den;
+		float ratio;
 	};
-	static constexpr int32_t kNumHarmonics = 12;
+	// clang-format off
+	static constexpr HarmonicEntry kHarmonicTable[] = {
+		{1,8, 0.125f},     {1,4, 0.25f},      {1,3, 0.33333333f}, {3,8, 0.375f},
+		{1,2, 0.5f},       {5,8, 0.625f},      {2,3, 0.66666667f}, {3,4, 0.75f},
+		{7,8, 0.875f},     {1,1, 1.0f},        {9,8, 1.125f},      {5,4, 1.25f},
+		{4,3, 1.33333333f},{11,8, 1.375f},     {3,2, 1.5f},        {13,8, 1.625f},
+		{5,3, 1.66666667f},{7,4, 1.75f},       {15,8, 1.875f},     {2,1, 2.0f},
+		{17,8, 2.125f},    {9,4, 2.25f},       {7,3, 2.33333333f}, {19,8, 2.375f},
+		{5,2, 2.5f},       {21,8, 2.625f},     {8,3, 2.66666667f}, {11,4, 2.75f},
+		{23,8, 2.875f},    {3,1, 3.0f},        {25,8, 3.125f},     {13,4, 3.25f},
+		{10,3, 3.33333333f},{27,8, 3.375f},    {7,2, 3.5f},        {29,8, 3.625f},
+		{11,3, 3.66666667f},{15,4, 3.75f},     {31,8, 3.875f},     {4,1, 4.0f},
+		{17,4, 4.25f},     {13,3, 4.33333333f},{9,2, 4.5f},        {14,3, 4.66666667f},
+		{19,4, 4.75f},     {5,1, 5.0f},        {21,4, 5.25f},      {16,3, 5.33333333f},
+		{11,2, 5.5f},      {17,3, 5.66666667f},{23,4, 5.75f},      {6,1, 6.0f},
+		{25,4, 6.25f},     {19,3, 6.33333333f},{13,2, 6.5f},       {20,3, 6.66666667f},
+		{27,4, 6.75f},     {7,1, 7.0f},        {29,4, 7.25f},      {22,3, 7.33333333f},
+		{15,2, 7.5f},      {23,3, 7.66666667f},{31,4, 7.75f},      {8,1, 8.0f},
+		{25,3, 8.33333333f},{17,2, 8.5f},      {26,3, 8.66666667f},{9,1, 9.0f},
+		{28,3, 9.33333333f},{19,2, 9.5f},      {29,3, 9.66666667f},{10,1, 10.0f},
+		{31,3, 10.33333333f},{21,2, 10.5f},    {32,3, 10.66666667f},{11,1, 11.0f},
+		{23,2, 11.5f},     {12,1, 12.0f},      {25,2, 12.5f},      {13,1, 13.0f},
+		{27,2, 13.5f},     {14,1, 14.0f},      {29,2, 14.5f},      {15,1, 15.0f},
+		{31,2, 15.5f},     {16,1, 16.0f},      {17,1, 17.0f},      {18,1, 18.0f},
+		{19,1, 19.0f},     {20,1, 20.0f},      {21,1, 21.0f},      {22,1, 22.0f},
+		{23,1, 23.0f},     {24,1, 24.0f},      {25,1, 25.0f},      {26,1, 26.0f},
+		{27,1, 27.0f},     {28,1, 28.0f},      {29,1, 29.0f},      {30,1, 30.0f},
+		{31,1, 31.0f},     {32,1, 32.0f},
+	};
+	// clang-format on
+	static constexpr int32_t kNumHarmonics = 102;
 
 	[[nodiscard]] bool isOscEnabled() const { return harmonic > 0; }
 	[[nodiscard]] bool isHpfEnabled() const { return hpf > 0; }
@@ -132,21 +167,14 @@ struct HarmParams {
 
 		uint32_t cutoffPhaseInc = noteCodeToPhaseIncrement(cutoffNote);
 
-		// alpha for single-pole filter: alpha = 2*pi*fc/fs
-		// Since phaseIncrement = fc * 2^32 / fs, we have:
-		//   alpha = phaseIncrement * 2*pi / 2^32
-		// In Q31: alpha_q31 = phaseIncrement * (2*pi / 2^32) * 2^31
-		//       = phaseIncrement * pi / 2^1 (approximately)
-		// Simpler: alpha ~= phaseIncrement >> 1 (since 2pi/2^32 * 2^31 = pi ≈ 3.14, close to shifting)
-		// More accurate: multiply by 3 and shift right by 1 to approximate pi
-		// Actually: alpha = phaseInc * (2*pi) / (2^32)
-		// As a fraction of full scale Q31: alpha_q31 = (phaseInc * 2*pi * 2^31) / 2^32
-		//   = phaseInc * pi ≈ phaseInc * 3
-		// But we need alpha < 1.0 (Q31 < ONE_Q31), and for audio frequencies phaseInc is already
-		// large enough that phaseInc*3 could overflow. So use: alpha_q31 = phaseInc (this
-		// approximates alpha = phaseInc/2^31 * pi/2 which slightly underestimates but is stable).
-		// For better accuracy without overflow:
-		q31_t alpha = static_cast<q31_t>(std::min(cutoffPhaseInc, static_cast<uint32_t>(ONE_Q31 >> 1)));
+		// alpha for single-pole LPF: alpha ≈ 2*pi*fc/fs (valid when fc << fs)
+		// phaseIncrement = fc * 2^32 / fs
+		// So: alpha = phaseInc * 2*pi / 2^32
+		// In Q31: alpha_q31 = phaseInc * 2*pi * 2^31 / 2^32 = phaseInc * pi
+		// Approximate pi as 3: alpha_q31 = phaseInc * 3
+		// Use 64-bit to avoid overflow, clamp for stability
+		q31_t alpha =
+		    static_cast<q31_t>(std::min(static_cast<int64_t>(cutoffPhaseInc) * 3, static_cast<int64_t>(ONE_Q31 >> 1)));
 
 		for (auto& sample : buffer) {
 			// Left channel — 1st pole
@@ -176,15 +204,18 @@ struct HarmParams {
 	// Generates a sine at a harmonic of the note frequency, with AR envelope,
 	// portamento, and phase/spread control. Mixes additively into buffer.
 
-	void renderOsc(std::span<StereoSample> buffer, int32_t noteCode, bool voicesActive, q31_t levelFinalValue,
-	               q31_t fineFinalValue) {
+	void renderOsc(std::span<StereoSample> buffer, int32_t noteCode, bool voicesActive, q31_t fineFinalValue) {
 		if (!isOscEnabled()) {
 			return;
 		}
 
 		// --- Pitch calculation ---
 		uint32_t basePhaseInc = noteCodeToPhaseIncrement(noteCode);
-		float ratio = kHarmonicRatios[std::min(static_cast<int32_t>(harmonic), kNumHarmonics - 1)];
+		int32_t tableIdx = std::min(static_cast<int32_t>(harmonic) - 1, kNumHarmonics - 1);
+		float ratio = kHarmonicTable[tableIdx].ratio;
+
+		// Pink noise loudness scaling: -3dB/octave, calibrated at 40Hz = unity (no boost below)
+		// Computed after portamento so we use the actual output frequency
 
 		// Apply fine tune: fineFinalValue is bipolar Q31, map to +/-12 semitones
 		// fineFinalValue: -ONE_Q31 = -12st, 0 = 0st, +ONE_Q31 = +12st
@@ -195,8 +226,12 @@ struct HarmParams {
 		float newTargetFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;
 		targetFreq = newTargetFreq;
 
+		// --- Trigger detection (moved before portamento so we can snap on retrigger) ---
+		bool triggered = voicesActive && !voicesWereActive;
+
 		// --- Portamento ---
-		if (porta == 0 || currentFreq == 0.0f) {
+		// Snap immediately if: no porta, first use, or retrigger after full note-off
+		if (porta == 0 || currentFreq == 0.0f || triggered) {
 			currentFreq = targetFreq;
 		}
 		else {
@@ -212,8 +247,10 @@ struct HarmParams {
 
 		uint32_t phaseIncrement = static_cast<uint32_t>(std::max(currentFreq, 0.0f));
 
-		// --- Trigger detection ---
-		bool triggered = voicesActive && !voicesWereActive;
+		// Pink noise scaling: -3dB/octave, 40Hz = unity, never boosts
+		// Convert phaseIncrement to Hz: freq = phaseInc * sampleRate / 2^32
+		float outputHz = currentFreq * (kHarmSampleRate / 4294967296.0f);
+		float pinkScale = (outputHz > 40.0f) ? std::sqrtf(40.0f / outputHz) : 1.0f;
 
 		// --- Phase/Spread on trigger ---
 		if (triggered) {
@@ -293,23 +330,22 @@ struct HarmParams {
 				phaseAccumR = phaseAccumL;
 			}
 
-			// Skip mix if level is zero (keep phase/envelope running)
-			if (levelFinalValue == 0) {
-				continue;
-			}
-
-			// Generate sine
-			int32_t sineL = getSine(phaseAccumL);
-			int32_t sineR = isStereo ? getSine(phaseAccumR) : sineL;
+			// Generate sine — scale to EFFECTIVE_0DBFS_Q31 (internal 0dBFS = ONE_Q31/128)
+			// getSine returns full Q31 range, shift right by 7 to match internal levels
+			// Apply pink noise curve: 1/sqrt(ratio) for -3dB/octave rolloff
+			q31_t pinkQ31 = static_cast<q31_t>(pinkScale * static_cast<float>(ONE_Q31));
+			int32_t sineL = multiply_32x32_rshift32(getSine(phaseAccumL), pinkQ31) >> 6;
+			int32_t sineR = isStereo ? (multiply_32x32_rshift32(getSine(phaseAccumR), pinkQ31) >> 6) : sineL;
 
 			// Apply envelope (convert float to Q31)
 			q31_t envQ31 = static_cast<q31_t>(envelope * static_cast<float>(ONE_Q31));
 			sineL = multiply_32x32_rshift32(sineL, envQ31) << 1;
 			sineR = multiply_32x32_rshift32(sineR, envQ31) << 1;
 
-			// Apply level
-			sineL = multiply_32x32_rshift32(sineL, levelFinalValue) << 1;
-			sineR = multiply_32x32_rshift32(sineR, levelFinalValue) << 1;
+			// Apply level from direct knob (0-127 -> 0 to full scale)
+			q31_t levelQ31 = static_cast<q31_t>((static_cast<int64_t>(level) * ONE_Q31) / 127);
+			sineL = multiply_32x32_rshift32(sineL, levelQ31) << 1;
+			sineR = multiply_32x32_rshift32(sineR, levelQ31) << 1;
 
 			// Mix into buffer (additive)
 			sample.l = add_saturate(sample.l, sineL);
@@ -325,7 +361,8 @@ struct HarmParams {
 	// ========================================================================
 
 	void writeToFile(Serializer& writer) const {
-		WRITE_FIELD(writer, harmonic, "harmHarmonic");
+		WRITE_FIELD_DEFAULT(writer, harmonic, "harmHarmonic", kHarmDefault);
+		WRITE_FIELD(writer, level, "harmLevel");
 		WRITE_FIELD(writer, phase, "harmPhase");
 		WRITE_FIELD(writer, attack, "harmAttack");
 		WRITE_FIELD_DEFAULT(writer, release, "harmRelease", 64);
@@ -335,6 +372,7 @@ struct HarmParams {
 
 	bool readTag(Deserializer& reader, const char* tagName) {
 		READ_FIELD(reader, tagName, harmonic, "harmHarmonic");
+		READ_FIELD(reader, tagName, level, "harmLevel");
 		READ_FIELD(reader, tagName, phase, "harmPhase");
 		READ_FIELD(reader, tagName, attack, "harmAttack");
 		READ_FIELD(reader, tagName, release, "harmRelease");

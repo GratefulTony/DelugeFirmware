@@ -20,6 +20,7 @@
  */
 #pragma once
 
+#include "dsp/harm.h"
 #include "gui/menu_item/integer.h"
 #include "gui/ui/sound_editor.h"
 #include "hid/display/display.h"
@@ -28,11 +29,9 @@
 #include "model/instrument/kit.h"
 #include "model/song/song.h"
 #include "processing/sound/sound_drum.h"
+#include <cstdio>
 
 namespace deluge::gui::menu_item::fx {
-
-// Ratio names indexed by harmonic value 0-11
-constexpr const char* kHarmRatioNames[] = {"OFF", "1/4", "1/3", "1/2", "1", "2", "3", "4", "5", "6", "7", "8"};
 
 class HarmHarmonic final : public IntegerWithOff {
 public:
@@ -57,30 +56,64 @@ public:
 		}
 	}
 
-	[[nodiscard]] int32_t getMaxValue() const override { return 11; }
+	[[nodiscard]] int32_t getMaxValue() const override { return deluge::dsp::HarmParams::kNumHarmonics; }
 
-	void drawPixelsForOled() override {
-		int32_t val = this->getValue();
-		if (val >= 0 && val <= 11) {
-			deluge::hid::display::OLED::main.drawStringCentered(kHarmRatioNames[val], 0, 20, kTextSpacingX,
-			                                                    kTextSpacingY, OLED_MAIN_WIDTH_PIXELS);
+private:
+	// Format ratio as "n:d" string into buffer, returns buffer
+	static const char* formatRatio(int32_t val, char* buf, size_t bufSize) {
+		if (val == 0) {
+			return "OFF";
+		}
+		int32_t idx = std::min(val - 1, deluge::dsp::HarmParams::kNumHarmonics - 1);
+		auto& entry = deluge::dsp::HarmParams::kHarmonicTable[idx];
+		if (entry.den == 1) {
+			snprintf(buf, bufSize, "%d", entry.num);
 		}
 		else {
-			IntegerWithOff::drawPixelsForOled();
+			snprintf(buf, bufSize, "%d:%d", entry.num, entry.den);
 		}
+		return buf;
+	}
+
+	void drawPixelsForOled() override {
+		char buf[8];
+		const char* text = formatRatio(this->getValue(), buf, sizeof(buf));
+		deluge::hid::display::OLED::main.drawStringCentered(text, 0, 20, kTextSpacingX, kTextSpacingY,
+		                                                    OLED_MAIN_WIDTH_PIXELS);
 	}
 
 	void renderInHorizontalMenu(const SlotPosition& slot) override {
-		int32_t val = this->getValue();
-		if (val >= 0 && val <= 11) {
-			deluge::hid::display::OLED::main.drawStringCentered(kHarmRatioNames[val], slot.start_x,
-			                                                    slot.start_y + kHorizontalMenuSlotYOffset,
-			                                                    kTextSpacingX, kTextSpacingY, slot.width);
+		char buf[8];
+		const char* text = formatRatio(this->getValue(), buf, sizeof(buf));
+		deluge::hid::display::OLED::main.drawStringCentered(
+		    text, slot.start_x, slot.start_y + kHorizontalMenuSlotYOffset, kTextSpacingX, kTextSpacingY, slot.width);
+	}
+};
+
+class HarmLevel final : public Integer {
+public:
+	using Integer::Integer;
+
+	void readCurrentValue() override { this->setValue(soundEditor.currentModControllable->harm.level); }
+	bool usesAffectEntire() override { return true; }
+
+	void writeCurrentValue() override {
+		int32_t current_value = this->getValue();
+		if (currentUIMode == UI_MODE_HOLDING_AFFECT_ENTIRE_IN_SOUND_EDITOR && soundEditor.editingKitRow()) {
+			Kit* kit = getCurrentKit();
+			for (Drum* thisDrum = kit->firstDrum; thisDrum != nullptr; thisDrum = thisDrum->next) {
+				if (thisDrum->type == DrumType::SOUND) {
+					static_cast<SoundDrum*>(thisDrum)->harm.level = current_value;
+				}
+			}
 		}
 		else {
-			IntegerWithOff::renderInHorizontalMenu(slot);
+			soundEditor.currentModControllable->harm.level = current_value;
 		}
 	}
+
+	[[nodiscard]] int32_t getMaxValue() const override { return 127; }
+	[[nodiscard]] RenderingStyle getRenderingStyle() const override { return BAR; }
 };
 
 class HarmPhase final : public Integer {
