@@ -2806,7 +2806,28 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		          !voices_.empty(), reverbSendAmount >> 1);
 	}
 
+	// Harm: compute lowest active note for pitch tracking (sub reinforces bass note)
+	int32_t harmNoteCode = lastNoteCode; // fallback when no voices active
+	if (harm.isEnabled() && !voices_.empty()) {
+		harmNoteCode = std::numeric_limits<int32_t>::max();
+		for (auto& voice : voices_) {
+			harmNoteCode = std::min(harmNoteCode, voice->noteCodeAfterArpeggiation);
+		}
+	}
+
+	// Harm HPF - strip fundamental pre-reverb so reverb only gets harmonics
+	if (harm.isHpfEnabled()) {
+		harm.renderHpf(sound_stereo, harmNoteCode);
+	}
+
 	processReverbSendAndVolume(sound_stereo, reverbBuffer, postFXVolume, postReverbVolume, reverbSendAmount, 0, true);
+
+	// Harm oscillator - add clean sub harmonic back post-reverb (dry)
+	if (harm.isOscEnabled()) {
+		int32_t harmLevel = paramFinalValues[params::GLOBAL_HARM_LEVEL - params::FIRST_GLOBAL];
+		int32_t harmFine = paramFinalValues[params::GLOBAL_HARM_FINE - params::FIRST_GLOBAL];
+		harm.renderOsc(sound_stereo, harmNoteCode, !voices_.empty(), harmLevel, harmFine);
+	}
 
 	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
 	compressor.setThreshold(compThreshold);
