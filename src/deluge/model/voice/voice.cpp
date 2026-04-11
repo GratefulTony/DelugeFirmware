@@ -2749,8 +2749,11 @@ pitchTooHigh:
 				// velocity or note is affecting pitch), and stretch-syncing.
 				if (!voiceSample->doneFirstRenderYet && !tryToStartMidNote
 				    && portaEnvelopePos == 0xFFFFFFFF) { // No porta
-
-					// Split-loop from offset wrapping can't use cache
+					// Split-loop from offset wrapping can't use cache.
+					// This means loop crossfade is unavailable when start offset
+					// causes the loop region to wrap around the sample boundary.
+					// TODO: support split-loop caching by concatenating the two
+					// halves into a linear cache region.
 					if (guides[s].loopSplit) {
 						goto dontUseCache;
 					}
@@ -2762,7 +2765,8 @@ pitchTooHigh:
 						// restart position, the cache can't represent the asymmetric first
 						// iteration correctly (its loop-start maps to cache byte 0 which
 						// is the offset position, not the original start). Skip caching.
-						if (guides[s].startPlaybackAtByte != guides[s].loopStartPlaybackAtByte) {
+						if (guides[s].startPlaybackAtByte != guides[s].loopStartPlaybackAtByte
+						    && voiceSample->loopFadeInSamplesTotal == 0) {
 							goto dontUseCache;
 						}
 
@@ -2848,7 +2852,11 @@ dontUseCache: {}
 			// increments for the hop crossfades with the overall voice ones, and having multiple crossfading hops write
 			// directly to the osc buffer).
 
-			// Compute crossfade samples for this source
+			// Compute crossfade samples for this source.
+			// Note: loop crossfade requires the sample cache, so it is not available
+			// for time-stretch mode (which bypasses the cache), split-loop offset
+			// wrapping, or pingpong mode. In these cases loopFadeInSamplesTotal is
+			// still set and the uncached path applies a basic fade-in/fade-out.
 			if (loopingType != LoopType::NONE) {
 				auto* holder = static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder);
 				int32_t crossfadeSamples = (holder->loopCrossfadeMs * sample->sampleRate) / 1000;

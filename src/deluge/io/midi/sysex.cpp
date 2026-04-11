@@ -43,7 +43,7 @@ void Debug::sysexReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 
 	case 1:
 #ifdef ENABLE_SYSEX_LOAD
-		loadPacketReceived(data, len);
+		loadPacketReceived(cable, data, len);
 #endif
 		break;
 
@@ -129,7 +129,7 @@ static void firstPacket(uint8_t* data, int32_t len) {
 	boostTask(midiEngine.routine_task_id);
 }
 
-void Debug::loadPacketReceived(uint8_t* data, int32_t len) {
+void Debug::loadPacketReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 	uint32_t handshake = runtimeFeatureSettings.get(RuntimeFeatureSettingType::DevSysexAllowed);
 	if (handshake == 0) {
 		return; // not allowed
@@ -168,6 +168,10 @@ void Debug::loadPacketReceived(uint8_t* data, int32_t len) {
 		PadLEDs::sendOutMainPadColours();
 		PadLEDs::sendOutSidebarColours();
 	}
+
+	// ACK: echo back segment number so host knows we're ready for the next
+	uint8_t ack[] = {0xF0, 0x00, 0x21, 0x7B, 0x01, 0x03, 0x01, data[7], data[8], 0xF7};
+	cable.sendSysex(ack, sizeof(ack));
 }
 
 void Debug::loadCheckAndRun(uint8_t* data, int32_t len) {
