@@ -177,8 +177,8 @@ struct HarmParams {
 		float ratio = isOscEnabled()
 		                  ? kHarmonicTable[std::min(static_cast<int32_t>(harmonic) - 1, kNumHarmonics - 1)].ratio
 		                  : 1.0f;
-		float fineModSemitones = (static_cast<float>(fineModulation) / static_cast<float>(ONE_Q31)) * 12.0f;
-		float fineSemitones = (static_cast<float>(fine) - 64.0f) * (12.0f / 63.0f) + bendSemitones + fineModSemitones;
+		float fineSemitones =
+		    (static_cast<float>(fineModulation) / static_cast<float>(ONE_Q31)) * 12.0f + bendSemitones;
 		float fineMul = std::exp2f(fineSemitones / 12.0f);
 		float centerFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;
 		float w0 = centerFreq * (6.2831853f / 4294967296.0f); // 2*pi*fc/fs
@@ -247,10 +247,9 @@ struct HarmParams {
 		// Pink noise loudness scaling: -3dB/octave, calibrated at 40Hz = unity (no boost below)
 		// Computed after portamento so we use the actual output frequency
 
-		// Apply fine tune + pitch bend + mod matrix: direct knob 0=-12st, 64=0st, 127=+12st
-		// fineModulation is hybrid bipolar Q31: maps to +/-12 semitones of modulation on top
-		float fineModSemitones = (static_cast<float>(fineModulation) / static_cast<float>(ONE_Q31)) * 12.0f;
-		float fineSemitones = (static_cast<float>(fine) - 64.0f) * (12.0f / 63.0f) + bendSemitones + fineModSemitones;
+		// Apply fine tune: patched param (hybrid bipolar Q31, +/-12st) + pitch bend
+		float fineSemitones =
+		    (static_cast<float>(fineModulation) / static_cast<float>(ONE_Q31)) * 12.0f + bendSemitones;
 		float fineMul = std::exp2f(fineSemitones / 12.0f);
 
 		float newTargetFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;
@@ -395,16 +394,9 @@ struct HarmParams {
 			sineL = multiply_32x32_rshift32(sineL, envQ31) << 1;
 			sineR = multiply_32x32_rshift32(sineR, envQ31) << 1;
 
-			// Apply level from direct knob (0-127 -> 0 to full scale)
-			q31_t levelQ31 = static_cast<q31_t>((static_cast<int64_t>(level) * ONE_Q31) / 127);
-			sineL = multiply_32x32_rshift32(sineL, levelQ31) << 1;
-			sineR = multiply_32x32_rshift32(sineR, levelQ31) << 1;
-
-			// Apply mod matrix level modulation (from GLOBAL_HARM_LEVEL patched param)
-			if (levelModulation != ONE_Q31) {
-				sineL = multiply_32x32_rshift32(sineL, levelModulation) << 1;
-				sineR = multiply_32x32_rshift32(sineR, levelModulation) << 1;
-			}
+			// Apply level from patched param (GLOBAL_HARM_LEVEL, mod matrix target)
+			sineL = multiply_32x32_rshift32(sineL, levelModulation) << 1;
+			sineR = multiply_32x32_rshift32(sineR, levelModulation) << 1;
 
 			// Mix into buffer (additive)
 			sample.l = add_saturate(sample.l, sineL);
