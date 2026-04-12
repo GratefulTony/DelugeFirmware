@@ -397,103 +397,76 @@ struct HarmParams {
 			return;
 		}
 
-		q31_t combinedGain = computeCombinedGain();
+		// --- Decide path: NEON (stable sustain) or scalar (envelope changing) ---
+		bool envelopeStable = (voicesActive && envelope >= 0.999f) || (!voicesActive && envelope == 0.0f);
+		bool noCatchup = (phaseCatchupL == 0 && phaseCatchupR == 0);
 
-		// --- Process phase catchup (scalar, usually converges in <1 buffer) ---
-		size_t sampleIdx = 0;
-		while (sampleIdx < buffer.size() && (phaseCatchupL != 0 || (isStereo && phaseCatchupR != 0))) {
-			if (phaseCatchupL != 0) {
-				int32_t corrL = multiply_32x32_rshift32(phaseCatchupL, static_cast<int32_t>(phaseIncrement)) >> 4;
-				if (corrL == 0) {
-					corrL = (phaseCatchupL > 0) ? 1 : -1;
-				}
-				phaseAccumL += static_cast<uint32_t>(corrL);
-				phaseCatchupL -= corrL;
-			}
-			phaseAccumL += phaseIncrement;
-
-			if (isStereo) {
-				if (phaseCatchupR != 0) {
-					int32_t corrR = multiply_32x32_rshift32(phaseCatchupR, static_cast<int32_t>(phaseIncrement)) >> 4;
-					if (corrR == 0) {
-						corrR = (phaseCatchupR > 0) ? 1 : -1;
-					}
-					phaseAccumR += static_cast<uint32_t>(corrR);
-					phaseCatchupR -= corrR;
-				}
-				phaseAccumR += phaseIncrement;
-			}
-			else {
-				phaseAccumR = phaseAccumL;
-			}
-
-			// Scalar sine for catchup samples
-			int32_t sineL = multiply_32x32_rshift32(getSine(phaseAccumL), combinedGain) >> 5;
-			int32_t sineR = isStereo ? (multiply_32x32_rshift32(getSine(phaseAccumR), combinedGain) >> 5) : sineL;
-			buffer[sampleIdx].l = add_saturate(buffer[sampleIdx].l, sineL);
-			buffer[sampleIdx].r = add_saturate(buffer[sampleIdx].r, sineR);
-			sampleIdx++;
-		}
-
-		// --- NEON fast path for remaining samples (no catchup) ---
-		// Update envelope every 4 samples and recompute gain for smooth transitions
-		size_t remaining = buffer.size() - sampleIdx;
-		size_t chunks = remaining / 4;
-
-		if (!isStereo) {
+		if (envelopeStable && noCatchup && !isStereo && envelope > 0.0f) {
+			// NEON fast path: constant gain, no catchup, mono
+			q31_t combinedGain = computeCombinedGain();
+			size_t chunks = buffer.size() / 4;
 			for (size_t c = 0; c < chunks; c++) {
-				// Advance envelope 4 samples and recompute gain
-				for (int e = 0; e < 4; e++) {
-					advanceEnvelope();
-				}
-				combinedGain = computeCombinedGain();
-
 				Argon<int32_t> sineVec = SineOsc::getSineVector(&phaseAccumL, phaseIncrement);
 				Argon<int32_t> scaled = sineVec.MultiplyFixedPoint(combinedGain) >> 6;
-
-				size_t base = sampleIdx + c * 4;
+				size_t base = c * 4;
 				for (int i = 0; i < 4; i++) {
 					buffer[base + i].l = add_saturate(buffer[base + i].l, scaled[i]);
 					buffer[base + i].r = add_saturate(buffer[base + i].r, scaled[i]);
 				}
 			}
+			// Remaining scalar
+			for (size_t s = chunks * 4; s < buffer.size(); s++) {
+				phaseAccumL += phaseIncrement;
+				int32_t sine = multiply_32x32_rshift32(getSine(phaseAccumL), combinedGain) >> 5;
+				buffer[s].l = add_saturate(buffer[s].l, sine);
+				buffer[s].r = add_saturate(buffer[s].r, sine);
+			}
 			phaseAccumR = phaseAccumL;
 		}
 		else {
-			for (size_t c = 0; c < chunks; c++) {
-				for (int e = 0; e < 4; e++) {
-					advanceEnvelope();
-				}
-				combinedGain = computeCombinedGain();
+			// Scalar path: per-sample envelope, catchup, stereo support
+			for (auto& sample : buffer) {
+				advanceEnvelope();
 
-				Argon<int32_t> sineVecL = SineOsc::getSineVector(&phaseAccumL, phaseIncrement);
-				Argon<int32_t> sineVecR = SineOsc::getSineVector(&phaseAccumR, phaseIncrement);
-				Argon<int32_t> scaledL = sineVecL.MultiplyFixedPoint(combinedGain) >> 6;
-				Argon<int32_t> scaledR = sineVecR.MultiplyFixedPoint(combinedGain) >> 6;
-
-				size_t base = sampleIdx + c * 4;
-				for (int i = 0; i < 4; i++) {
-					buffer[base + i].l = add_saturate(buffer[base + i].l, scaledL[i]);
-					buffer[base + i].r = add_saturate(buffer[base + i].r, scaledR[i]);
+				// Phase catchup
+				if (phaseCatchupL != 0) {
+					int32_t corrL = multiply_32x32_rshift32(phaseCatchupL, static_cast<int32_t>(phaseIncrement)) >> 4;
+					if (corrL == 0) {
+						corrL = (phaseCatchupL > 0) ? 1 : -1;
+					}
+					phaseAccumL += static_cast<uint32_t>(corrL);
+					phaseCatchupL -= corrL;
 				}
+				phaseAccumL += phaseIncrement;
+
+				if (isStereo) {
+					if (phaseCatchupR != 0) {
+						int32_t corrR =
+						    multiply_32x32_rshift32(phaseCatchupR, static_cast<int32_t>(phaseIncrement)) >> 4;
+						if (corrR == 0) {
+							corrR = (phaseCatchupR > 0) ? 1 : -1;
+						}
+						phaseAccumR += static_cast<uint32_t>(corrR);
+						phaseCatchupR -= corrR;
+					}
+					phaseAccumR += phaseIncrement;
+				}
+				else {
+					phaseAccumR = phaseAccumL;
+					phaseCatchupR = phaseCatchupL;
+				}
+
+				if (envelope == 0.0f) {
+					continue;
+				}
+
+				q31_t combinedGain = computeCombinedGain();
+				int32_t sineL = multiply_32x32_rshift32(getSine(phaseAccumL), combinedGain) >> 5;
+				int32_t sineR = isStereo ? (multiply_32x32_rshift32(getSine(phaseAccumR), combinedGain) >> 5) : sineL;
+
+				sample.l = add_saturate(sample.l, sineL);
+				sample.r = add_saturate(sample.r, sineR);
 			}
-		}
-		sampleIdx += chunks * 4;
-		// Handle remaining 0-3 samples scalar
-		for (; sampleIdx < buffer.size(); sampleIdx++) {
-			advanceEnvelope();
-			combinedGain = computeCombinedGain();
-			phaseAccumL += phaseIncrement;
-			if (isStereo) {
-				phaseAccumR += phaseIncrement;
-			}
-			else {
-				phaseAccumR = phaseAccumL;
-			}
-			int32_t sineL = multiply_32x32_rshift32(getSine(phaseAccumL), combinedGain) >> 5;
-			int32_t sineR = isStereo ? (multiply_32x32_rshift32(getSine(phaseAccumR), combinedGain) >> 5) : sineL;
-			buffer[sampleIdx].l = add_saturate(buffer[sampleIdx].l, sineL);
-			buffer[sampleIdx].r = add_saturate(buffer[sampleIdx].r, sineR);
 		}
 
 		// Update trigger state
