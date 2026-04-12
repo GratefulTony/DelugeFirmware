@@ -20,6 +20,7 @@
  */
 #pragma once
 
+#include "dsp/oscillators/sine_osc.h"
 #include "dsp/stereo_sample.h"
 #include "io/debug/fx_benchmark.h"
 #include "storage/field_serialization.h"
@@ -360,24 +361,63 @@ struct HarmParams {
 		// --- Pre-compute loop-invariant values ---
 		q31_t levelGain = std::max(static_cast<int32_t>(0), levelModulation + (ONE_Q31 >> 2));
 
-		// --- Per-sample processing ---
-		for (auto& sample : buffer) {
-			// Update AR envelope — simple: voicesActive = attack/sustain, else release
-			if (voicesActive) {
-				envelope += (1.0f - envelope) * attackRate;
-				if (envelope > 1.0f) {
+		// --- Update envelope for entire buffer ---
+		// Envelope changes slowly enough to compute once per buffer
+		if (voicesActive) {
+			// Attack/sustain: advance envelope toward 1.0 for buffer.size() samples
+			if (envelope < 1.0f) {
+				float remaining = 1.0f - envelope;
+				float retention = 1.0f - attackRate;
+				// After N samples: envelope = 1.0 - remaining * retention^N
+				if (attack == 0) {
 					envelope = 1.0f;
 				}
+				else {
+					envelope = 1.0f - remaining * std::powf(retention, static_cast<float>(buffer.size()));
+				}
 			}
-			else if (envelope > 0.0f) {
-				envelope -= envelope * releaseRate;
+		}
+		else if (envelope > 0.0f) {
+			// Release: decay toward 0 for buffer.size() samples
+			if (release == 0) {
+				envelope = 0.0f;
+			}
+			else {
+				float retention = 1.0f - releaseRate;
+				envelope *= std::powf(retention, static_cast<float>(buffer.size()));
 				if (envelope < kHarmEnvThreshold) {
 					envelope = 0.0f;
 				}
 			}
+		}
 
-			// Advance phase accumulators with catchup correction (~24 cycle convergence)
-			// Use >> 4 instead of / 12 to avoid expensive integer division
+		// Skip output entirely if silent
+		if (levelGain == 0 || envelope == 0.0f) {
+			// Still advance phase accumulators so pitch stays correct
+			uint32_t totalPhaseAdvance = phaseIncrement * static_cast<uint32_t>(buffer.size());
+			phaseAccumL += totalPhaseAdvance;
+			phaseAccumR = isStereo ? (phaseAccumR + totalPhaseAdvance) : phaseAccumL;
+			phaseCatchupL = 0;
+			phaseCatchupR = 0;
+			voicesWereActive = voicesActive;
+			FX_BENCH_STOP(bench);
+			return;
+		}
+
+		// Pre-combine envelope * level * pink into a single gain (Q31)
+		// levelGain range [0, ONE_Q31/2], envelope [0, 1.0]
+		q31_t envQ31 = static_cast<q31_t>(envelope * static_cast<float>(ONE_Q31));
+		// Combine: envQ31 * levelGain (with <<2 for level scaling, >>6 for pink+0dBFS)
+		// Total chain per sample was: sine * pink >> 6, * env << 1, * level << 2
+		// Combine pink * env * level into one multiplier:
+		// combinedGain = cachedPinkQ31 * envQ31 / 2^31 * levelGain (needs careful bit management)
+		q31_t envLevel = multiply_32x32_rshift32(envQ31, levelGain) << 2;
+		q31_t combinedGain = multiply_32x32_rshift32(cachedPinkQ31, envLevel);
+		// combinedGain needs >> 6 shift applied when mixing (from pink/0dBFS scaling)
+
+		// --- Process phase catchup (scalar, usually converges in <1 buffer) ---
+		size_t sampleIdx = 0;
+		while (sampleIdx < buffer.size() && (phaseCatchupL != 0 || (isStereo && phaseCatchupR != 0))) {
 			if (phaseCatchupL != 0) {
 				int32_t corrL = multiply_32x32_rshift32(phaseCatchupL, static_cast<int32_t>(phaseIncrement)) >> 4;
 				if (corrL == 0) {
@@ -401,30 +441,84 @@ struct HarmParams {
 			}
 			else {
 				phaseAccumR = phaseAccumL;
-				phaseCatchupR = phaseCatchupL;
 			}
 
-			// Skip output if silent (level=0 or envelope=0), but keep phase/envelope running
-			if (levelGain == 0 || envelope == 0.0f) {
-				continue;
+			// Scalar sine for catchup samples
+			int32_t sineL = multiply_32x32_rshift32(getSine(phaseAccumL), combinedGain) >> 5;
+			int32_t sineR = isStereo ? (multiply_32x32_rshift32(getSine(phaseAccumR), combinedGain) >> 5) : sineL;
+			buffer[sampleIdx].l = add_saturate(buffer[sampleIdx].l, sineL);
+			buffer[sampleIdx].r = add_saturate(buffer[sampleIdx].r, sineR);
+			sampleIdx++;
+		}
+
+		// --- NEON fast path for remaining samples (no catchup, constant gain) ---
+		size_t remaining = buffer.size() - sampleIdx;
+		if (!isStereo) {
+			// Mono: use SineOsc::getSineVector for 4 samples at a time
+			size_t chunks = remaining / 4;
+			for (size_t c = 0; c < chunks; c++) {
+				Argon<int32_t> sineVec = SineOsc::getSineVector(&phaseAccumL, phaseIncrement);
+				// Apply combined gain: sine * combinedGain >> 5 (Q31 multiply + shift for 0dBFS)
+				Argon<int32_t> scaled = sineVec.MultiplyFixedPoint(combinedGain) >> 5;
+				// Mix into buffer
+				size_t base = sampleIdx + c * 4;
+				for (int i = 0; i < 4; i++) {
+					buffer[base + i].l = add_saturate(buffer[base + i].l, scaled[i]);
+					buffer[base + i].r = add_saturate(buffer[base + i].r, scaled[i]);
+				}
 			}
+			// Handle remaining 0-3 samples scalar
+			phaseAccumR = phaseAccumL;
+			sampleIdx += chunks * 4;
+			for (; sampleIdx < buffer.size(); sampleIdx++) {
+				phaseAccumL += phaseIncrement;
+				int32_t s = multiply_32x32_rshift32(getSine(phaseAccumL), combinedGain) >> 5;
+				buffer[sampleIdx].l = add_saturate(buffer[sampleIdx].l, s);
+				buffer[sampleIdx].r = add_saturate(buffer[sampleIdx].r, s);
+			}
+			phaseAccumR = phaseAccumL;
+		}
+		else {
+			// Stereo: two separate NEON passes
+			// Save phase state, run L channel
+			uint32_t savedPhaseR = phaseAccumR;
+			size_t chunks = remaining / 4;
+			// L channel NEON
+			std::array<int32_t, 128> tempL{};
+			uint32_t tempPhaseL = phaseAccumL;
+			for (size_t c = 0; c < chunks; c++) {
+				Argon<int32_t> sineVec = SineOsc::getSineVector(&tempPhaseL, phaseIncrement);
+				Argon<int32_t> scaled = sineVec.MultiplyFixedPoint(combinedGain) >> 5;
+				scaled.StoreTo(&tempL[c * 4]);
+			}
+			phaseAccumL = tempPhaseL;
 
-			// Generate sine scaled to internal 0dBFS with pink noise curve
-			int32_t sineL = multiply_32x32_rshift32(getSine(phaseAccumL), cachedPinkQ31) >> 6;
-			int32_t sineR = isStereo ? (multiply_32x32_rshift32(getSine(phaseAccumR), cachedPinkQ31) >> 6) : sineL;
+			// R channel NEON
+			std::array<int32_t, 128> tempR{};
+			uint32_t tempPhaseR = savedPhaseR;
+			for (size_t c = 0; c < chunks; c++) {
+				Argon<int32_t> sineVec = SineOsc::getSineVector(&tempPhaseR, phaseIncrement);
+				Argon<int32_t> scaled = sineVec.MultiplyFixedPoint(combinedGain) >> 5;
+				scaled.StoreTo(&tempR[c * 4]);
+			}
+			phaseAccumR = tempPhaseR;
 
-			// Apply envelope
-			q31_t envQ31 = static_cast<q31_t>(envelope * static_cast<float>(ONE_Q31));
-			sineL = multiply_32x32_rshift32(sineL, envQ31) << 1;
-			sineR = multiply_32x32_rshift32(sineR, envQ31) << 1;
-
-			// Apply level
-			sineL = multiply_32x32_rshift32(sineL, levelGain) << 2;
-			sineR = multiply_32x32_rshift32(sineR, levelGain) << 2;
-
-			// Mix into buffer (additive)
-			sample.l = add_saturate(sample.l, sineL);
-			sample.r = add_saturate(sample.r, sineR);
+			// Mix both channels
+			for (size_t i = 0; i < chunks * 4; i++) {
+				size_t idx = sampleIdx + i;
+				buffer[idx].l = add_saturate(buffer[idx].l, tempL[i]);
+				buffer[idx].r = add_saturate(buffer[idx].r, tempR[i]);
+			}
+			sampleIdx += chunks * 4;
+			// Remaining scalar
+			for (; sampleIdx < buffer.size(); sampleIdx++) {
+				phaseAccumL += phaseIncrement;
+				phaseAccumR += phaseIncrement;
+				int32_t sL = multiply_32x32_rshift32(getSine(phaseAccumL), combinedGain) >> 5;
+				int32_t sR = multiply_32x32_rshift32(getSine(phaseAccumR), combinedGain) >> 5;
+				buffer[sampleIdx].l = add_saturate(buffer[sampleIdx].l, sL);
+				buffer[sampleIdx].r = add_saturate(buffer[sampleIdx].r, sR);
+			}
 		}
 
 		// Update trigger state

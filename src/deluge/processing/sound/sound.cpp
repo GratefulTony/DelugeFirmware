@@ -2839,6 +2839,11 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		}
 	}
 
+	// Harm: safety — if no voices exist but gate is stuck, force it closed
+	if (voices_.empty() && harm.isGateOpen()) {
+		harm.harmAllNotesOff();
+	}
+
 	// Harm: compute pitch bend in semitones
 	float harmBendSemitones = 0.0f;
 	if (harm.isEnabled() && monophonicExpressionValues[0] != 0) {
