@@ -2831,17 +2831,20 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		}
 	}
 
+	// Harm: read patched params for mod matrix
+	int32_t harmLevelMod = paramFinalValues[params::GLOBAL_HARM_LEVEL - params::FIRST_GLOBAL];
+	int32_t harmFineMod = paramFinalValues[params::GLOBAL_HARM_FINE - params::FIRST_GLOBAL];
+
 	// Harm notch - strip the harmonic frequency pre-reverb
 	if (harm.isHpfEnabled()) {
-		harm.renderHpf(sound_stereo, harmNoteCode, harmBendSemitones);
+		harm.renderHpf(sound_stereo, harmNoteCode, harmBendSemitones, harmFineMod);
 	}
 
 	processReverbSendAndVolume(sound_stereo, reverbBuffer, postFXVolume, postReverbVolume, reverbSendAmount, 0, true);
 
 	// Harm oscillator - add clean harmonic back post-reverb (dry)
 	if (harm.isOscEnabled()) {
-		int32_t harmLevelMod = paramFinalValues[params::GLOBAL_HARM_LEVEL - params::FIRST_GLOBAL];
-		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmBendSemitones, harmLevelMod);
+		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmBendSemitones, harmLevelMod, harmFineMod);
 	}
 
 	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);

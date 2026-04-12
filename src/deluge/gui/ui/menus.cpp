@@ -817,8 +817,8 @@ HorizontalMenu utilitySubMenu{
 
 // Harm - note-tracking HPF + clean sub oscillator
 fx::HarmHarmonic harmHarmonicMenu{STRING_FOR_HARM_HARMONIC};
-fx::HarmFine harmFineMenu{STRING_FOR_HARM_FINE};
-fx::HarmLevel harmLevelMenu{STRING_FOR_HARM_LEVEL};
+patched_param::Integer harmFineMenu{STRING_FOR_HARM_FINE, STRING_FOR_HARM_FINE, params::GLOBAL_HARM_FINE};
+patched_param::Integer harmLevelMenu{STRING_FOR_HARM_LEVEL, STRING_FOR_HARM_LEVEL, params::GLOBAL_HARM_LEVEL};
 fx::HarmPhase harmPhaseMenu{STRING_FOR_HARM_PHASE};
 fx::HarmAttack harmAttackMenu{STRING_FOR_HARM_ATTACK};
 fx::HarmRelease harmReleaseMenu{STRING_FOR_HARM_RELEASE};

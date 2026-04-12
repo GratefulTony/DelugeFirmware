@@ -245,13 +245,12 @@ void SourceSelection::readValueAgain() {
 }
 
 void SourceSelection::selectEncoderAction(int32_t offset) {
-	int32_t currentValue = this->getValue();
-	int32_t newValue = 0;
+	int32_t newValue = this->getValue();
 	do {
-		newValue = std::clamp<int32_t>(currentValue + offset, 0, kNumPatchSources - 1);
+		newValue += offset;
 
-		// if no change, just exit
-		if (newValue == currentValue) {
+		// Clamp to valid range — exit if we hit the boundary
+		if (newValue >= kNumPatchSources || newValue < 0) {
 			return;
 		}
 	} while (!sourceIsAllowed(sourceMenuContents[newValue]));
