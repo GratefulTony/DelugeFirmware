@@ -87,10 +87,19 @@ struct HarmParams {
 	void harmAllNotesOff() { gateCount = 0; }
 	[[nodiscard]] bool isGateOpen() const { return gateCount > 0; }
 	// Notch biquad state (direct form II transposed), per channel, Q31
-	q31_t notchZ1L{0}; // z^-1 delay left
-	q31_t notchZ2L{0}; // z^-2 delay left
-	q31_t notchZ1R{0}; // z^-1 delay right
-	q31_t notchZ2R{0}; // z^-2 delay right
+	q31_t notchZ1L{0};
+	q31_t notchZ2L{0};
+	q31_t notchZ1R{0};
+	q31_t notchZ2R{0};
+
+	// Cached notch coefficients — recomputed only when inputs change
+	q31_t cachedQb0{0};
+	q31_t cachedQb1{0};
+	q31_t cachedQa2{0};
+	int32_t cachedNotchNote{-9999};
+	uint8_t cachedNotchHpf{0};
+	q31_t cachedNotchFine{0};
+	float cachedNotchBend{0.0f};
 
 	// Harmonic ratio table: sorted unique fractions with denominators {1,2,3,4,8}
 	// Index 0 is unused (0=OFF), indices 1-102 map to ratios
@@ -175,42 +184,42 @@ struct HarmParams {
 		FX_BENCH_DECLARE(bench, "harm", "notch");
 		FX_BENCH_START(bench);
 
-		// Compute notch center frequency — track the oscillator's actual pitch
-		uint32_t basePhaseInc = noteCodeToPhaseIncrement(noteCode);
-		float ratio = isOscEnabled()
-		                  ? kHarmonicTable[std::min(static_cast<int32_t>(harmonic) - 1, kNumHarmonics - 1)].ratio
-		                  : 1.0f;
-		float fineSemitones =
-		    (static_cast<float>(fineModulation) / static_cast<float>(ONE_Q31)) * 12.0f + bendSemitones;
-		float fineMul = std::exp2f(fineSemitones / 12.0f);
-		float centerFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;
-		float w0 = centerFreq * (6.2831853f / 4294967296.0f); // 2*pi*fc/fs
+		// Only recompute coefficients when inputs change
+		bool needRecompute = (noteCode != cachedNotchNote || hpf != cachedNotchHpf || fineModulation != cachedNotchFine
+		                      || bendSemitones != cachedNotchBend);
 
-		// Q from hpf knob: 1=narrow (Q=30), 127=wide (Q=0.5)
-		float Q = 30.0f - (static_cast<float>(hpf - 1) / 126.0f) * 29.5f;
+		q31_t qb0, qb1, qa2;
+		if (needRecompute) {
+			// Compute notch center frequency — track the oscillator's actual pitch
+			uint32_t basePhaseInc = noteCodeToPhaseIncrement(noteCode);
+			float ratio = isOscEnabled()
+			                  ? kHarmonicTable[std::min(static_cast<int32_t>(harmonic) - 1, kNumHarmonics - 1)].ratio
+			                  : 1.0f;
+			float fineSemitones =
+			    (static_cast<float>(fineModulation) / static_cast<float>(ONE_Q31)) * 12.0f + bendSemitones;
+			float fineMul = std::exp2f(fineSemitones / 12.0f);
+			float centerFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;
+			float w0 = centerFreq * (6.2831853f / 4294967296.0f);
 
-		// Biquad notch coefficients (Audio EQ Cookbook, Bristow-Johnson)
-		float sinw0 = std::sinf(w0);
-		float cosw0 = std::cosf(w0);
-		float alpha = sinw0 / (2.0f * Q);
+			float Q = 30.0f - (static_cast<float>(hpf - 1) / 126.0f) * 29.5f;
+			float sinw0 = std::sinf(w0);
+			float cosw0 = std::cosf(w0);
+			float alpha = sinw0 / (2.0f * Q);
+			float inv_a0 = 1.0f / (1.0f + alpha);
 
-		// Notch: b0=1, b1=-2cos(w0), b2=1, a0=1+alpha, a1=-2cos(w0), a2=1-alpha
-		// Note: b1 == a1 (before normalization) for a notch
-		float inv_a0 = 1.0f / (1.0f + alpha);
-		float fb0 = inv_a0; // 1 / (1+alpha)
-		float fb1 = -2.0f * cosw0 * inv_a0;
-		// fb2 = fb0 (same as b0 normalized)
-		float fa1 = fb1; // a1/a0 == b1/a0 for notch
-		float fa2 = (1.0f - alpha) * inv_a0;
-
-		// Convert to Q31 coefficients
-		// These are all in range [-2, 2], so use Q1.30 (multiply result needs <<2 to recover)
-		constexpr float kQ30Scale = 1073741824.0f; // 2^30
-		q31_t qb0 = static_cast<q31_t>(fb0 * kQ30Scale);
-		q31_t qb1 = static_cast<q31_t>(fb1 * kQ30Scale);
-		// qb2 == qb0
+			constexpr float kQ30Scale = 1073741824.0f;
+			cachedQb0 = static_cast<q31_t>(inv_a0 * kQ30Scale);
+			cachedQb1 = static_cast<q31_t>(-2.0f * cosw0 * inv_a0 * kQ30Scale);
+			cachedQa2 = static_cast<q31_t>((1.0f - alpha) * inv_a0 * kQ30Scale);
+			cachedNotchNote = noteCode;
+			cachedNotchHpf = hpf;
+			cachedNotchFine = fineModulation;
+			cachedNotchBend = bendSemitones;
+		}
+		qb0 = cachedQb0;
+		qb1 = cachedQb1;
 		q31_t qa1 = qb1; // same for notch
-		q31_t qa2 = static_cast<q31_t>(fa2 * kQ30Scale);
+		qa2 = cachedQa2;
 
 		for (auto& sample : buffer) {
 			// Left channel — Direct Form II Transposed in Q31
