@@ -2863,7 +2863,9 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 	processReverbSendAndVolume(sound_stereo, reverbBuffer, postFXVolume, postReverbVolume, reverbSendAmount, 0, true);
 
 	// Harm oscillator - add clean harmonic back post-reverb (dry)
-	if (harm.isOscEnabled()) {
+	// Skip entirely when level produces zero gain (saves all per-buffer transcendentals)
+	q31_t harmLevelGain = std::max(static_cast<int32_t>(0), harmLevelMod + (ONE_Q31 >> 2));
+	if (harm.isOscEnabled() && (harmLevelGain > 0 || harm.envelope > 0.0f)) {
 		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmBendSemitones, harmLevelMod, harmFineMod);
 	}
 
