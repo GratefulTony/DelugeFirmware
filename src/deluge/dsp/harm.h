@@ -265,13 +265,12 @@ struct HarmParams {
 		}
 		else {
 			// Map porta knob (1..127) to smoothing rate per sample
-			// Higher knob = slower glide
 			float portaRate =
 			    kHarmPortaMaxRate - (static_cast<float>(porta) / 127.0f) * (kHarmPortaMaxRate - kHarmPortaMinRate);
-			// Apply per-sample smoothing for the whole buffer
-			for (size_t i = 0; i < buffer.size(); i++) {
-				currentFreq += (targetFreq - currentFreq) * portaRate;
-			}
+			// Compute final value after N samples: freq = target + (current - target) * (1 - rate)^N
+			float retention = 1.0f - portaRate;
+			float retentionN = std::powf(retention, static_cast<float>(buffer.size()));
+			currentFreq = targetFreq + (currentFreq - targetFreq) * retentionN;
 		}
 
 		uint32_t phaseIncrement = static_cast<uint32_t>(std::max(currentFreq, 0.0f));
@@ -329,36 +328,32 @@ struct HarmParams {
 			releaseRate = 1.0f / releaseTimeSamples;
 		}
 
+		// --- Pre-compute loop-invariant values ---
+		q31_t pinkQ31 = static_cast<q31_t>(pinkScale * static_cast<float>(ONE_Q31));
+		q31_t levelGain = std::max(static_cast<int32_t>(0), levelModulation + (ONE_Q31 >> 2));
+
 		// --- Per-sample processing ---
 		for (auto& sample : buffer) {
 			// Update AR envelope — simple: voicesActive = attack/sustain, else release
 			if (voicesActive) {
-				// Attack / sustain
 				envelope += (1.0f - envelope) * attackRate;
 				if (envelope > 1.0f) {
 					envelope = 1.0f;
 				}
 			}
 			else if (envelope > 0.0f) {
-				// Release
 				envelope -= envelope * releaseRate;
 				if (envelope < kHarmEnvThreshold) {
 					envelope = 0.0f;
 				}
 			}
 
-			// Advance phase accumulators with catchup correction
-			// Catchup: exponential decay of phase error over ~24 wave cycles
-			// Per-sample decay: error * phaseIncrement / (24 * 2^32) ≈ error * phaseInc >> 27
-			// (24 * 2^32 ≈ 2^4.6 * 2^32 ≈ 2^36.6, so shift ~5 gives per-cycle,
-			//  but we want per-sample so divide by samples-per-cycle = 2^32/phaseInc)
-			// Simpler: correction = phaseCatchup * phaseInc / (24 * 2^32)
-			// In integer: multiply_32x32_rshift32(phaseCatchup, phaseInc) / 24
+			// Advance phase accumulators with catchup correction (~24 cycle convergence)
+			// Use >> 4 instead of / 12 to avoid expensive integer division
 			if (phaseCatchupL != 0) {
-				int32_t corrL = multiply_32x32_rshift32(phaseCatchupL, static_cast<int32_t>(phaseIncrement));
-				corrL = corrL / 12; // ~24 cycles (divide by 12 because multiply already shifted by 32)
+				int32_t corrL = multiply_32x32_rshift32(phaseCatchupL, static_cast<int32_t>(phaseIncrement)) >> 4;
 				if (corrL == 0) {
-					corrL = (phaseCatchupL > 0) ? 1 : -1; // ensure convergence
+					corrL = (phaseCatchupL > 0) ? 1 : -1;
 				}
 				phaseAccumL += static_cast<uint32_t>(corrL);
 				phaseCatchupL -= corrL;
@@ -367,8 +362,7 @@ struct HarmParams {
 
 			if (isStereo) {
 				if (phaseCatchupR != 0) {
-					int32_t corrR = multiply_32x32_rshift32(phaseCatchupR, static_cast<int32_t>(phaseIncrement));
-					corrR = corrR / 12;
+					int32_t corrR = multiply_32x32_rshift32(phaseCatchupR, static_cast<int32_t>(phaseIncrement)) >> 4;
 					if (corrR == 0) {
 						corrR = (phaseCatchupR > 0) ? 1 : -1;
 					}
@@ -382,25 +376,21 @@ struct HarmParams {
 				phaseCatchupR = phaseCatchupL;
 			}
 
-			// Generate sine — scale to EFFECTIVE_0DBFS_Q31 (internal 0dBFS = ONE_Q31/128)
-			// getSine returns full Q31 range, shift right by 7 to match internal levels
-			// Apply pink noise curve: 1/sqrt(ratio) for -3dB/octave rolloff
-			q31_t pinkQ31 = static_cast<q31_t>(pinkScale * static_cast<float>(ONE_Q31));
+			// Skip output if silent (level=0 or envelope=0), but keep phase/envelope running
+			if (levelGain == 0 || envelope == 0.0f) {
+				continue;
+			}
+
+			// Generate sine scaled to internal 0dBFS with pink noise curve
 			int32_t sineL = multiply_32x32_rshift32(getSine(phaseAccumL), pinkQ31) >> 6;
 			int32_t sineR = isStereo ? (multiply_32x32_rshift32(getSine(phaseAccumR), pinkQ31) >> 6) : sineL;
 
-			// Apply envelope (convert float to Q31)
+			// Apply envelope
 			q31_t envQ31 = static_cast<q31_t>(envelope * static_cast<float>(ONE_Q31));
 			sineL = multiply_32x32_rshift32(sineL, envQ31) << 1;
 			sineR = multiply_32x32_rshift32(sineR, envQ31) << 1;
 
-			// Apply level: hybrid patcher outputs [-ONE_Q31/4, ONE_Q31/4] for knob range
-			// Shift to unipolar: gain = value + ONE_Q31/4 (range [0, ONE_Q31/2])
-			// Then multiply with <<2 correction to use full gain range
-			q31_t levelGain = std::max(static_cast<int32_t>(0), levelModulation + (ONE_Q31 >> 2));
-			if (levelGain == 0) {
-				continue; // silence
-			}
+			// Apply level
 			sineL = multiply_32x32_rshift32(sineL, levelGain) << 2;
 			sineR = multiply_32x32_rshift32(sineR, levelGain) << 2;
 
