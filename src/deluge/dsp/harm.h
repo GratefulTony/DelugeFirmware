@@ -21,6 +21,7 @@
 #pragma once
 
 #include "dsp/stereo_sample.h"
+#include "io/debug/fx_benchmark.h"
 #include "storage/field_serialization.h"
 #include "util/fixedpoint.h"
 #include "util/lookuptables/lookuptables.h"
@@ -171,6 +172,8 @@ struct HarmParams {
 		if (!isHpfEnabled()) {
 			return;
 		}
+		FX_BENCH_DECLARE(bench, "harm", "notch");
+		FX_BENCH_START(bench);
 
 		// Compute notch center frequency — track the oscillator's actual pitch
 		uint32_t basePhaseInc = noteCodeToPhaseIncrement(noteCode);
@@ -225,6 +228,7 @@ struct HarmParams {
 			notchZ2R = (multiply_32x32_rshift32(qb0, sample.r) << 2) - (multiply_32x32_rshift32(qa2, outR) << 2);
 			sample.r = outR;
 		}
+		FX_BENCH_STOP(bench);
 	}
 
 	// ========================================================================
@@ -238,6 +242,8 @@ struct HarmParams {
 		if (!isOscEnabled()) {
 			return;
 		}
+		FX_BENCH_DECLARE(bench, "harm", "osc");
+		FX_BENCH_START(bench);
 
 		// --- Pitch calculation ---
 		uint32_t basePhaseInc = noteCodeToPhaseIncrement(noteCode);
@@ -401,6 +407,7 @@ struct HarmParams {
 
 		// Update trigger state
 		voicesWereActive = voicesActive;
+		FX_BENCH_STOP(bench);
 	}
 
 	// ========================================================================
