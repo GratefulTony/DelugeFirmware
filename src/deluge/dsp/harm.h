@@ -101,6 +101,14 @@ struct HarmParams {
 	q31_t cachedNotchFine{0};
 	float cachedNotchBend{0.0f};
 
+	// Cached osc pitch/pink — recomputed only when inputs change
+	float cachedTargetFreq{0.0f};
+	q31_t cachedPinkQ31{ONE_Q31};
+	int32_t cachedOscNote{-9999};
+	uint8_t cachedOscHarmonic{0};
+	q31_t cachedOscFine{0};
+	float cachedOscBend{0.0f};
+
 	// Harmonic ratio table: sorted unique fractions with denominators {1,2,3,4,8}
 	// Index 0 is unused (0=OFF), indices 1-102 map to ratios
 	struct HarmonicEntry {
@@ -254,21 +262,24 @@ struct HarmParams {
 		FX_BENCH_DECLARE(bench, "harm", "osc");
 		FX_BENCH_START(bench);
 
-		// --- Pitch calculation ---
-		uint32_t basePhaseInc = noteCodeToPhaseIncrement(noteCode);
-		int32_t tableIdx = std::min(static_cast<int32_t>(harmonic) - 1, kNumHarmonics - 1);
-		float ratio = kHarmonicTable[tableIdx].ratio;
+		// --- Pitch calculation (cached when inputs unchanged) ---
+		bool pitchChanged = (noteCode != cachedOscNote || harmonic != cachedOscHarmonic
+		                     || fineModulation != cachedOscFine || bendSemitones != cachedOscBend);
+		if (pitchChanged) {
+			uint32_t basePhaseInc = noteCodeToPhaseIncrement(noteCode);
+			int32_t tableIdx = std::min(static_cast<int32_t>(harmonic) - 1, kNumHarmonics - 1);
+			float ratio = kHarmonicTable[tableIdx].ratio;
+			float fineSemitones =
+			    (static_cast<float>(fineModulation) / static_cast<float>(ONE_Q31)) * 12.0f + bendSemitones;
+			float fineMul = std::exp2f(fineSemitones / 12.0f);
+			cachedTargetFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;
 
-		// Pink noise loudness scaling: -3dB/octave, calibrated at 40Hz = unity (no boost below)
-		// Computed after portamento so we use the actual output frequency
-
-		// Apply fine tune: patched param (hybrid bipolar Q31, +/-12st) + pitch bend
-		float fineSemitones =
-		    (static_cast<float>(fineModulation) / static_cast<float>(ONE_Q31)) * 12.0f + bendSemitones;
-		float fineMul = std::exp2f(fineSemitones / 12.0f);
-
-		float newTargetFreq = static_cast<float>(basePhaseInc) * ratio * fineMul;
-		targetFreq = newTargetFreq;
+			cachedOscNote = noteCode;
+			cachedOscHarmonic = harmonic;
+			cachedOscFine = fineModulation;
+			cachedOscBend = bendSemitones;
+		}
+		targetFreq = cachedTargetFreq;
 
 		// --- Trigger detection (moved before portamento so we can snap on retrigger) ---
 		bool triggered = voicesActive && !voicesWereActive;
@@ -278,7 +289,7 @@ struct HarmParams {
 		if (porta == 0 || currentFreq == 0.0f || triggered) {
 			currentFreq = targetFreq;
 		}
-		else {
+		else if (currentFreq != targetFreq) {
 			// Map porta knob (1..127) to smoothing rate per sample
 			float portaRate =
 			    kHarmPortaMaxRate - (static_cast<float>(porta) / 127.0f) * (kHarmPortaMaxRate - kHarmPortaMinRate);
@@ -291,9 +302,12 @@ struct HarmParams {
 		uint32_t phaseIncrement = static_cast<uint32_t>(std::max(currentFreq, 0.0f));
 
 		// Pink noise scaling: -3dB/octave, 40Hz = unity, never boosts
-		// Convert phaseIncrement to Hz: freq = phaseInc * sampleRate / 2^32
-		float outputHz = currentFreq * (kHarmSampleRate / 4294967296.0f);
-		float pinkScale = (outputHz > 40.0f) ? std::sqrtf(40.0f / outputHz) : 1.0f;
+		// Only recompute when frequency changed (sqrtf is ~30 cycles)
+		if (pitchChanged || currentFreq != targetFreq) {
+			float outputHz = currentFreq * (kHarmSampleRate / 4294967296.0f);
+			float pinkScale = (outputHz > 40.0f) ? std::sqrtf(40.0f / outputHz) : 1.0f;
+			cachedPinkQ31 = static_cast<q31_t>(pinkScale * static_cast<float>(ONE_Q31));
+		}
 
 		// --- Phase catchup on trigger ---
 		// Instead of snapping phase (which clicks), compute the error between
@@ -344,7 +358,6 @@ struct HarmParams {
 		}
 
 		// --- Pre-compute loop-invariant values ---
-		q31_t pinkQ31 = static_cast<q31_t>(pinkScale * static_cast<float>(ONE_Q31));
 		q31_t levelGain = std::max(static_cast<int32_t>(0), levelModulation + (ONE_Q31 >> 2));
 
 		// --- Per-sample processing ---
@@ -397,8 +410,8 @@ struct HarmParams {
 			}
 
 			// Generate sine scaled to internal 0dBFS with pink noise curve
-			int32_t sineL = multiply_32x32_rshift32(getSine(phaseAccumL), pinkQ31) >> 6;
-			int32_t sineR = isStereo ? (multiply_32x32_rshift32(getSine(phaseAccumR), pinkQ31) >> 6) : sineL;
+			int32_t sineL = multiply_32x32_rshift32(getSine(phaseAccumL), cachedPinkQ31) >> 6;
+			int32_t sineR = isStereo ? (multiply_32x32_rshift32(getSine(phaseAccumR), cachedPinkQ31) >> 6) : sineL;
 
 			// Apply envelope
 			q31_t envQ31 = static_cast<q31_t>(envelope * static_cast<float>(ONE_Q31));
