@@ -232,7 +232,8 @@ struct HarmParams {
 	// Generates a sine at a harmonic of the note frequency, with AR envelope,
 	// portamento, and phase/spread control. Mixes additively into buffer.
 
-	void renderOsc(std::span<StereoSample> buffer, int32_t noteCode, bool voicesActive, float bendSemitones = 0.0f) {
+	void renderOsc(std::span<StereoSample> buffer, int32_t noteCode, bool voicesActive, float bendSemitones = 0.0f,
+	               q31_t levelModulation = ONE_Q31) {
 		if (!isOscEnabled()) {
 			return;
 		}
@@ -395,6 +396,12 @@ struct HarmParams {
 			q31_t levelQ31 = static_cast<q31_t>((static_cast<int64_t>(level) * ONE_Q31) / 127);
 			sineL = multiply_32x32_rshift32(sineL, levelQ31) << 1;
 			sineR = multiply_32x32_rshift32(sineR, levelQ31) << 1;
+
+			// Apply mod matrix level modulation (from GLOBAL_HARM_LEVEL patched param)
+			if (levelModulation != ONE_Q31) {
+				sineL = multiply_32x32_rshift32(sineL, levelModulation) << 1;
+				sineR = multiply_32x32_rshift32(sineR, levelModulation) << 1;
+			}
 
 			// Mix into buffer (additive)
 			sample.l = add_saturate(sample.l, sineL);

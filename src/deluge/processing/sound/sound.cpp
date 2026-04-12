@@ -2840,7 +2840,8 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 
 	// Harm oscillator - add clean harmonic back post-reverb (dry)
 	if (harm.isOscEnabled()) {
-		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmBendSemitones);
+		int32_t harmLevelMod = paramFinalValues[params::GLOBAL_HARM_LEVEL - params::FIRST_GLOBAL];
+		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmBendSemitones, harmLevelMod);
 	}
 
 	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
