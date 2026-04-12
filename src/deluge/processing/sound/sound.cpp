@@ -194,6 +194,7 @@ void Sound::initParams(ParamManager* paramManager) {
 	patchedParams->params[params::LOCAL_OSC_B_VOLUME].setCurrentValueBasicForSetup(2147483647);
 	patchedParams->params[params::GLOBAL_VOLUME_POST_FX].setCurrentValueBasicForSetup(
 	    getParamFromUserValue(params::GLOBAL_VOLUME_POST_FX, 40));
+	patchedParams->params[params::GLOBAL_HARM_LEVEL].setCurrentValueBasicForSetup(-2147483648); // min = silence
 	patchedParams->params[params::GLOBAL_VOLUME_POST_REVERB_SEND].setCurrentValueBasicForSetup(0);
 	patchedParams->params[params::LOCAL_FOLD].setCurrentValueBasicForSetup(-2147483648);
 	patchedParams->params[params::LOCAL_HPF_RESONANCE].setCurrentValueBasicForSetup(-2147483648);

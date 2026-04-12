@@ -394,9 +394,14 @@ struct HarmParams {
 			sineL = multiply_32x32_rshift32(sineL, envQ31) << 1;
 			sineR = multiply_32x32_rshift32(sineR, envQ31) << 1;
 
-			// Apply level from patched param (GLOBAL_HARM_LEVEL, mod matrix target)
-			sineL = multiply_32x32_rshift32(sineL, levelModulation) << 1;
-			sineR = multiply_32x32_rshift32(sineR, levelModulation) << 1;
+			// Apply level: convert bipolar Q31 to unipolar gain
+			// -ONE_Q31 (knob min) → 0, 0 (center) → 0.5, ONE_Q31 (knob max) → 1.0
+			q31_t levelGain = (levelModulation >> 1) + (ONE_Q31 >> 1);
+			if (levelGain <= 0) {
+				continue; // silence
+			}
+			sineL = multiply_32x32_rshift32(sineL, levelGain) << 1;
+			sineR = multiply_32x32_rshift32(sineR, levelGain) << 1;
 
 			// Mix into buffer (additive)
 			sample.l = add_saturate(sample.l, sineL);
