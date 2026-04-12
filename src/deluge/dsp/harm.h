@@ -360,22 +360,6 @@ struct HarmParams {
 		// --- Pre-compute loop-invariant values ---
 		q31_t levelGain = std::max(static_cast<int32_t>(0), levelModulation + (ONE_Q31 >> 2));
 
-		// Helper to advance envelope by 1 sample
-		auto advanceEnvelope = [&]() {
-			if (voicesActive) {
-				envelope += (1.0f - envelope) * attackRate;
-				if (envelope > 1.0f) {
-					envelope = 1.0f;
-				}
-			}
-			else if (envelope > 0.0f) {
-				envelope -= envelope * releaseRate;
-				if (envelope < kHarmEnvThreshold) {
-					envelope = 0.0f;
-				}
-			}
-		};
-
 		// Skip output entirely if silent
 		if (levelGain == 0 && !voicesActive) {
 			// No output possible and not attacking — just advance phase
@@ -391,7 +375,19 @@ struct HarmParams {
 
 		// --- Per-sample processing ---
 		for (auto& sample : buffer) {
-			advanceEnvelope();
+			// Update AR envelope
+			if (voicesActive) {
+				envelope += (1.0f - envelope) * attackRate;
+				if (envelope > 1.0f) {
+					envelope = 1.0f;
+				}
+			}
+			else if (envelope > 0.0f) {
+				envelope -= envelope * releaseRate;
+				if (envelope < kHarmEnvThreshold) {
+					envelope = 0.0f;
+				}
+			}
 
 			// Phase catchup (~24 cycle convergence)
 			if (phaseCatchupL != 0) {
