@@ -394,14 +394,15 @@ struct HarmParams {
 			sineL = multiply_32x32_rshift32(sineL, envQ31) << 1;
 			sineR = multiply_32x32_rshift32(sineR, envQ31) << 1;
 
-			// Apply level: convert bipolar Q31 to unipolar gain
-			// -ONE_Q31 (knob min) → 0, 0 (center) → 0.5, ONE_Q31 (knob max) → 1.0
-			q31_t levelGain = (levelModulation >> 1) + (ONE_Q31 >> 1);
-			if (levelGain <= 0) {
+			// Apply level: hybrid patcher outputs [-ONE_Q31/4, ONE_Q31/4] for knob range
+			// Shift to unipolar: gain = value + ONE_Q31/4 (range [0, ONE_Q31/2])
+			// Then multiply with <<2 correction to use full gain range
+			q31_t levelGain = std::max(static_cast<int32_t>(0), levelModulation + (ONE_Q31 >> 2));
+			if (levelGain == 0) {
 				continue; // silence
 			}
-			sineL = multiply_32x32_rshift32(sineL, levelGain) << 1;
-			sineR = multiply_32x32_rshift32(sineR, levelGain) << 1;
+			sineL = multiply_32x32_rshift32(sineL, levelGain) << 2;
+			sineR = multiply_32x32_rshift32(sineR, levelGain) << 2;
 
 			// Mix into buffer (additive)
 			sample.l = add_saturate(sample.l, sineL);

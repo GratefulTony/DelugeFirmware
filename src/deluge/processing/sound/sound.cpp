@@ -2816,9 +2816,28 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		          !voices_.empty(), reverbSendAmount >> 1);
 	}
 
-	// Harm: gate from noteOn/noteOff counter on the harm struct itself
+	// Harm: gate from noteOn/noteOff counter, pitch from last-note-priority with voice fallback
 	int32_t harmNoteCode = lastNoteCode;
 	bool harmVoicesHeld = harm.isGateOpen();
+
+	// If lastNoteCode's voice is releasing, fall back to a still-held voice's pitch
+	if (harmVoicesHeld && !voices_.empty()) {
+		bool lastNoteStillHeld = false;
+		int32_t fallbackNote = lastNoteCode;
+		for (auto& voice : voices_) {
+			auto envState = voice->envelopes[0].state;
+			if (envState != EnvelopeStage::RELEASE && envState != EnvelopeStage::FAST_RELEASE
+			    && envState != EnvelopeStage::OFF) {
+				fallbackNote = voice->noteCodeAfterArpeggiation;
+				if (voice->noteCodeAfterArpeggiation == lastNoteCode) {
+					lastNoteStillHeld = true;
+				}
+			}
+		}
+		if (!lastNoteStillHeld) {
+			harmNoteCode = fallbackNote;
+		}
+	}
 
 	// Harm: compute pitch bend in semitones
 	float harmBendSemitones = 0.0f;
