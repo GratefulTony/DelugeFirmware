@@ -1712,6 +1712,8 @@ void Sound::noteOff(ModelStackWithThreeMainThings* modelStack, ArpeggiatorBase* 
 void Sound::noteOnPostArpeggiator(ModelStackWithSoundFlags* modelStack, int32_t noteCodePreArp, int32_t noteCodePostArp,
                                   int32_t velocity, int16_t const* mpeValues, uint32_t sampleSyncLength,
                                   int32_t ticksLate, uint32_t samplesLate, int32_t fromMIDIChannel) {
+	harm.harmNoteOn();
+
 	const ActiveVoice* voiceToReuse = nullptr;
 	const ActiveVoice* voiceForLegato = nullptr;
 
@@ -1901,6 +1903,12 @@ void Sound::allNotesOff(ModelStackWithThreeMainThings* modelStack, ArpeggiatorBa
 
 // noteCode = ALL_NOTES_OFF (default) means stop *any* voice, regardless of noteCode
 void Sound::noteOffPostArpeggiator(ModelStackWithSoundFlags* modelStack, int32_t noteCode) {
+	if (noteCode == ALL_NOTES_OFF) {
+		harm.harmAllNotesOff();
+	}
+	else {
+		harm.harmNoteOff();
+	}
 	// Send midi note offs out for specific notes,
 	// but only if the type of sound allows note tails (if not, note off was already sent right after its note on)
 	if (outputMidiChannel != MIDI_CHANNEL_NONE && allowNoteTails(modelStack, true)) {
@@ -2299,6 +2307,7 @@ void Sound::reassessRenderSkippingStatus(ModelStackWithSoundFlags* modelStack, b
 	bool skippingStatusNow =
 	    (voices_.empty() && (delay.repeatsUntilAbandon == 0u) && !stutterer.isStuttering(this)
 	     && !disperser.delay.hasEnergy() // Disperser tail still ringing
+	     && (harm.envelope <= 0.0f)      // Harm envelope still releasing
 	     && ((arpSettings == nullptr) || !getArp()->hasAnyInputNotesActive() || arpSettings->mode == ArpMode::OFF));
 
 	if (skippingStatusNow != skippingRendering) {
@@ -2806,28 +2815,9 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		          !voices_.empty(), reverbSendAmount >> 1);
 	}
 
-	// Harm: last-note priority with fallback to any held note
+	// Harm: gate from noteOn/noteOff counter on the harm struct itself
 	int32_t harmNoteCode = lastNoteCode;
-	bool harmVoicesHeld = false;
-	if (harm.isEnabled() && !voices_.empty()) {
-		bool lastNoteStillHeld = false;
-		int32_t fallbackHeldNote = lastNoteCode;
-		for (auto& voice : voices_) {
-			auto envState = voice->envelopes[0].state;
-			if (envState != EnvelopeStage::RELEASE && envState != EnvelopeStage::FAST_RELEASE
-			    && envState != EnvelopeStage::OFF) {
-				harmVoicesHeld = true;
-				fallbackHeldNote = voice->noteCodeAfterArpeggiation;
-				if (voice->noteCodeAfterArpeggiation == lastNoteCode) {
-					lastNoteStillHeld = true;
-				}
-			}
-		}
-		if (harmVoicesHeld && !lastNoteStillHeld) {
-			// Last played note was released, fall back to a still-held note
-			harmNoteCode = fallbackHeldNote;
-		}
-	}
+	bool harmVoicesHeld = harm.isGateOpen();
 
 	// Harm: compute pitch bend in semitones
 	float harmBendSemitones = 0.0f;
@@ -5561,6 +5551,8 @@ void Sound::wontBeRenderedForAWhile() {
 
 	getArp()->reset(); // Surely this shouldn't be quite necessary?
 	sidechain.status = EnvelopeStage::OFF;
+	harm.envelope = 0.0f;
+	harm.harmAllNotesOff();
 
 	// Tell it to just cut the MODFX tail - we needa change status urgently!
 	reassessRenderSkippingStatus(nullptr, true);

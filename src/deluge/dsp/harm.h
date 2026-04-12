@@ -75,6 +75,16 @@ struct HarmParams {
 	float currentFreq{0.0f};      // Portamento-smoothed frequency (as phase increment)
 	float targetFreq{0.0f};       // Target frequency
 	bool voicesWereActive{false}; // For trigger detection
+	int32_t gateCount{0};         // Note gate: >0 = held, incremented on noteOn, decremented on noteOff
+
+	void harmNoteOn() { gateCount++; }
+	void harmNoteOff() {
+		if (gateCount > 0) {
+			gateCount--;
+		}
+	}
+	void harmAllNotesOff() { gateCount = 0; }
+	[[nodiscard]] bool isGateOpen() const { return gateCount > 0; }
 	// Notch biquad state (direct form II transposed), per channel, Q31
 	q31_t notchZ1L{0}; // z^-1 delay left
 	q31_t notchZ2L{0}; // z^-2 delay left
