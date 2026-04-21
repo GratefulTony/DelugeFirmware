@@ -1881,14 +1881,7 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 
 	D_PRINTLN("B2 havePath");
 
-	// ISOLATION TEST: skip the entire swap phase and just return.
-	// If the freeze/crash still happens before this point, the bug is in the render.
-	// If the freeze/crash goes away with this return, the bug is in the swap code below.
-	display->displayPopup("bounced OK (isolation test)");
-	D_PRINTLN("B-ISOLATION: returning early, skipping swap phase");
-	return;
-
-	// --- Swap phase (intentionally unreachable during isolation test) ---
+	// --- Swap phase ---
 
 	AudioOutput* newOutput = currentSong->createNewAudioOutput();
 	if (!newOutput) {
