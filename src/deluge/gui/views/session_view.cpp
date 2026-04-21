@@ -1826,12 +1826,12 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	bool savedExportToSilence = stemExport.exportToSilence;
 
 	// Configure for bounce.
-	// includeSongFX=true + renderOffline=false: recorder in OUTPUT mode (normal real-time path).
-	// Ticks advance naturally through audio_engine's routine_ → renderAudio pipeline. The offline
-	// path doesn't appear to advance swung ticks in this usage (lastSwungTickActioned stays 0).
-	// exportToSilence=false: end recording at loop end.
+	// renderOffline=true drives rendering inside the audio engine's offline loop, which also
+	// synchronously drains the recorder's cardRoutine. That avoids the DMA/memory race we hit
+	// with renderOffline=false (live rendering): any disk_write inside finalizeRecordedFile
+	// was hardfaulting with matching matrix-LED stack-trace patterns.
 	stemExport.includeSongFX = true;
-	stemExport.renderOffline = false;
+	stemExport.renderOffline = true;
 	stemExport.allowNormalization = false;
 	stemExport.exportToSilence = false;
 	stemExport.restrictToClip = clip;
