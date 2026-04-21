@@ -747,10 +747,22 @@ Error SampleRecorder::finalizeRecordedFile() {
 			return Error::SD_CARD;
 		}
 
+		// Skip first-cluster header rewrite during stem export. Even though this runs inside
+		// cardRoutine, the disk_write(0, cluster->data, ...) has been hardfaulting here —
+		// apparently from a DMA/memory race between stem-export's live-rendering audio engine
+		// path and this rewrite. Stem export paths (bounce, stems export) can tolerate a
+		// header that was over-reported at start-of-file; worst case the WAV plays for
+		// slightly longer than the real data. Normal record+play keeps the rewrite.
+		bool skipHeaderRewrite = stemExport.processStarted;
+		if (skipHeaderRewrite) {
+			D_PRINTLN("FR-SKIP: stem export, skipping first-cluster rewrite");
+		}
+
 		// If the actual audio data length we ended up with is not the same as was written in the headers in the first
 		// cluster (very likely; various reasons)
-		if (sample->audioDataLengthBytes != audioDataLengthBytesAsWrittenToFile
-		    || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile)) {
+		if (!skipHeaderRewrite
+		    && (sample->audioDataLengthBytes != audioDataLengthBytesAsWrittenToFile
+		        || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile))) {
 			D_PRINT("FR-D ");
 			D_PRINT("D1 ");
 			int32_t __ne = sample ? sample->clusters.getNumElements() : -1;
