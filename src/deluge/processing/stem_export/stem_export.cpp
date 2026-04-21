@@ -564,11 +564,13 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 						display->popupText(buf);
 					}
 					else if ((yieldTickCounter & 0x3FFF) == 0x2000) {
-						uint32_t ts = AudioEngine::audioSampleTimer;
-						uint32_t delta = ts - lastSampleTimer;
-						lastSampleTimer = ts;
-						static char buf2[40];
-						snprintf(buf2, sizeof(buf2), "ast=%lu d=%lu", (unsigned long)ts, (unsigned long)delta);
+						int32_t pos = playbackHandler.lastSwungTickActioned;
+						int32_t target = stemExport.loopLengthToStopStemExport;
+						int type = (int)stemExport.currentStemExportType;
+						int procSt = stemExport.processStarted ? 1 : 0;
+						static char buf2[48];
+						snprintf(buf2, sizeof(buf2), "pos=%ld tgt=%ld t=%d ps=%d", (long)pos, (long)target, type,
+						         procSt);
 						display->popupText(buf2);
 					}
 					yieldTickCounter++;
