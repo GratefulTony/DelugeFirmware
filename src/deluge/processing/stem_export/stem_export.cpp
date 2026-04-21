@@ -549,15 +549,18 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 					if (stemExport.stopRecording) {
 						stemExport.stopOutputRecording();
 					}
-					// Diag: update popup periodically with the three yield-exit condition values.
-					// rec=playbackHandler.recording enum; src=recordingSource enum; clk=clock.
+					// Diag: update popup periodically. stat=recorder->status (0=CAPTURING,
+					// 1=WAITING_TO_STOP, 2=FINISHED_STILL_WRITING, 3=COMPLETE); sR=stopRecording flag;
+					// src=recordingSource enum; clk=clock; tpS indicates silence timer started.
 					static uint32_t yieldTickCounter = 0;
 					if ((yieldTickCounter++ & 0x1FFF) == 0) {
-						int rec = (int)playbackHandler.recording;
+						int stat = audioRecorder.recorder ? (int)audioRecorder.recorder->status : -99;
 						int src = (int)audioRecorder.recordingSource;
 						int clk = playbackHandler.isEitherClockActive() ? 1 : 0;
-						static char buf[40];
-						snprintf(buf, sizeof(buf), "rec=%d src=%d clk=%d", rec, src, clk);
+						int sR = stemExport.stopRecording ? 1 : 0;
+						int tpS = (stemExport.timePlaybackStopped != 0xFFFFFFFF) ? 1 : 0;
+						static char buf[48];
+						snprintf(buf, sizeof(buf), "stat=%d src=%d clk=%d sR=%d tpS=%d", stat, src, clk, sR, tpS);
 						display->popupText(buf);
 					}
 					return !(playbackHandler.recording != RecordingMode::OFF
