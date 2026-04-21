@@ -1586,6 +1586,9 @@ LiveInputBuffer* getOrCreateLiveInputBuffer(OscType inputType, bool mayCreate) {
 bool createdNewRecorder;
 
 void doRecorderCardRoutines() {
+	if (stemExport.processStarted) {
+		D_PRINTLN("dRCR: enter");
+	}
 
 	SampleRecorder** prevPointer = &firstRecorder;
 	int32_t count = 0;
@@ -1597,7 +1600,13 @@ void doRecorderCardRoutines() {
 			break;
 		}
 
+		if (stemExport.processStarted) {
+			D_PRINTLN("dRCR: pre-cardRoutine status=%d", (int)recorder->status);
+		}
 		Error error = recorder->cardRoutine();
+		if (stemExport.processStarted) {
+			D_PRINTLN("dRCR: post-cardRoutine err=%d status=%d", (int)error, (int)recorder->status);
+		}
 		if (error != Error::NONE) {
 			display->displayError(error);
 		}
@@ -1605,6 +1614,9 @@ void doRecorderCardRoutines() {
 		// If, while in the card routine, a new Recorder was added, then our linked list traversal state thing will
 		// be out of wack, so let's just get out and come back later
 		if (createdNewRecorder) {
+			if (stemExport.processStarted) {
+				D_PRINTLN("dRCR: createdNewRecorder, break");
+			}
 			break;
 		}
 
@@ -1618,8 +1630,15 @@ void doRecorderCardRoutines() {
 
 		// Otherwise, move on
 		else {
+			if (stemExport.processStarted) {
+				D_PRINTLN("dRCR: moving to next recorder");
+			}
 			prevPointer = &recorder->next;
 		}
+	}
+
+	if (stemExport.processStarted) {
+		D_PRINTLN("dRCR: exit");
 	}
 
 	if (ALPHA_OR_BETA_VERSION && ENABLE_CLIP_CUTTING_DIAGNOSTICS && count >= 10 && !display->hasPopup()) {
