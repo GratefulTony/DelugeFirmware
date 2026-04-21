@@ -798,19 +798,28 @@ Error SampleRecorder::finalizeRecordedFile() {
 		}
 	}
 
-	D_PRINTLN("FR-J: finalizeRecordedFile ending");
+	D_PRINTLN("FR-J: finalizeRecordedFile ending, sample=%p", (void*)sample);
 
 	sample->numChannels = (action != MonitoringAction::NONE || recordingNumChannels == 1) ? 1 : 2;
+	D_PRINTLN("FR-K: numChannels set");
 	sample->lengthInSamples = dataLengthAfterAction / (sample->byteDepth * sample->numChannels);
+	D_PRINTLN("FR-L: lengthInSamples set");
 	sample->audioDataLengthBytes =
 	    sample->lengthInSamples
 	    * (sample->byteDepth
 	       * sample->numChannels); // Ensure whole number of samples (surely it already would be though?)
+	D_PRINTLN("FR-M: audioDataLengthBytes set");
 
 	if (sample->tempFilePathForRecording.isEmpty()) {
+		D_PRINTLN("FR-N: tempFilePath empty, setting sampleBrowser");
 		sampleBrowser.lastFilePathLoaded.set(&sample->filePath);
+		D_PRINTLN("FR-O: sampleBrowser set");
+	}
+	else {
+		D_PRINTLN("FR-N': tempFilePath non-empty");
 	}
 
+	D_PRINTLN("FR-P: returning Error::NONE");
 	return Error::NONE;
 }
 
