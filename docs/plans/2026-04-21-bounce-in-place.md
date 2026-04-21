@@ -239,349 +239,364 @@ If all four dispatch routes behave correctly, proceed. Otherwise fix dispatch be
 
 ---
 
-## Phase 2 — Single-clip bounce (CLIP scope end-to-end)
+## Phase 2 — Single-clip bounce via StemExport hooks (REVISED)
 
-End-of-phase hardware test: bounce a single non-empty synth clip in a track with only that one clip; confirm source clip is replaced by a new audio clip on a new audio track, playback is audibly identical except reverb (still applied via live send).
+### Background
 
-### Task 2.1: Implement render phase — stem export orchestration
+The first attempt at Phase 2 hand-rolled the stem-export state machine inside `bounceInPlace` to render a single clip. That approach hit a sequence of hard-to-fix issues: wrong loop-length-to-stop-at, missing UI-mode management, `recordButtonPressed` guard skipping because of UI-mode ordering, hardfaults when `recordButtonPressed`'s side effects ran from the context-menu entry path, and a final hardfault even with the menu closed first. Each fix shifted the crash elsewhere because the code was fighting invariants maintained by the official `StemExport::startStemExportProcess`.
+
+Preserved history: the failed attempt is tagged `bounce-in-place-phase2-failed` in the repo. This phase takes a different approach.
+
+### New architecture
+
+Delegate to `StemExport::startStemExportProcess(CLIP)` — the known-good entry point used by the existing stem-export trigger (session_view.cpp:417 when holding SAVE + pressing record). Add three small hooks to `StemExport` so a caller can:
+
+1. **Restrict the export to a single clip** (instead of all non-empty session clips).
+2. **Read back the full WAV path** of the produced file.
+3. **Suppress the "done stem export" context menu** at the tail of `startStemExportProcess`, since we want to do our own swap work after the export finishes.
+
+All three hooks are single fields + a few `if` guards. Minimal surface change to `StemExport`.
+
+End-of-phase hardware test: bounce a single non-empty synth clip in a track with only that one clip; confirm source clip is replaced by a new audio clip on a new audio track adjacent to the source, playback audibly matches source (minus reverb — Phase 2.5 fix).
+
+### Task 2.1: Add `StemExport` hooks
 
 **Files:**
-- Modify: `src/deluge/gui/views/session_view.cpp` — flesh out `bounceInPlace` CLIP path
+- Modify: `src/deluge/processing/stem_export/stem_export.h` — add three public fields
+- Modify: `src/deluge/processing/stem_export/stem_export.cpp` — initialize them, honor `restrictToClip` in `disarmAllClipsForStemExport`, honor `skipDoneContextMenu` in `finishStemExportProcess`
+- Modify: `src/deluge/model/sample/sample_recorder.cpp` — populate `lastExportedWavPath` at the point where the full file path is constructed
 
-**Step 1: Add required includes**
+**Step 1: Add the three fields**
 
-At the top of `session_view.cpp`, after existing includes, ensure these are present:
+In `stem_export.h`, in the public section of `class StemExport`, near the other export-config fields:
 
 ```cpp
-#include "processing/stem_export/stem_export.h"
-#include "gui/ui/audio_recorder.h"
-#include "model/clip/audio_clip.h"
-#include "processing/audio_output.h"
-#include "modulation/params/param.h"
-#include "modulation/params/param_set.h"
+// Bounce-in-place hooks
+Clip* restrictToClip = nullptr;       // if set, disarmAllClipsForStemExport marks only this clip
+String lastExportedWavPath;           // populated by SampleRecorder when stem WAV is created
+bool skipDoneContextMenu = false;     // if true, finishStemExportProcess does NOT open doneStemExport menu
 ```
 
-**Step 2: Replace the stub with the CLIP-scope render phase**
+**Step 2: Initialize in constructor**
 
-Replace the `bounceInPlace` body:
+In `stem_export.cpp`, `StemExport::StemExport()` constructor, set:
+
+```cpp
+restrictToClip = nullptr;
+skipDoneContextMenu = false;
+// lastExportedWavPath is a String, default-constructed empty
+```
+
+**Step 3: Honor `restrictToClip` in `disarmAllClipsForStemExport`**
+
+Current logic (stem_export.cpp around line 416-452): iterate all session clips; if non-empty and not MIDI/CV, set `exportStem=true` and increment `totalNumStemsToExport`.
+
+New logic: if `restrictToClip != nullptr`, set `exportStem=true` for THAT clip only (if it passes the same non-empty/non-MIDI/non-CV filter); all other clips get `exportStem=false`. Example:
+
+```cpp
+for (int32_t idxClip = 0; idxClip < totalNumClips; ++idxClip) {
+    Clip* clip = currentSong->sessionClips.getClipAtIndex(idxClip);
+    if (clip != nullptr) {
+        OutputType outputType = clip->output->type;
+        bool qualifies = !clip->isEmpty(false) && outputType != OutputType::MIDI_OUT && outputType != OutputType::CV;
+        bool isTarget = (restrictToClip == nullptr) || (clip == restrictToClip);
+        if (qualifies && isTarget) {
+            clip->exportStem = true;
+            totalNumStemsToExport++;
+        } else {
+            clip->exportStem = false;
+        }
+        // ... rest of existing loop body unchanged (activeIfNoSoloBeforeStemExport, etc.) ...
+    }
+}
+```
+
+**Step 4: Honor `skipDoneContextMenu` in `finishStemExportProcess`**
+
+Current (stem_export.cpp:727-755) opens `doneStemExport` context menu after export. Add a guard:
+
+```cpp
+void StemExport::finishStemExportProcess(StemExportType stemExportType, int32_t elementsProcessed) {
+    // ... existing cleanup code ...
+
+    if (!skipDoneContextMenu) {
+        bool available = context_menu::doneStemExport.setupAndCheckAvailability();
+        if (available) {
+            display->setNextTransitionDirection(1);
+            openUI(&context_menu::doneStemExport);
+        }
+    }
+
+    // ... rest of existing function ...
+}
+```
+
+**Step 5: Populate `lastExportedWavPath` from `sample_recorder.cpp`**
+
+At sample_recorder.cpp:431 (where `stemExport.getUnusedStemRecordingFilePath(&filePath, folderID)` is called), after the successful result and after `filePathCreated.set(...)` has stored the path (around line 465-470 in the working version), copy the path into the stemExport field. Specifically, in the branch where `stemExport.processStarted` is true, after `filePathCreated` is set, add:
+
+```cpp
+if (stemExport.processStarted) {
+    stemExport.lastExportedWavPath.set(filePathCreated.get());
+}
+```
+
+Place this AFTER `filePathCreated.set(...)` calls and BEFORE `createFile`. That way on successful recording setup, the full path is captured.
+
+**Step 6: Commit**
+
+```bash
+git add src/deluge/processing/stem_export/stem_export.h src/deluge/processing/stem_export/stem_export.cpp src/deluge/model/sample/sample_recorder.cpp
+git commit -m "feat: add bounce-in-place hooks to StemExport"
+```
+
+---
+
+### Task 2.2: Implement `bounceInPlace(CLIP)` via the hooks
+
+**Files:**
+- Modify: `src/deluge/gui/views/session_view.cpp` — replace the stub `bounceInPlace` body
+
+**Step 1: Replace `bounceInPlace` with the delegated version**
+
+Complete replacement for `bounceInPlace`:
 
 ```cpp
 void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
-	if (!clip || clip->type == ClipType::NONE) {
-		return;
-	}
+    if (!clip) {
+        return;
+    }
 
-	// Precondition: MIDI/CV can't be bounced
-	OutputType outType = clip->output->type;
-	if (outType == OutputType::MIDI_OUT || outType == OutputType::CV) {
-		display->displayPopup(l10n::get(l10n::String::STRING_FOR_CANT_CONVERT_TYPE));
-		return;
-	}
+    // Precondition: MIDI/CV can't be bounced
+    OutputType outType = clip->output->type;
+    if (outType == OutputType::MIDI_OUT || outType == OutputType::CV) {
+        display->displayPopup(l10n::get(l10n::String::STRING_FOR_CANT_CONVERT_TYPE));
+        return;
+    }
+    if (playbackHandler.recording == RecordingMode::ARRANGEMENT) {
+        display->displayPopup(l10n::get(l10n::String::STRING_FOR_RECORDING_TO_ARRANGEMENT));
+        return;
+    }
 
-	// Precondition: not already recording arrangement
-	if (playbackHandler.recording == RecordingMode::ARRANGEMENT) {
-		display->displayPopup(l10n::get(l10n::String::STRING_FOR_RECORDING_TO_ARRANGEMENT));
-		return;
-	}
+    // Phase 2 POC: only CLIP scope
+    if (scope != BounceScope::CLIP) {
+        display->displayPopup("Track bounce not yet impl");
+        return;
+    }
 
-	// Save stemExport state for restoration
-	bool savedIncludeSongFX = stemExport.includeSongFX;
-	bool savedRenderOffline = stemExport.renderOffline;
-	bool savedAllowNormalization = stemExport.allowNormalization;
+    int32_t clipIndex = currentSong->sessionClips.getIndexForClip(clip);
+    if (clipIndex < 0) {
+        return;
+    }
 
-	// Configure stem export for bounce
-	stemExport.includeSongFX = false;
-	stemExport.renderOffline = true;
-	stemExport.allowNormalization = false;
-	stemExport.currentStemExportType = StemExportType::CLIP;
+    // Save state we will mutate on StemExport
+    bool savedIncludeSongFX = stemExport.includeSongFX;
+    bool savedRenderOffline = stemExport.renderOffline;
+    bool savedAllowNormalization = stemExport.allowNormalization;
+    bool savedExportToSilence = stemExport.exportToSilence;
 
-	if (scope == BounceScope::CLIP) {
-		int32_t clipIndex = currentSong->sessionClips.getIndexForClip(clip);
-		if (clipIndex < 0) {
-			goto restore;
-		}
+    // Configure for bounce
+    stemExport.includeSongFX = false;
+    stemExport.renderOffline = true;
+    stemExport.allowNormalization = false;
+    stemExport.exportToSilence = false;
+    stemExport.restrictToClip = clip;
+    stemExport.skipDoneContextMenu = true;
+    stemExport.lastExportedWavPath.clear();
 
-		// Prepare all clips: disarm + mark only target with exportStem
-		int32_t totalClips = stemExport.disarmAllClipsForStemExport();
-		for (int32_t i = 0; i < totalClips; i++) {
-			Clip* c = currentSong->sessionClips.getClipAtIndex(i);
-			if (c) {
-				c->exportStem = (c == clip);
-			}
-		}
+    // Snapshot reverb send (on source output's backed-up param manager) before starting the export.
+    int32_t sourceReverbSend = 0;
+    {
+        ParamManager* pm = currentSong->getBackedUpParamManagerForExactClip(
+            (ModControllableAudio*)clip->output->toModControllable(), nullptr);
+        if (pm && pm->containsAnyParamCollectionsIncludingExpression()) {
+            UnpatchedParamSet* ups = pm->getUnpatchedParamSet();
+            sourceReverbSend = ups->getValue(deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT);
+        }
+    }
 
-		// Set loop length + marker for the target clip
-		stemExport.getLoopEndPointInSamplesForAudioFile(clip->loopLength);
+    // Drive the full stem-export state machine. Blocks (via yield) until export completes.
+    // On exit, stemExport.lastExportedWavPath holds the absolute path of the rendered WAV.
+    stemExport.startStemExportProcess(StemExportType::CLIP);
 
-		// Kick off the stem render
-		bool started = stemExport.startCurrentStemExport(
-		    StemExportType::CLIP, clip->output, clip->activeIfNoSolo, clipIndex, true);
+    // Copy WAV path out before resetting hooks
+    String wavPath;
+    wavPath.set(&stemExport.lastExportedWavPath);
 
-		if (!started) {
-			stemExport.restoreAllClipMutes(totalClips);
-			goto restore;
-		}
+    // Reset stemExport hooks and restore mutated flags
+    stemExport.restrictToClip = nullptr;
+    stemExport.skipDoneContextMenu = false;
+    stemExport.lastExportedWavPath.clear();
+    stemExport.includeSongFX = savedIncludeSongFX;
+    stemExport.renderOffline = savedRenderOffline;
+    stemExport.allowNormalization = savedAllowNormalization;
+    stemExport.exportToSilence = savedExportToSilence;
 
-		// Yield until render completes (same predicate stem export uses internally)
-		yield([]() {
-			if (stemExport.stopRecording) {
-				stemExport.stopOutputRecording();
-			}
-			return !(playbackHandler.recording != RecordingMode::OFF
-			         || audioRecorder.recordingSource > AudioInputChannel::NONE
-			         || playbackHandler.isEitherClockActive());
-		});
+    if (wavPath.isEmpty()) {
+        // Export was cancelled, failed, or produced no file
+        display->displayError(Error::FILE_UNREADABLE);
+        return;
+    }
 
-		// TODO (next task): create AudioOutput + AudioClip + swap
-		display->displayPopup(stemExport.wavFileNameForStemExport.get());
+    // --- Swap phase ---
 
-		stemExport.restoreAllClipMutes(totalClips);
-	}
-	else {
-		display->displayPopup("Track bounce not yet impl");
-	}
+    // Create new AudioOutput (standalone — source output might keep other clips)
+    AudioOutput* newOutput = currentSong->createNewAudioOutput();
+    if (!newOutput) {
+        display->displayError(Error::INSUFFICIENT_RAM);
+        return;
+    }
+    newOutput->colour = clip->output->colour;
 
-restore:
-	stemExport.includeSongFX = savedIncludeSongFX;
-	stemExport.renderOffline = savedRenderOffline;
-	stemExport.allowNormalization = savedAllowNormalization;
+    // Splice newOutput into the output list just BEFORE source so it appears one column to the right.
+    // (Mirrors the pattern in SessionView::gridCreateClip's synth-clone branch.)
+    {
+        Output** p = &currentSong->firstOutput;
+        while (*p && *p != newOutput) {
+            p = &(*p)->next;
+        }
+        if (*p == newOutput) {
+            *p = newOutput->next;
+        }
+        Output** q = &currentSong->firstOutput;
+        while (*q && *q != clip->output) {
+            q = &(*q)->next;
+        }
+        newOutput->next = *q;
+        *q = newOutput;
+    }
+
+    // Copy reverb send to new AudioOutput
+    {
+        ParamManager* pmNew = currentSong->getBackedUpParamManagerForExactClip(
+            (ModControllableAudio*)newOutput->toModControllable(), nullptr);
+        if (pmNew && pmNew->containsAnyParamCollectionsIncludingExpression()) {
+            UnpatchedParamSet* upsNew = pmNew->getUnpatchedParamSet();
+            upsNew->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT]
+                .setCurrentValueBasicForSetup(sourceReverbSend);
+        }
+    }
+
+    // Allocate and build new AudioClip
+    void* clipMem = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(AudioClip));
+    if (!clipMem) {
+        currentSong->deleteOutputThatIsInMainList(newOutput);
+        display->displayError(Error::INSUFFICIENT_RAM);
+        return;
+    }
+    AudioClip* newClip = new (clipMem) AudioClip();
+    newClip->cloneFrom(clip);
+    newClip->colourOffset = clip->colourOffset;
+
+    char modelStackMemory[MODEL_STACK_MAX_SIZE];
+    ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
+    Error setErr = newClip->setOutput(modelStack->addTimelineCounter(newClip), newOutput);
+    if (setErr != Error::NONE) {
+        newClip->~AudioClip();
+        delugeDealloc(clipMem);
+        currentSong->deleteOutputThatIsInMainList(newOutput);
+        display->displayError(setErr);
+        return;
+    }
+
+    // Load the rendered WAV as the new clip's sample
+    newClip->sampleHolder.filePath.set(wavPath.get());
+    Error sampleErr = newClip->sampleHolder.loadFile(false, false, true);
+    if (sampleErr != Error::NONE) {
+        newClip->~AudioClip();
+        delugeDealloc(clipMem);
+        currentSong->deleteOutputThatIsInMainList(newOutput);
+        display->displayError(sampleErr);
+        return;
+    }
+    newClip->name.set(newClip->sampleHolder.filePath.get());
+
+    // Transfer active/mute state to the new clip (source's state is still valid — startStemExportProcess
+    // restored mutes at the end via its existing restoreAllClipMutes call).
+    newClip->activeIfNoSolo = clip->activeIfNoSolo;
+    newClip->activeIfNoSoloBeforeStemExport = clip->activeIfNoSoloBeforeStemExport;
+    if (clip->soloingInSessionMode) {
+        session.unsoloClip(clip);
+    }
+
+    Output* sourceOutput = clip->output;
+
+    currentSong->swapClips(newClip, clip, clipIndex);
+
+    if (currentSong->getClipWithOutput(sourceOutput) == nullptr) {
+        currentSong->deleteOutputThatIsInMainList(sourceOutput);
+    }
+
+    view.setActiveModControllableTimelineCounter(newClip);
+    view.displayOutputName(newClip->output, true, newClip);
+    requestRendering(this, 1 << selectedClipYDisplay, 1 << selectedClipYDisplay);
 }
 ```
+
+Notes:
+- No custom yield, no hand-rolled state-machine management. `startStemExportProcess` handles `stopPlayback`, `recordButtonPressed`, `enterUIMode(UI_MODE_STEM_EXPORT)`, disarm, export, restore, recording-LED cleanup.
+- Required includes at the top of session_view.cpp: `processing/stem_export/stem_export.h`, `gui/ui/audio_recorder.h` (if not already), `model/clip/audio_clip.h`, `processing/audio_output.h`, `modulation/params/param.h`, `modulation/params/param_set.h`. Verify each is present; add only what's missing.
+
+**Step 2: Ensure ClipSettingsMenu closes BEFORE calling bounceInPlace**
+
+The existing `ClipSettingsMenu::acceptCurrentOption` currently returns `false` which closes the menu after `bounceInPlace` returns. For this phase, closing the menu first is safer (the known-good stem-export trigger runs with session view active, not with an overlay). Update clip_settings.cpp's acceptCurrentOption so the bounce dispatch closes the menu first:
+
+```cpp
+if (option == 2) {
+    Clip* clipToBounce = clip;
+    display->setNextTransitionDirection(-1);
+    close();
+    sessionView.bounceInPlace(clipToBounce, Scope::CLIP);
+    return true;
+}
+```
+
+And same for TRACK scope (will popup "not yet impl" for Phase 2).
 
 **Step 3: Commit**
 
 ```bash
-git add src/deluge/gui/views/session_view.cpp
-git commit -m "feat: bounce CLIP scope — render phase via StemExport"
+git add src/deluge/gui/views/session_view.cpp src/deluge/gui/context_menu/clip_settings/clip_settings.cpp
+git commit -m "feat: bounce CLIP scope — delegate to startStemExportProcess"
 ```
 
 ---
 
-### Task 2.2: Create new AudioOutput with reverb send copied from source
+### Task 2.3: Build + hardware test
 
-**Files:**
-- Modify: `src/deluge/gui/views/session_view.cpp`
-
-**Step 1: Replace the `TODO` block with AudioOutput creation**
-
-Replace the line `display->displayPopup(stemExport.wavFileNameForStemExport.get());` (and the adjacent TODO comment) with:
-
-```cpp
-		// Capture WAV path before state bleeds elsewhere
-		String wavPath;
-		wavPath.set(&stemExport.wavFileNameForStemExport);
-
-		// Snapshot source reverb-send amount before creating new output
-		int32_t sourceReverbSend = 0;
-		{
-			ParamManagerForTimeline* pm = currentSong->getBackedUpParamManagerForExactClip(
-			    (ModControllableAudio*)clip->output->toModControllable(), nullptr);
-			if (pm && pm->containsAnyParamCollectionsIncludingExpression()) {
-				UnpatchedParamSet* ups = pm->getUnpatchedParamSet();
-				sourceReverbSend = ups->getValue(deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT);
-			}
-		}
-
-		// Create new AudioOutput (standalone for CLIP scope — source output kept for any other clips)
-		AudioOutput* newOutput = currentSong->createNewAudioOutput();
-		if (!newOutput) {
-			display->displayError(Error::INSUFFICIENT_RAM);
-			stemExport.restoreAllClipMutes(totalClips);
-			goto restore;
-		}
-		newOutput->colour = clip->output->colour;
-
-		// Splice newOutput into the output list just BEFORE the source output, so the new
-		// audio column appears one column to the right of the source in grid view.
-		// Mirrors the pattern in SessionView::gridCreateClip's synth-clone branch.
-		{
-			// First, unlink newOutput from wherever createNewAudioOutput put it (typically tail)
-			Output** p = &currentSong->firstOutput;
-			while (*p && *p != newOutput) {
-				p = &(*p)->next;
-			}
-			if (*p == newOutput) {
-				*p = newOutput->next;
-			}
-			// Now find source and insert newOutput just before it
-			Output** q = &currentSong->firstOutput;
-			while (*q && *q != clip->output) {
-				q = &(*q)->next;
-			}
-			newOutput->next = *q;
-			*q = newOutput;
-		}
-
-		// Copy reverb send onto new AudioOutput's param manager
-		{
-			ParamManagerForTimeline* pmNew = currentSong->getBackedUpParamManagerForExactClip(
-			    (ModControllableAudio*)newOutput->toModControllable(), nullptr);
-			if (pmNew && pmNew->containsAnyParamCollectionsIncludingExpression()) {
-				UnpatchedParamSet* upsNew = pmNew->getUnpatchedParamSet();
-				upsNew->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT]
-				    .setCurrentValueBasicForSetup(sourceReverbSend);
-			}
-		}
-
-		// TODO (next task): create AudioClip and swap into session
-		display->displayPopup(wavPath.get());
-
-		stemExport.restoreAllClipMutes(totalClips);
-```
-
-Notes for the implementer:
-- If `getBackedUpParamManagerForExactClip` isn't the right accessor, check how `View::displayOutputName` / existing audio-clip creation paths reach the unpatched param set for a newly created `AudioOutput`. The exact API name varies; what you want is the `UnpatchedParamSet*` for the new output's ModControllable.
-- If the new output's param manager is zero-initialised, `setCurrentValueBasicForSetup` may be the wrong setter — compare against how `createNewAudioOutput` + `GlobalEffectableForClip::initParamsForAudioClip` set other unpatched params, and follow that pattern.
-
-**Step 2: Commit**
-
-```bash
-git add src/deluge/gui/views/session_view.cpp
-git commit -m "feat: bounce CLIP scope — create AudioOutput, copy reverb send"
-```
-
----
-
-### Task 2.3: Create AudioClip and swap into session
-
-**Files:**
-- Modify: `src/deluge/gui/views/session_view.cpp`
-
-**Step 1: Replace the second TODO block with the swap**
-
-Replace the lines from `// TODO (next task): create AudioClip…` through `display->displayPopup(wavPath.get());` with:
-
-```cpp
-		// Allocate AudioClip
-		void* clipMem = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(AudioClip));
-		if (!clipMem) {
-			// Roll back: delete the new AudioOutput we just created
-			currentSong->deleteOutput(newOutput);
-			display->displayError(Error::INSUFFICIENT_RAM);
-			stemExport.restoreAllClipMutes(totalClips);
-			goto restore;
-		}
-		AudioClip* newClip = new (clipMem) AudioClip();
-		newClip->cloneFrom(clip);           // gets loopLength, section, colour offset etc.
-		newClip->colourOffset = clip->colourOffset;
-
-		// Hook to timeline + new output
-		char modelStackMemory[MODEL_STACK_MAX_SIZE];
-		ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
-		newClip->setOutput(modelStack->addTimelineCounter(newClip), newOutput);
-
-		// Load the rendered WAV as this clip's sample
-		Error sampleErr = newClip->sampleHolder.loadFileRead(wavPath.get(), currentSong);
-		if (sampleErr != Error::NONE) {
-			newClip->~AudioClip();
-			delugeDealloc(clipMem);
-			currentSong->deleteOutput(newOutput);
-			display->displayError(sampleErr);
-			stemExport.restoreAllClipMutes(totalClips);
-			goto restore;
-		}
-
-		// If playback is active and source was active, keep audio clip playing
-		if (playbackHandler.playbackState && currentSong->isClipActive(clip)) {
-			newClip->activeIfNoSolo = clip->activeIfNoSolo;
-			if (clip->soloingInSessionMode) {
-				session.unsoloClip(clip);
-			}
-		}
-
-		// Swap in the session
-		currentSong->swapClips(newClip, clip, clipIndex);
-
-		// If source instrument has no remaining clips, delete it
-		if (currentSong->getClipWithOutput(clip->output) == nullptr) {
-			currentSong->deleteOutput(clip->output);
-		}
-
-		view.setActiveModControllableTimelineCounter(newClip);
-		view.displayOutputName(newClip->output, true, newClip);
-		requestRendering(this, 1 << selectedClipYDisplay, 1 << selectedClipYDisplay);
-
-		stemExport.restoreAllClipMutes(totalClips);
-```
-
-Exact API names to verify while implementing:
-- `AudioClip::cloneFrom` / constructor — match what `Song::replaceInstrumentClipWithAudioClip` (song.cpp:5619) does for a newly created AudioClip.
-- `sampleHolder.loadFileRead` — confirm the method name and signature; if the AudioClip's sample-loading API is different, mirror what the sample browser or audio-clip-from-recording path uses.
-- `currentSong->swapClips` — confirm signature; this should exist (it's what `replaceInstrumentClipWithAudioClip` calls internally).
-- `deleteOutput` — verify the right function to remove an empty source Output.
-
-Do **not** guess — open `song.cpp` around line 5619 (`replaceInstrumentClipWithAudioClip`) and mirror its exact API calls.
-
-**Step 2: Commit**
-
-```bash
-git add src/deluge/gui/views/session_view.cpp
-git commit -m "feat: bounce CLIP scope — create AudioClip and swap into session"
-```
-
----
-
-### Task 2.4: Phase 2 build, format, flash, hardware test
-
-**Step 1: Format**
-
-```bash
-./dbt format
-```
-
-**Step 2: Build**
+**Step 1: Build and format**
 
 ```bash
 ./dbt build release
+./dbt format
 ```
 
-Expected: clean build. If anything fails, fix before proceeding (most likely culprits: wrong param-manager accessor, wrong clone method, missing include). Consult the open-questions list in the design doc.
+Commit format changes if any: `git add -u && git commit -m "chore: format"`.
 
-**Step 3: Commit formatting changes (if any)**
-
-```bash
-git add -u && git commit -m "chore: format"   # only if format changed anything
-```
-
-**Step 4: Flash**
+**Step 2: Flash**
 
 ```bash
 ./dbt loadfw
 ```
 
-**Step 5: Hardware verification**
+**Step 3: Hardware verification**
 
-- Create a new song. Default template has one synth track with one clip.
-- Add some notes to the synth clip.
-- Add a small reverb send on the synth track (mod encoder while holding clip).
-- In grid song view, hold the synth clip pad + SELECT → select "Bounce Clip".
-- Watch: "Exporting stem 1 of 1" popup should appear briefly, then the synth clip's square should become an audio clip.
-- Press play. The audio should sound substantially identical to the source (including the live reverb tail, since reverb send was copied to the new AudioOutput).
-- Press the new audio clip pad + SELECT → verify it's an AudioClip (menu shows `Bounce Clip`, `Bounce Track`, `Clip Mode`, `Clip Name`, no `Convert to Audio`).
-- Verify the source synth instrument is gone from the output list (enter output menu / scroll, no synth track left).
+Setup: new song, synth track with ONE clip containing a few notes. Add a small reverb send on the synth.
 
-If any of these fail, don't proceed to Phase 3 — diagnose first. Most likely issues:
-- Reverb send not copied correctly → re-check the param manager accessor.
-- Source instrument not deleted → `getClipWithOutput` might be returning the new clip; verify it iterates only real clips, not the freshly swapped one.
-- Audio sounds at wrong level → check `AudioOutput` compressor default (open question #1 in design doc); may need explicit bypass.
+Procedure:
+- Grid song view → hold synth clip pad + SELECT → ClipSettings → "Bounce Clip".
+- Expected: "Exporting stem 1 of 1" popup briefly (the standard stem-export popup is reused). After it finishes, the clip is replaced by an audio clip in a new adjacent column (one to the right of the original synth column). Source synth track is deleted (no other clips were using it).
+- Press play — audio clip plays, sounds substantially like the source (minus reverb — known Phase 2.5 deferral).
 
-**Step 6 (if issues): bypass AudioOutput compressor explicitly**
+**Expected known issues**:
+- Reverb send on synth source may not be copied through — the param-manager lookup path used here is correct for AudioOutput/Kit but returns nullptr for SoundInstrument with live clips. Phase 2.5 fix will add a synth-specific lookup.
+- If gain sounds quieter than source, AudioOutput's default `UNPATCHED_VOLUME` may need explicit adjustment.
 
-If level is wrong, after creating `newOutput` add:
+**If it fails**:
+- Crash: same LED-decoding request as before. If we're now going through `startStemExportProcess` unchanged, a crash in this path is very unlikely — existing stem export trigger works reliably.
+- "file unreadable" popup: `lastExportedWavPath` didn't get populated. Check `sample_recorder.cpp`'s set-point for the hook and verify it runs during our CLIP-scope export.
+- Missing audio: check that `restrictToClip` actually restricts the export (the marked clip is the one that gets exported).
 
-```cpp
-		// Explicit bypass to match source level (compressor default may not be transparent)
-		if (pmNew && pmNew->containsAnyParamCollectionsIncludingExpression()) {
-			UnpatchedParamSet* upsNew = pmNew->getUnpatchedParamSet();
-			upsNew->params[deluge::modulation::params::UNPATCHED_COMPRESSOR_THRESHOLD]
-			    .setCurrentValueBasicForSetup(0);
-			// …and any other compressor params as needed
-		}
-```
-
-Only add this if the hardware test reveals a gain mismatch.
-
----
 
 ## Phase 3 — Whole-track bounce (TRACK scope)
 
