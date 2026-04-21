@@ -1739,6 +1739,7 @@ errorAfterAllocation:
 
 // PLEASE don't call this if there's any chance you might be in the SD card routine...
 void discardRecorder(SampleRecorder* recorder) {
+	D_PRINTLN("discardRecorder: enter recorder=%p", (void*)recorder);
 	int32_t count = 0;
 	SampleRecorder** prevPointer = &firstRecorder;
 	while (*prevPointer) {
@@ -1755,8 +1756,11 @@ void discardRecorder(SampleRecorder* recorder) {
 		prevPointer = &(*prevPointer)->next;
 	}
 
+	D_PRINTLN("discardRecorder: pre-dtor");
 	recorder->~SampleRecorder();
+	D_PRINTLN("discardRecorder: pre-dealloc");
 	delugeDealloc(recorder);
+	D_PRINTLN("discardRecorder: done");
 }
 
 bool isAnyInternalRecordingHappening() {

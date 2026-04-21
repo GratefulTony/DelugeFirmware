@@ -192,6 +192,10 @@ void AudioRecorder::endRecordingSoon(int32_t buttonLatency) {
 }
 
 void AudioRecorder::slowRoutine() {
+	// Log EVERY entry when in stem export, even if src=NONE (to detect task firing)
+	if (stemExport.processStarted) {
+		D_PRINTLN("AR::slowRoutine: entry src=%d", (int)recordingSource);
+	}
 	if (recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
 		D_PRINTLN("AR::slowRoutine: src=%d, recorder=%d, status=%d", (int)recordingSource, (int)(recorder != nullptr),
 		          recorder ? (int)recorder->status : -99);
