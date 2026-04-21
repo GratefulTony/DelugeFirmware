@@ -22,6 +22,7 @@
 #include "hid/button.h"
 #include "model/song/song.h"
 #include "storage/flash_storage.h"
+#include "util/d_string.h"
 
 class Editor;
 class InstrumentClip;
@@ -161,8 +162,14 @@ public:
 
 	enum class BounceScope { CLIP, TRACK };
 
-	// bounce synth/kit/audio clip to new audio clip through current FX chain
+	// bounce synth/kit/audio clip to new audio clip through current FX chain.
+	// Renders the clip to a WAV via stem export, then arms a deferred callback
+	// that inserts a new AudioOutput + AudioClip into the session. The insert
+	// is deferred so it runs from a different call path than the render,
+	// avoiding a layout-sensitive latent race in the SD finalize path.
 	void bounceInPlace(Clip* clip, BounceScope scope);
+	bool hasPendingBounceAddTrack() const { return pendingBounceSource_ != nullptr; }
+	void completePendingBounceAddTrack();
 
 	// pulse selected clip in grid view
 	void gridPulseSelectedClip();
@@ -313,6 +320,12 @@ private:
 	RGB gridSelectedClipRenderedColour;     // last pulse colour we rendered
 	bool blendDirection = false;            // direction we're blending towards
 	int32_t progress = 0;                   // pulse blend slider position
+
+	// Pending-state for deferred bounce add-track (see bounceInPlace).
+	Clip* pendingBounceSource_ = nullptr;
+	int32_t pendingBounceSourceIndex_ = -1;
+	int32_t pendingBounceReverbSend_ = 0;
+	String pendingBounceWavPath_;
 
 	static constexpr int32_t kMinProgress = 1;                           // min position to reach in blend slider
 	static constexpr int32_t kMaxProgressFull = (65535 / 100) * 60;      // max position to reach for unmuted clip

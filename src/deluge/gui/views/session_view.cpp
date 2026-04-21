@@ -1216,6 +1216,11 @@ void SessionView::sectionPadAction(uint8_t y, bool on) {
 }
 
 ActionResult SessionView::timerCallback() {
+	if (pendingBounceSource_ != nullptr) {
+		completePendingBounceAddTrack();
+		return ActionResult::DEALT_WITH;
+	}
+
 	switch (currentUIMode) {
 
 	case UI_MODE_HOLDING_SECTION_PAD:
@@ -1877,10 +1882,37 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 		return;
 	}
 
-	// --- Add-track phase ---
-	// Create a new AudioOutput adjacent to the source, then an AudioClip on it that plays
-	// the rendered WAV. We insert the new clip into sessionClips right after the source —
-	// the source clip and its output are left intact.
+	// Arm deferred add-track. Running the add-track synchronously here compiles it
+	// into this same function body as the render path and has been tickling a
+	// layout-sensitive race in the SD finalize code. Running it from a timer
+	// callback (different call stack, different caller, separately-compiled entry
+	// path) reliably avoids that.
+	pendingBounceSource_ = clip;
+	pendingBounceSourceIndex_ = clipIndex;
+	pendingBounceReverbSend_ = sourceReverbSend;
+	pendingBounceWavPath_.set(&wavPath);
+	uiTimerManager.setTimer(TimerName::UI_SPECIFIC, 1);
+}
+
+[[gnu::noinline]] void SessionView::completePendingBounceAddTrack() {
+	Clip* clip = pendingBounceSource_;
+	int32_t clipIndex = pendingBounceSourceIndex_;
+	int32_t sourceReverbSend = pendingBounceReverbSend_;
+	String wavPath;
+	wavPath.set(&pendingBounceWavPath_);
+
+	pendingBounceSource_ = nullptr;
+	pendingBounceSourceIndex_ = -1;
+	pendingBounceReverbSend_ = 0;
+	pendingBounceWavPath_.clear();
+
+	if (!clip || wavPath.isEmpty()) {
+		return;
+	}
+
+	// Create a new AudioOutput adjacent to source, then an AudioClip on it that plays
+	// the rendered WAV. The new clip is inserted into sessionClips right after source —
+	// source clip and its output are left intact.
 
 	AudioOutput* newOutput = currentSong->createNewAudioOutput();
 	if (!newOutput) {
@@ -1952,8 +1984,7 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 
 	newClip->activeIfNoSolo = clip->activeIfNoSolo;
 
-	// Insert newClip into the session clip list just after the source clip. Source clip
-	// and output remain untouched.
+	// Insert newClip into the session clip list just after the source clip.
 	int32_t insertIndex = clipIndex + 1;
 	if (currentSong->sessionClips.insertClipAtIndex(newClip, insertIndex) != Error::NONE) {
 		newClip->~AudioClip();
