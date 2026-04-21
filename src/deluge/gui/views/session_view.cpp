@@ -1834,7 +1834,7 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	stemExport.includeSongFX = true;
 	stemExport.renderOffline = true;
 	stemExport.allowNormalization = false;
-	stemExport.exportToSilence = true;
+	stemExport.exportToSilence = false;
 	stemExport.restrictToClip = clip;
 	stemExport.skipDoneContextMenu = true;
 	stemExport.lastExportedWavPath.clear();
