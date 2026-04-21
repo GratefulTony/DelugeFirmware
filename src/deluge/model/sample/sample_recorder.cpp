@@ -782,7 +782,8 @@ Error SampleRecorder::finalizeRecordedFile() {
 				loopEndSampleAsWrittenToFile = sample->fileLoopEndSamples;
 				updateDataLengthInFirstCluster(cluster);
 
-				D_PRINTLN("FR-G: pre-disk_write");
+				D_PRINTLN("FR-G: pre-disk_write data=%p sda=%u", (void*)cluster->data,
+				          (unsigned)firstSampleCluster->sdAddress);
 				// Write just that one first sector back to the card
 				disk_write(0, (BYTE*)cluster->data, firstSampleCluster->sdAddress, 1);
 				D_PRINTLN("FR-H: post-disk_write");
