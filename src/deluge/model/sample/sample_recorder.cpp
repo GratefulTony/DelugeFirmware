@@ -521,8 +521,10 @@ gotError:
 
 	// If we've actually finished recording...
 	if (status == RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
+		D_PRINTLN("cardRoutine: finishing writes, calling finalizeRecordedFile");
 		if (!hadCardError) {
 			error = finalizeRecordedFile();
+			D_PRINTLN("cardRoutine: finalizeRecordedFile returned err=%d", (int)error);
 			if (error != Error::NONE) {
 				hadCardError = true;
 				error = Error::SD_CARD;
@@ -540,6 +542,7 @@ gotError:
 		}
 		else {
 			status = autoDeleteWhenDone ? RecorderStatus::AWAITING_DELETION : RecorderStatus::COMPLETE;
+			D_PRINTLN("cardRoutine: status -> %d", (int)status);
 		}
 	}
 
@@ -725,6 +728,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 
 	// Or if no action or shifting was required...
 	else {
+		D_PRINTLN("FR-A: no-action branch");
 
 		// If we made the file too long, because we then compensated for button latency and are throwing away the last
 		// little bit, then truncate it
@@ -736,7 +740,9 @@ Error SampleRecorder::finalizeRecordedFile() {
 			Error error = truncateFileDownToSize(correctLength);
 		}
 
+		D_PRINTLN("FR-B: pre-close");
 		auto closed = this->file->close();
+		D_PRINTLN("FR-C: post-close ok=%d", (int)closed.has_value());
 		if (!closed) {
 			return Error::SD_CARD;
 		}
@@ -745,11 +751,14 @@ Error SampleRecorder::finalizeRecordedFile() {
 		// cluster (very likely; various reasons)
 		if (sample->audioDataLengthBytes != audioDataLengthBytesAsWrittenToFile
 		    || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile)) {
+			D_PRINTLN("FR-D: updating header");
 
 			// Update data length as written in first cluster
 			SampleCluster* firstSampleCluster = sample->clusters.getElement(0);
+			D_PRINTLN("FR-E: pre-getCluster");
 			Cluster* cluster =
 			    firstSampleCluster->getCluster(sample, 0, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
+			D_PRINTLN("FR-F: post-getCluster nn=%d", (int)(cluster != nullptr));
 			if (cluster) {
 
 				// Bug hunting - newly gotten Cluster
@@ -767,8 +776,10 @@ Error SampleRecorder::finalizeRecordedFile() {
 				loopEndSampleAsWrittenToFile = sample->fileLoopEndSamples;
 				updateDataLengthInFirstCluster(cluster);
 
+				D_PRINTLN("FR-G: pre-disk_write");
 				// Write just that one first sector back to the card
 				disk_write(0, (BYTE*)cluster->data, firstSampleCluster->sdAddress, 1);
+				D_PRINTLN("FR-H: post-disk_write");
 
 				// If that failed, well, that's a shame, but we don't need to do anything
 
@@ -779,9 +790,15 @@ Error SampleRecorder::finalizeRecordedFile() {
 				cluster->numReasonsHeldBySampleRecorder--;
 
 				audioFileManager.removeReasonFromCluster(*cluster, "E026");
+				D_PRINTLN("FR-I: header update done");
 			}
 		}
+		else {
+			D_PRINTLN("FR-D': header matches");
+		}
 	}
+
+	D_PRINTLN("FR-J: finalizeRecordedFile ending");
 
 	sample->numChannels = (action != MonitoringAction::NONE || recordingNumChannels == 1) ? 1 : 2;
 	sample->lengthInSamples = dataLengthAfterAction / (sample->byteDepth * sample->numChannels);

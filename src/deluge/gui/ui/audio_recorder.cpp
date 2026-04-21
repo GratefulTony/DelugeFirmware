@@ -27,6 +27,7 @@
 #include "hid/display/oled.h"
 #include "hid/led/indicator_leds.h"
 #include "hid/led/pad_leds.h"
+#include "io/debug/log.h"
 #include "model/action/action_logger.h"
 #include "model/clip/instrument_clip.h"
 #include "model/instrument/kit.h"
@@ -192,7 +193,10 @@ void AudioRecorder::endRecordingSoon(int32_t buttonLatency) {
 
 void AudioRecorder::slowRoutine() {
 	if (recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
+		D_PRINTLN("AR::slowRoutine: src=%d, recorder=%d, status=%d", (int)recordingSource, (int)(recorder != nullptr),
+		          recorder ? (int)recorder->status : -99);
 		if (recorder->status >= RecorderStatus::COMPLETE) {
+			D_PRINTLN("AR::slowRoutine: status COMPLETE, calling finishRecording");
 			indicator_leds::setLedState(IndicatorLED::RECORD, (playbackHandler.recording == RecordingMode::NORMAL));
 			finishRecording();
 		}
@@ -266,13 +270,16 @@ void AudioRecorder::process() {
 
 // Returns error code
 void AudioRecorder::finishRecording() {
+	D_PRINTLN("AR::finishRecording: pre-discard");
 	recorder->pointerHeldElsewhere = false;
 
 	AudioEngine::discardRecorder(recorder);
+	D_PRINTLN("AR::finishRecording: post-discard");
 
 	recorder = nullptr;
 	recordingSource = AudioInputChannel::NONE;
 	display->removeLoadingAnimation();
+	D_PRINTLN("AR::finishRecording: done");
 }
 
 ActionResult AudioRecorder::padAction(int32_t x, int32_t y, int32_t velocity) {
