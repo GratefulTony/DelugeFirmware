@@ -39,18 +39,17 @@ std::span<char const*> ClipSettingsMenu::getOptions() {
 	using enum l10n::String;
 	if (clip->type == ClipType::AUDIO) {
 		static const char* optionsls[] = {
-		    l10n::get(STRING_FOR_BOUNCE_CLIP),
-		    l10n::get(STRING_FOR_BOUNCE_TRACK),
 		    l10n::get(STRING_FOR_CLIP_MODE),
 		    l10n::get(STRING_FOR_CLIP_NAME),
+		    l10n::get(STRING_FOR_BOUNCE_CLIP),
+		    l10n::get(STRING_FOR_BOUNCE_TRACK),
 		};
 		return {optionsls, 4};
 	}
 	else {
 		static const char* optionsls[] = {
-		    l10n::get(STRING_FOR_CONVERT_TO_AUDIO), l10n::get(STRING_FOR_BOUNCE_CLIP),
-		    l10n::get(STRING_FOR_BOUNCE_TRACK),     l10n::get(STRING_FOR_CLIP_MODE),
-		    l10n::get(STRING_FOR_CLIP_NAME),
+		    l10n::get(STRING_FOR_CONVERT_TO_AUDIO), l10n::get(STRING_FOR_CLIP_MODE),    l10n::get(STRING_FOR_CLIP_NAME),
+		    l10n::get(STRING_FOR_BOUNCE_CLIP),      l10n::get(STRING_FOR_BOUNCE_TRACK),
 		};
 		return {optionsls, 5};
 	}
@@ -77,25 +76,25 @@ bool ClipSettingsMenu::acceptCurrentOption() {
 		option--; // normalise past Convert to Audio
 	}
 
-	// Now option is: 0=Bounce Clip, 1=Bounce Track, 2=Clip Mode, 3=Clip Name
+	// Now option is: 0=Clip Mode, 1=Clip Name, 2=Bounce Clip, 3=Bounce Track
 	if (option == 0) {
-		sessionView.bounceInPlace(clip, Scope::CLIP);
-		return false;
-	}
-	if (option == 1) {
-		sessionView.bounceInPlace(clip, Scope::TRACK);
-		return false;
-	}
-	if (option == 2) {
 		launchStyle.clip = clip;
 		launchStyle.setupAndCheckAvailability();
 		openUI(&launchStyle);
 		return true;
 	}
-	currentUIMode = UI_MODE_NONE;
-	renameClipUI.clip = clip;
-	openUI(&renameClipUI);
-	return true;
+	if (option == 1) {
+		currentUIMode = UI_MODE_NONE;
+		renameClipUI.clip = clip;
+		openUI(&renameClipUI);
+		return true;
+	}
+	if (option == 2) {
+		sessionView.bounceInPlace(clip, Scope::CLIP);
+		return false;
+	}
+	sessionView.bounceInPlace(clip, Scope::TRACK);
+	return false;
 }
 
 ActionResult ClipSettingsMenu::padAction(int32_t x, int32_t y, int32_t on) {
