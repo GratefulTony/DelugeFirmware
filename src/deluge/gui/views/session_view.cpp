@@ -1789,6 +1789,14 @@ void SessionView::resyncNewClip(Clip* newClip, ModelStackWithTimelineCounter* mo
 	}
 }
 
+void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
+	if (!clip) {
+		return;
+	}
+	char const* msg = (scope == BounceScope::CLIP) ? "Bounce clip (stub)" : "Bounce track (stub)";
+	display->displayPopup(msg);
+}
+
 void SessionView::replaceInstrumentClipWithAudioClip(Clip* clip) {
 	int32_t clipIndex = currentSong->sessionClips.getIndexForClip(clip);
 

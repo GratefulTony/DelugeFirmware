@@ -159,6 +159,11 @@ public:
 	// convert instrument clip to audio clip
 	void replaceInstrumentClipWithAudioClip(Clip* clip);
 
+	enum class BounceScope { CLIP, TRACK };
+
+	// bounce synth/kit/audio clip to new audio clip through current FX chain
+	void bounceInPlace(Clip* clip, BounceScope scope);
+
 	// pulse selected clip in grid view
 	void gridPulseSelectedClip();
 
