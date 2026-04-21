@@ -192,8 +192,14 @@ void AudioRecorder::endRecordingSoon(int32_t buttonLatency) {
 }
 
 void AudioRecorder::slowRoutine() {
-	// Unconditional log at every entry, every tick. Used to detect if this task fires at all.
 	D_PRINTLN("AR::slowRoutine ENTRY");
+	// While stem export is driving, it manages the recorder's lifecycle itself — calling
+	// finishRecording here causes a race with cardRoutine (which also uses the recorder and
+	// internally yields during SD operations). The destruction here can invalidate pointers
+	// cardRoutine is holding, leading to a hardfault when cardRoutine resumes.
+	if (stemExport.processStarted) {
+		return;
+	}
 	if (recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
 		D_PRINTLN("AR::slowRoutine: src=%d, recorder=%d, status=%d", (int)recordingSource, (int)(recorder != nullptr),
 		          recorder ? (int)recorder->status : -99);

@@ -365,15 +365,24 @@ int32_t StemExport::exportInstrumentStems(StemExportType stemExportType) {
 					continue;
 				}
 
-				// wait until recording is done and playback is turned off
+				// Wait until the recorder finishes writing. See exportClipStems for
+				// why we key on recorder->status and finalise the recorder ourselves.
 				yield([]() {
 					if (stemExport.stopRecording) {
 						stemExport.stopOutputRecording();
 					}
-					return !(playbackHandler.recording != RecordingMode::OFF
-					         || audioRecorder.recordingSource > AudioInputChannel::NONE
-					         || playbackHandler.isEitherClockActive());
+					if (!audioRecorder.recorder) {
+						return true;
+					}
+					return audioRecorder.recorder->status >= RecorderStatus::COMPLETE;
 				});
+
+				if (audioRecorder.recorder
+				    && audioRecorder.recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
+					indicator_leds::setLedState(IndicatorLED::RECORD,
+					                            (playbackHandler.recording == RecordingMode::NORMAL));
+					audioRecorder.finishRecording();
+				}
 
 				finishCurrentStemExport(stemExportType, output->mutedInArrangementMode);
 			}
@@ -410,15 +419,22 @@ int32_t StemExport::exportMixdownStem(StemExportType stemExportType) {
 		// so display progress
 		displayStemExportProgress(stemExportType);
 
-		// wait until recording is done and playback is turned off
+		// Wait until the recorder finishes writing. See exportClipStems for
+		// why we key on recorder->status and finalise the recorder ourselves.
 		yield([]() {
 			if (stemExport.stopRecording) {
 				stemExport.stopOutputRecording();
 			}
-			return !(playbackHandler.recording != RecordingMode::OFF
-			         || audioRecorder.recordingSource > AudioInputChannel::NONE
-			         || playbackHandler.isEitherClockActive());
+			if (!audioRecorder.recorder) {
+				return true;
+			}
+			return audioRecorder.recorder->status >= RecorderStatus::COMPLETE;
 		});
+
+		if (audioRecorder.recorder && audioRecorder.recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
+			indicator_leds::setLedState(IndicatorLED::RECORD, (playbackHandler.recording == RecordingMode::NORMAL));
+			audioRecorder.finishRecording();
+		}
 
 		// update number of stems exported
 		numStemsExported++;
@@ -546,36 +562,32 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 
 				D_PRINTLN("ECS3 preYield");
 
-				// wait until recording is done and playback is turned off
+				// Wait until the recorder has finished writing the file. We exit on
+				// recorder->status >= COMPLETE (and not on recordingSource clearing),
+				// because AR::slowRoutine is suppressed during stem export — the recorder
+				// finalize path must not run concurrently with cardRoutine. We dispose
+				// the recorder ourselves below.
 				yield([]() {
 					if (stemExport.stopRecording) {
 						stemExport.stopOutputRecording();
 					}
-					// Diag log. Cycles between 2 lines: one every 8192 iters shows recorder state,
-					// the next 8192 shows pos/target/type/processStarted.
-					static uint32_t yieldTickCounter = 0;
-					if ((yieldTickCounter & 0x3FFF) == 0) {
-						int stat = audioRecorder.recorder ? (int)audioRecorder.recorder->status : -99;
-						int src = (int)audioRecorder.recordingSource;
-						int clk = playbackHandler.isEitherClockActive() ? 1 : 0;
-						int icl = playbackHandler.isInternalClockActive() ? 1 : 0;
-						int sess = (currentPlaybackMode == &session) ? 1 : 0;
-						D_PRINTLN("yield: st=%d src=%d clk=%d icl=%d sess=%d", stat, src, clk, icl, sess);
+					if (!audioRecorder.recorder) {
+						return true;
 					}
-					else if ((yieldTickCounter & 0x3FFF) == 0x2000) {
-						int32_t pos = playbackHandler.lastSwungTickActioned;
-						int32_t target = stemExport.loopLengthToStopStemExport;
-						int type = (int)stemExport.currentStemExportType;
-						int procSt = stemExport.processStarted ? 1 : 0;
-						D_PRINTLN("yield: pos=%ld tgt=%ld type=%d ps=%d", (long)pos, (long)target, type, procSt);
-					}
-					yieldTickCounter++;
-					return !(playbackHandler.recording != RecordingMode::OFF
-					         || audioRecorder.recordingSource > AudioInputChannel::NONE
-					         || playbackHandler.isEitherClockActive());
+					return audioRecorder.recorder->status >= RecorderStatus::COMPLETE;
 				});
 
 				D_PRINTLN("ECS4 postYield");
+
+				// Manually finish the recording now that cardRoutine is done with it.
+				// This mirrors what AR::slowRoutine would normally do, but happens at a
+				// safe point where cardRoutine isn't mid-flight.
+				if (audioRecorder.recorder
+				    && audioRecorder.recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
+					indicator_leds::setLedState(IndicatorLED::RECORD,
+					                            (playbackHandler.recording == RecordingMode::NORMAL));
+					audioRecorder.finishRecording();
+				}
 
 				finishCurrentStemExport(stemExportType, clip->activeIfNoSolo);
 
@@ -691,17 +703,24 @@ int32_t StemExport::exportDrumStems(StemExportType stemExportType) {
 					continue;
 				}
 
-				// wait until recording is done and playback is turned off
+				// Wait until the recorder finishes writing. See exportClipStems for
+				// why we key on recorder->status and finalise the recorder ourselves.
 				yield([]() {
-					// if you haven't found silence yet and playback has stopped
-					// check for silence so you can stop recording
 					if (stemExport.stopRecording) {
 						stemExport.stopOutputRecording();
 					}
-					return !(playbackHandler.recording != RecordingMode::OFF
-					         || audioRecorder.recordingSource > AudioInputChannel::NONE
-					         || playbackHandler.isEitherClockActive());
+					if (!audioRecorder.recorder) {
+						return true;
+					}
+					return audioRecorder.recorder->status >= RecorderStatus::COMPLETE;
 				});
+
+				if (audioRecorder.recorder
+				    && audioRecorder.recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
+					indicator_leds::setLedState(IndicatorLED::RECORD,
+					                            (playbackHandler.recording == RecordingMode::NORMAL));
+					audioRecorder.finishRecording();
+				}
 
 				finishCurrentStemExport(stemExportType, thisNoteRow->muted);
 			}
