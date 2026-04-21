@@ -1826,13 +1826,12 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	bool savedExportToSilence = stemExport.exportToSilence;
 
 	// Configure for bounce.
-	// POC choice: includeSongFX=true + renderOffline=true matches the known-good default of the
-	// shipped stem-export feature. Recorder ends up in OFFLINE_OUTPUT mode which is fed by
-	// renderAudioForStemExport. Trade-off: the song's master FX (global compressor/EQ/reverb)
-	// get baked into the bounced audio. For POC this is acceptable — we can revisit once
-	// bouncing works end-to-end.
+	// includeSongFX=true + renderOffline=false: recorder in OUTPUT mode (normal real-time path).
+	// Ticks advance naturally through audio_engine's routine_ → renderAudio pipeline. The offline
+	// path doesn't appear to advance swung ticks in this usage (lastSwungTickActioned stays 0).
+	// exportToSilence=false: end recording at loop end.
 	stemExport.includeSongFX = true;
-	stemExport.renderOffline = true;
+	stemExport.renderOffline = false;
 	stemExport.allowNormalization = false;
 	stemExport.exportToSilence = false;
 	stemExport.restrictToClip = clip;
