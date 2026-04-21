@@ -1826,14 +1826,13 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	bool savedExportToSilence = stemExport.exportToSilence;
 
 	// Configure for bounce.
-	// - renderOffline=false: with includeSongFX=false, recorder uses MIX channel. MIX is fed by
-	//   Song::renderAudio (not renderAudioForStemExport), which only runs when renderOffline=false.
-	// - exportToSilence=true: match normal stem export defaults. Setting false caused hardware
-	//   crashes during recorder finalize — likely endRecordingSoon fired before the recorder
-	//   had a chance to flush its first buffer cluster. The extra silence wait gives runway.
-	//   Trade-off: bounce takes 12-60s after loop end while waiting for silence.
-	stemExport.includeSongFX = false;
-	stemExport.renderOffline = false;
+	// POC choice: includeSongFX=true + renderOffline=true matches the known-good default of the
+	// shipped stem-export feature. Recorder ends up in OFFLINE_OUTPUT mode which is fed by
+	// renderAudioForStemExport. Trade-off: the song's master FX (global compressor/EQ/reverb)
+	// get baked into the bounced audio. For POC this is acceptable — we can revisit once
+	// bouncing works end-to-end.
+	stemExport.includeSongFX = true;
+	stemExport.renderOffline = true;
 	stemExport.allowNormalization = false;
 	stemExport.exportToSilence = true;
 	stemExport.restrictToClip = clip;
