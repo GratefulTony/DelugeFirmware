@@ -1877,13 +1877,10 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 		return;
 	}
 
-	// ISOLATION TEST: skip the entire swap phase and just return.
-	// If the freeze/crash still happens before this point, the bug is in the render.
-	// If the freeze/crash goes away with this return, the bug is in the swap code below.
-	display->displayPopup("bounced OK (isolation test)");
-	return;
-
-	// --- Swap phase (intentionally unreachable during isolation test) ---
+	// --- Add-track phase ---
+	// Create a new AudioOutput adjacent to the source, then an AudioClip on it that plays
+	// the rendered WAV. We insert the new clip into sessionClips right after the source —
+	// the source clip and its output are left intact.
 
 	AudioOutput* newOutput = currentSong->createNewAudioOutput();
 	if (!newOutput) {
@@ -1954,23 +1951,21 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	newClip->name.set(newClip->sampleHolder.filePath.get());
 
 	newClip->activeIfNoSolo = clip->activeIfNoSolo;
-	newClip->activeIfNoSoloBeforeStemExport = clip->activeIfNoSoloBeforeStemExport;
-	if (clip->soloingInSessionMode) {
-		session.unsoloClip(clip);
-	}
 
-	Output* sourceOutput = clip->output;
-
-	currentSong->swapClips(newClip, clip, clipIndex);
-
-	if (currentSong->getClipWithOutput(sourceOutput) == nullptr) {
-		currentSong->deleteOutputThatIsInMainList(sourceOutput);
+	// Insert newClip into the session clip list just after the source clip. Source clip
+	// and output remain untouched.
+	int32_t insertIndex = clipIndex + 1;
+	if (currentSong->sessionClips.insertClipAtIndex(newClip, insertIndex) != Error::NONE) {
+		newClip->~AudioClip();
+		delugeDealloc(clipMem);
+		currentSong->deleteOutputThatIsInMainList(newOutput);
+		display->displayError(Error::INSUFFICIENT_RAM);
+		return;
 	}
 
 	view.setActiveModControllableTimelineCounter(newClip);
 	view.displayOutputName(newClip->output, true, newClip);
-	// Full refresh: the new AudioOutput landed in a new column and the grid needs to redraw
-	// everything to show it (and to clear the vacated source column if it was deleted).
+	// Full refresh: the new AudioOutput landed in a new column and the grid needs to redraw.
 	requestRendering(this, 0xFFFFFFFF, 0xFFFFFFFF);
 }
 
