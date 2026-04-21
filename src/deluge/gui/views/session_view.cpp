@@ -1854,7 +1854,7 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	// On exit, stemExport.lastExportedWavPath holds the absolute path of the rendered WAV.
 	stemExport.startStemExportProcess(StemExportType::CLIP);
 
-	display->popupText("B1 postSEP");
+	D_PRINTLN("B1 postSEP");
 
 	// Copy WAV path out before resetting hooks
 	String wavPath;
@@ -1874,7 +1874,7 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 		return;
 	}
 
-	display->popupText("B2 havePath");
+	D_PRINTLN("B2 havePath");
 
 	// --- Swap phase ---
 
@@ -1885,7 +1885,7 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	}
 	newOutput->colour = clip->output->colour;
 
-	display->popupText("B3 newOutput");
+	D_PRINTLN("B3 newOutput");
 
 	// Splice newOutput into the output list just BEFORE source so it appears one column to the right.
 	{
@@ -1904,7 +1904,7 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 		*q = newOutput;
 	}
 
-	display->popupText("B4 spliced");
+	D_PRINTLN("B4 spliced");
 
 	// Copy reverb send to new AudioOutput
 	{
@@ -1917,7 +1917,7 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 		}
 	}
 
-	display->popupText("B5 reverb");
+	D_PRINTLN("B5 reverb");
 
 	// Allocate and build new AudioClip
 	void* clipMem = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(AudioClip));
@@ -1930,7 +1930,7 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	newClip->cloneFrom(clip);
 	newClip->colourOffset = clip->colourOffset;
 
-	display->popupText("B6 newClip");
+	D_PRINTLN("B6 newClip");
 
 	char modelStackMemory[MODEL_STACK_MAX_SIZE];
 	ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
@@ -1943,7 +1943,7 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 		return;
 	}
 
-	display->popupText("B7 setOutput");
+	D_PRINTLN("B7 setOutput");
 
 	newClip->sampleHolder.filePath.set(wavPath.get());
 	Error sampleErr = newClip->sampleHolder.loadFile(false, false, true);
@@ -1956,7 +1956,7 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	}
 	newClip->name.set(newClip->sampleHolder.filePath.get());
 
-	display->popupText("B8 loadFile");
+	D_PRINTLN("B8 loadFile");
 
 	newClip->activeIfNoSolo = clip->activeIfNoSolo;
 	newClip->activeIfNoSoloBeforeStemExport = clip->activeIfNoSoloBeforeStemExport;
@@ -1968,19 +1968,19 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 
 	currentSong->swapClips(newClip, clip, clipIndex);
 
-	display->popupText("B9 swapped");
+	D_PRINTLN("B9 swapped");
 
 	if (currentSong->getClipWithOutput(sourceOutput) == nullptr) {
 		currentSong->deleteOutputThatIsInMainList(sourceOutput);
 	}
 
-	display->popupText("B10 cleaned");
+	D_PRINTLN("B10 cleaned");
 
 	view.setActiveModControllableTimelineCounter(newClip);
 	view.displayOutputName(newClip->output, true, newClip);
 	requestRendering(this, 1 << selectedClipYDisplay, 1 << selectedClipYDisplay);
 
-	display->popupText("B11 done");
+	D_PRINTLN("B11 done");
 }
 
 void SessionView::replaceInstrumentClipWithAudioClip(Clip* clip) {

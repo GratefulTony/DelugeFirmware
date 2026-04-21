@@ -27,10 +27,12 @@
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
 #include "hid/led/indicator_leds.h"
+#include "io/debug/log.h"
 #include "model/clip/clip.h"
 #include "model/clip/instrument_clip.h"
 #include "model/instrument/non_audio_instrument.h"
 #include "model/note/note_row.h"
+#include "model/sample/sample_recorder.h"
 #include "model/song/song.h"
 #include "playback/mode/arrangement.h"
 #include "playback/mode/session.h"
@@ -108,7 +110,7 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 	// so that we can reset vertical scroll position
 	int32_t elementsProcessed = 0;
 
-	display->popupText("SSEP1 preExport");
+	D_PRINTLN("SSEP1 preExport");
 
 	// export stems
 	if (stemExportType == StemExportType::CLIP) {
@@ -124,18 +126,18 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 		elementsProcessed = exportMixdownStem(stemExportType);
 	}
 
-	display->popupText("SSEP2 postExport");
+	D_PRINTLN("SSEP2 postExport");
 
 	// if process wasn't cancelled, then we got here because we finished
 	// exporting all the stems, so let's finish up
 	if (isUIModeActive(UI_MODE_STEM_EXPORT)) {
 		finishStemExportProcess(stemExportType, elementsProcessed);
-		display->popupText("SSEP3 postFinish");
+		D_PRINTLN("SSEP3 postFinish");
 	}
 	else {
 		processStarted = false;
 		updateScrollPosition(stemExportType, elementsProcessed);
-		display->popupText("SSEP3x cancelled");
+		D_PRINTLN("SSEP3x cancelled");
 	}
 
 	// turn off recording if it's still on
@@ -144,7 +146,7 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 		playbackHandler.setLedStates();
 	}
 
-	display->popupText("SSEP4 preRender");
+	D_PRINTLN("SSEP4 preRender");
 
 	// re-render UI because view scroll positions and mute statuses will have been updated
 	uiNeedsRendering(getCurrentUI());
@@ -157,7 +159,7 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 		}
 	}
 
-	display->popupText("SSEP5 done");
+	D_PRINTLN("SSEP5 done");
 }
 
 /// Stop stem export process
@@ -523,10 +525,10 @@ bool StemExport::writeLoopEndPos() {
 int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 	// prepare all the clips for stem export
 	int32_t totalNumClips = disarmAllClipsForStemExport();
-	display->popupText("ECS1 disarmed");
+	D_PRINTLN("ECS1 disarmed");
 
 	if (totalNumClips != 0 && totalNumStemsToExport != 0) {
-		display->popupText("ECS2 enterLoop");
+		D_PRINTLN("ECS2 enterLoop");
 		// now we're going to iterate through all clips to find the ones that should be exported
 		for (int32_t idxClip = totalNumClips - 1; idxClip >= 0; --idxClip) {
 			Clip* clip = currentSong->sessionClips.getClipAtIndex(idxClip);
@@ -542,36 +544,30 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 					continue;
 				}
 
-				display->popupText("ECS3 preYield");
+				D_PRINTLN("ECS3 preYield");
 
 				// wait until recording is done and playback is turned off
 				yield([]() {
 					if (stemExport.stopRecording) {
 						stemExport.stopOutputRecording();
 					}
-					// Diag popup. Cycles between 2 popups: one every 8192 iters shows recorder state,
-					// the next 8192 shows timer advance. So you see them alternate as we yield.
+					// Diag log. Cycles between 2 lines: one every 8192 iters shows recorder state,
+					// the next 8192 shows pos/target/type/processStarted.
 					static uint32_t yieldTickCounter = 0;
-					static uint32_t lastSampleTimer = 0;
 					if ((yieldTickCounter & 0x3FFF) == 0) {
 						int stat = audioRecorder.recorder ? (int)audioRecorder.recorder->status : -99;
 						int src = (int)audioRecorder.recordingSource;
 						int clk = playbackHandler.isEitherClockActive() ? 1 : 0;
 						int icl = playbackHandler.isInternalClockActive() ? 1 : 0;
 						int sess = (currentPlaybackMode == &session) ? 1 : 0;
-						static char buf[48];
-						snprintf(buf, sizeof(buf), "st%d s%d c%d ic%d ss%d", stat, src, clk, icl, sess);
-						display->popupText(buf);
+						D_PRINTLN("yield: st=%d src=%d clk=%d icl=%d sess=%d", stat, src, clk, icl, sess);
 					}
 					else if ((yieldTickCounter & 0x3FFF) == 0x2000) {
 						int32_t pos = playbackHandler.lastSwungTickActioned;
 						int32_t target = stemExport.loopLengthToStopStemExport;
 						int type = (int)stemExport.currentStemExportType;
 						int procSt = stemExport.processStarted ? 1 : 0;
-						static char buf2[48];
-						snprintf(buf2, sizeof(buf2), "pos=%ld tgt=%ld t=%d ps=%d", (long)pos, (long)target, type,
-						         procSt);
-						display->popupText(buf2);
+						D_PRINTLN("yield: pos=%ld tgt=%ld type=%d ps=%d", (long)pos, (long)target, type, procSt);
 					}
 					yieldTickCounter++;
 					return !(playbackHandler.recording != RecordingMode::OFF
@@ -579,11 +575,11 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 					         || playbackHandler.isEitherClockActive());
 				});
 
-				display->popupText("ECS4 postYield");
+				D_PRINTLN("ECS4 postYield");
 
 				finishCurrentStemExport(stemExportType, clip->activeIfNoSolo);
 
-				display->popupText("ECS5 finClip");
+				D_PRINTLN("ECS5 finClip");
 			}
 			// in the event that stem exporting is cancelled while iterating through clips
 			// break out of the loop
@@ -591,16 +587,16 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 				break;
 			}
 		}
-		display->popupText("ECS6 exitLoop");
+		D_PRINTLN("ECS6 exitLoop");
 	}
 	else {
-		display->popupText("ECS2x skipLoop");
+		D_PRINTLN("ECS2x skipLoop");
 	}
 
 	// set clip mutes back to their previous state (before exporting stems)
 	restoreAllClipMutes(totalNumClips);
 
-	display->popupText("ECS7 restored");
+	D_PRINTLN("ECS7 restored");
 
 	return totalNumClips;
 }
