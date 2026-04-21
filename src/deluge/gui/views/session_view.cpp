@@ -1838,6 +1838,12 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	stemExport.skipDoneContextMenu = true;
 	stemExport.lastExportedWavPath.clear();
 
+	// Clear any exclusive UI mode (e.g. UI_MODE_CLIP_PRESSED_IN_SONG_VIEW from the preceding menu
+	// context). startStemExportProcess calls recordButtonPressed which is guarded by
+	// isUIModeWithinRange(recordButtonUIModes) — if an incompatible exclusive mode is set, the
+	// call no-ops and recording never arms, which makes ticks not advance as expected.
+	exitUIMode(UI_MODE_CLIP_PRESSED_IN_SONG_VIEW);
+
 	// Snapshot reverb send (on source output's backed-up param manager) before starting the export.
 	int32_t sourceReverbSend = 0;
 	{
