@@ -1850,19 +1850,19 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	// call no-ops and recording never arms, which makes ticks not advance as expected.
 	exitUIMode(UI_MODE_CLIP_PRESSED_IN_SONG_VIEW);
 
-	// Snapshot reverb send from the source clip's live paramManager (UNPATCHED_REVERB_SEND_AMOUNT
-	// lives on each clip, not on the output's backed-up manager). Fall back to the backed-up
-	// manager if the clip's own is empty for whatever reason.
-	int32_t sourceReverbSend = 0;
+	// Snapshot reverb send from the source clip's live paramManager. Which slot depends on
+	// output type:
+	//   - Synth (SoundInstrument): patched GLOBAL_REVERB_AMOUNT
+	//   - Kit / AudioOutput (GlobalEffectableForClip): unpatched UNPATCHED_REVERB_SEND_AMOUNT
+	// See Sound::getThingWithMostReverb vs GlobalEffectableForClip::getThingWithMostReverb.
+	int32_t sourceReverbSend = -2147483648; // MIN = 0%
 	if (clip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
-		UnpatchedParamSet* ups = clip->paramManager.getUnpatchedParamSet();
-		sourceReverbSend = ups->getValue(deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT);
-	}
-	else {
-		ParamManager* pm = currentSong->getBackedUpParamManagerForExactClip(
-		    (ModControllableAudio*)clip->output->toModControllable(), nullptr);
-		if (pm && pm->containsAnyParamCollectionsIncludingExpression()) {
-			UnpatchedParamSet* ups = pm->getUnpatchedParamSet();
+		if (clip->output->type == OutputType::SYNTH) {
+			PatchedParamSet* pps = clip->paramManager.getPatchedParamSet();
+			sourceReverbSend = pps->getValue(deluge::modulation::params::GLOBAL_REVERB_AMOUNT);
+		}
+		else {
+			UnpatchedParamSet* ups = clip->paramManager.getUnpatchedParamSet();
 			sourceReverbSend = ups->getValue(deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT);
 		}
 	}
