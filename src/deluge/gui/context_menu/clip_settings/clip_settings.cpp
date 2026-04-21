@@ -90,11 +90,17 @@ bool ClipSettingsMenu::acceptCurrentOption() {
 		return true;
 	}
 	if (option == 2) {
-		sessionView.bounceInPlace(clip, Scope::CLIP);
-		return false;
+		Clip* clipToBounce = clip;
+		display->setNextTransitionDirection(-1);
+		close();
+		sessionView.bounceInPlace(clipToBounce, Scope::CLIP);
+		return true;
 	}
-	sessionView.bounceInPlace(clip, Scope::TRACK);
-	return false;
+	Clip* clipToBounce = clip;
+	display->setNextTransitionDirection(-1);
+	close();
+	sessionView.bounceInPlace(clipToBounce, Scope::TRACK);
+	return true;
 }
 
 ActionResult ClipSettingsMenu::padAction(int32_t x, int32_t y, int32_t on) {

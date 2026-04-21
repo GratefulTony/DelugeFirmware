@@ -62,11 +62,14 @@
 #include "model/fx/stutterer.h"
 #include "model/instrument/instrument.h"
 #include "model/instrument/melodic_instrument.h"
+#include "model/mod_controllable/mod_controllable_audio.h"
 #include "model/note/note_row.h"
 #include "model/sample/sample.h"
 #include "model/sample/sample_recorder.h"
 #include "model/settings/runtime_feature_settings.h"
+#include "modulation/params/param.h"
 #include "modulation/params/param_manager.h"
+#include "modulation/params/param_set.h"
 #include "playback/mode/arrangement.h"
 #include "playback/mode/session.h"
 #include "playback/playback_handler.h"
@@ -1793,8 +1796,170 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	if (!clip) {
 		return;
 	}
-	char const* msg = (scope == BounceScope::CLIP) ? "Bounce clip (stub)" : "Bounce track (stub)";
-	display->displayPopup(msg);
+
+	// Precondition: MIDI/CV can't be bounced
+	OutputType outType = clip->output->type;
+	if (outType == OutputType::MIDI_OUT || outType == OutputType::CV) {
+		display->displayPopup(l10n::get(l10n::String::STRING_FOR_CANT_CONVERT_TYPE));
+		return;
+	}
+	if (playbackHandler.recording == RecordingMode::ARRANGEMENT) {
+		display->displayPopup(l10n::get(l10n::String::STRING_FOR_RECORDING_TO_ARRANGEMENT));
+		return;
+	}
+
+	// Phase 2 POC: only CLIP scope
+	if (scope != BounceScope::CLIP) {
+		display->displayPopup("Track bounce not yet impl");
+		return;
+	}
+
+	int32_t clipIndex = currentSong->sessionClips.getIndexForClip(clip);
+	if (clipIndex < 0) {
+		return;
+	}
+
+	// Save state we will mutate on StemExport
+	bool savedIncludeSongFX = stemExport.includeSongFX;
+	bool savedRenderOffline = stemExport.renderOffline;
+	bool savedAllowNormalization = stemExport.allowNormalization;
+	bool savedExportToSilence = stemExport.exportToSilence;
+
+	// Configure for bounce
+	stemExport.includeSongFX = false;
+	stemExport.renderOffline = true;
+	stemExport.allowNormalization = false;
+	stemExport.exportToSilence = false;
+	stemExport.restrictToClip = clip;
+	stemExport.skipDoneContextMenu = true;
+	stemExport.lastExportedWavPath.clear();
+
+	// Snapshot reverb send (on source output's backed-up param manager) before starting the export.
+	int32_t sourceReverbSend = 0;
+	{
+		ParamManager* pm = currentSong->getBackedUpParamManagerForExactClip(
+		    (ModControllableAudio*)clip->output->toModControllable(), nullptr);
+		if (pm && pm->containsAnyParamCollectionsIncludingExpression()) {
+			UnpatchedParamSet* ups = pm->getUnpatchedParamSet();
+			sourceReverbSend = ups->getValue(deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT);
+		}
+	}
+
+	// Drive the full stem-export state machine. Blocks (via yield) until export completes.
+	// On exit, stemExport.lastExportedWavPath holds the absolute path of the rendered WAV.
+	stemExport.startStemExportProcess(StemExportType::CLIP);
+
+	// Copy WAV path out before resetting hooks
+	String wavPath;
+	wavPath.set(&stemExport.lastExportedWavPath);
+
+	// Reset stemExport hooks and restore mutated flags
+	stemExport.restrictToClip = nullptr;
+	stemExport.skipDoneContextMenu = false;
+	stemExport.lastExportedWavPath.clear();
+	stemExport.includeSongFX = savedIncludeSongFX;
+	stemExport.renderOffline = savedRenderOffline;
+	stemExport.allowNormalization = savedAllowNormalization;
+	stemExport.exportToSilence = savedExportToSilence;
+
+	if (wavPath.isEmpty()) {
+		// Export was cancelled, failed, or produced no file
+		display->displayError(Error::FILE_UNREADABLE);
+		return;
+	}
+
+	// --- Swap phase ---
+
+	// Create new AudioOutput (standalone — source output might keep other clips)
+	AudioOutput* newOutput = currentSong->createNewAudioOutput();
+	if (!newOutput) {
+		display->displayError(Error::INSUFFICIENT_RAM);
+		return;
+	}
+	newOutput->colour = clip->output->colour;
+
+	// Splice newOutput into the output list just BEFORE source so it appears one column to the right.
+	// (Mirrors the pattern in SessionView::gridCreateClip's synth-clone branch.)
+	{
+		Output** p = &currentSong->firstOutput;
+		while (*p && *p != newOutput) {
+			p = &(*p)->next;
+		}
+		if (*p == newOutput) {
+			*p = newOutput->next;
+		}
+		Output** q = &currentSong->firstOutput;
+		while (*q && *q != clip->output) {
+			q = &(*q)->next;
+		}
+		newOutput->next = *q;
+		*q = newOutput;
+	}
+
+	// Copy reverb send to new AudioOutput
+	{
+		ParamManager* pmNew = currentSong->getBackedUpParamManagerForExactClip(
+		    (ModControllableAudio*)newOutput->toModControllable(), nullptr);
+		if (pmNew && pmNew->containsAnyParamCollectionsIncludingExpression()) {
+			UnpatchedParamSet* upsNew = pmNew->getUnpatchedParamSet();
+			upsNew->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT].setCurrentValueBasicForSetup(
+			    sourceReverbSend);
+		}
+	}
+
+	// Allocate and build new AudioClip
+	void* clipMem = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(AudioClip));
+	if (!clipMem) {
+		currentSong->deleteOutputThatIsInMainList(newOutput);
+		display->displayError(Error::INSUFFICIENT_RAM);
+		return;
+	}
+	AudioClip* newClip = new (clipMem) AudioClip();
+	newClip->cloneFrom(clip);
+	newClip->colourOffset = clip->colourOffset;
+
+	char modelStackMemory[MODEL_STACK_MAX_SIZE];
+	ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
+	Error setErr = newClip->setOutput(modelStack->addTimelineCounter(newClip), newOutput);
+	if (setErr != Error::NONE) {
+		newClip->~AudioClip();
+		delugeDealloc(clipMem);
+		currentSong->deleteOutputThatIsInMainList(newOutput);
+		display->displayError(setErr);
+		return;
+	}
+
+	// Load the rendered WAV as the new clip's sample
+	newClip->sampleHolder.filePath.set(wavPath.get());
+	Error sampleErr = newClip->sampleHolder.loadFile(false, false, true);
+	if (sampleErr != Error::NONE) {
+		newClip->~AudioClip();
+		delugeDealloc(clipMem);
+		currentSong->deleteOutputThatIsInMainList(newOutput);
+		display->displayError(sampleErr);
+		return;
+	}
+	newClip->name.set(newClip->sampleHolder.filePath.get());
+
+	// Transfer active/mute state to the new clip (source's state is still valid — startStemExportProcess
+	// restored mutes at the end via its existing restoreAllClipMutes call).
+	newClip->activeIfNoSolo = clip->activeIfNoSolo;
+	newClip->activeIfNoSoloBeforeStemExport = clip->activeIfNoSoloBeforeStemExport;
+	if (clip->soloingInSessionMode) {
+		session.unsoloClip(clip);
+	}
+
+	Output* sourceOutput = clip->output;
+
+	currentSong->swapClips(newClip, clip, clipIndex);
+
+	if (currentSong->getClipWithOutput(sourceOutput) == nullptr) {
+		currentSong->deleteOutputThatIsInMainList(sourceOutput);
+	}
+
+	view.setActiveModControllableTimelineCounter(newClip);
+	view.displayOutputName(newClip->output, true, newClip);
+	requestRendering(this, 1 << selectedClipYDisplay, 1 << selectedClipYDisplay);
 }
 
 void SessionView::replaceInstrumentClipWithAudioClip(Clip* clip) {
