@@ -1825,9 +1825,13 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	bool savedAllowNormalization = stemExport.allowNormalization;
 	bool savedExportToSilence = stemExport.exportToSilence;
 
-	// Configure for bounce
+	// Configure for bounce.
+	// renderOffline MUST be false when includeSongFX is false: renderOffline=true routes audio
+	// through renderAudioForStemExport (audio_engine.cpp:1123) which only feeds the recorder
+	// when the recorder is in OFFLINE_OUTPUT mode. With includeSongFX=false the recorder is in
+	// MIX mode — no audio ever reaches it, recorder stays in CAPTURING_DATA forever, hang.
 	stemExport.includeSongFX = false;
-	stemExport.renderOffline = true;
+	stemExport.renderOffline = false;
 	stemExport.allowNormalization = false;
 	stemExport.exportToSilence = false;
 	stemExport.restrictToClip = clip;
