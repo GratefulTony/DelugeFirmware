@@ -751,10 +751,12 @@ Error SampleRecorder::finalizeRecordedFile() {
 		// cluster (very likely; various reasons)
 		if (sample->audioDataLengthBytes != audioDataLengthBytesAsWrittenToFile
 		    || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile)) {
-			D_PRINTLN("FR-D: updating header");
+			D_PRINTLN("FR-D: updating header, sample=%p", (void*)sample);
+			D_PRINTLN("FR-D1: clusters nElem=%d", sample ? sample->clusters.getNumElements() : -1);
 
 			// Update data length as written in first cluster
 			SampleCluster* firstSampleCluster = sample->clusters.getElement(0);
+			D_PRINTLN("FR-D2: firstSampleCluster=%p", (void*)firstSampleCluster);
 			D_PRINTLN("FR-E: pre-getCluster");
 			Cluster* cluster =
 			    firstSampleCluster->getCluster(sample, 0, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
