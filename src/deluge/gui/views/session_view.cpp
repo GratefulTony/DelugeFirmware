@@ -1831,11 +1831,12 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	bool savedExportToSilence = stemExport.exportToSilence;
 
 	// Configure for bounce.
-	// renderOffline=true drives rendering inside the audio engine's offline loop, which also
-	// synchronously drains the recorder's cardRoutine. That avoids the DMA/memory race we hit
-	// with renderOffline=false (live rendering): any disk_write inside finalizeRecordedFile
-	// was hardfaulting with matching matrix-LED stack-trace patterns.
-	stemExport.includeSongFX = true;
+	// includeSongFX=false makes the recorder capture the MIX channel (pre-master-FX, pre-master-
+	// volume, pre-master-compressor, pre-reverb-send). That way, when the new AudioOutput plays
+	// the bounced WAV, the master stage gets applied exactly once — matching the source's own
+	// gain staging. Reverb send is preserved (copied from source to the new output).
+	// renderOffline=true drives rendering inside the audio engine's offline loop.
+	stemExport.includeSongFX = false;
 	stemExport.renderOffline = true;
 	stemExport.allowNormalization = false;
 	stemExport.exportToSilence = false;
