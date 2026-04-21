@@ -549,20 +549,29 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 					if (stemExport.stopRecording) {
 						stemExport.stopOutputRecording();
 					}
-					// Diag: update popup periodically. stat=recorder->status (0=CAPTURING,
-					// 1=WAITING_TO_STOP, 2=FINISHED_STILL_WRITING, 3=COMPLETE); sR=stopRecording flag;
-					// src=recordingSource enum; clk=clock; tpS indicates silence timer started.
+					// Diag popup. Cycles between 2 popups: one every 8192 iters shows recorder state,
+					// the next 8192 shows timer advance. So you see them alternate as we yield.
 					static uint32_t yieldTickCounter = 0;
-					if ((yieldTickCounter++ & 0x1FFF) == 0) {
+					static uint32_t lastSampleTimer = 0;
+					if ((yieldTickCounter & 0x3FFF) == 0) {
 						int stat = audioRecorder.recorder ? (int)audioRecorder.recorder->status : -99;
 						int src = (int)audioRecorder.recordingSource;
 						int clk = playbackHandler.isEitherClockActive() ? 1 : 0;
-						int sR = stemExport.stopRecording ? 1 : 0;
-						int tpS = (stemExport.timePlaybackStopped != 0xFFFFFFFF) ? 1 : 0;
+						int icl = playbackHandler.isInternalClockActive() ? 1 : 0;
+						int sess = (currentPlaybackMode == &session) ? 1 : 0;
 						static char buf[48];
-						snprintf(buf, sizeof(buf), "stat=%d src=%d clk=%d sR=%d tpS=%d", stat, src, clk, sR, tpS);
+						snprintf(buf, sizeof(buf), "st%d s%d c%d ic%d ss%d", stat, src, clk, icl, sess);
 						display->popupText(buf);
 					}
+					else if ((yieldTickCounter & 0x3FFF) == 0x2000) {
+						uint32_t ts = AudioEngine::audioSampleTimer;
+						uint32_t delta = ts - lastSampleTimer;
+						lastSampleTimer = ts;
+						static char buf2[40];
+						snprintf(buf2, sizeof(buf2), "ast=%lu d=%lu", (unsigned long)ts, (unsigned long)delta);
+						display->popupText(buf2);
+					}
+					yieldTickCounter++;
 					return !(playbackHandler.recording != RecordingMode::OFF
 					         || audioRecorder.recordingSource > AudioInputChannel::NONE
 					         || playbackHandler.isEitherClockActive());
