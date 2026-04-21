@@ -546,10 +546,19 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 
 				// wait until recording is done and playback is turned off
 				yield([]() {
-					// if you haven't found silence yet and playback has stopped
-					// check for silence so you can stop recording
 					if (stemExport.stopRecording) {
 						stemExport.stopOutputRecording();
+					}
+					// Diag: update popup periodically with the three yield-exit condition values.
+					// rec=playbackHandler.recording enum; src=recordingSource enum; clk=clock.
+					static uint32_t yieldTickCounter = 0;
+					if ((yieldTickCounter++ & 0x1FFF) == 0) {
+						int rec = (int)playbackHandler.recording;
+						int src = (int)audioRecorder.recordingSource;
+						int clk = playbackHandler.isEitherClockActive() ? 1 : 0;
+						static char buf[40];
+						snprintf(buf, sizeof(buf), "rec=%d src=%d clk=%d", rec, src, clk);
+						display->popupText(buf);
 					}
 					return !(playbackHandler.recording != RecordingMode::OFF
 					         || audioRecorder.recordingSource > AudioInputChannel::NONE
