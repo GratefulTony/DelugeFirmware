@@ -1849,6 +1849,8 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	// On exit, stemExport.lastExportedWavPath holds the absolute path of the rendered WAV.
 	stemExport.startStemExportProcess(StemExportType::CLIP);
 
+	display->displayPopup("B1 postSEP");
+
 	// Copy WAV path out before resetting hooks
 	String wavPath;
 	wavPath.set(&stemExport.lastExportedWavPath);
@@ -1863,14 +1865,14 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	stemExport.exportToSilence = savedExportToSilence;
 
 	if (wavPath.isEmpty()) {
-		// Export was cancelled, failed, or produced no file
 		display->displayError(Error::FILE_UNREADABLE);
 		return;
 	}
 
+	display->displayPopup("B2 havePath");
+
 	// --- Swap phase ---
 
-	// Create new AudioOutput (standalone — source output might keep other clips)
 	AudioOutput* newOutput = currentSong->createNewAudioOutput();
 	if (!newOutput) {
 		display->displayError(Error::INSUFFICIENT_RAM);
@@ -1878,8 +1880,9 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	}
 	newOutput->colour = clip->output->colour;
 
+	display->displayPopup("B3 newOutput");
+
 	// Splice newOutput into the output list just BEFORE source so it appears one column to the right.
-	// (Mirrors the pattern in SessionView::gridCreateClip's synth-clone branch.)
 	{
 		Output** p = &currentSong->firstOutput;
 		while (*p && *p != newOutput) {
@@ -1896,6 +1899,8 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 		*q = newOutput;
 	}
 
+	display->displayPopup("B4 spliced");
+
 	// Copy reverb send to new AudioOutput
 	{
 		ParamManager* pmNew = currentSong->getBackedUpParamManagerForExactClip(
@@ -1906,6 +1911,8 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 			    sourceReverbSend);
 		}
 	}
+
+	display->displayPopup("B5 reverb");
 
 	// Allocate and build new AudioClip
 	void* clipMem = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(AudioClip));
@@ -1918,6 +1925,8 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	newClip->cloneFrom(clip);
 	newClip->colourOffset = clip->colourOffset;
 
+	display->displayPopup("B6 newClip");
+
 	char modelStackMemory[MODEL_STACK_MAX_SIZE];
 	ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
 	Error setErr = newClip->setOutput(modelStack->addTimelineCounter(newClip), newOutput);
@@ -1929,7 +1938,8 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 		return;
 	}
 
-	// Load the rendered WAV as the new clip's sample
+	display->displayPopup("B7 setOutput");
+
 	newClip->sampleHolder.filePath.set(wavPath.get());
 	Error sampleErr = newClip->sampleHolder.loadFile(false, false, true);
 	if (sampleErr != Error::NONE) {
@@ -1941,8 +1951,8 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	}
 	newClip->name.set(newClip->sampleHolder.filePath.get());
 
-	// Transfer active/mute state to the new clip (source's state is still valid — startStemExportProcess
-	// restored mutes at the end via its existing restoreAllClipMutes call).
+	display->displayPopup("B8 loadFile");
+
 	newClip->activeIfNoSolo = clip->activeIfNoSolo;
 	newClip->activeIfNoSoloBeforeStemExport = clip->activeIfNoSoloBeforeStemExport;
 	if (clip->soloingInSessionMode) {
@@ -1953,13 +1963,19 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 
 	currentSong->swapClips(newClip, clip, clipIndex);
 
+	display->displayPopup("B9 swapped");
+
 	if (currentSong->getClipWithOutput(sourceOutput) == nullptr) {
 		currentSong->deleteOutputThatIsInMainList(sourceOutput);
 	}
 
+	display->displayPopup("B10 cleaned");
+
 	view.setActiveModControllableTimelineCounter(newClip);
 	view.displayOutputName(newClip->output, true, newClip);
 	requestRendering(this, 1 << selectedClipYDisplay, 1 << selectedClipYDisplay);
+
+	display->displayPopup("B11 done");
 }
 
 void SessionView::replaceInstrumentClipWithAudioClip(Clip* clip) {
