@@ -108,7 +108,7 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 	// so that we can reset vertical scroll position
 	int32_t elementsProcessed = 0;
 
-	display->displayPopup("SSEP1 preExport");
+	display->popupText("SSEP1 preExport");
 
 	// export stems
 	if (stemExportType == StemExportType::CLIP) {
@@ -124,18 +124,18 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 		elementsProcessed = exportMixdownStem(stemExportType);
 	}
 
-	display->displayPopup("SSEP2 postExport");
+	display->popupText("SSEP2 postExport");
 
 	// if process wasn't cancelled, then we got here because we finished
 	// exporting all the stems, so let's finish up
 	if (isUIModeActive(UI_MODE_STEM_EXPORT)) {
 		finishStemExportProcess(stemExportType, elementsProcessed);
-		display->displayPopup("SSEP3 postFinish");
+		display->popupText("SSEP3 postFinish");
 	}
 	else {
 		processStarted = false;
 		updateScrollPosition(stemExportType, elementsProcessed);
-		display->displayPopup("SSEP3x cancelled");
+		display->popupText("SSEP3x cancelled");
 	}
 
 	// turn off recording if it's still on
@@ -144,7 +144,7 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 		playbackHandler.setLedStates();
 	}
 
-	display->displayPopup("SSEP4 preRender");
+	display->popupText("SSEP4 preRender");
 
 	// re-render UI because view scroll positions and mute statuses will have been updated
 	uiNeedsRendering(getCurrentUI());
@@ -157,7 +157,7 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 		}
 	}
 
-	display->displayPopup("SSEP5 done");
+	display->popupText("SSEP5 done");
 }
 
 /// Stop stem export process
@@ -523,10 +523,10 @@ bool StemExport::writeLoopEndPos() {
 int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 	// prepare all the clips for stem export
 	int32_t totalNumClips = disarmAllClipsForStemExport();
-	display->displayPopup("ECS1 disarmed");
+	display->popupText("ECS1 disarmed");
 
 	if (totalNumClips != 0 && totalNumStemsToExport != 0) {
-		display->displayPopup("ECS2 enterLoop");
+		display->popupText("ECS2 enterLoop");
 		// now we're going to iterate through all clips to find the ones that should be exported
 		for (int32_t idxClip = totalNumClips - 1; idxClip >= 0; --idxClip) {
 			Clip* clip = currentSong->sessionClips.getClipAtIndex(idxClip);
@@ -542,7 +542,7 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 					continue;
 				}
 
-				display->displayPopup("ECS3 preYield");
+				display->popupText("ECS3 preYield");
 
 				// wait until recording is done and playback is turned off
 				yield([]() {
@@ -556,11 +556,11 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 					         || playbackHandler.isEitherClockActive());
 				});
 
-				display->displayPopup("ECS4 postYield");
+				display->popupText("ECS4 postYield");
 
 				finishCurrentStemExport(stemExportType, clip->activeIfNoSolo);
 
-				display->displayPopup("ECS5 finClip");
+				display->popupText("ECS5 finClip");
 			}
 			// in the event that stem exporting is cancelled while iterating through clips
 			// break out of the loop
@@ -568,16 +568,16 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 				break;
 			}
 		}
-		display->displayPopup("ECS6 exitLoop");
+		display->popupText("ECS6 exitLoop");
 	}
 	else {
-		display->displayPopup("ECS2x skipLoop");
+		display->popupText("ECS2x skipLoop");
 	}
 
 	// set clip mutes back to their previous state (before exporting stems)
 	restoreAllClipMutes(totalNumClips);
 
-	display->displayPopup("ECS7 restored");
+	display->popupText("ECS7 restored");
 
 	return totalNumClips;
 }
