@@ -1983,7 +1983,9 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 
 	view.setActiveModControllableTimelineCounter(newClip);
 	view.displayOutputName(newClip->output, true, newClip);
-	requestRendering(this, 1 << selectedClipYDisplay, 1 << selectedClipYDisplay);
+	// Full refresh: the new AudioOutput landed in a new column and the grid needs to redraw
+	// everything to show it (and to clear the vacated source column if it was deleted).
+	requestRendering(this, 0xFFFFFFFF, 0xFFFFFFFF);
 
 	D_PRINTLN("B11 done");
 }
