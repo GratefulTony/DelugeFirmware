@@ -102,6 +102,11 @@ public:
 
 	// check if we're in context menu
 	bool inContextMenu();
+
+	// Bounce-in-place hooks
+	Clip* restrictToClip = nullptr;   // if set, disarmAllClipsForStemExport marks only this clip
+	String lastExportedWavPath;       // populated by SampleRecorder when stem WAV is created
+	bool skipDoneContextMenu = false; // if true, finishStemExportProcess does NOT open doneStemExport menu
 };
 
 extern StemExport stemExport;

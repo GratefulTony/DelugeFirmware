@@ -77,6 +77,10 @@ StemExport::StemExport() {
 	timeThereWasLastSomeActivity = 0xFFFFFFFF;
 
 	lastFolderNameForStemExport.clear();
+
+	restrictToClip = nullptr;
+	skipDoneContextMenu = false;
+	// lastExportedWavPath is a String, default-constructed empty
 }
 
 /// starts stem export process which includes setting up UI mode, timer, and preparing
@@ -431,9 +435,13 @@ int32_t StemExport::disarmAllClipsForStemExport() {
 				/* export clip stem if all these conditions are met:
 				    1) the clip is not empty (it has notes in it)
 				    2) the output type is not MIDI or CV
+				    3) if restrictToClip is set, this clip IS restrictToClip
 				*/
 				OutputType outputType = clip->output->type;
-				if (!clip->isEmpty(false) && outputType != OutputType::MIDI_OUT && outputType != OutputType::CV) {
+				bool qualifies =
+				    !clip->isEmpty(false) && outputType != OutputType::MIDI_OUT && outputType != OutputType::CV;
+				bool isTarget = (restrictToClip == nullptr) || (clip == restrictToClip);
+				if (qualifies && isTarget) {
 					clip->exportStem = true;
 					totalNumStemsToExport++;
 				}
@@ -731,11 +739,13 @@ void StemExport::finishStemExportProcess(StemExportType stemExportType, int32_t 
 		getCurrentUI()->close();
 	}
 
-	// display stem export completed context menu
-	bool available = context_menu::doneStemExport.setupAndCheckAvailability();
-	if (available) {
-		display->setNextTransitionDirection(1);
-		openUI(&context_menu::doneStemExport);
+	// display stem export completed context menu (unless caller asked us to skip it, e.g. bounce-in-place)
+	if (!skipDoneContextMenu) {
+		bool available = context_menu::doneStemExport.setupAndCheckAvailability();
+		if (available) {
+			display->setNextTransitionDirection(1);
+			openUI(&context_menu::doneStemExport);
+		}
 	}
 
 	// exit out of the stem export UI mode
