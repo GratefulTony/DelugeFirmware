@@ -1850,9 +1850,15 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	// call no-ops and recording never arms, which makes ticks not advance as expected.
 	exitUIMode(UI_MODE_CLIP_PRESSED_IN_SONG_VIEW);
 
-	// Snapshot reverb send (on source output's backed-up param manager) before starting the export.
+	// Snapshot reverb send from the source clip's live paramManager (UNPATCHED_REVERB_SEND_AMOUNT
+	// lives on each clip, not on the output's backed-up manager). Fall back to the backed-up
+	// manager if the clip's own is empty for whatever reason.
 	int32_t sourceReverbSend = 0;
-	{
+	if (clip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
+		UnpatchedParamSet* ups = clip->paramManager.getUnpatchedParamSet();
+		sourceReverbSend = ups->getValue(deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT);
+	}
+	else {
 		ParamManager* pm = currentSong->getBackedUpParamManagerForExactClip(
 		    (ModControllableAudio*)clip->output->toModControllable(), nullptr);
 		if (pm && pm->containsAnyParamCollectionsIncludingExpression()) {
@@ -1939,17 +1945,6 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 		*q = newOutput;
 	}
 
-	// Copy reverb send to new AudioOutput
-	{
-		ParamManager* pmNew = currentSong->getBackedUpParamManagerForExactClip(
-		    (ModControllableAudio*)newOutput->toModControllable(), nullptr);
-		if (pmNew && pmNew->containsAnyParamCollectionsIncludingExpression()) {
-			UnpatchedParamSet* upsNew = pmNew->getUnpatchedParamSet();
-			upsNew->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT].setCurrentValueBasicForSetup(
-			    sourceReverbSend);
-		}
-	}
-
 	// Allocate and build new AudioClip
 	void* clipMem = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(AudioClip));
 	if (!clipMem) {
@@ -1984,6 +1979,14 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	newClip->name.set(newClip->sampleHolder.filePath.get());
 
 	newClip->activeIfNoSolo = clip->activeIfNoSolo;
+
+	// Copy reverb send onto the new clip's own paramManager (UNPATCHED_REVERB_SEND_AMOUNT is
+	// per-clip, not per-output).
+	if (newClip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
+		UnpatchedParamSet* upsNew = newClip->paramManager.getUnpatchedParamSet();
+		upsNew->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT].setCurrentValueBasicForSetup(
+		    sourceReverbSend);
+	}
 
 	// Insert newClip into the session clip list just after the source clip.
 	int32_t insertIndex = clipIndex + 1;
