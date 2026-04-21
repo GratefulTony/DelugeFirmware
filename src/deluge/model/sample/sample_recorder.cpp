@@ -800,35 +800,29 @@ Error SampleRecorder::finalizeRecordedFile() {
 
 	D_PRINTLN("FR-J: finalizeRecordedFile ending, sample=%p", (void*)sample);
 
+	// Skip all post-finalize sample-metadata bookkeeping when stem export is driving.
+	// For stem export / bounce-in-place, the WAV file has been fully finalized above; we
+	// don't need to update sample->numChannels / lengthInSamples / audioDataLengthBytes nor
+	// touch sampleBrowser. Accessing `sample` here has been crashing intermittently in this
+	// code path (apparently due to race between our cooperative yields during SD writes and
+	// something else accessing sample's memory). The interactive sample-recording UI paths
+	// still run the bookkeeping.
+	if (stemExport.processStarted) {
+		D_PRINTLN("FR-K: skipping post-finalize bookkeeping (stem export)");
+		return Error::NONE;
+	}
+
 	sample->numChannels = (action != MonitoringAction::NONE || recordingNumChannels == 1) ? 1 : 2;
-	D_PRINTLN("FR-K: numChannels set");
 	sample->lengthInSamples = dataLengthAfterAction / (sample->byteDepth * sample->numChannels);
-	D_PRINTLN("FR-L: lengthInSamples set");
 	sample->audioDataLengthBytes =
 	    sample->lengthInSamples
 	    * (sample->byteDepth
 	       * sample->numChannels); // Ensure whole number of samples (surely it already would be though?)
-	D_PRINTLN("FR-M: audioDataLengthBytes set");
 
 	if (sample->tempFilePathForRecording.isEmpty()) {
-		// Skip updating sampleBrowser.lastFilePathLoaded when stem export is driving — that UI
-		// isn't active, and the String::set here crashes in this context (likely because the
-		// sampleBrowser's String state interacts badly with the cooperative yields during our
-		// long SD writes). It's only needed for the interactive sample-recording UI anyway.
-		if (!stemExport.processStarted) {
-			D_PRINTLN("FR-N: tempFilePath empty, setting sampleBrowser");
-			sampleBrowser.lastFilePathLoaded.set(&sample->filePath);
-			D_PRINTLN("FR-O: sampleBrowser set");
-		}
-		else {
-			D_PRINTLN("FR-N: skipping sampleBrowser update (stem export)");
-		}
-	}
-	else {
-		D_PRINTLN("FR-N': tempFilePath non-empty");
+		sampleBrowser.lastFilePathLoaded.set(&sample->filePath);
 	}
 
-	D_PRINTLN("FR-P: returning Error::NONE");
 	return Error::NONE;
 }
 
