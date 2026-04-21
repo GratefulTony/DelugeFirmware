@@ -922,11 +922,6 @@ void PlaybackHandler::doMIDIClockOutTick() {
 
 void PlaybackHandler::actionSwungTick() {
 
-	if (stemExport.processStarted) {
-		D_PRINTLN("actionSwungTick: lastActioned=%ld + til=%ld", (long)lastSwungTickActioned,
-		          (long)swungTicksTilNextEvent);
-	}
-
 	currentlyActioningSwungTickOrResettingPlayPos = true;
 
 	swungTickScheduled = false;

@@ -521,10 +521,8 @@ gotError:
 
 	// If we've actually finished recording...
 	if (status == RecorderStatus::FINISHED_CAPTURING_BUT_STILL_WRITING) {
-		D_PRINTLN("cardRoutine: finishing writes, calling finalizeRecordedFile");
 		if (!hadCardError) {
 			error = finalizeRecordedFile();
-			D_PRINTLN("cardRoutine: finalizeRecordedFile returned err=%d", (int)error);
 			if (error != Error::NONE) {
 				hadCardError = true;
 				error = Error::SD_CARD;
@@ -542,7 +540,6 @@ gotError:
 		}
 		else {
 			status = autoDeleteWhenDone ? RecorderStatus::AWAITING_DELETION : RecorderStatus::COMPLETE;
-			D_PRINTLN("cardRoutine: status -> %d", (int)status);
 		}
 	}
 
@@ -728,7 +725,6 @@ Error SampleRecorder::finalizeRecordedFile() {
 
 	// Or if no action or shifting was required...
 	else {
-		D_PRINTLN("FR-A: no-action branch");
 
 		// If we made the file too long, because we then compensated for button latency and are throwing away the last
 		// little bit, then truncate it
@@ -740,9 +736,7 @@ Error SampleRecorder::finalizeRecordedFile() {
 			Error error = truncateFileDownToSize(correctLength);
 		}
 
-		D_PRINTLN("FR-B: pre-close");
 		auto closed = this->file->close();
-		D_PRINTLN("FR-C: post-close ok=%d", (int)closed.has_value());
 		if (!closed) {
 			return Error::SD_CARD;
 		}
@@ -751,20 +745,11 @@ Error SampleRecorder::finalizeRecordedFile() {
 		// cluster (very likely; various reasons)
 		if (sample->audioDataLengthBytes != audioDataLengthBytesAsWrittenToFile
 		    || (recordingExtraMargins && sample->fileLoopEndSamples != loopEndSampleAsWrittenToFile)) {
-			D_PRINT("FR-D ");
-			D_PRINT("D1 ");
-			int32_t __ne = sample ? sample->clusters.getNumElements() : -1;
-			D_PRINT("D2 ");
-			uint32_t __es = sample ? sample->clusters.elementSize : 0;
-			D_PRINT("D3 ");
+
 			// Update data length as written in first cluster
 			SampleCluster* firstSampleCluster = sample->clusters.getElement(0);
-			D_PRINT("D4 ");
-			D_PRINTLN("FR-D ne=%d es=%u fsc=%p", (int)__ne, (unsigned)__es, (void*)firstSampleCluster);
-			D_PRINTLN("FR-E: pre-getCluster");
 			Cluster* cluster =
 			    firstSampleCluster->getCluster(sample, 0, CLUSTER_LOAD_IMMEDIATELY); // Remember, this adds a "reason"
-			D_PRINTLN("FR-F: post-getCluster nn=%d", (int)(cluster != nullptr));
 			if (cluster) {
 
 				// Bug hunting - newly gotten Cluster
@@ -782,11 +767,8 @@ Error SampleRecorder::finalizeRecordedFile() {
 				loopEndSampleAsWrittenToFile = sample->fileLoopEndSamples;
 				updateDataLengthInFirstCluster(cluster);
 
-				D_PRINTLN("FR-G: pre-disk_write data=%p sda=%u", (void*)cluster->data,
-				          (unsigned)firstSampleCluster->sdAddress);
 				// Write just that one first sector back to the card
 				disk_write(0, (BYTE*)cluster->data, firstSampleCluster->sdAddress, 1);
-				D_PRINTLN("FR-H: post-disk_write");
 
 				// If that failed, well, that's a shame, but we don't need to do anything
 
@@ -797,25 +779,15 @@ Error SampleRecorder::finalizeRecordedFile() {
 				cluster->numReasonsHeldBySampleRecorder--;
 
 				audioFileManager.removeReasonFromCluster(*cluster, "E026");
-				D_PRINTLN("FR-I: header update done");
 			}
 		}
-		else {
-			D_PRINTLN("FR-D': header matches");
-		}
 	}
-
-	D_PRINTLN("FR-J: finalizeRecordedFile ending, sample=%p", (void*)sample);
 
 	// Skip all post-finalize sample-metadata bookkeeping when stem export is driving.
 	// For stem export / bounce-in-place, the WAV file has been fully finalized above; we
 	// don't need to update sample->numChannels / lengthInSamples / audioDataLengthBytes nor
-	// touch sampleBrowser. Accessing `sample` here has been crashing intermittently in this
-	// code path (apparently due to race between our cooperative yields during SD writes and
-	// something else accessing sample's memory). The interactive sample-recording UI paths
-	// still run the bookkeeping.
+	// touch sampleBrowser.
 	if (stemExport.processStarted) {
-		D_PRINTLN("FR-K: skipping post-finalize bookkeeping (stem export)");
 		return Error::NONE;
 	}
 
