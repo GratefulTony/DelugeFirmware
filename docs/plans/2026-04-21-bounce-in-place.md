@@ -391,6 +391,27 @@ Replace the line `display->displayPopup(stemExport.wavFileNameForStemExport.get(
 		}
 		newOutput->colour = clip->output->colour;
 
+		// Splice newOutput into the output list just BEFORE the source output, so the new
+		// audio column appears one column to the right of the source in grid view.
+		// Mirrors the pattern in SessionView::gridCreateClip's synth-clone branch.
+		{
+			// First, unlink newOutput from wherever createNewAudioOutput put it (typically tail)
+			Output** p = &currentSong->firstOutput;
+			while (*p && *p != newOutput) {
+				p = &(*p)->next;
+			}
+			if (*p == newOutput) {
+				*p = newOutput->next;
+			}
+			// Now find source and insert newOutput just before it
+			Output** q = &currentSong->firstOutput;
+			while (*q && *q != clip->output) {
+				q = &(*q)->next;
+			}
+			newOutput->next = *q;
+			*q = newOutput;
+		}
+
 		// Copy reverb send onto new AudioOutput's param manager
 		{
 			ParamManagerForTimeline* pmNew = currentSong->getBackedUpParamManagerForExactClip(
