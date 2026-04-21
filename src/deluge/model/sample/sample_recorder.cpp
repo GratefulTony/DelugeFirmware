@@ -811,9 +811,18 @@ Error SampleRecorder::finalizeRecordedFile() {
 	D_PRINTLN("FR-M: audioDataLengthBytes set");
 
 	if (sample->tempFilePathForRecording.isEmpty()) {
-		D_PRINTLN("FR-N: tempFilePath empty, setting sampleBrowser");
-		sampleBrowser.lastFilePathLoaded.set(&sample->filePath);
-		D_PRINTLN("FR-O: sampleBrowser set");
+		// Skip updating sampleBrowser.lastFilePathLoaded when stem export is driving — that UI
+		// isn't active, and the String::set here crashes in this context (likely because the
+		// sampleBrowser's String state interacts badly with the cooperative yields during our
+		// long SD writes). It's only needed for the interactive sample-recording UI anyway.
+		if (!stemExport.processStarted) {
+			D_PRINTLN("FR-N: tempFilePath empty, setting sampleBrowser");
+			sampleBrowser.lastFilePathLoaded.set(&sample->filePath);
+			D_PRINTLN("FR-O: sampleBrowser set");
+		}
+		else {
+			D_PRINTLN("FR-N: skipping sampleBrowser update (stem export)");
+		}
 	}
 	else {
 		D_PRINTLN("FR-N': tempFilePath non-empty");
