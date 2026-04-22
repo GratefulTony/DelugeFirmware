@@ -1214,6 +1214,8 @@ enum class String : size_t {
 
 	// strings for clip settings menu
 	STRING_FOR_CONVERT_TO_AUDIO,
+	STRING_FOR_BOUNCE_CLIP,
+	STRING_FOR_BOUNCE_TRACK,
 	STRING_FOR_CLIP_MODE,
 	STRING_FOR_CLIP_NAME,
 

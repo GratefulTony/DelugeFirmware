@@ -24,6 +24,7 @@
 #include "model/action/action.h"
 #include "model/action/action_logger.h"
 #include "processing/engines/audio_engine.h"
+#include "processing/stem_export/stem_export.h"
 #include <limits>
 #include <string.h>
 // #include <algorithm>
@@ -83,9 +84,17 @@ GlobalEffectableForClip::GlobalEffectableForClip() {
 
 	setupFilterSetConfig(&volumePostFX, paramManagerForClip);
 
-	int32_t reverbSendAmount = getFinalParameterValueVolume(
-	    reverbAmountAdjust,
-	    cableToLinearParamShortcut(unpatchedParams->getValue(params::UNPATCHED_REVERB_SEND_AMOUNT)));
+	// During kit bounce we want to capture per-drum reverb contributions only. The kit-level
+	// send would otherwise route the already-reverbed combined output back through the bus a
+	// second time — baking the kit-level send into the WAV. Skip it here; the live kit-level
+	// send (and any automation on it) is cloned onto the new AudioClip so it reproduces at
+	// playback.
+	int32_t reverbSendAmount = 0;
+	if (!stemExport.bakeReverbOnly) {
+		reverbSendAmount = getFinalParameterValueVolume(
+		    reverbAmountAdjust,
+		    cableToLinearParamShortcut(unpatchedParams->getValue(params::UNPATCHED_REVERB_SEND_AMOUNT)));
+	}
 
 	int32_t pan = unpatchedParams->getValue(params::UNPATCHED_PAN) >> 1;
 

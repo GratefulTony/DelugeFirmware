@@ -62,21 +62,28 @@
 #include "model/fx/stutterer.h"
 #include "model/instrument/instrument.h"
 #include "model/instrument/melodic_instrument.h"
+#include "model/mod_controllable/mod_controllable_audio.h"
 #include "model/note/note_row.h"
 #include "model/sample/sample.h"
 #include "model/sample/sample_recorder.h"
 #include "model/settings/runtime_feature_settings.h"
+#include "modulation/automation/auto_param.h"
+#include "modulation/params/param.h"
 #include "modulation/params/param_manager.h"
+#include "modulation/params/param_set.h"
 #include "playback/mode/arrangement.h"
 #include "playback/mode/session.h"
 #include "playback/playback_handler.h"
 #include "processing/audio_output.h"
 #include "processing/engines/audio_engine.h"
+#include "processing/sound/sound_drum.h"
 #include "processing/sound/sound_instrument.h"
+#include "processing/source.h"
 #include "processing/stem_export/stem_export.h"
 #include "scheduler_api.h"
 #include "storage/audio/audio_file_manager.h"
 #include "storage/file_item.h"
+#include "storage/multi_range/multisample_range.h"
 #include "storage/storage_manager.h"
 #include "util/cfunctions.h"
 #include "util/d_string.h"
@@ -1213,6 +1220,11 @@ void SessionView::sectionPadAction(uint8_t y, bool on) {
 }
 
 ActionResult SessionView::timerCallback() {
+	if (pendingBounceItemCount_ > 0) {
+		completePendingBounceAddTrack();
+		return ActionResult::DEALT_WITH;
+	}
+
 	switch (currentUIMode) {
 
 	case UI_MODE_HOLDING_SECTION_PAD:
@@ -1787,6 +1799,337 @@ void SessionView::resyncNewClip(Clip* newClip, ModelStackWithTimelineCounter* mo
 	if (session.hasPlaybackActive() && playbackHandler.isEitherClockActive() && currentSong->isClipActive(newClip)) {
 		session.reSyncClip(modelStackWithTimelineCounter, true);
 	}
+}
+
+// Force the source clip's sample clusters into RAM so that when stem-export starts playback
+// and immediately begins recording, the first samples aren't silence-while-loading-from-SD.
+// Synth clips don't need this (oscillator-generated). AudioClip sources need their single
+// sample primed. Kit sources need every SoundDrum's sample sources primed.
+static void primeSourceClustersForBounce(Clip* clip) {
+	if (!clip) {
+		return;
+	}
+
+	auto primeSampleSource = [](Source& src) {
+		if (src.oscType != OscType::SAMPLE) {
+			return;
+		}
+		for (int32_t r = 0; r < src.ranges.getNumElements(); r++) {
+			auto* range = (MultisampleRange*)src.ranges.getElement(r);
+			if (range && range->sampleHolder.audioFile) {
+				range->sampleHolder.claimClusterReasons(src.sampleControls.reversed, CLUSTER_LOAD_IMMEDIATELY);
+			}
+		}
+	};
+
+	auto primeSound = [&](Sound* sound) {
+		for (int32_t s = 0; s < kNumSources; s++) {
+			primeSampleSource(sound->sources[s]);
+		}
+	};
+
+	if (clip->type == ClipType::AUDIO) {
+		AudioClip* ac = (AudioClip*)clip;
+		if (ac->sampleHolder.audioFile) {
+			ac->sampleHolder.claimClusterReasons(ac->sampleControls.isCurrentlyReversed(), CLUSTER_LOAD_IMMEDIATELY);
+		}
+		return;
+	}
+
+	if (clip->output->type == OutputType::SYNTH) {
+		primeSound((SoundInstrument*)clip->output);
+	}
+	else if (clip->output->type == OutputType::KIT && clip->type == ClipType::INSTRUMENT) {
+		InstrumentClip* ic = (InstrumentClip*)clip;
+		for (int32_t i = 0; i < ic->noteRows.getNumElements(); i++) {
+			NoteRow* nr = ic->noteRows.getElement(i);
+			if (!nr || !nr->drum || nr->drum->type != DrumType::SOUND) {
+				continue;
+			}
+			primeSound((SoundDrum*)nr->drum);
+		}
+	}
+}
+
+// Render a single clip to a WAV via stem_export; returns true on success with outPath set.
+// Assumes stemExport.restrictToClip, saved flags, and pre-render setup are handled by caller.
+static bool renderClipToWav(Clip* clip, String* outPath) {
+	bool isKit = (clip->output->type == OutputType::KIT);
+	stemExport.includeSongFX = false;
+	stemExport.bakeReverbOnly = isKit;
+	stemExport.renderOffline = true;
+	stemExport.allowNormalization = false;
+	stemExport.exportToSilence = false;
+	stemExport.restrictToClip = clip;
+	stemExport.skipDoneContextMenu = true;
+	stemExport.lastExportedWavPath.clear();
+
+	primeSourceClustersForBounce(clip);
+
+	stemExport.startStemExportProcess(StemExportType::CLIP);
+
+	outPath->set(&stemExport.lastExportedWavPath);
+
+	// Reset hooks (not the saved flags — caller restores those across the whole bounce run).
+	stemExport.restrictToClip = nullptr;
+	stemExport.skipDoneContextMenu = false;
+	stemExport.lastExportedWavPath.clear();
+
+	return !outPath->isEmpty();
+}
+
+void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
+	if (!clip) {
+		return;
+	}
+
+	// Precondition: MIDI/CV can't be bounced
+	OutputType outType = clip->output->type;
+	if (outType == OutputType::MIDI_OUT || outType == OutputType::CV) {
+		display->displayPopup(l10n::get(l10n::String::STRING_FOR_CANT_CONVERT_TYPE));
+		return;
+	}
+	if (playbackHandler.recording == RecordingMode::ARRANGEMENT) {
+		display->displayPopup(l10n::get(l10n::String::STRING_FOR_RECORDING_TO_ARRANGEMENT));
+		return;
+	}
+
+	// Save stem-export flags once for the whole bounce run.
+	bool savedIncludeSongFX = stemExport.includeSongFX;
+	bool savedRenderOffline = stemExport.renderOffline;
+	bool savedAllowNormalization = stemExport.allowNormalization;
+	bool savedExportToSilence = stemExport.exportToSilence;
+	bool savedBakeReverbOnly = stemExport.bakeReverbOnly;
+
+	// Clear any exclusive UI mode (e.g. UI_MODE_CLIP_PRESSED_IN_SONG_VIEW from the preceding menu
+	// context). startStemExportProcess calls recordButtonPressed which is guarded by
+	// isUIModeWithinRange(recordButtonUIModes) — if an incompatible exclusive mode is set, the
+	// call no-ops and recording never arms, which makes ticks not advance as expected.
+	exitUIMode(UI_MODE_CLIP_PRESSED_IN_SONG_VIEW);
+
+	pendingBounceItemCount_ = 0;
+
+	if (scope == BounceScope::CLIP) {
+		int32_t clipIndex = currentSong->sessionClips.getIndexForClip(clip);
+		if (clipIndex < 0) {
+			return;
+		}
+		PendingBounceItem& item = pendingBounceItems_[0];
+		item.srcClip = clip;
+		item.srcIndex = clipIndex;
+		if (renderClipToWav(clip, &item.wavPath)) {
+			pendingBounceItemCount_ = 1;
+		}
+	}
+	else {
+		// TRACK: bounce every non-empty bounceable clip on this output.
+		// MIDI/CV clips (if any could land here) are skipped silently.
+		Output* sourceOutput = clip->output;
+		for (int32_t i = 0; i < currentSong->sessionClips.getNumElements(); i++) {
+			if (pendingBounceItemCount_ >= kMaxBounceItems) {
+				break;
+			}
+			Clip* candidate = currentSong->sessionClips.getClipAtIndex(i);
+			if (!candidate || candidate->output != sourceOutput) {
+				continue;
+			}
+			OutputType t = candidate->output->type;
+			if (t == OutputType::MIDI_OUT || t == OutputType::CV) {
+				continue;
+			}
+			PendingBounceItem& item = pendingBounceItems_[pendingBounceItemCount_];
+			item.srcClip = candidate;
+			item.srcIndex = i;
+			item.wavPath.clear();
+			if (!renderClipToWav(candidate, &item.wavPath)) {
+				continue; // skip this clip but keep trying others
+			}
+			pendingBounceItemCount_++;
+		}
+	}
+
+	// Restore stem-export flags (render helper didn't).
+	stemExport.includeSongFX = savedIncludeSongFX;
+	stemExport.renderOffline = savedRenderOffline;
+	stemExport.allowNormalization = savedAllowNormalization;
+	stemExport.exportToSilence = savedExportToSilence;
+	stemExport.bakeReverbOnly = savedBakeReverbOnly;
+
+	if (pendingBounceItemCount_ == 0) {
+		display->displayError(Error::FILE_UNREADABLE);
+		return;
+	}
+
+	// Arm deferred add-track. Running the add-track synchronously here compiles it into
+	// this same function body as the render path and tickles a layout-sensitive race in
+	// the SD finalize code. Running it from a timer callback (different call stack,
+	// different caller, separately-compiled entry path) reliably avoids that.
+	uiTimerManager.setTimer(TimerName::UI_SPECIFIC, 1);
+}
+
+// Build one AudioClip on the given output from (srcClip, wavPath). Does not yet insert it
+// into sessionClips — caller handles that (so insertion order can be controlled).
+// Returns the new clip on success; nullptr on failure (sets audible error popup).
+static AudioClip* buildBouncedClip(Clip* srcClip, AudioOutput* newOutput, String const& wavPath) {
+	void* clipMem = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(AudioClip));
+	if (!clipMem) {
+		display->displayError(Error::INSUFFICIENT_RAM);
+		return nullptr;
+	}
+	AudioClip* newClip = new (clipMem) AudioClip();
+	newClip->cloneFrom(srcClip);
+	newClip->colourOffset = srcClip->colourOffset;
+
+	char modelStackMemory[MODEL_STACK_MAX_SIZE];
+	ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
+	Error setErr = newClip->setOutput(modelStack->addTimelineCounter(newClip), newOutput);
+	if (setErr != Error::NONE) {
+		newClip->~AudioClip();
+		delugeDealloc(clipMem);
+		display->displayError(setErr);
+		return nullptr;
+	}
+
+	newClip->sampleHolder.filePath.set(wavPath.get());
+	Error sampleErr = newClip->sampleHolder.loadFile(false, false, true);
+	if (sampleErr != Error::NONE) {
+		newClip->~AudioClip();
+		delugeDealloc(clipMem);
+		display->displayError(sampleErr);
+		return nullptr;
+	}
+	newClip->name.set(newClip->sampleHolder.filePath.get());
+
+	// Align the sample-playback window to clipLength-in-samples so the timestretch ratio
+	// stays at 1.0 (no mid-clip stretch artifacts). Leave a small safety margin of
+	// kPlaybackEndSafetyMargin samples — the sample reader needs headroom past endPos for
+	// interpolation / cluster-boundary reassessment; trimming flush to clipLength triggered
+	// an E147 ("bytesLeftWhichMayBeRead <= 0 samples") in SampleLowLevelReader on re-bounce.
+	// The margin is well inside the ~344-sample drift tolerance the timestretch engine
+	// accepts before re-enabling stretch, so no stretching kicks in from this shortfall.
+	{
+		constexpr uint32_t kPlaybackEndSafetyMargin = 32;
+		uint64_t clipLengthInSamplesBig = playbackHandler.getTimePerInternalTickBig() * (uint64_t)newClip->loopLength;
+		uint32_t clipLengthInSamples = (uint32_t)(clipLengthInSamplesBig >> 32);
+		uint32_t wavLen = newClip->sampleHolder.getDurationInSamples(true);
+		if (clipLengthInSamples > kPlaybackEndSafetyMargin && wavLen > clipLengthInSamples) {
+			uint32_t targetLen = clipLengthInSamples - kPlaybackEndSafetyMargin;
+			newClip->sampleHolder.endPos = newClip->sampleHolder.startPos + targetLen;
+			newClip->sampleHolder.claimClusterReasons(newClip->sampleControls.isCurrentlyReversed(),
+			                                          CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE);
+		}
+	}
+
+	newClip->activeIfNoSolo = srcClip->activeIfNoSolo;
+
+	// Clone reverb-send AutoParam (including automation) and override volume default.
+	if (newClip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
+		UnpatchedParamSet* upsNew = newClip->paramManager.getUnpatchedParamSet();
+		AutoParam& reverbSendDst = upsNew->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT];
+
+		AutoParam* reverbSendSrc = nullptr;
+		if (srcClip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
+			if (srcClip->output->type == OutputType::SYNTH) {
+				reverbSendSrc = &srcClip->paramManager.getPatchedParamSet()
+				                     ->params[deluge::modulation::params::GLOBAL_REVERB_AMOUNT];
+			}
+			else {
+				reverbSendSrc = &srcClip->paramManager.getUnpatchedParamSet()
+				                     ->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT];
+			}
+		}
+		if (reverbSendSrc) {
+			reverbSendDst.cloneFrom(reverbSendSrc, /*copyAutomation=*/true);
+		}
+
+		// Leave UNPATCHED_VOLUME at initParamsForAudioClip's default (-536870912, ~25% knob).
+		// That default is chosen by the engine specifically because loaded AudioClip samples
+		// are typically pre-mixed / full-scale, which matches what a bounced WAV looks like.
+		// Earlier overrides (0, -200M, -400M) tried to "match source unity" but my analytical
+		// model of the gain path was producing predictions that didn't match hardware, so
+		// going back to the engine-designed default rather than continuing to guess values.
+	}
+
+	return newClip;
+}
+
+[[gnu::noinline]] void SessionView::completePendingBounceAddTrack() {
+	// Snapshot and clear pending state so reentry / cancellation paths work cleanly.
+	int32_t count = pendingBounceItemCount_;
+	pendingBounceItemCount_ = 0;
+	if (count <= 0) {
+		return;
+	}
+
+	// Anchor: use the first item's source output as the "one column to the right" reference.
+	Output* sourceOutput = pendingBounceItems_[0].srcClip ? pendingBounceItems_[0].srcClip->output : nullptr;
+	if (!sourceOutput) {
+		return;
+	}
+
+	// One shared new AudioOutput for all bounced clips.
+	AudioOutput* newOutput = currentSong->createNewAudioOutput();
+	if (!newOutput) {
+		display->displayError(Error::INSUFFICIENT_RAM);
+		return;
+	}
+	newOutput->colour = sourceOutput->colour;
+
+	// Splice newOutput into the output list just BEFORE source so it appears one column to the right.
+	{
+		Output** p = &currentSong->firstOutput;
+		while (*p && *p != newOutput) {
+			p = &(*p)->next;
+		}
+		if (*p == newOutput) {
+			*p = newOutput->next;
+		}
+		Output** q = &currentSong->firstOutput;
+		while (*q && *q != sourceOutput) {
+			q = &(*q)->next;
+		}
+		newOutput->next = *q;
+		*q = newOutput;
+	}
+
+	// Insert from highest srcIndex down so earlier insertions don't invalidate later indices.
+	// pendingBounceItems_ is already in ascending order (we iterate sessionClips low→high
+	// when populating), so walk it in reverse.
+	AudioClip* lastNewClip = nullptr;
+	for (int32_t i = count - 1; i >= 0; i--) {
+		PendingBounceItem& item = pendingBounceItems_[i];
+		if (!item.srcClip || item.wavPath.isEmpty()) {
+			continue;
+		}
+		AudioClip* newClip = buildBouncedClip(item.srcClip, newOutput, item.wavPath);
+		if (!newClip) {
+			continue;
+		}
+		int32_t insertIndex = item.srcIndex + 1;
+		if (currentSong->sessionClips.insertClipAtIndex(newClip, insertIndex) != Error::NONE) {
+			newClip->~AudioClip();
+			delugeDealloc(newClip);
+			continue;
+		}
+		lastNewClip = newClip;
+	}
+
+	// Clear pending items' strings so we don't hold references.
+	for (int32_t i = 0; i < count; i++) {
+		pendingBounceItems_[i].srcClip = nullptr;
+		pendingBounceItems_[i].srcIndex = -1;
+		pendingBounceItems_[i].wavPath.clear();
+	}
+
+	if (!lastNewClip) {
+		// Nothing actually landed — clean up the output we speculatively created.
+		currentSong->deleteOutputThatIsInMainList(newOutput);
+		return;
+	}
+
+	view.setActiveModControllableTimelineCounter(lastNewClip);
+	view.displayOutputName(newOutput, true, lastNewClip);
+	requestRendering(this, 0xFFFFFFFF, 0xFFFFFFFF);
 }
 
 void SessionView::replaceInstrumentClipWithAudioClip(Clip* clip) {

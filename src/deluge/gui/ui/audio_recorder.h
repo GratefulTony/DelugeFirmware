@@ -48,6 +48,11 @@ public:
 
 	void endRecordingSoon(int32_t buttonLatency = 0);
 
+	// Normally invoked by slowRoutine once the recorder has reached COMPLETE.
+	// Exposed so stem export can dispose of the recorder itself at a point when
+	// cardRoutine is known to be idle, avoiding a race.
+	void finishRecording();
+
 	void renderOLED(deluge::hid::display::oled_canvas::Canvas& canvas) override;
 
 	bool updatedRecordingStatus = false;
@@ -56,7 +61,6 @@ public:
 	UIType getUIType() override { return UIType::AUDIO_RECORDER; }
 
 private:
-	void finishRecording();
 	bool setupRecordingToFile(AudioInputChannel newMode, int32_t newNumChannels, AudioRecordingFolder folderID,
 	                          bool writeLoopPoints = false, bool shouldNormalize = true);
 };

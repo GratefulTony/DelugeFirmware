@@ -469,6 +469,12 @@ aborted:
 				mayOverwrite = false;
 			}
 
+			// Bounce-in-place hook: capture the full WAV path for the caller when this recording
+			// is driven by stem export.
+			if (stemExport.processStarted) {
+				stemExport.lastExportedWavPath.set(filePathCreated.get());
+			}
+
 			// Recording could finish or abort during this!
 			auto created = StorageManager::createFile(filePathCreated.get(), mayOverwrite);
 			if (!created) {
@@ -775,6 +781,14 @@ Error SampleRecorder::finalizeRecordedFile() {
 				audioFileManager.removeReasonFromCluster(*cluster, "E026");
 			}
 		}
+	}
+
+	// Skip all post-finalize sample-metadata bookkeeping when stem export is driving.
+	// For stem export / bounce-in-place, the WAV file has been fully finalized above; we
+	// don't need to update sample->numChannels / lengthInSamples / audioDataLengthBytes nor
+	// touch sampleBrowser.
+	if (stemExport.processStarted) {
+		return Error::NONE;
 	}
 
 	sample->numChannels = (action != MonitoringAction::NONE || recordingNumChannels == 1) ? 1 : 2;

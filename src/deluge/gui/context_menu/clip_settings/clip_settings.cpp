@@ -41,16 +41,17 @@ std::span<char const*> ClipSettingsMenu::getOptions() {
 		static const char* optionsls[] = {
 		    l10n::get(STRING_FOR_CLIP_MODE),
 		    l10n::get(STRING_FOR_CLIP_NAME),
+		    l10n::get(STRING_FOR_BOUNCE_CLIP),
+		    l10n::get(STRING_FOR_BOUNCE_TRACK),
 		};
-		return {optionsls, 2};
+		return {optionsls, 4};
 	}
 	else {
 		static const char* optionsls[] = {
-		    l10n::get(STRING_FOR_CONVERT_TO_AUDIO),
-		    l10n::get(STRING_FOR_CLIP_MODE),
-		    l10n::get(STRING_FOR_CLIP_NAME),
+		    l10n::get(STRING_FOR_CONVERT_TO_AUDIO), l10n::get(STRING_FOR_CLIP_MODE),    l10n::get(STRING_FOR_CLIP_NAME),
+		    l10n::get(STRING_FOR_BOUNCE_CLIP),      l10n::get(STRING_FOR_BOUNCE_TRACK),
 		};
-		return {optionsls, 3};
+		return {optionsls, 5};
 	}
 }
 
@@ -64,27 +65,42 @@ void ClipSettingsMenu::selectEncoderAction(int8_t offset) {
 }
 
 bool ClipSettingsMenu::acceptCurrentOption() {
-	if (clip->type == ClipType::INSTRUMENT && this->currentOption == 0) {
-		sessionView.replaceInstrumentClipWithAudioClip(clip);
-		return false; // exit UI
-	}
-	else {
-		int32_t option = this->currentOption;
-		if (clip->type == ClipType::INSTRUMENT) {
-			option--; // rebase option selection to 0
-		}
+	using Scope = SessionView::BounceScope;
+	int32_t option = this->currentOption;
+
+	if (clip->type == ClipType::INSTRUMENT) {
 		if (option == 0) {
-			launchStyle.clip = clip;
-			launchStyle.setupAndCheckAvailability();
-			openUI(&launchStyle);
+			sessionView.replaceInstrumentClipWithAudioClip(clip);
+			return false;
 		}
-		else {
-			currentUIMode = UI_MODE_NONE;
-			renameClipUI.clip = clip;
-			openUI(&renameClipUI);
-		}
+		option--; // normalise past Convert to Audio
+	}
+
+	// Now option is: 0=Clip Mode, 1=Clip Name, 2=Bounce Clip, 3=Bounce Track
+	if (option == 0) {
+		launchStyle.clip = clip;
+		launchStyle.setupAndCheckAvailability();
+		openUI(&launchStyle);
 		return true;
 	}
+	if (option == 1) {
+		currentUIMode = UI_MODE_NONE;
+		renameClipUI.clip = clip;
+		openUI(&renameClipUI);
+		return true;
+	}
+	if (option == 2) {
+		Clip* clipToBounce = clip;
+		display->setNextTransitionDirection(-1);
+		close();
+		sessionView.bounceInPlace(clipToBounce, Scope::CLIP);
+		return true;
+	}
+	Clip* clipToBounce = clip;
+	display->setNextTransitionDirection(-1);
+	close();
+	sessionView.bounceInPlace(clipToBounce, Scope::TRACK);
+	return true;
 }
 
 ActionResult ClipSettingsMenu::padAction(int32_t x, int32_t y, int32_t on) {

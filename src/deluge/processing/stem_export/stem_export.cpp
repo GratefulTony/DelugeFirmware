@@ -27,10 +27,12 @@
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
 #include "hid/led/indicator_leds.h"
+#include "io/debug/log.h"
 #include "model/clip/clip.h"
 #include "model/clip/instrument_clip.h"
 #include "model/instrument/non_audio_instrument.h"
 #include "model/note/note_row.h"
+#include "model/sample/sample_recorder.h"
 #include "model/song/song.h"
 #include "playback/mode/arrangement.h"
 #include "playback/mode/session.h"
@@ -77,6 +79,11 @@ StemExport::StemExport() {
 	timeThereWasLastSomeActivity = 0xFFFFFFFF;
 
 	lastFolderNameForStemExport.clear();
+
+	restrictToClip = nullptr;
+	skipDoneContextMenu = false;
+	bakeReverbOnly = false;
+	// lastExportedWavPath is a String, default-constructed empty
 }
 
 /// starts stem export process which includes setting up UI mode, timer, and preparing
@@ -143,7 +150,6 @@ void StemExport::startStemExportProcess(StemExportType stemExportType) {
 		if (!rootUIIsClipMinderScreen()) {
 			sessionView.redrawNumericDisplay();
 		}
-		// here is the right place to call InstrumentClipMinder::redrawNumericDisplay()
 	}
 }
 
@@ -174,6 +180,10 @@ void StemExport::startOutputRecordingUntilLoopEndAndSilence() {
 			else {
 				channel = AudioInputChannel::OUTPUT;
 			}
+		}
+		// Bake reverb into WAV but skip master FX. Only supported in offline render.
+		else if (bakeReverbOnly && renderOffline) {
+			channel = AudioInputChannel::OFFLINE_OUTPUT;
 		}
 		bool normalization =
 		    currentStemExportType == StemExportType::DRUM ? allowNormalizationForDrums : allowNormalization;
@@ -350,15 +360,24 @@ int32_t StemExport::exportInstrumentStems(StemExportType stemExportType) {
 					continue;
 				}
 
-				// wait until recording is done and playback is turned off
+				// Wait until the recorder finishes writing. See exportClipStems for
+				// why we key on recorder->status and finalise the recorder ourselves.
 				yield([]() {
 					if (stemExport.stopRecording) {
 						stemExport.stopOutputRecording();
 					}
-					return !(playbackHandler.recording != RecordingMode::OFF
-					         || audioRecorder.recordingSource > AudioInputChannel::NONE
-					         || playbackHandler.isEitherClockActive());
+					if (!audioRecorder.recorder) {
+						return true;
+					}
+					return audioRecorder.recorder->status >= RecorderStatus::COMPLETE;
 				});
+
+				if (audioRecorder.recorder
+				    && audioRecorder.recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
+					indicator_leds::setLedState(IndicatorLED::RECORD,
+					                            (playbackHandler.recording == RecordingMode::NORMAL));
+					audioRecorder.finishRecording();
+				}
 
 				finishCurrentStemExport(stemExportType, output->mutedInArrangementMode);
 			}
@@ -395,15 +414,22 @@ int32_t StemExport::exportMixdownStem(StemExportType stemExportType) {
 		// so display progress
 		displayStemExportProgress(stemExportType);
 
-		// wait until recording is done and playback is turned off
+		// Wait until the recorder finishes writing. See exportClipStems for
+		// why we key on recorder->status and finalise the recorder ourselves.
 		yield([]() {
 			if (stemExport.stopRecording) {
 				stemExport.stopOutputRecording();
 			}
-			return !(playbackHandler.recording != RecordingMode::OFF
-			         || audioRecorder.recordingSource > AudioInputChannel::NONE
-			         || playbackHandler.isEitherClockActive());
+			if (!audioRecorder.recorder) {
+				return true;
+			}
+			return audioRecorder.recorder->status >= RecorderStatus::COMPLETE;
 		});
+
+		if (audioRecorder.recorder && audioRecorder.recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
+			indicator_leds::setLedState(IndicatorLED::RECORD, (playbackHandler.recording == RecordingMode::NORMAL));
+			audioRecorder.finishRecording();
+		}
 
 		// update number of stems exported
 		numStemsExported++;
@@ -431,9 +457,13 @@ int32_t StemExport::disarmAllClipsForStemExport() {
 				/* export clip stem if all these conditions are met:
 				    1) the clip is not empty (it has notes in it)
 				    2) the output type is not MIDI or CV
+				    3) if restrictToClip is set, this clip IS restrictToClip
 				*/
 				OutputType outputType = clip->output->type;
-				if (!clip->isEmpty(false) && outputType != OutputType::MIDI_OUT && outputType != OutputType::CV) {
+				bool qualifies =
+				    !clip->isEmpty(false) && outputType != OutputType::MIDI_OUT && outputType != OutputType::CV;
+				bool isTarget = (restrictToClip == nullptr) || (clip == restrictToClip);
+				if (qualifies && isTarget) {
 					clip->exportStem = true;
 					totalNumStemsToExport++;
 				}
@@ -523,17 +553,30 @@ int32_t StemExport::exportClipStems(StemExportType stemExportType) {
 					continue;
 				}
 
-				// wait until recording is done and playback is turned off
+				// Wait until the recorder has finished writing the file. We exit on
+				// recorder->status >= COMPLETE (and not on recordingSource clearing),
+				// because AR::slowRoutine is suppressed during stem export — the recorder
+				// finalize path must not run concurrently with cardRoutine. We dispose
+				// the recorder ourselves below.
 				yield([]() {
-					// if you haven't found silence yet and playback has stopped
-					// check for silence so you can stop recording
 					if (stemExport.stopRecording) {
 						stemExport.stopOutputRecording();
 					}
-					return !(playbackHandler.recording != RecordingMode::OFF
-					         || audioRecorder.recordingSource > AudioInputChannel::NONE
-					         || playbackHandler.isEitherClockActive());
+					if (!audioRecorder.recorder) {
+						return true;
+					}
+					return audioRecorder.recorder->status >= RecorderStatus::COMPLETE;
 				});
+
+				// Manually finish the recording now that cardRoutine is done with it.
+				// This mirrors what AR::slowRoutine would normally do, but happens at a
+				// safe point where cardRoutine isn't mid-flight.
+				if (audioRecorder.recorder
+				    && audioRecorder.recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
+					indicator_leds::setLedState(IndicatorLED::RECORD,
+					                            (playbackHandler.recording == RecordingMode::NORMAL));
+					audioRecorder.finishRecording();
+				}
 
 				finishCurrentStemExport(stemExportType, clip->activeIfNoSolo);
 			}
@@ -641,17 +684,24 @@ int32_t StemExport::exportDrumStems(StemExportType stemExportType) {
 					continue;
 				}
 
-				// wait until recording is done and playback is turned off
+				// Wait until the recorder finishes writing. See exportClipStems for
+				// why we key on recorder->status and finalise the recorder ourselves.
 				yield([]() {
-					// if you haven't found silence yet and playback has stopped
-					// check for silence so you can stop recording
 					if (stemExport.stopRecording) {
 						stemExport.stopOutputRecording();
 					}
-					return !(playbackHandler.recording != RecordingMode::OFF
-					         || audioRecorder.recordingSource > AudioInputChannel::NONE
-					         || playbackHandler.isEitherClockActive());
+					if (!audioRecorder.recorder) {
+						return true;
+					}
+					return audioRecorder.recorder->status >= RecorderStatus::COMPLETE;
 				});
+
+				if (audioRecorder.recorder
+				    && audioRecorder.recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
+					indicator_leds::setLedState(IndicatorLED::RECORD,
+					                            (playbackHandler.recording == RecordingMode::NORMAL));
+					audioRecorder.finishRecording();
+				}
 
 				finishCurrentStemExport(stemExportType, thisNoteRow->muted);
 			}
@@ -731,11 +781,13 @@ void StemExport::finishStemExportProcess(StemExportType stemExportType, int32_t 
 		getCurrentUI()->close();
 	}
 
-	// display stem export completed context menu
-	bool available = context_menu::doneStemExport.setupAndCheckAvailability();
-	if (available) {
-		display->setNextTransitionDirection(1);
-		openUI(&context_menu::doneStemExport);
+	// display stem export completed context menu (unless caller asked us to skip it, e.g. bounce-in-place)
+	if (!skipDoneContextMenu) {
+		bool available = context_menu::doneStemExport.setupAndCheckAvailability();
+		if (available) {
+			display->setNextTransitionDirection(1);
+			openUI(&context_menu::doneStemExport);
+		}
 	}
 
 	// exit out of the stem export UI mode

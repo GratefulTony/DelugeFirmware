@@ -1041,6 +1041,8 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_SET_CLIP_LENGTH_EQUAL_TO_SAMPLE_LENGTH, "Set Clip Length Equal to Sample Length"},
         {STRING_FOR_CLIP_LENGTH_ADJUSTED, "Clip Length Adjusted"},
         {STRING_FOR_CONVERT_TO_AUDIO, "Convert to Audio"},
+        {STRING_FOR_BOUNCE_CLIP, "Bounce Clip"},
+        {STRING_FOR_BOUNCE_TRACK, "Bounce Track"},
         {STRING_FOR_CLIP_MODE, "Clip Mode"},
         {STRING_FOR_CLIP_NAME, "Clip Name"},
         {STRING_FOR_NOTE_EDITOR, "Note Editor"},
