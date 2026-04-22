@@ -2726,15 +2726,15 @@ RGB View::getClipMuteSquareColour(Clip* clip, RGB thisColour, bool allowMIDIFlas
 	// Or if not soloing...
 	else {
 		if (!clip->activeIfNoSolo) {
-			switch (clip->launchStyle) {
-			case LaunchStyle::FILL:
-				thisColour = menu_item::fillColourMenu.getRGB(); // colours::red_orange;
-				break;
-			case LaunchStyle::ONCE:
-				thisColour = menu_item::onceColourMenu.getRGB(); // colours::red_orange;
-				break;
-			default:
-				// If it's stopped, red.
+			if (clip->launchStyle == LaunchStyle::FILL) {
+				thisColour = menu_item::fillColourMenu.getRGB();
+			}
+			// Any clip that will transition after a finite number of loops gets the
+			// old "once" colour — visual cue that this clip has a plan.
+			else if (clip->clipRepeats != 0) {
+				thisColour = menu_item::onceColourMenu.getRGB();
+			}
+			else {
 				thisColour = menu_item::stoppedColourMenu.getRGB();
 			}
 		}

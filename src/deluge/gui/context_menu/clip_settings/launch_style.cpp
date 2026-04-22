@@ -10,7 +10,7 @@
 
 namespace deluge::gui::context_menu::clip_settings {
 
-constexpr size_t kNumValues = 3;
+constexpr size_t kNumValues = 2;
 
 LaunchStyleMenu launchStyle{};
 
@@ -24,7 +24,6 @@ std::span<char const*> LaunchStyleMenu::getOptions() {
 	static const char* optionsls[] = {
 	    l10n::get(STRING_FOR_DEFAULT_LAUNCH),
 	    l10n::get(STRING_FOR_FILL_LAUNCH),
-	    l10n::get(STRING_FOR_ONCE_LAUNCH),
 	};
 	return {optionsls, kNumValues};
 }

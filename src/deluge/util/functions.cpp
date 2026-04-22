@@ -1402,9 +1402,6 @@ char const* launchStyleToString(LaunchStyle launchStyle) {
 	case LaunchStyle::FILL:
 		return "fill";
 
-	case LaunchStyle::ONCE:
-		return "once";
-
 	default:
 		__builtin_unreachable();
 		return "";
@@ -1414,9 +1411,6 @@ char const* launchStyleToString(LaunchStyle launchStyle) {
 LaunchStyle stringToLaunchStyle(char const* string) {
 	if (!strcmp(string, "fill")) {
 		return LaunchStyle::FILL;
-	}
-	else if (!strcmp(string, "once")) {
-		return LaunchStyle::ONCE;
 	}
 	else {
 		return LaunchStyle::DEFAULT;

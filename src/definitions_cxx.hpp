@@ -1098,7 +1098,7 @@ enum class ClipType {
 	AUDIO,
 };
 
-enum class LaunchStyle { DEFAULT, FILL, ONCE };
+enum class LaunchStyle { DEFAULT, FILL };
 
 enum class NextAction : uint8_t {
 	STOP,
