@@ -1100,6 +1100,15 @@ enum class ClipType {
 
 enum class LaunchStyle { DEFAULT, FILL, ONCE };
 
+enum class NextAction : uint8_t {
+	STOP,
+	NEXT,
+	PREV,
+	RANDOM,
+	RANDOM_WALK,
+};
+constexpr uint8_t kNumNextActions = 5;
+
 enum class StartupSongMode { BLANK, TEMPLATE, LASTOPENED, LASTSAVED };
 constexpr auto kNumStartupSongMode = util::to_underlying(StartupSongMode::LASTSAVED) + 1;
 
