@@ -23,6 +23,7 @@
 #include "model/song/song.h"
 #include "storage/flash_storage.h"
 #include "util/d_string.h"
+#include <array>
 
 class Editor;
 class InstrumentClip;
@@ -168,7 +169,7 @@ public:
 	// is deferred so it runs from a different call path than the render,
 	// avoiding a layout-sensitive latent race in the SD finalize path.
 	void bounceInPlace(Clip* clip, BounceScope scope);
-	bool hasPendingBounceAddTrack() const { return pendingBounceSource_ != nullptr; }
+	bool hasPendingBounceAddTrack() const { return pendingBounceItemCount_ > 0; }
 	void completePendingBounceAddTrack();
 
 	// pulse selected clip in grid view
@@ -322,10 +323,16 @@ private:
 	int32_t progress = 0;                   // pulse blend slider position
 
 	// Pending-state for deferred bounce add-track (see bounceInPlace).
-	Clip* pendingBounceSource_ = nullptr;
-	int32_t pendingBounceSourceIndex_ = -1;
-	int32_t pendingBounceReverbSend_ = 0;
-	String pendingBounceWavPath_;
+	// One entry per rendered clip; track-scope bounces fill multiple entries that all
+	// land on a single shared new AudioOutput.
+	struct PendingBounceItem {
+		Clip* srcClip = nullptr;
+		int32_t srcIndex = -1;
+		String wavPath;
+	};
+	static constexpr int32_t kMaxBounceItems = 32;
+	std::array<PendingBounceItem, kMaxBounceItems> pendingBounceItems_;
+	int32_t pendingBounceItemCount_ = 0;
 
 	static constexpr int32_t kMinProgress = 1;                           // min position to reach in blend slider
 	static constexpr int32_t kMaxProgressFull = (65535 / 100) * 60;      // max position to reach for unmuted clip
