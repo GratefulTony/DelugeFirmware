@@ -2000,14 +2000,21 @@ static AudioClip* buildBouncedClip(Clip* srcClip, AudioOutput* newOutput, String
 	}
 	newClip->name.set(newClip->sampleHolder.filePath.get());
 
-	// Align the sample-playback window to exactly clipLength-in-samples — timestretch
-	// ratio becomes 1.0, no mid-clip stretch artifacts.
+	// Align the sample-playback window to clipLength-in-samples so the timestretch ratio
+	// stays at 1.0 (no mid-clip stretch artifacts). Leave a small safety margin of
+	// kPlaybackEndSafetyMargin samples — the sample reader needs headroom past endPos for
+	// interpolation / cluster-boundary reassessment; trimming flush to clipLength triggered
+	// an E147 ("bytesLeftWhichMayBeRead <= 0 samples") in SampleLowLevelReader on re-bounce.
+	// The margin is well inside the ~344-sample drift tolerance the timestretch engine
+	// accepts before re-enabling stretch, so no stretching kicks in from this shortfall.
 	{
+		constexpr uint32_t kPlaybackEndSafetyMargin = 32;
 		uint64_t clipLengthInSamplesBig = playbackHandler.getTimePerInternalTickBig() * (uint64_t)newClip->loopLength;
 		uint32_t clipLengthInSamples = (uint32_t)(clipLengthInSamplesBig >> 32);
 		uint32_t wavLen = newClip->sampleHolder.getDurationInSamples(true);
-		if (wavLen > clipLengthInSamples && clipLengthInSamples > 0) {
-			newClip->sampleHolder.endPos = newClip->sampleHolder.startPos + clipLengthInSamples;
+		if (clipLengthInSamples > kPlaybackEndSafetyMargin && wavLen > clipLengthInSamples) {
+			uint32_t targetLen = clipLengthInSamples - kPlaybackEndSafetyMargin;
+			newClip->sampleHolder.endPos = newClip->sampleHolder.startPos + targetLen;
 			newClip->sampleHolder.claimClusterReasons(newClip->sampleControls.isCurrentlyReversed(),
 			                                          CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE);
 		}
