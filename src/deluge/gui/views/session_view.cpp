@@ -2094,11 +2094,17 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	newClip->activeIfNoSolo = clip->activeIfNoSolo;
 
 	// Copy reverb send onto the new clip's own paramManager (UNPATCHED_REVERB_SEND_AMOUNT is
-	// per-clip, not per-output).
+	// per-clip, not per-output). Also override the AudioClip UNPATCHED_VOLUME default:
+	// initParamsForAudioClip sets it to ~25% (-536870912) as a "samples are often loud
+	// already" safety, but our bounced WAV captures post-source-volume output, so playing
+	// it through the new clip at unity (= 0, "half of the way up" in the same sense as
+	// synth/kit defaults) reproduces the source's perceived level. Without this, kits
+	// lose gain (~6dB) across a bounce.
 	if (newClip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
 		UnpatchedParamSet* upsNew = newClip->paramManager.getUnpatchedParamSet();
 		upsNew->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT].setCurrentValueBasicForSetup(
 		    sourceReverbSend);
+		upsNew->params[deluge::modulation::params::UNPATCHED_VOLUME].setCurrentValueBasicForSetup(0);
 	}
 
 	// Insert newClip into the session clip list just after the source clip.
