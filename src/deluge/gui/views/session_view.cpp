@@ -2042,24 +2042,12 @@ static AudioClip* buildBouncedClip(Clip* srcClip, AudioOutput* newOutput, String
 			reverbSendDst.cloneFrom(reverbSendSrc, /*copyAutomation=*/true);
 		}
 
-		// Override the AudioClip UNPATCHED_VOLUME default.
-		//
-		// initParamsForAudioClip sets UNPATCHED_VOLUME to -536870912 (~25% on UI) as a safety
-		// margin for pre-mixed sample content. Our bounced WAV captures post-source-volume
-		// output, so that default would double-attenuate and the bounce plays back ~6dB below
-		// source.
-		//
-		// Setting 0 ("half up", unity for synth/kit clips) overshoots by ~1.7dB. The reason is
-		// that the source's processFXForGlobalEffectable fudged its output up by ~1.22–1.25x as
-		// part of its own stage, that fudge is baked into the WAV, and the new AudioOutput then
-		// applies ITS 1.22 fudge on top — so we effectively multiply by ~1.22 twice. The effect
-		// is most audible when re-bouncing an already-bounced AudioClip, where both source and
-		// destination are audio outputs with matching 1.22 fudge.
-		//
-		// Iteratively tuned: -200M (~-1.7dB) was still too hot in practice. The gain path
-		// clearly has more compounding than a simple fudge-factor analysis predicts. -400M
-		// (~-3.6dB on the quadratic curve) lands closer to source level empirically.
-		upsNew->params[deluge::modulation::params::UNPATCHED_VOLUME].setCurrentValueBasicForSetup(-400000000);
+		// Leave UNPATCHED_VOLUME at initParamsForAudioClip's default (-536870912, ~25% knob).
+		// That default is chosen by the engine specifically because loaded AudioClip samples
+		// are typically pre-mixed / full-scale, which matches what a bounced WAV looks like.
+		// Earlier overrides (0, -200M, -400M) tried to "match source unity" but my analytical
+		// model of the gain path was producing predictions that didn't match hardware, so
+		// going back to the engine-designed default rather than continuing to guess values.
 	}
 
 	return newClip;
