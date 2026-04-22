@@ -2989,6 +2989,13 @@ Clip* View::findNextClipForOutput(Output* output) {
 	return nullptr;
 }
 
+Clip* View::findNextActionTarget(Clip* source, NextAction mode) {
+	// Phase 2 stub — real walker arrives in Phase 3.
+	(void)source;
+	(void)mode;
+	return nullptr;
+}
+
 /*
 char modelStackMemory[MODEL_STACK_MAX_SIZE];
 ModelStackWithThreeMainThings* modelStack = setupModelStack(modelStackMemory);

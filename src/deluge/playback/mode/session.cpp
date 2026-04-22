@@ -631,11 +631,25 @@ doNormalLaunch:
 			}
 		}
 
-		// Arm it again if a ONCE clip, so it stops at the launchEvent
+		// Finite-repeat clips: tick the loop counter and, when the repeat count is
+		// reached, arm self-off and (for non-STOP modes) arm the target on. Always
+		// bump distanceTilLaunchEvent to the clip's loopLength so we get called
+		// again at its next loop boundary.
 		if (!isFillLaunch && (clip->activeIfNoSolo || clip->soloingInSessionMode)
-		    && clip->launchStyle == LaunchStyle::ONCE && clip->armState == ArmState::OFF) {
-			clip->armState = ArmState::ON_NORMAL;
+		    && clip->launchStyle != LaunchStyle::FILL && clip->clipRepeats != 0 && clip->armState == ArmState::OFF) {
+
+			clip->clipRepeatCount++;
 			distanceTilLaunchEvent = std::max(distanceTilLaunchEvent, clip->loopLength);
+
+			if (clip->clipRepeatCount >= clip->clipRepeats) {
+				clip->armState = ArmState::ON_NORMAL; // toggle self off at next event
+				if (clip->nextAction != NextAction::STOP) {
+					Clip* target = view.findNextActionTarget(clip, clip->nextAction);
+					if (target && target != clip) {
+						target->armState = ArmState::ON_NORMAL; // toggle target on
+					}
+				}
+			}
 		}
 
 		bool clipActiveAfter = clip->soloingInSessionMode || (clip->activeIfNoSolo && !anySoloingAfter);
