@@ -211,6 +211,11 @@ public:
 
 	// Reset counter; call when this clip becomes active on a launch event.
 	void onLaunch();
+
+	// True when a finite-repeat clip has reached its programmed repeat count and
+	// is therefore expected to toggle (stop or hand off) at the next launch event.
+	// Replaces the old LaunchStyle::ONCE-specific exemption checks.
+	inline bool hasFiniteRepeatArming() const { return clipRepeats != 0 && clipRepeatCount >= clipRepeats; }
 	int64_t fillEventAtTickCount;
 	bool overdubsShouldCloneOutput;
 
