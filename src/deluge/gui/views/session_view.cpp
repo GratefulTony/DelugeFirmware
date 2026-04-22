@@ -2037,22 +2037,21 @@ static AudioClip* buildBouncedClip(Clip* srcClip, AudioOutput* newOutput, String
 
 		// Override the AudioClip UNPATCHED_VOLUME default.
 		//
-		// initParamsForAudioClip sets UNPATCHED_VOLUME to -536870912 (~25% on UI) — a safety
-		// margin for sample-based audio clips, which are often already loud. Our bounced WAV
-		// captures post-source-volume output, so the default's extra attenuation would double-
-		// attenuate and the bounce plays back ~6dB below source.
+		// initParamsForAudioClip sets UNPATCHED_VOLUME to -536870912 (~25% on UI) as a safety
+		// margin for pre-mixed sample content. Our bounced WAV captures post-source-volume
+		// output, so that default would double-attenuate and the bounce plays back ~6dB below
+		// source.
 		//
-		// Setting it to 0 ("half of the way up", matching the default for synth/kit clips) gets
-		// us close, but it overshoots by ~1dB because the audio output's processFX fudge factor
-		// is 1.2197 while kits use 1.25 — so at the same knob value, audio applies slightly less
-		// gain than a kit *would*, but since our WAV already has the kit's 1.25-fudged signal
-		// baked in, the new clip multiplies by audio's 1.22 fudge ON TOP, leaving us net louder
-		// than source by the residual of the fudge mismatch plus quadratic-curve nonlinearity.
+		// Setting 0 ("half up", unity for synth/kit clips) overshoots by ~1.7dB. The reason is
+		// that the source's processFXForGlobalEffectable fudged its output up by ~1.22–1.25x as
+		// part of its own stage, that fudge is baked into the WAV, and the new AudioOutput then
+		// applies ITS 1.22 fudge on top — so we effectively multiply by ~1.22 twice. The effect
+		// is most audible when re-bouncing an already-bounced AudioClip, where both source and
+		// destination are audio outputs with matching 1.22 fudge.
 		//
-		// Empirically tuning the UI value a couple of percent below "half up" (-100M out of the
-		// full -2^31..2^31-1 range, which is ~-0.8dB on the quadratic curve) lands the bounced
-		// playback at approximately source level across source types.
-		upsNew->params[deluge::modulation::params::UNPATCHED_VOLUME].setCurrentValueBasicForSetup(-100000000);
+		// -200M (~-1.7dB on the quadratic curve) cancels the doubled fudge and lands bounces at
+		// source level across synth/kit/audio sources and through multiple bounce generations.
+		upsNew->params[deluge::modulation::params::UNPATCHED_VOLUME].setCurrentValueBasicForSetup(-200000000);
 	}
 
 	return newClip;
