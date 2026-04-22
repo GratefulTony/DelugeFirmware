@@ -701,6 +701,12 @@ void Clip::writeDataToFile(Serializer& writer, Song* song) {
 	if (launchStyle != LaunchStyle::DEFAULT) {
 		writer.writeAttribute("launchStyle", launchStyleToString(launchStyle));
 	}
+	if (clipRepeats != 0) {
+		writer.writeAttribute("clipRepeats", clipRepeats);
+	}
+	if (nextAction != NextAction::STOP) {
+		writer.writeAttribute("nextAction", nextActionToString(nextAction));
+	}
 }
 
 void Clip::writeMidiCommandsToFile(Serializer& writer, Song* song) {

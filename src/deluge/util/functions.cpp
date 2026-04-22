@@ -1423,6 +1423,40 @@ LaunchStyle stringToLaunchStyle(char const* string) {
 	}
 }
 
+char const* nextActionToString(NextAction action) {
+	switch (action) {
+	case NextAction::STOP:
+		return "stop";
+	case NextAction::NEXT:
+		return "next";
+	case NextAction::PREV:
+		return "prev";
+	case NextAction::RANDOM:
+		return "random";
+	case NextAction::RANDOM_WALK:
+		return "randomWalk";
+	default:
+		__builtin_unreachable();
+		return "";
+	}
+}
+
+NextAction stringToNextAction(char const* string) {
+	if (!strcmp(string, "next")) {
+		return NextAction::NEXT;
+	}
+	if (!strcmp(string, "prev")) {
+		return NextAction::PREV;
+	}
+	if (!strcmp(string, "random")) {
+		return NextAction::RANDOM;
+	}
+	if (!strcmp(string, "randomWalk")) {
+		return NextAction::RANDOM_WALK;
+	}
+	return NextAction::STOP;
+}
+
 char const* getInstrumentFolder(OutputType outputType) {
 	if (outputType == OutputType::SYNTH) {
 		return "SYNTHS";
