@@ -703,6 +703,11 @@ void renderAudioForStemExport(size_t numSamples) {
 		renderReverb(numSamples);
 		renderSongFX(numSamples);
 	}
+	else if (stemExport.bakeReverbOnly) {
+		// Bake reverb into main mix but skip master FX / vol / compressor — so when the
+		// bounced WAV is played back through a new track, master only applies once.
+		renderReverb(numSamples);
+	}
 
 	// If we're recording final output for offline stem export with song FX
 	// Check if we have a recorder

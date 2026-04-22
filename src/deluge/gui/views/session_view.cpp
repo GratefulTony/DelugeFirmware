@@ -1882,14 +1882,22 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	bool savedRenderOffline = stemExport.renderOffline;
 	bool savedAllowNormalization = stemExport.allowNormalization;
 	bool savedExportToSilence = stemExport.exportToSilence;
+	bool savedBakeReverbOnly = stemExport.bakeReverbOnly;
 
-	// Configure for bounce.
-	// includeSongFX=false makes the recorder capture the MIX channel (pre-master-FX, pre-master-
-	// volume, pre-master-compressor, pre-reverb-send). That way, when the new AudioOutput plays
-	// the bounced WAV, the master stage gets applied exactly once — matching the source's own
-	// gain staging. Reverb send is preserved (copied from source to the new output).
+	// Configure for bounce. Channel selection depends on source type:
+	//
+	//   Synth / AudioClip: record MIX (pre-reverb, pre-master). The source has a single reverb
+	//     send value; we preserve it on the new AudioClip, reverb is re-created live at playback.
+	//
+	//   Kit: bake per-drum reverb into the WAV. Each drum carries its own reverb send amount —
+	//     a single send on a new AudioClip can't approximate per-drum variation. So we render
+	//     the reverb bus (bakeReverbOnly=true), skip master FX/vol, and the new clip gets 0
+	//     reverb send. Playback through the new track runs master once → gain matches source.
+	//
 	// renderOffline=true drives rendering inside the audio engine's offline loop.
+	bool isKit = (clip->output->type == OutputType::KIT);
 	stemExport.includeSongFX = false;
+	stemExport.bakeReverbOnly = isKit;
 	stemExport.renderOffline = true;
 	stemExport.allowNormalization = false;
 	stemExport.exportToSilence = false;
@@ -1962,6 +1970,12 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	stemExport.renderOffline = savedRenderOffline;
 	stemExport.allowNormalization = savedAllowNormalization;
 	stemExport.exportToSilence = savedExportToSilence;
+	stemExport.bakeReverbOnly = savedBakeReverbOnly;
+
+	// Reverb is baked into the WAV for kits → don't double it on the new track.
+	if (isKit) {
+		sourceReverbSend = -2147483648;
+	}
 
 	if (wavPath.isEmpty()) {
 		display->displayError(Error::FILE_UNREADABLE);

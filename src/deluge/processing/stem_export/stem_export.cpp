@@ -82,6 +82,7 @@ StemExport::StemExport() {
 
 	restrictToClip = nullptr;
 	skipDoneContextMenu = false;
+	bakeReverbOnly = false;
 	// lastExportedWavPath is a String, default-constructed empty
 }
 
@@ -179,6 +180,10 @@ void StemExport::startOutputRecordingUntilLoopEndAndSilence() {
 			else {
 				channel = AudioInputChannel::OUTPUT;
 			}
+		}
+		// Bake reverb into WAV but skip master FX. Only supported in offline render.
+		else if (bakeReverbOnly && renderOffline) {
+			channel = AudioInputChannel::OFFLINE_OUTPUT;
 		}
 		bool normalization =
 		    currentStemExportType == StemExportType::DRUM ? allowNormalizationForDrums : allowNormalization;

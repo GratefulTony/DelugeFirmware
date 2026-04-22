@@ -107,6 +107,13 @@ public:
 	Clip* restrictToClip = nullptr;   // if set, disarmAllClipsForStemExport marks only this clip
 	String lastExportedWavPath;       // populated by SampleRecorder when stem WAV is created
 	bool skipDoneContextMenu = false; // if true, finishStemExportProcess does NOT open doneStemExport menu
+	// When true (and includeSongFX=false, renderOffline=true), rendering processes the reverb
+	// bus and mixes the reverb tails into the main output buffer, but skips master FX / master
+	// volume / master compressor. Recorder is armed on OFFLINE_OUTPUT so it captures the
+	// dry-mix-plus-reverb buffer. Used by kit bounce so per-drum reverb sends get baked into
+	// the WAV — a single overall reverb send on the new AudioClip can't approximate per-drum
+	// variation.
+	bool bakeReverbOnly = false;
 };
 
 extern StemExport stemExport;
