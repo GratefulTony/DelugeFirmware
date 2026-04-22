@@ -67,6 +67,7 @@
 #include "model/sample/sample.h"
 #include "model/sample/sample_recorder.h"
 #include "model/settings/runtime_feature_settings.h"
+#include "modulation/automation/auto_param.h"
 #include "modulation/params/param.h"
 #include "modulation/params/param_manager.h"
 #include "modulation/params/param_set.h"
@@ -1932,15 +1933,10 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 		}
 	}
 
-	// For kit sources, temporarily mute the kit-level reverb send so the bake captures only
-	// per-drum reverb. Restore right after the stem export returns. sourceReverbSend already
-	// holds the value the new clip will inherit as its live send.
-	bool kitLevelReverbMuted = false;
-	if (isKit && clip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
-		UnpatchedParamSet* ups = clip->paramManager.getUnpatchedParamSet();
-		ups->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT].setCurrentValueBasicForSetup(-2147483648);
-		kitLevelReverbMuted = true;
-	}
+	// For kit sources, the kit-level reverb-send contribution is bypassed at render time via
+	// stemExport.bakeReverbOnly (see GlobalEffectableForClip::processFXForGlobalEffectable).
+	// That avoids touching the source's live paramManager, so automation on the send is
+	// preserved intact during the bake; we'll clone it onto the new clip below.
 
 	// Prime source sample clusters so recording doesn't capture silence while the first
 	// SD clusters load. Especially needed for AudioClip sources and sample-based kit drums.
@@ -1963,13 +1959,6 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	stemExport.allowNormalization = savedAllowNormalization;
 	stemExport.exportToSilence = savedExportToSilence;
 	stemExport.bakeReverbOnly = savedBakeReverbOnly;
-
-	// Restore the source kit's kit-level reverb send (we muted it for the bake).
-	if (kitLevelReverbMuted && clip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
-		UnpatchedParamSet* ups = clip->paramManager.getUnpatchedParamSet();
-		ups->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT].setCurrentValueBasicForSetup(
-		    sourceReverbSend);
-	}
 
 	if (wavPath.isEmpty()) {
 		display->displayError(Error::FILE_UNREADABLE);
@@ -2087,17 +2076,36 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 
 	newClip->activeIfNoSolo = clip->activeIfNoSolo;
 
-	// Copy reverb send onto the new clip's own paramManager (UNPATCHED_REVERB_SEND_AMOUNT is
-	// per-clip, not per-output). Also override the AudioClip UNPATCHED_VOLUME default:
-	// initParamsForAudioClip sets it to ~25% (-536870912) as a "samples are often loud
-	// already" safety, but our bounced WAV captures post-source-volume output, so playing
-	// it through the new clip at unity (= 0, "half of the way up" in the same sense as
-	// synth/kit defaults) reproduces the source's perceived level. Without this, kits
-	// lose gain (~6dB) across a bounce.
+	// Clone the source's reverb-send AutoParam (including any automation curve) onto the new
+	// clip's unpatched UNPATCHED_REVERB_SEND_AMOUNT. For synth sources the live slot is the
+	// patched GLOBAL_REVERB_AMOUNT; for kits and audio clips it's already the unpatched
+	// UNPATCHED_REVERB_SEND_AMOUNT. Raw int32 value semantics are the same — both feed
+	// cableToLinearParamShortcut — so cloneFrom preserves meaning across the slot switch.
+	//
+	// Also override the AudioClip UNPATCHED_VOLUME default (initParamsForAudioClip sets it to
+	// ~25%, but our bounced WAV is post-source-volume, so unity=0 matches level).
 	if (newClip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
 		UnpatchedParamSet* upsNew = newClip->paramManager.getUnpatchedParamSet();
-		upsNew->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT].setCurrentValueBasicForSetup(
-		    sourceReverbSend);
+		AutoParam& reverbSendDst = upsNew->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT];
+
+		AutoParam* reverbSendSrc = nullptr;
+		if (clip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
+			if (clip->output->type == OutputType::SYNTH) {
+				reverbSendSrc =
+				    &clip->paramManager.getPatchedParamSet()->params[deluge::modulation::params::GLOBAL_REVERB_AMOUNT];
+			}
+			else {
+				reverbSendSrc = &clip->paramManager.getUnpatchedParamSet()
+				                     ->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT];
+			}
+		}
+		if (reverbSendSrc) {
+			reverbSendDst.cloneFrom(reverbSendSrc, /*copyAutomation=*/true);
+		}
+		else {
+			reverbSendDst.setCurrentValueBasicForSetup(sourceReverbSend);
+		}
+
 		upsNew->params[deluge::modulation::params::UNPATCHED_VOLUME].setCurrentValueBasicForSetup(0);
 	}
 
