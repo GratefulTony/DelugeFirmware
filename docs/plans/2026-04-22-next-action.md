@@ -270,7 +270,7 @@ git commit -m "next-action: read clipRepeats/nextAction (with legacy 'once' tran
 
 **Step 1: Build**
 
-Run: `./dbt build release`
+Run: `./dbt build`
 Expected: success, no new warnings.
 
 **Step 2: Flash**
@@ -564,7 +564,7 @@ Also check `launch_style.h` for `kNumValues` — if it's `3`, change to `2`.
 **Step 5: Build**
 
 ```bash
-./dbt build release
+./dbt build
 ```
 
 Expected: compiles cleanly. If any ONCE reference is left, the compiler catches it — fix the call site.
@@ -726,7 +726,7 @@ Note: `random(x)` is the existing firmware RNG — see `src/deluge/util/function
 **Step 2: Build + format**
 
 ```bash
-./dbt build release
+./dbt build
 ./dbt format
 ```
 
@@ -923,7 +923,7 @@ git commit -m "next-action: wire Clip Repeats and Next Action into ClipSettingsM
 ### Task 4.5: Build + hardware smoke
 
 ```bash
-./dbt build release && ./dbt loadfw
+./dbt build && ./dbt loadfw
 ```
 
 **Hardware checklist:**
