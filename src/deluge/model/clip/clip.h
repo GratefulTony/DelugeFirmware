@@ -200,6 +200,17 @@ public:
 	uint32_t indexForSaving; // For use only while saving song
 
 	LaunchStyle launchStyle;
+	// Next-action behavior (subsumes old LaunchStyle::ONCE).
+	// clipRepeats == 0 means infinite loop (today's DEFAULT behavior).
+	// Otherwise valid values are {1, 2, 4, 8, 16}.
+	uint8_t clipRepeats = 0;
+	NextAction nextAction = NextAction::STOP;
+	// Runtime-only: incremented at each loop-boundary launch event while
+	// this clip is playing; compared against clipRepeats.
+	uint8_t clipRepeatCount = 0;
+
+	// Reset counter; call when this clip becomes active on a launch event.
+	void onLaunch();
 	int64_t fillEventAtTickCount;
 	bool overdubsShouldCloneOutput;
 

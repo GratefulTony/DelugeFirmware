@@ -57,6 +57,9 @@ Clip::Clip(ClipType newType) : type(newType) {
 	originalLength = 0;
 	armedForRecording = true;
 	launchStyle = LaunchStyle::DEFAULT;
+	clipRepeats = 0;
+	nextAction = NextAction::STOP;
+	clipRepeatCount = 0;
 	fillEventAtTickCount = 0;
 
 	// initialize automation clip view variables
@@ -94,6 +97,9 @@ void Clip::cloneFrom(Clip const* otherClip) {
 	repeatCount = otherClip->repeatCount;
 	armedForRecording = otherClip->armedForRecording;
 	launchStyle = otherClip->launchStyle;
+	clipRepeats = otherClip->clipRepeats;
+	nextAction = otherClip->nextAction;
+	// clipRepeatCount is runtime-only; don't copy.
 }
 
 void Clip::copyBasicsFrom(Clip const* otherClip) {
@@ -102,6 +108,9 @@ void Clip::copyBasicsFrom(Clip const* otherClip) {
 	// modKnobMode = otherClip->modKnobMode;
 	section = otherClip->section;
 	launchStyle = otherClip->launchStyle;
+	clipRepeats = otherClip->clipRepeats;
+	nextAction = otherClip->nextAction;
+	// clipRepeatCount is runtime-only; don't copy.
 	onAutomationClipView = otherClip->onAutomationClipView;
 }
 
@@ -585,6 +594,10 @@ Error Clip::undoDetachmentFromOutput(ModelStackWithTimelineCounter* modelStack) 
 	paramManager.trimToLength(loopLength, modelStackWithThreeMainThings, nullptr, false);
 
 	return Error::NONE;
+}
+
+void Clip::onLaunch() {
+	clipRepeatCount = 0;
 }
 
 // ----- TimelineCounter implementation -------
