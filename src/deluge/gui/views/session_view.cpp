@@ -2056,9 +2056,10 @@ static AudioClip* buildBouncedClip(Clip* srcClip, AudioOutput* newOutput, String
 		// is most audible when re-bouncing an already-bounced AudioClip, where both source and
 		// destination are audio outputs with matching 1.22 fudge.
 		//
-		// -200M (~-1.7dB on the quadratic curve) cancels the doubled fudge and lands bounces at
-		// source level across synth/kit/audio sources and through multiple bounce generations.
-		upsNew->params[deluge::modulation::params::UNPATCHED_VOLUME].setCurrentValueBasicForSetup(-200000000);
+		// Iteratively tuned: -200M (~-1.7dB) was still too hot in practice. The gain path
+		// clearly has more compounding than a simple fudge-factor analysis predicts. -400M
+		// (~-3.6dB on the quadratic curve) lands closer to source level empirically.
+		upsNew->params[deluge::modulation::params::UNPATCHED_VOLUME].setCurrentValueBasicForSetup(-400000000);
 	}
 
 	return newClip;
