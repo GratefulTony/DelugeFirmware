@@ -1911,43 +1911,35 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	// call no-ops and recording never arms, which makes ticks not advance as expected.
 	exitUIMode(UI_MODE_CLIP_PRESSED_IN_SONG_VIEW);
 
-	// Snapshot reverb send from the source. Where it lives depends on output type:
-	//   - Synth (SoundInstrument): clip's patched GLOBAL_REVERB_AMOUNT
-	//   - Kit: kit-wide is clip's unpatched UNPATCHED_REVERB_SEND_AMOUNT, AND each SoundDrum
-	//     contributes its own patched GLOBAL_REVERB_AMOUNT from its NoteRow paramManager
-	//   - AudioOutput: clip's unpatched UNPATCHED_REVERB_SEND_AMOUNT
-	// We take the max across all contributing slots — mirrors the engine's own
-	// getThingWithMostReverb pattern (see Kit::getThingWithMostReverb) and gives the bounced
-	// AudioClip a reverb-send matching the most-reverbed voice in the source.
+	// Snapshot the reverb-send value we want to put onto the new AudioClip:
+	//   - Synth (SoundInstrument): clip's patched GLOBAL_REVERB_AMOUNT. Signal is captured
+	//     pre-reverb via MIX, so the new clip needs a live send to reproduce it.
+	//   - AudioOutput: clip's unpatched UNPATCHED_REVERB_SEND_AMOUNT. Same as synth.
+	//   - Kit: kit-level unpatched UNPATCHED_REVERB_SEND_AMOUNT only. Per-drum reverb can't
+	//     be represented on a single AudioClip's single send, so it gets baked into the WAV
+	//     (bakeReverbOnly). But the kit-wide send IS a single value, so we preserve it as a
+	//     live send by temporarily muting it on the source below — that way the bake captures
+	//     only per-drum contributions, and the new clip plays at the right kit-level depth.
 	int32_t sourceReverbSend = -2147483648; // MIN = 0%
-	auto bumpMax = [&](int32_t v) {
-		if (v > sourceReverbSend) {
-			sourceReverbSend = v;
-		}
-	};
 	if (clip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
 		if (clip->output->type == OutputType::SYNTH) {
 			PatchedParamSet* pps = clip->paramManager.getPatchedParamSet();
-			bumpMax(pps->getValue(deluge::modulation::params::GLOBAL_REVERB_AMOUNT));
+			sourceReverbSend = pps->getValue(deluge::modulation::params::GLOBAL_REVERB_AMOUNT);
 		}
 		else {
 			UnpatchedParamSet* ups = clip->paramManager.getUnpatchedParamSet();
-			bumpMax(ups->getValue(deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT));
+			sourceReverbSend = ups->getValue(deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT);
 		}
 	}
-	if (clip->output->type == OutputType::KIT && clip->type == ClipType::INSTRUMENT) {
-		InstrumentClip* ic = (InstrumentClip*)clip;
-		for (int32_t i = 0; i < ic->noteRows.getNumElements(); i++) {
-			NoteRow* nr = ic->noteRows.getElement(i);
-			if (!nr || !nr->drum || nr->drum->type != DrumType::SOUND) {
-				continue;
-			}
-			if (!nr->paramManager.containsAnyParamCollectionsIncludingExpression()) {
-				continue;
-			}
-			PatchedParamSet* pps = nr->paramManager.getPatchedParamSet();
-			bumpMax(pps->getValue(deluge::modulation::params::GLOBAL_REVERB_AMOUNT));
-		}
+
+	// For kit sources, temporarily mute the kit-level reverb send so the bake captures only
+	// per-drum reverb. Restore right after the stem export returns. sourceReverbSend already
+	// holds the value the new clip will inherit as its live send.
+	bool kitLevelReverbMuted = false;
+	if (isKit && clip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
+		UnpatchedParamSet* ups = clip->paramManager.getUnpatchedParamSet();
+		ups->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT].setCurrentValueBasicForSetup(-2147483648);
+		kitLevelReverbMuted = true;
 	}
 
 	// Prime source sample clusters so recording doesn't capture silence while the first
@@ -1972,9 +1964,11 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	stemExport.exportToSilence = savedExportToSilence;
 	stemExport.bakeReverbOnly = savedBakeReverbOnly;
 
-	// Reverb is baked into the WAV for kits → don't double it on the new track.
-	if (isKit) {
-		sourceReverbSend = -2147483648;
+	// Restore the source kit's kit-level reverb send (we muted it for the bake).
+	if (kitLevelReverbMuted && clip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
+		UnpatchedParamSet* ups = clip->paramManager.getUnpatchedParamSet();
+		ups->params[deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT].setCurrentValueBasicForSetup(
+		    sourceReverbSend);
 	}
 
 	if (wavPath.isEmpty()) {
