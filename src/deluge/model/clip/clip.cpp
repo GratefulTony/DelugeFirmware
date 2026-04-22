@@ -782,7 +782,24 @@ void Clip::readTagFromFile(Deserializer& reader, char const* tagName, Song* song
 	}
 
 	else if (!strcmp(tagName, "launchStyle")) {
-		launchStyle = stringToLaunchStyle(reader.readTagOrAttributeValue());
+		char const* value = reader.readTagOrAttributeValue();
+		// Legacy translation: "once" maps to the new-model (1, STOP) and
+		// leaves launchStyle at DEFAULT. Done here (not in stringToLaunchStyle)
+		// so the enum can drop ONCE in Phase 2.
+		if (!strcmp(value, "once")) {
+			launchStyle = LaunchStyle::DEFAULT;
+			clipRepeats = 1;
+			nextAction = NextAction::STOP;
+		}
+		else {
+			launchStyle = stringToLaunchStyle(value);
+		}
+	}
+	else if (!strcmp(tagName, "clipRepeats")) {
+		clipRepeats = reader.readTagOrAttributeValueInt();
+	}
+	else if (!strcmp(tagName, "nextAction")) {
+		nextAction = stringToNextAction(reader.readTagOrAttributeValue());
 	}
 
 	/*
