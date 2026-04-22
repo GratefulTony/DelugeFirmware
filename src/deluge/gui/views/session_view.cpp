@@ -2071,6 +2071,26 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	}
 	newClip->name.set(newClip->sampleHolder.filePath.get());
 
+	// Align the sample-playback window to exactly clipLength-in-samples. The WAV's actual
+	// sample count can be off by a few samples from loopLength*samplesPerTick due to big-
+	// fixed-point tick rounding; AudioClip's timestretch engine normally hides that by
+	// stretching the sample to fit, but the stretching creates audible artifacts in the
+	// middle of the sample. Trimming endPos to match clipLength makes the timestretch ratio
+	// exactly 1.0 (no stretch) while keeping the clip's loopLength tied to the grid. At most
+	// a handful of trailing WAV samples are discarded, which is inaudible. If the WAV came
+	// out shorter than clipLength (uncommon), we leave endPos alone and a tiny timestretch
+	// still fits it to the grid.
+	{
+		uint64_t clipLengthInSamplesBig = playbackHandler.getTimePerInternalTickBig() * (uint64_t)newClip->loopLength;
+		uint32_t clipLengthInSamples = (uint32_t)(clipLengthInSamplesBig >> 32);
+		uint32_t wavLen = newClip->sampleHolder.getDurationInSamples(true);
+		if (wavLen > clipLengthInSamples && clipLengthInSamples > 0) {
+			newClip->sampleHolder.endPos = newClip->sampleHolder.startPos + clipLengthInSamples;
+			newClip->sampleHolder.claimClusterReasons(newClip->sampleControls.isCurrentlyReversed(),
+			                                          CLUSTER_LOAD_IMMEDIATELY_OR_ENQUEUE);
+		}
+	}
+
 	newClip->activeIfNoSolo = clip->activeIfNoSolo;
 
 	// Copy reverb send onto the new clip's own paramManager (UNPATCHED_REVERB_SEND_AMOUNT is
