@@ -594,6 +594,7 @@ doNormalLaunch:
 					if (!wasArmedToStartSoloing) {
 						clip->activeIfNoSolo = true;
 					}
+					clip->onLaunch();
 
 					ModelStackWithTimelineCounter* modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
 
@@ -1035,6 +1036,7 @@ void Session::toggleClipStatus(Clip* clip, int32_t* clipIndex, bool doInstant, i
 			// If Deluge not playing, easy
 			if (!playbackHandler.isEitherClockActive()) {
 				clip->activeIfNoSolo = true;
+				clip->onLaunch();
 
 				char modelStackMemory[MODEL_STACK_MAX_SIZE];
 				ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
@@ -1266,6 +1268,7 @@ void Session::armSectionWhenNeitherClockActive(ModelStack* modelStack, int32_t s
 
 		if (clip->section == section && !clip->activeIfNoSolo) {
 			clip->activeIfNoSolo = true;
+			clip->onLaunch();
 
 			ModelStackWithTimelineCounter* modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
 
@@ -1373,6 +1376,7 @@ void Session::armClipsWithNothingToSyncTo(uint8_t section, Clip* clip) {
 	// If just one Clip...
 	if (clip) {
 		clip->activeIfNoSolo = true;
+		clip->onLaunch();
 		currentSong->assertActiveness(modelStack->addTimelineCounter(clip));
 	}
 	else // Or, if a whole section...
@@ -1381,6 +1385,7 @@ void Session::armClipsWithNothingToSyncTo(uint8_t section, Clip* clip) {
 			Clip* thisClip = currentSong->sessionClips.getClipAtIndex(c);
 			if (thisClip->section == section) {
 				thisClip->activeIfNoSolo = true;
+				thisClip->onLaunch();
 				currentSong->assertActiveness(modelStack->addTimelineCounter(thisClip)); // Very inefficient
 			}
 		}
@@ -1818,6 +1823,7 @@ void Session::armClipToStartOrSoloUsingQuantization(Clip* thisClip, bool doLateS
 			}
 
 			thisClip->activeIfNoSolo = true;
+			thisClip->onLaunch();
 
 			// Must call this before setPos, because that does stuff with ParamManagers
 			currentSong->assertActiveness(modelStack, playbackHandler.getActualArrangementRecordPos() - pos);
@@ -1885,6 +1891,7 @@ void Session::scheduleFillClip(Clip* clip) {
 				}
 
 				clip->activeIfNoSolo = true;
+				clip->onLaunch();
 
 				// Must call this before setPos, because that does stuff with ParamManagers
 				currentSong->assertActiveness(modelStack, playbackHandler.getActualArrangementRecordPos() - pos);
@@ -2173,6 +2180,7 @@ void Session::resetPlayPos(int32_t newPos, bool doingComplete, int32_t buttonPre
 		// act on it here
 		if (clip->isPendingOverdub) {
 			clip->activeIfNoSolo = true;
+			clip->onLaunch();
 			clip->armState = ArmState::OFF;
 			goto yeahNahItsOn;
 		}
