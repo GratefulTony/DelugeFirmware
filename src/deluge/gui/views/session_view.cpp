@@ -75,11 +75,14 @@
 #include "playback/playback_handler.h"
 #include "processing/audio_output.h"
 #include "processing/engines/audio_engine.h"
+#include "processing/sound/sound_drum.h"
 #include "processing/sound/sound_instrument.h"
+#include "processing/source.h"
 #include "processing/stem_export/stem_export.h"
 #include "scheduler_api.h"
 #include "storage/audio/audio_file_manager.h"
 #include "storage/file_item.h"
+#include "storage/multi_range/multisample_range.h"
 #include "storage/storage_manager.h"
 #include "util/cfunctions.h"
 #include "util/d_string.h"
@@ -1797,6 +1800,56 @@ void SessionView::resyncNewClip(Clip* newClip, ModelStackWithTimelineCounter* mo
 	}
 }
 
+// Force the source clip's sample clusters into RAM so that when stem-export starts playback
+// and immediately begins recording, the first samples aren't silence-while-loading-from-SD.
+// Synth clips don't need this (oscillator-generated). AudioClip sources need their single
+// sample primed. Kit sources need every SoundDrum's sample sources primed.
+static void primeSourceClustersForBounce(Clip* clip) {
+	if (!clip) {
+		return;
+	}
+
+	auto primeSampleSource = [](Source& src) {
+		if (src.oscType != OscType::SAMPLE) {
+			return;
+		}
+		for (int32_t r = 0; r < src.ranges.getNumElements(); r++) {
+			auto* range = (MultisampleRange*)src.ranges.getElement(r);
+			if (range && range->sampleHolder.audioFile) {
+				range->sampleHolder.claimClusterReasons(src.sampleControls.reversed, CLUSTER_LOAD_IMMEDIATELY);
+			}
+		}
+	};
+
+	auto primeSound = [&](Sound* sound) {
+		for (int32_t s = 0; s < kNumSources; s++) {
+			primeSampleSource(sound->sources[s]);
+		}
+	};
+
+	if (clip->type == ClipType::AUDIO) {
+		AudioClip* ac = (AudioClip*)clip;
+		if (ac->sampleHolder.audioFile) {
+			ac->sampleHolder.claimClusterReasons(ac->sampleControls.isCurrentlyReversed(), CLUSTER_LOAD_IMMEDIATELY);
+		}
+		return;
+	}
+
+	if (clip->output->type == OutputType::SYNTH) {
+		primeSound((SoundInstrument*)clip->output);
+	}
+	else if (clip->output->type == OutputType::KIT && clip->type == ClipType::INSTRUMENT) {
+		InstrumentClip* ic = (InstrumentClip*)clip;
+		for (int32_t i = 0; i < ic->noteRows.getNumElements(); i++) {
+			NoteRow* nr = ic->noteRows.getElement(i);
+			if (!nr || !nr->drum || nr->drum->type != DrumType::SOUND) {
+				continue;
+			}
+			primeSound((SoundDrum*)nr->drum);
+		}
+	}
+}
+
 void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	if (!clip) {
 		return;
@@ -1850,22 +1903,48 @@ void SessionView::bounceInPlace(Clip* clip, BounceScope scope) {
 	// call no-ops and recording never arms, which makes ticks not advance as expected.
 	exitUIMode(UI_MODE_CLIP_PRESSED_IN_SONG_VIEW);
 
-	// Snapshot reverb send from the source clip's live paramManager. Which slot depends on
-	// output type:
-	//   - Synth (SoundInstrument): patched GLOBAL_REVERB_AMOUNT
-	//   - Kit / AudioOutput (GlobalEffectableForClip): unpatched UNPATCHED_REVERB_SEND_AMOUNT
-	// See Sound::getThingWithMostReverb vs GlobalEffectableForClip::getThingWithMostReverb.
+	// Snapshot reverb send from the source. Where it lives depends on output type:
+	//   - Synth (SoundInstrument): clip's patched GLOBAL_REVERB_AMOUNT
+	//   - Kit: kit-wide is clip's unpatched UNPATCHED_REVERB_SEND_AMOUNT, AND each SoundDrum
+	//     contributes its own patched GLOBAL_REVERB_AMOUNT from its NoteRow paramManager
+	//   - AudioOutput: clip's unpatched UNPATCHED_REVERB_SEND_AMOUNT
+	// We take the max across all contributing slots — mirrors the engine's own
+	// getThingWithMostReverb pattern (see Kit::getThingWithMostReverb) and gives the bounced
+	// AudioClip a reverb-send matching the most-reverbed voice in the source.
 	int32_t sourceReverbSend = -2147483648; // MIN = 0%
+	auto bumpMax = [&](int32_t v) {
+		if (v > sourceReverbSend) {
+			sourceReverbSend = v;
+		}
+	};
 	if (clip->paramManager.containsAnyParamCollectionsIncludingExpression()) {
 		if (clip->output->type == OutputType::SYNTH) {
 			PatchedParamSet* pps = clip->paramManager.getPatchedParamSet();
-			sourceReverbSend = pps->getValue(deluge::modulation::params::GLOBAL_REVERB_AMOUNT);
+			bumpMax(pps->getValue(deluge::modulation::params::GLOBAL_REVERB_AMOUNT));
 		}
 		else {
 			UnpatchedParamSet* ups = clip->paramManager.getUnpatchedParamSet();
-			sourceReverbSend = ups->getValue(deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT);
+			bumpMax(ups->getValue(deluge::modulation::params::UNPATCHED_REVERB_SEND_AMOUNT));
 		}
 	}
+	if (clip->output->type == OutputType::KIT && clip->type == ClipType::INSTRUMENT) {
+		InstrumentClip* ic = (InstrumentClip*)clip;
+		for (int32_t i = 0; i < ic->noteRows.getNumElements(); i++) {
+			NoteRow* nr = ic->noteRows.getElement(i);
+			if (!nr || !nr->drum || nr->drum->type != DrumType::SOUND) {
+				continue;
+			}
+			if (!nr->paramManager.containsAnyParamCollectionsIncludingExpression()) {
+				continue;
+			}
+			PatchedParamSet* pps = nr->paramManager.getPatchedParamSet();
+			bumpMax(pps->getValue(deluge::modulation::params::GLOBAL_REVERB_AMOUNT));
+		}
+	}
+
+	// Prime source sample clusters so recording doesn't capture silence while the first
+	// SD clusters load. Especially needed for AudioClip sources and sample-based kit drums.
+	primeSourceClustersForBounce(clip);
 
 	// Drive the full stem-export state machine. Blocks (via yield) until export completes.
 	// On exit, stemExport.lastExportedWavPath holds the absolute path of the rendered WAV.
