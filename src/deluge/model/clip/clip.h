@@ -212,6 +212,15 @@ public:
 	// Reset counter; call when this clip becomes active on a launch event.
 	void onLaunch();
 
+	// Tick this clip's finite-repeat counter (no-op if clipRepeats == 0).
+	// If count reaches threshold, arms self (ON_NORMAL), schedules a launch
+	// event at currentTick + loopLength, and returns the walker-resolved
+	// target Clip* for the caller to arm (directly or via deferred list).
+	// For STOP mode or stay-on-self, returns nullptr (no target to arm).
+	// Guards on `playbackHandler.isEitherClockActive()` — safe to call from
+	// stopped-playback activation sites as a no-op.
+	Clip* maybeTickNextAction();
+
 	// True when a finite-repeat clip has reached its programmed repeat count and
 	// is therefore expected to toggle (stop or hand off) at the next launch event.
 	// Replaces the old LaunchStyle::ONCE-specific exemption checks.
