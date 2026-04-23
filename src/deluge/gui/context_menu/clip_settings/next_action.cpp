@@ -31,6 +31,16 @@ namespace deluge::gui::context_menu::clip_settings {
 
 constexpr size_t kNumValues = 5;
 
+// The menu stores its selection as the raw enum value via a static_cast.
+// If NextAction is ever reordered, the static_asserts here will fail —
+// fix the options-array order (or switch to a value table like ClipRepeats).
+static_assert(static_cast<int32_t>(NextAction::STOP) == 0);
+static_assert(static_cast<int32_t>(NextAction::NEXT) == 1);
+static_assert(static_cast<int32_t>(NextAction::PREV) == 2);
+static_assert(static_cast<int32_t>(NextAction::RANDOM) == 3);
+static_assert(static_cast<int32_t>(NextAction::RANDOM_WALK) == 4);
+static_assert(kNumNextActions == 5);
+
 NextActionMenu nextAction{};
 
 char const* NextActionMenu::getTitle() {
@@ -40,6 +50,8 @@ char const* NextActionMenu::getTitle() {
 
 std::span<char const*> NextActionMenu::getOptions() {
 	using enum l10n::String;
+	// Option order MUST match NextAction enum order — selectEncoderAction relies
+	// on static_cast<NextAction>(index). The static_asserts above enforce this.
 	static const char* optionsls[] = {
 	    l10n::get(STRING_FOR_NEXT_ACTION_STOP),        l10n::get(STRING_FOR_NEXT_ACTION_NEXT),
 	    l10n::get(STRING_FOR_NEXT_ACTION_PREV),        l10n::get(STRING_FOR_NEXT_ACTION_RANDOM),
