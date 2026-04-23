@@ -785,7 +785,12 @@ void Session::processPendingNextActionTransitions() {
 		target->activeIfNoSolo = true;
 		target->onLaunch();
 		target->setPos(targetMstc, 0, false);
-		target->resumePlayback(targetMstc, true);
+		// Trigger any notes starting at position 0 — normal flow would do this
+		// via doTickForward's per-clip iteration, but we activated target at
+		// the tail of that iteration, so it gets skipped this tick. Call
+		// processCurrentPos explicitly with ticksSinceLast=0 so InstrumentClip
+		// / AudioClip note-row / sample triggering runs at pos=0.
+		target->processCurrentPos(targetMstc, 0);
 		target->output->setActiveClip(targetMstc);
 		anyTransitionHappened = true;
 	}
