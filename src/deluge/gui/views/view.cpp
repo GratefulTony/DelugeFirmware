@@ -3076,8 +3076,15 @@ Clip* View::findNextActionTarget(Clip* source, NextAction mode) {
 			return source;
 		}
 		bool forward = (random(1) != 0);
-		int32_t step = forward ? 1 : (blockLen - 1);
-		return atBlockIdx((srcInBlock + step) % blockLen);
+		// Reflect off boundaries so we stay inside the block.
+		if (srcInBlock == 0) {
+			forward = true;
+		}
+		else if (srcInBlock == blockLen - 1) {
+			forward = false;
+		}
+		int32_t signedStep = forward ? 1 : -1;
+		return atBlockIdx(srcInBlock + signedStep);
 	}
 	case NextAction::RANDOM_OTHER: {
 		if (blockLen == 1) {
@@ -3092,7 +3099,7 @@ Clip* View::findNextActionTarget(Clip* source, NextAction mode) {
 	}
 	case NextAction::NEAR: {
 		if (blockLen == 1) {
-			return source; // degenerate block — nothing else to pick
+			return source;
 		}
 		// Geometric-like step: start at 1, flip coin to extend, truncate at blockLen-1.
 		// Gives P(step=1) ~= 0.5, P(step=2) ~= 0.25, etc., biased toward adjacent.
@@ -3100,10 +3107,24 @@ Clip* View::findNextActionTarget(Clip* source, NextAction mode) {
 		while (step < (blockLen - 1) && (random(1) == 0)) {
 			step++;
 		}
-		// Direction ±
 		bool forward = (random(1) != 0);
-		int32_t signedStep = forward ? step : (blockLen - step);
-		return atBlockIdx((srcInBlock + signedStep) % blockLen);
+		// Reflect off block boundaries — if the chosen direction would land
+		// outside the block, flip direction instead of wrapping.
+		if (forward && srcInBlock + step >= blockLen) {
+			forward = false;
+		}
+		else if (!forward && srcInBlock - step < 0) {
+			forward = true;
+		}
+		int32_t newIdx = srcInBlock + (forward ? step : -step);
+		// Clamp defensively (shouldn't be needed after reflection, but cheap).
+		if (newIdx < 0) {
+			newIdx = 0;
+		}
+		if (newIdx >= blockLen) {
+			newIdx = blockLen - 1;
+		}
+		return atBlockIdx(newIdx);
 	}
 	case NextAction::STOP:
 	default:
