@@ -1030,3 +1030,5 @@ Use the `superpowers:requesting-code-review` skill to package the branch for rev
 - Configurable per-clip *ordering* within the block (today: section-ascending). Expose as a per-clip flag if users want reverse-by-default blocks.
 - Chain definitions by explicit targets (clip A → clip C skipping B). Out of scope; grid-derived ordering is what the design commits to.
 - Runtime-toggleable random seed for reproducible live sets. YAGNI until asked.
+- **RANDOM_NEAR / Lévy-flight mode** — random transitions biased toward adjacent clips with a heavy tail for occasional far jumps. Needs a design pass on the weighting distribution and the UX knob (if any).
+- **Suppress "beats remaining" popup when a next-action is the event driver** — the countdown popup makes sense for user-armed launches but is visual clutter when transitions are automatic per-clip. Investigation target: wherever the popup is triggered by `scheduleLaunchTiming` / `armingChanged`; gate it on whether the pending launch was set up by a finite-repeat re-arm vs. a user action.
