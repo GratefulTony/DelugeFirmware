@@ -269,6 +269,17 @@ void Clip::processCurrentPos(ModelStackWithTimelineCounter* modelStack, uint32_t
 		// going to hit next etc.
 		if (!lastProcessedPos) { // Possibly only just became the case, above.
 			repeatCount++;
+
+			// Finite-repeat counting (reverse playback wrap). See the matching
+			// block in the forward-wrap branch below for the full rationale.
+			if (clipRepeats != 0 && (activeIfNoSolo || soloingInSessionMode) && launchStyle != LaunchStyle::FILL
+			    && armState == ArmState::OFF && playbackHandler.isEitherClockActive()) {
+				clipRepeatCount++;
+				if (clipRepeatCount >= clipRepeats) {
+					pendingNextActionTransition = true;
+				}
+			}
+
 			if (sequenceDirectionMode == SequenceDirection::PINGPONG) {
 				lastProcessedPos = -lastProcessedPos; // In case it did get left of zero.
 				currentlyPlayingReversed = !currentlyPlayingReversed;
@@ -294,6 +305,20 @@ playingForwardNow:
 
 			lastProcessedPos -= loopLength;
 			repeatCount++;
+
+			// Finite-repeat counting: detect loop-wrap and flag transition
+			// when the count reaches the programmed repeat threshold. The
+			// actual swap is performed later by Session::processPendingNext
+			// ActionTransitions at the tail of doTickForward, outside per-
+			// clip tick iteration — see commit 669f7027's revert for why
+			// mutating source/target state inline broke things.
+			if (clipRepeats != 0 && (activeIfNoSolo || soloingInSessionMode) && launchStyle != LaunchStyle::FILL
+			    && armState == ArmState::OFF && playbackHandler.isEitherClockActive()) {
+				clipRepeatCount++;
+				if (clipRepeatCount >= clipRepeats) {
+					pendingNextActionTransition = true;
+				}
+			}
 
 			if (sequenceDirectionMode == SequenceDirection::PINGPONG) {
 				// Normally we'll have hit the exact loop point, meaning lastProcessedPos will have wrapped to 0, above.
@@ -598,6 +623,7 @@ Error Clip::undoDetachmentFromOutput(ModelStackWithTimelineCounter* modelStack) 
 
 void Clip::onLaunch() {
 	clipRepeatCount = 0;
+	pendingNextActionTransition = false;
 }
 
 // ----- TimelineCounter implementation -------

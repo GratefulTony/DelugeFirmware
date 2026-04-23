@@ -40,6 +40,7 @@ public:
 	void armAllClipsToStop(int32_t afterNumRepeats);
 	void armNextSection(int32_t oldSection, int32_t numRepetitions = -1);
 	void doLaunch(bool isFillLaunch);
+	void processPendingNextActionTransitions();
 	void scheduleLaunchTiming(int64_t atTickCount, int32_t numRepeatsUntil, int32_t armedLaunchLengthForOneRepeat,
 	                          bool isFromNextAction = false);
 	int32_t getNumSixteenthNotesRemainingTilLaunch();

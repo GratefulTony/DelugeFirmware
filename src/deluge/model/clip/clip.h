@@ -208,6 +208,11 @@ public:
 	// Runtime-only: incremented at each loop-boundary launch event while
 	// this clip is playing; compared against clipRepeats.
 	uint8_t clipRepeatCount = 0;
+	// Runtime-only: set by Clip::processCurrentPos when a finite-repeat clip
+	// wraps past its programmed repeat count. Consumed by
+	// Session::processPendingNextActionTransitions at the tail of doTickForward.
+	// Not serialized.
+	bool pendingNextActionTransition = false;
 
 	// Reset counter; call when this clip becomes active on a launch event.
 	void onLaunch();

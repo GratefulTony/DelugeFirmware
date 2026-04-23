@@ -371,16 +371,6 @@ void Session::doLaunch(bool isFillLaunch) {
 	}
 	int32_t distanceTilLaunchEvent = 0; // For if clips automatically armed cos they just started recording a loop
 
-	// Clips whose armState should be set to ON_NORMAL after all iteration passes
-	// complete. Used by the finite-repeat re-arm block to arm a transition target
-	// without that arm being clobbered by Pass 3's activation branch for that
-	// target (Pass 3 would clear the arm at line ~572 and then skip activation
-	// because `output->alreadyGotItsNewClip` is already true for the source's
-	// Output — same Output as target for same-track transitions).
-	constexpr int32_t kMaxPendingArms = 16;
-	Clip* pendingArms[kMaxPendingArms];
-	int32_t pendingArmCount = 0;
-
 	// Ok, now action all currently playing clips. This includes clips armed to start recording or stop - including ones
 	// which weren't actually armed to stop but need to stop in order to make way for other ones which were armed to
 	// start. But we can't action the starting of any Clips yet, until all stopping is done.
@@ -641,38 +631,12 @@ doNormalLaunch:
 			}
 		}
 
-		// Finite-repeat clips: tick the loop counter and, when the repeat count is
-		// reached, arm self-off and (for non-STOP modes) arm the target on. Always
-		// bump distanceTilLaunchEvent to the clip's loopLength so we get called
-		// again at its next loop boundary.
-		if (!isFillLaunch && (clip->activeIfNoSolo || clip->soloingInSessionMode)
-		    && clip->launchStyle != LaunchStyle::FILL && clip->clipRepeats != 0 && clip->armState == ArmState::OFF) {
-
-			clip->clipRepeatCount++;
-			distanceTilLaunchEvent = std::max(distanceTilLaunchEvent, clip->loopLength);
-
-			if (clip->clipRepeatCount >= clip->clipRepeats) {
-				if (clip->nextAction == NextAction::STOP) {
-					clip->armState = ArmState::ON_NORMAL; // toggle self off at next event
-				}
-				else {
-					Clip* target = view.findNextActionTarget(clip, clip->nextAction);
-					if (target != nullptr && target != clip) {
-						clip->armState = ArmState::ON_NORMAL; // toggle self off
-						// Defer target arm until after Pass 3 finishes iterating so Pass 3's
-						// activation branch doesn't clobber it (see explanation above).
-						if (pendingArmCount < kMaxPendingArms) {
-							pendingArms[pendingArmCount++] = target;
-						}
-					}
-					else {
-						// No valid transition target (degenerate block, or RANDOM picked self).
-						// Keep playing; reset counter so the next cycle gets a fresh evaluation.
-						clip->clipRepeatCount = 0;
-					}
-				}
-			}
-		}
+		// Finite-repeat counting and transition-arming now live in
+		// Clip::processCurrentPos (flag-set on loop-wrap) and
+		// Session::processPendingNextActionTransitions (swap at tail of
+		// doTickForward). That decouples per-clip counting from the global
+		// launch-event cadence, so parallel finite-repeat clips with differing
+		// loopLengths each transition at their own boundary.
 
 		bool clipActiveAfter = clip->soloingInSessionMode || (clip->activeIfNoSolo && !anySoloingAfter);
 
@@ -768,14 +732,59 @@ doNormalLaunch:
 		}
 	}
 
-	// Apply deferred finite-repeat target arms now that Pass 3 is complete.
-	// These are seen by Pass 1 of the next launch event, where per-Output
-	// launch bookkeeping is reset for them correctly.
-	for (int32_t i = 0; i < pendingArmCount; i++) {
-		pendingArms[i]->armState = ArmState::ON_NORMAL;
-	}
-
 	AudioEngine::bypassCulling = true;
+}
+
+// Scan sessionClips for clips that Clip::processCurrentPos flagged for a
+// finite-repeat transition during this tick, and perform the swap here —
+// outside the per-clip tick iteration in doTickForward. Mutating source/
+// target state inline inside processCurrentPos broke the mechanism (see
+// reverted commit 669f7027); deferring to here avoids that.
+void Session::processPendingNextActionTransitions() {
+	for (int32_t c = currentSong->sessionClips.getNumElements() - 1; c >= 0; c--) {
+		Clip* clip = currentSong->sessionClips.getClipAtIndex(c);
+		if (clip == nullptr || !clip->pendingNextActionTransition) {
+			continue;
+		}
+		clip->pendingNextActionTransition = false;
+
+		if (!clip->activeIfNoSolo && !clip->soloingInSessionMode) {
+			// Clip was deactivated between flag-set and now; skip.
+			continue;
+		}
+		if (clip->armState != ArmState::OFF) {
+			// User armed this clip for something else; defer to user action.
+			continue;
+		}
+
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
+
+		if (clip->nextAction == NextAction::STOP) {
+			clip->clipRepeatCount = 0;
+			clip->activeIfNoSolo = false;
+			clip->expectNoFurtherTicks(currentSong, true);
+			continue;
+		}
+
+		Clip* target = view.findNextActionTarget(clip, clip->nextAction);
+		if (target == nullptr || target == clip) {
+			// Stay-on-self or degenerate block — keep playing, reset counter.
+			clip->clipRepeatCount = 0;
+			continue;
+		}
+
+		// Direct swap: deactivate source, activate target at pos 0.
+		clip->activeIfNoSolo = false;
+		clip->expectNoFurtherTicks(currentSong, true);
+
+		ModelStackWithTimelineCounter* targetMstc = modelStack->addTimelineCounter(target);
+		target->soloingInSessionMode = false;
+		target->activeIfNoSolo = true;
+		target->onLaunch();
+		target->setPos(targetMstc, 0, false);
+		target->output->setActiveClip(targetMstc);
+	}
 }
 
 void Session::justAbortedSomeLinearRecording() {
@@ -2265,38 +2274,9 @@ yeahNahItsOn:
 					}
 				}
 
-				// Simulate doLaunch's re-arm block for finite-repeat clips at transport-start.
-				// In the manual-trigger path, activation and the first clipRepeatCount++ happen
-				// in the same launch event (Pass 3 activation + the re-arm block right below
-				// it), so the transition arms one loop after the clip starts. Transport-start
-				// activates via resetPlayPos (not doLaunch), so without this simulation the
-				// first counter-tick would be delayed a full loop, giving 2 loops of the source
-				// before the transition fires. Replicating the re-arm block here restores
-				// one-loop semantics.
-				if (clip->clipRepeats != 0) {
-					clip->clipRepeatCount++;
-					distanceTilLaunchEvent = std::max(distanceTilLaunchEvent, clip->loopLength);
-
-					if (clip->clipRepeatCount >= clip->clipRepeats) {
-						if (clip->nextAction == NextAction::STOP) {
-							clip->armState = ArmState::ON_NORMAL;
-						}
-						else {
-							Clip* target = view.findNextActionTarget(clip, clip->nextAction);
-							if (target != nullptr && target != clip) {
-								clip->armState = ArmState::ON_NORMAL;
-								// No Pass-3 clobber to worry about here (resetPlayPos is single-pass),
-								// so the target arm can be set directly.
-								target->armState = ArmState::ON_NORMAL;
-							}
-							else {
-								// RANDOM picked self or degenerate block — keep playing,
-								// reset counter for next cycle.
-								clip->clipRepeatCount = 0;
-							}
-						}
-					}
-				}
+				// Finite-repeat counting starts fresh at transport-start via
+				// onLaunch() reset elsewhere, and is driven by loop-wrap detection
+				// inside Clip::processCurrentPos from here on.
 			}
 
 			// Rohan: Not quite sure why we needed to set this here?
@@ -2586,6 +2566,12 @@ void Session::doTickForward(int32_t posIncrement) {
 	    }
 	}
 	*/
+
+	// Action any pending next-action transitions that processCurrentPos detected
+	// at loop wraps during this tick. Doing this AFTER all per-clip tick work
+	// is done — outside processCurrentPos iteration — avoids mid-iteration
+	// state mutation on the source clip that broke commit 669f7027.
+	processPendingNextActionTransitions();
 }
 
 void Session::resyncToSongTicks(Song* song) {
