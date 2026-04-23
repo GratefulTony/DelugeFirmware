@@ -17,7 +17,9 @@
 
 #include "gui/context_menu/clip_settings/clip_settings.h"
 #include "definitions_cxx.hpp"
+#include "gui/context_menu/clip_settings/clip_repeats.h"
 #include "gui/context_menu/clip_settings/launch_style.h"
+#include "gui/context_menu/clip_settings/next_action.h"
 #include "gui/l10n/l10n.h"
 #include "gui/ui/rename/rename_clip_ui.h"
 #include "gui/ui/root_ui.h"
@@ -39,19 +41,18 @@ std::span<char const*> ClipSettingsMenu::getOptions() {
 	using enum l10n::String;
 	if (clip->type == ClipType::AUDIO) {
 		static const char* optionsls[] = {
-		    l10n::get(STRING_FOR_CLIP_MODE),
-		    l10n::get(STRING_FOR_CLIP_NAME),
-		    l10n::get(STRING_FOR_BOUNCE_CLIP),
-		    l10n::get(STRING_FOR_BOUNCE_TRACK),
+		    l10n::get(STRING_FOR_CLIP_MODE), l10n::get(STRING_FOR_CLIP_REPEATS), l10n::get(STRING_FOR_NEXT_ACTION),
+		    l10n::get(STRING_FOR_CLIP_NAME), l10n::get(STRING_FOR_BOUNCE_CLIP),  l10n::get(STRING_FOR_BOUNCE_TRACK),
 		};
-		return {optionsls, 4};
+		return {optionsls, 6};
 	}
 	else {
 		static const char* optionsls[] = {
-		    l10n::get(STRING_FOR_CONVERT_TO_AUDIO), l10n::get(STRING_FOR_CLIP_MODE),    l10n::get(STRING_FOR_CLIP_NAME),
-		    l10n::get(STRING_FOR_BOUNCE_CLIP),      l10n::get(STRING_FOR_BOUNCE_TRACK),
+		    l10n::get(STRING_FOR_CONVERT_TO_AUDIO), l10n::get(STRING_FOR_CLIP_MODE), l10n::get(STRING_FOR_CLIP_REPEATS),
+		    l10n::get(STRING_FOR_NEXT_ACTION),      l10n::get(STRING_FOR_CLIP_NAME), l10n::get(STRING_FOR_BOUNCE_CLIP),
+		    l10n::get(STRING_FOR_BOUNCE_TRACK),
 		};
-		return {optionsls, 5};
+		return {optionsls, 7};
 	}
 }
 
@@ -76,7 +77,7 @@ bool ClipSettingsMenu::acceptCurrentOption() {
 		option--; // normalise past Convert to Audio
 	}
 
-	// Now option is: 0=Clip Mode, 1=Clip Name, 2=Bounce Clip, 3=Bounce Track
+	// Now option is: 0=Clip Mode, 1=Clip Repeats, 2=Next Action, 3=Clip Name, 4=Bounce Clip, 5=Bounce Track
 	if (option == 0) {
 		launchStyle.clip = clip;
 		launchStyle.setupAndCheckAvailability();
@@ -84,12 +85,24 @@ bool ClipSettingsMenu::acceptCurrentOption() {
 		return true;
 	}
 	if (option == 1) {
+		clipRepeats.clip = clip;
+		clipRepeats.setupAndCheckAvailability();
+		openUI(&clipRepeats);
+		return true;
+	}
+	if (option == 2) {
+		nextAction.clip = clip;
+		nextAction.setupAndCheckAvailability();
+		openUI(&nextAction);
+		return true;
+	}
+	if (option == 3) {
 		currentUIMode = UI_MODE_NONE;
 		renameClipUI.clip = clip;
 		openUI(&renameClipUI);
 		return true;
 	}
-	if (option == 2) {
+	if (option == 4) {
 		Clip* clipToBounce = clip;
 		display->setNextTransitionDirection(-1);
 		close();
