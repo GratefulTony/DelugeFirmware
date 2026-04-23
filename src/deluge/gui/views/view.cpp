@@ -89,6 +89,7 @@
 #include "storage/file_item.h"
 #include "storage/flash_storage.h"
 #include "storage/storage_manager.h"
+#include "util/functions.h"
 
 namespace params = deluge::modulation::params;
 namespace encoders = deluge::hid::encoders;
@@ -2990,10 +2991,98 @@ Clip* View::findNextClipForOutput(Output* output) {
 }
 
 Clip* View::findNextActionTarget(Clip* source, NextAction mode) {
-	// Phase 2 stub — real walker arrives in Phase 3.
-	(void)source;
-	(void)mode;
-	return nullptr;
+	if (!source || !source->output) {
+		return nullptr;
+	}
+	if (mode == NextAction::STOP) {
+		return nullptr; // caller doesn't need a target for STOP
+	}
+
+	// Collect all clips on the same Output, indexed with their section number.
+	// Stack-bounded: cap at kMaxPerOutput to avoid heap and to bound the sort.
+	// If exceeded, fall back to STOP semantics by returning nullptr.
+	constexpr int32_t kMaxPerOutput = 64;
+	struct Entry {
+		uint8_t section;
+		Clip* clip;
+	};
+	Entry entries[kMaxPerOutput];
+	int32_t count = 0;
+
+	for (int32_t i = 0; i < currentSong->sessionClips.getNumElements(); i++) {
+		Clip* c = currentSong->sessionClips.getClipAtIndex(i);
+		if (!c || c->output != source->output) {
+			continue;
+		}
+		if (count >= kMaxPerOutput) {
+			return nullptr;
+		}
+		entries[count++] = {c->section, c};
+	}
+	if (count == 0) {
+		return nullptr;
+	}
+
+	// Insertion sort by section ascending (count is tiny; std::sort would drag in deps).
+	for (int32_t i = 1; i < count; i++) {
+		Entry tmp = entries[i];
+		int32_t j = i;
+		while (j > 0 && entries[j - 1].section > tmp.section) {
+			entries[j] = entries[j - 1];
+			j--;
+		}
+		entries[j] = tmp;
+	}
+
+	// Locate source in the sorted list.
+	int32_t sourceIdx = -1;
+	for (int32_t i = 0; i < count; i++) {
+		if (entries[i].clip == source) {
+			sourceIdx = i;
+			break;
+		}
+	}
+	if (sourceIdx < 0) {
+		return nullptr;
+	}
+
+	// Contiguous block bounds (inclusive). "Contiguous" = consecutive section
+	// numbers with no gap.
+	int32_t blockStart = sourceIdx;
+	while (blockStart > 0 && entries[blockStart - 1].section + 1 == entries[blockStart].section) {
+		blockStart--;
+	}
+	int32_t blockEnd = sourceIdx;
+	while (blockEnd < count - 1 && entries[blockEnd + 1].section == entries[blockEnd].section + 1) {
+		blockEnd++;
+	}
+	int32_t blockLen = blockEnd - blockStart + 1;
+
+	auto atBlockIdx = [&](int32_t idxInBlock) -> Clip* { return entries[blockStart + idxInBlock].clip; };
+	int32_t srcInBlock = sourceIdx - blockStart;
+
+	switch (mode) {
+	case NextAction::NEXT:
+		return atBlockIdx((srcInBlock + 1) % blockLen);
+	case NextAction::PREV:
+		return atBlockIdx((srcInBlock - 1 + blockLen) % blockLen);
+	case NextAction::RANDOM:
+		if (blockLen == 1) {
+			return source;
+		}
+		return atBlockIdx(random(blockLen - 1));
+	case NextAction::RANDOM_WALK: {
+		if (blockLen == 1) {
+			return source;
+		}
+		bool forward = (random(1) != 0);
+		int32_t step = forward ? 1 : (blockLen - 1);
+		return atBlockIdx((srcInBlock + step) % blockLen);
+	}
+	case NextAction::STOP:
+	default:
+		return nullptr;
+	}
 }
 
 /*
