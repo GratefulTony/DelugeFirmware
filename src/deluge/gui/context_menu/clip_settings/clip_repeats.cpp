@@ -26,10 +26,19 @@
 #include "hid/display/display.h"
 #include "model/clip/clip.h"
 #include <cstddef>
+#include <iterator>
 
 namespace deluge::gui::context_menu::clip_settings {
 
-constexpr size_t kNumValues = 6;
+struct RepeatsOption {
+	char const* label;
+	uint8_t value;
+};
+
+constexpr RepeatsOption kRepeatsOptions[] = {
+    {"Inf", 0}, {"1", 1}, {"2", 2}, {"4", 4}, {"8", 8}, {"16", 16},
+};
+constexpr size_t kNumValues = std::size(kRepeatsOptions);
 
 ClipRepeatsMenu clipRepeats{};
 
@@ -39,37 +48,22 @@ char const* ClipRepeatsMenu::getTitle() {
 }
 
 std::span<char const*> ClipRepeatsMenu::getOptions() {
-	static const char* optionsls[] = {
-	    "Inf", "1", "2", "4", "8", "16",
+	static const char* options[] = {
+	    kRepeatsOptions[0].label, kRepeatsOptions[1].label, kRepeatsOptions[2].label,
+	    kRepeatsOptions[3].label, kRepeatsOptions[4].label, kRepeatsOptions[5].label,
 	};
-	return {optionsls, kNumValues};
+	return {options, kNumValues};
 }
 
 bool ClipRepeatsMenu::setupAndCheckAvailability() {
 	currentUIMode = UI_MODE_NONE;
 
-	switch (clip->clipRepeats) {
-	case 0:
-		this->currentOption = 0;
-		break;
-	case 1:
-		this->currentOption = 1;
-		break;
-	case 2:
-		this->currentOption = 2;
-		break;
-	case 4:
-		this->currentOption = 3;
-		break;
-	case 8:
-		this->currentOption = 4;
-		break;
-	case 16:
-		this->currentOption = 5;
-		break;
-	default:
-		this->currentOption = 0;
-		break;
+	this->currentOption = 0; // default to Inf for unknown stored values
+	for (size_t i = 0; i < kNumValues; i++) {
+		if (kRepeatsOptions[i].value == clip->clipRepeats) {
+			this->currentOption = static_cast<int32_t>(i);
+			break;
+		}
 	}
 
 	if (display->haveOLED()) {
@@ -81,9 +75,7 @@ bool ClipRepeatsMenu::setupAndCheckAvailability() {
 
 void ClipRepeatsMenu::selectEncoderAction(int8_t offset) {
 	ContextMenu::selectEncoderAction(offset);
-
-	static constexpr uint8_t kIndexToRepeats[] = {0, 1, 2, 4, 8, 16};
-	clip->clipRepeats = kIndexToRepeats[this->currentOption];
+	clip->clipRepeats = kRepeatsOptions[this->currentOption].value;
 }
 
 } // namespace deluge::gui::context_menu::clip_settings
