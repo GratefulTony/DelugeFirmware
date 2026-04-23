@@ -30,7 +30,6 @@
 #include "model/output.h"
 #include "model/song/song.h"
 #include "playback/mode/playback_mode.h"
-#include "playback/mode/session.h"
 #include "playback/playback_handler.h"
 #include "processing/sound/sound_instrument.h"
 #include "storage/storage_manager.h"
@@ -270,12 +269,6 @@ void Clip::processCurrentPos(ModelStackWithTimelineCounter* modelStack, uint32_t
 		// going to hit next etc.
 		if (!lastProcessedPos) { // Possibly only just became the case, above.
 			repeatCount++;
-			{
-				Clip* nextActionTarget = maybeTickNextAction();
-				if (nextActionTarget != nullptr) {
-					nextActionTarget->armState = ArmState::ON_NORMAL;
-				}
-			}
 			if (sequenceDirectionMode == SequenceDirection::PINGPONG) {
 				lastProcessedPos = -lastProcessedPos; // In case it did get left of zero.
 				currentlyPlayingReversed = !currentlyPlayingReversed;
@@ -301,13 +294,6 @@ playingForwardNow:
 
 			lastProcessedPos -= loopLength;
 			repeatCount++;
-
-			{
-				Clip* nextActionTarget = maybeTickNextAction();
-				if (nextActionTarget != nullptr) {
-					nextActionTarget->armState = ArmState::ON_NORMAL;
-				}
-			}
 
 			if (sequenceDirectionMode == SequenceDirection::PINGPONG) {
 				// Normally we'll have hit the exact loop point, meaning lastProcessedPos will have wrapped to 0, above.
@@ -612,52 +598,6 @@ Error Clip::undoDetachmentFromOutput(ModelStackWithTimelineCounter* modelStack) 
 
 void Clip::onLaunch() {
 	clipRepeatCount = 0;
-}
-
-Clip* Clip::maybeTickNextAction() {
-	// Only meaningful while the clock is running.
-	if (!playbackHandler.isEitherClockActive()) {
-		return nullptr;
-	}
-	// Gate matches the old re-arm block in doLaunch.
-	if (launchStyle == LaunchStyle::FILL) {
-		return nullptr;
-	}
-	if (clipRepeats == 0) {
-		return nullptr;
-	}
-	if (armState != ArmState::OFF) {
-		return nullptr;
-	}
-	if (!activeIfNoSolo && !soloingInSessionMode) {
-		return nullptr;
-	}
-
-	clipRepeatCount++;
-	if (clipRepeatCount < clipRepeats) {
-		return nullptr;
-	}
-
-	// Threshold reached.
-	int64_t transitionTick = playbackHandler.lastSwungTickActioned + loopLength;
-
-	if (nextAction == NextAction::STOP) {
-		armState = ArmState::ON_NORMAL;
-		session.scheduleLaunchTiming(transitionTick, 1, loopLength);
-		return nullptr;
-	}
-
-	Clip* target = view.findNextActionTarget(this, nextAction);
-	if (target == nullptr || target == this) {
-		// Stay-on-self (RANDOM rolled self) or degenerate block.
-		// Keep playing; reset counter for another cycle.
-		clipRepeatCount = 0;
-		return nullptr;
-	}
-
-	armState = ArmState::ON_NORMAL;
-	session.scheduleLaunchTiming(transitionTick, 1, loopLength);
-	return target;
 }
 
 // ----- TimelineCounter implementation -------
