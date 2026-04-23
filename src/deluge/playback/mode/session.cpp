@@ -642,11 +642,19 @@ doNormalLaunch:
 			distanceTilLaunchEvent = std::max(distanceTilLaunchEvent, clip->loopLength);
 
 			if (clip->clipRepeatCount >= clip->clipRepeats) {
-				clip->armState = ArmState::ON_NORMAL; // toggle self off at next event
-				if (clip->nextAction != NextAction::STOP) {
+				if (clip->nextAction == NextAction::STOP) {
+					clip->armState = ArmState::ON_NORMAL; // toggle self off at next event
+				}
+				else {
 					Clip* target = view.findNextActionTarget(clip, clip->nextAction);
-					if (target && target != clip) {
+					if (target != nullptr && target != clip) {
+						clip->armState = ArmState::ON_NORMAL;   // toggle self off
 						target->armState = ArmState::ON_NORMAL; // toggle target on
+					}
+					else {
+						// No valid transition target (degenerate block, or RANDOM picked self).
+						// Keep playing; reset counter so the next cycle gets a fresh evaluation.
+						clip->clipRepeatCount = 0;
 					}
 				}
 			}
