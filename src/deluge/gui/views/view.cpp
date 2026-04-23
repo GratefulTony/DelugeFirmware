@@ -3079,6 +3079,17 @@ Clip* View::findNextActionTarget(Clip* source, NextAction mode) {
 		int32_t step = forward ? 1 : (blockLen - 1);
 		return atBlockIdx((srcInBlock + step) % blockLen);
 	}
+	case NextAction::RANDOM_OTHER: {
+		if (blockLen == 1) {
+			return source; // degenerate block — nothing else to pick
+		}
+		// Uniform over (blockLen - 1) non-self slots in the block.
+		int32_t pick = random(blockLen - 2); // [0, blockLen - 2]
+		if (pick >= srcInBlock) {
+			pick++; // skip source slot
+		}
+		return atBlockIdx(pick);
+	}
 	case NextAction::STOP:
 	default:
 		return nullptr;

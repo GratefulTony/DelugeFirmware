@@ -29,7 +29,7 @@
 
 namespace deluge::gui::context_menu::clip_settings {
 
-constexpr size_t kNumValues = 5;
+constexpr size_t kNumValues = 6;
 
 // The menu stores its selection as the raw enum value via a static_cast.
 // If NextAction is ever reordered, the static_asserts here will fail —
@@ -39,7 +39,8 @@ static_assert(static_cast<int32_t>(NextAction::NEXT) == 1);
 static_assert(static_cast<int32_t>(NextAction::PREV) == 2);
 static_assert(static_cast<int32_t>(NextAction::RANDOM) == 3);
 static_assert(static_cast<int32_t>(NextAction::RANDOM_WALK) == 4);
-static_assert(kNumNextActions == 5);
+static_assert(static_cast<int32_t>(NextAction::RANDOM_OTHER) == 5);
+static_assert(kNumNextActions == 6);
 
 NextActionMenu nextAction{};
 
@@ -55,7 +56,7 @@ std::span<char const*> NextActionMenu::getOptions() {
 	static const char* optionsls[] = {
 	    l10n::get(STRING_FOR_NEXT_ACTION_STOP),        l10n::get(STRING_FOR_NEXT_ACTION_NEXT),
 	    l10n::get(STRING_FOR_NEXT_ACTION_PREV),        l10n::get(STRING_FOR_NEXT_ACTION_RANDOM),
-	    l10n::get(STRING_FOR_NEXT_ACTION_RANDOM_WALK),
+	    l10n::get(STRING_FOR_NEXT_ACTION_RANDOM_WALK), l10n::get(STRING_FOR_NEXT_ACTION_RANDOM_OTHER),
 	};
 	return {optionsls, kNumValues};
 }

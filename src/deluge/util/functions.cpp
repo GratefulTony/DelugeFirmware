@@ -1429,6 +1429,8 @@ char const* nextActionToString(NextAction action) {
 		return "random";
 	case NextAction::RANDOM_WALK:
 		return "randomWalk";
+	case NextAction::RANDOM_OTHER:
+		return "randomOther";
 	default:
 		__builtin_unreachable();
 		return "";
@@ -1447,6 +1449,9 @@ NextAction stringToNextAction(char const* string) {
 	}
 	if (!strcmp(string, "randomWalk")) {
 		return NextAction::RANDOM_WALK;
+	}
+	if (!strcmp(string, "randomOther")) {
+		return NextAction::RANDOM_OTHER;
 	}
 	return NextAction::STOP;
 }
