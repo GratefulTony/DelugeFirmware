@@ -2261,7 +2261,7 @@ void SessionView::renderOLED(deluge::hid::display::oled_canvas::Canvas& canvas) 
 	if (playbackHandler.isEitherClockActive()) {
 		// Session playback
 		if (currentPlaybackMode == &session) {
-			if (session.launchEventAtSwungTickCount) {
+			if (session.launchEventAtSwungTickCount && !session.launchEventIsFromNextAction) {
 				intToString(session.numRepeatsTilLaunch, &loopsRemainingText[17]);
 				deluge::hid::display::OLED::clearMainImage();
 				deluge::hid::display::OLED::drawPermanentPopupLookingText(loopsRemainingText);
