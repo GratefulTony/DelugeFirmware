@@ -371,6 +371,16 @@ void Session::doLaunch(bool isFillLaunch) {
 	}
 	int32_t distanceTilLaunchEvent = 0; // For if clips automatically armed cos they just started recording a loop
 
+	// Clips whose armState should be set to ON_NORMAL after all iteration passes
+	// complete. Used by the finite-repeat re-arm block to arm a transition target
+	// without that arm being clobbered by Pass 3's activation branch for that
+	// target (Pass 3 would clear the arm at line ~572 and then skip activation
+	// because `output->alreadyGotItsNewClip` is already true for the source's
+	// Output — same Output as target for same-track transitions).
+	constexpr int32_t kMaxPendingArms = 16;
+	Clip* pendingArms[kMaxPendingArms];
+	int32_t pendingArmCount = 0;
+
 	// Ok, now action all currently playing clips. This includes clips armed to start recording or stop - including ones
 	// which weren't actually armed to stop but need to stop in order to make way for other ones which were armed to
 	// start. But we can't action the starting of any Clips yet, until all stopping is done.
@@ -595,7 +605,11 @@ doNormalLaunch:
 						clip->activeIfNoSolo = true;
 					}
 					clip->onLaunch();
-					clip->tickClipRepeats();
+
+					Clip* nextActionTarget = clip->maybeTickNextAction();
+					if (nextActionTarget != nullptr && pendingArmCount < kMaxPendingArms) {
+						pendingArms[pendingArmCount++] = nextActionTarget;
+					}
 
 					ModelStackWithTimelineCounter* modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
 
@@ -714,6 +728,13 @@ doNormalLaunch:
 			playbackHandler.recording = RecordingMode::OFF;
 			playbackHandler.setLedStates();
 		}
+	}
+
+	// Apply deferred finite-repeat target arms now that Pass 3 is complete.
+	// These are seen by Pass 1 of the next launch event, where per-Output
+	// launch bookkeeping is reset for them correctly.
+	for (int32_t i = 0; i < pendingArmCount; i++) {
+		pendingArms[i]->armState = ArmState::ON_NORMAL;
 	}
 
 	AudioEngine::bypassCulling = true;
@@ -1818,7 +1839,12 @@ void Session::armClipToStartOrSoloUsingQuantization(Clip* thisClip, bool doLateS
 
 			thisClip->activeIfNoSolo = true;
 			thisClip->onLaunch();
-			thisClip->tickClipRepeats();
+			{
+				Clip* nextActionTarget = thisClip->maybeTickNextAction();
+				if (nextActionTarget != nullptr) {
+					nextActionTarget->armState = ArmState::ON_NORMAL;
+				}
+			}
 
 			// Must call this before setPos, because that does stuff with ParamManagers
 			currentSong->assertActiveness(modelStack, playbackHandler.getActualArrangementRecordPos() - pos);
@@ -2176,7 +2202,12 @@ void Session::resetPlayPos(int32_t newPos, bool doingComplete, int32_t buttonPre
 		if (clip->isPendingOverdub) {
 			clip->activeIfNoSolo = true;
 			clip->onLaunch();
-			clip->tickClipRepeats();
+			{
+				Clip* nextActionTarget = clip->maybeTickNextAction();
+				if (nextActionTarget != nullptr) {
+					nextActionTarget->armState = ArmState::ON_NORMAL;
+				}
+			}
 			clip->armState = ArmState::OFF;
 			goto yeahNahItsOn;
 		}
@@ -2207,12 +2238,13 @@ yeahNahItsOn:
 				}
 
 				// Finite-repeat tick for transport-start activation — matches the
-				// doLaunch Pass 3 activation path. tickClipRepeats guards on
+				// doLaunch Pass 3 activation path. maybeTickNextAction guards on
 				// isEitherClockActive() itself; by the time resetPlayPos runs the
-				// clock is active, so this is a meaningful first-tick. No swap
-				// executes here; the first loop-wrap in processCurrentPos will
-				// call maybeExecuteNextActionSwap at the loop boundary.
-				clip->tickClipRepeats();
+				// clock is active, so this is a meaningful first-tick.
+				Clip* nextActionTarget = clip->maybeTickNextAction();
+				if (nextActionTarget != nullptr) {
+					nextActionTarget->armState = ArmState::ON_NORMAL;
+				}
 			}
 
 			// Rohan: Not quite sure why we needed to set this here?

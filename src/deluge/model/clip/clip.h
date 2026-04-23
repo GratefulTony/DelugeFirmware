@@ -212,20 +212,14 @@ public:
 	// Reset counter; call when this clip becomes active on a launch event.
 	void onLaunch();
 
-	// Increment this clip's finite-repeat counter (no-op if clipRepeats == 0
-	// or if the clock is inactive, etc). Does NOT perform any transition.
-	// Call at activation sites (Pass 3 doNormalLaunch, resetPlayPos,
-	// armClipToStartOrSoloUsingQuantization late-start) — the old "re-arm"
-	// block provided one tick at activation time; this preserves that.
-	void tickClipRepeats();
-
-	// If the counter has reached the programmed threshold AND this clip is
-	// active, perform the next-action transition as a DIRECT state swap
-	// (stop self, start walker-resolved target, repoint output activeClip).
-	// Call at each loop-wrap in processCurrentPos. Bypasses the global
-	// launchEventAtSwungTickCount mechanism so each finite-repeat clip
-	// transitions at its own loop boundary independently.
-	void maybeExecuteNextActionSwap();
+	// Tick this clip's finite-repeat counter (no-op if clipRepeats == 0).
+	// If count reaches threshold, arms self (ON_NORMAL), schedules a launch
+	// event at currentTick + loopLength, and returns the walker-resolved
+	// target Clip* for the caller to arm (directly or via deferred list).
+	// For STOP mode or stay-on-self, returns nullptr (no target to arm).
+	// Guards on `playbackHandler.isEitherClockActive()` — safe to call from
+	// stopped-playback activation sites as a no-op.
+	Clip* maybeTickNextAction();
 
 	// True when a finite-repeat clip has reached its programmed repeat count and
 	// is therefore expected to toggle (stop or hand off) at the next launch event.

@@ -27,7 +27,6 @@
 #include "model/clip/clip_instance.h"
 #include "model/consequence/consequence_clip_begin_linear_record.h"
 #include "model/consequence/consequence_output_existence.h"
-#include "model/model_stack.h"
 #include "model/output.h"
 #include "model/song/song.h"
 #include "playback/mode/playback_mode.h"
@@ -271,8 +270,12 @@ void Clip::processCurrentPos(ModelStackWithTimelineCounter* modelStack, uint32_t
 		// going to hit next etc.
 		if (!lastProcessedPos) { // Possibly only just became the case, above.
 			repeatCount++;
-			tickClipRepeats();
-			maybeExecuteNextActionSwap();
+			{
+				Clip* nextActionTarget = maybeTickNextAction();
+				if (nextActionTarget != nullptr) {
+					nextActionTarget->armState = ArmState::ON_NORMAL;
+				}
+			}
 			if (sequenceDirectionMode == SequenceDirection::PINGPONG) {
 				lastProcessedPos = -lastProcessedPos; // In case it did get left of zero.
 				currentlyPlayingReversed = !currentlyPlayingReversed;
@@ -299,8 +302,12 @@ playingForwardNow:
 			lastProcessedPos -= loopLength;
 			repeatCount++;
 
-			tickClipRepeats();
-			maybeExecuteNextActionSwap();
+			{
+				Clip* nextActionTarget = maybeTickNextAction();
+				if (nextActionTarget != nullptr) {
+					nextActionTarget->armState = ArmState::ON_NORMAL;
+				}
+			}
 
 			if (sequenceDirectionMode == SequenceDirection::PINGPONG) {
 				// Normally we'll have hit the exact loop point, meaning lastProcessedPos will have wrapped to 0, above.
@@ -607,78 +614,50 @@ void Clip::onLaunch() {
 	clipRepeatCount = 0;
 }
 
-void Clip::tickClipRepeats() {
+Clip* Clip::maybeTickNextAction() {
 	// Only meaningful while the clock is running.
 	if (!playbackHandler.isEitherClockActive()) {
-		return;
+		return nullptr;
 	}
+	// Gate matches the old re-arm block in doLaunch.
 	if (launchStyle == LaunchStyle::FILL) {
-		return;
+		return nullptr;
 	}
 	if (clipRepeats == 0) {
-		return;
-	}
-	if (!activeIfNoSolo && !soloingInSessionMode) {
-		return;
-	}
-	clipRepeatCount++;
-}
-
-void Clip::maybeExecuteNextActionSwap() {
-	if (!playbackHandler.isEitherClockActive()) {
-		return;
-	}
-	if (launchStyle == LaunchStyle::FILL) {
-		return;
-	}
-	if (clipRepeats == 0) {
-		return;
+		return nullptr;
 	}
 	if (armState != ArmState::OFF) {
-		// User armed this clip for something else — don't interfere.
-		return;
+		return nullptr;
 	}
 	if (!activeIfNoSolo && !soloingInSessionMode) {
-		return;
-	}
-	if (clipRepeatCount < clipRepeats) {
-		return;
+		return nullptr;
 	}
 
-	// Threshold reached — perform the transition now.
+	clipRepeatCount++;
+	if (clipRepeatCount < clipRepeats) {
+		return nullptr;
+	}
+
+	// Threshold reached.
+	int64_t transitionTick = playbackHandler.lastSwungTickActioned + loopLength;
+
 	if (nextAction == NextAction::STOP) {
-		clipRepeatCount = 0;
-		activeIfNoSolo = false;
-		expectNoFurtherTicks(currentSong, true);
-		return;
+		armState = ArmState::ON_NORMAL;
+		session.scheduleLaunchTiming(transitionTick, 1, loopLength);
+		return nullptr;
 	}
 
 	Clip* target = view.findNextActionTarget(this, nextAction);
 	if (target == nullptr || target == this) {
-		// Stay-on-self (RANDOM rolled self) or degenerate block — keep playing.
+		// Stay-on-self (RANDOM rolled self) or degenerate block.
+		// Keep playing; reset counter for another cycle.
 		clipRepeatCount = 0;
-		return;
+		return nullptr;
 	}
 
-	// Direct swap: stop self, start target, repoint output's activeClip.
-	// Rationale: armState-based transitions collide when multiple finite-repeat
-	// clips with different loopLengths coexist (launchEventAtSwungTickCount is
-	// a single slot and all armed clips toggle at the next event). Direct
-	// mutation fires each transition at its own clip's loop boundary.
-	char modelStackMemory[MODEL_STACK_MAX_SIZE];
-	ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
-
-	// Source deactivation (mirrors Pass 2's becameInactiveNormally path).
-	activeIfNoSolo = false;
-	expectNoFurtherTicks(currentSong, true);
-
-	// Target activation (mirrors Pass 3's doNormalLaunch path).
-	ModelStackWithTimelineCounter* targetMstc = modelStack->addTimelineCounter(target);
-	target->soloingInSessionMode = false;
-	target->activeIfNoSolo = true;
-	target->onLaunch();
-	target->setPos(targetMstc, 0, false);
-	target->output->setActiveClip(targetMstc);
+	armState = ArmState::ON_NORMAL;
+	session.scheduleLaunchTiming(transitionTick, 1, loopLength);
+	return target;
 }
 
 // ----- TimelineCounter implementation -------
