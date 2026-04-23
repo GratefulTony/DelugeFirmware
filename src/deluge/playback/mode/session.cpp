@@ -741,6 +741,7 @@ doNormalLaunch:
 // target state inline inside processCurrentPos broke the mechanism (see
 // reverted commit 669f7027); deferring to here avoids that.
 void Session::processPendingNextActionTransitions() {
+	bool anyTransitionHappened = false;
 	for (int32_t c = currentSong->sessionClips.getNumElements() - 1; c >= 0; c--) {
 		Clip* clip = currentSong->sessionClips.getClipAtIndex(c);
 		if (clip == nullptr || !clip->pendingNextActionTransition) {
@@ -764,6 +765,7 @@ void Session::processPendingNextActionTransitions() {
 			clip->clipRepeatCount = 0;
 			clip->activeIfNoSolo = false;
 			clip->expectNoFurtherTicks(currentSong, true);
+			anyTransitionHappened = true;
 			continue;
 		}
 
@@ -784,6 +786,13 @@ void Session::processPendingNextActionTransitions() {
 		target->onLaunch();
 		target->setPos(targetMstc, 0, false);
 		target->output->setActiveClip(targetMstc);
+		anyTransitionHappened = true;
+	}
+
+	if (anyTransitionHappened) {
+		// Ensure session view repaints so pad colors reflect the swap immediately
+		// instead of waiting for some unrelated refresh trigger.
+		sessionView.requestRendering(getRootUI(), 0xFFFFFFFF, 0xFFFFFFFF);
 	}
 }
 
