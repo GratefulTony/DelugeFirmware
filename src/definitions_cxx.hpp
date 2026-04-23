@@ -1107,8 +1107,9 @@ enum class NextAction : uint8_t {
 	RANDOM,
 	RANDOM_WALK,
 	RANDOM_OTHER,
+	NEAR,
 };
-constexpr uint8_t kNumNextActions = 6;
+constexpr uint8_t kNumNextActions = 7;
 
 enum class StartupSongMode { BLANK, TEMPLATE, LASTOPENED, LASTSAVED };
 constexpr auto kNumStartupSongMode = util::to_underlying(StartupSongMode::LASTSAVED) + 1;

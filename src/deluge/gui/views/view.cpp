@@ -3090,6 +3090,21 @@ Clip* View::findNextActionTarget(Clip* source, NextAction mode) {
 		}
 		return atBlockIdx(pick);
 	}
+	case NextAction::NEAR: {
+		if (blockLen == 1) {
+			return source; // degenerate block — nothing else to pick
+		}
+		// Geometric-like step: start at 1, flip coin to extend, truncate at blockLen-1.
+		// Gives P(step=1) ~= 0.5, P(step=2) ~= 0.25, etc., biased toward adjacent.
+		int32_t step = 1;
+		while (step < (blockLen - 1) && (random(1) == 0)) {
+			step++;
+		}
+		// Direction ±
+		bool forward = (random(1) != 0);
+		int32_t signedStep = forward ? step : (blockLen - step);
+		return atBlockIdx((srcInBlock + signedStep) % blockLen);
+	}
 	case NextAction::STOP:
 	default:
 		return nullptr;

@@ -1053,6 +1053,7 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_NEXT_ACTION_RANDOM, "Random"},
         {STRING_FOR_NEXT_ACTION_RANDOM_WALK, "Random Walk"},
         {STRING_FOR_NEXT_ACTION_RANDOM_OTHER, "Random Other"},
+        {STRING_FOR_NEXT_ACTION_NEAR, "Random Near"},
         {STRING_FOR_NOTE_EDITOR, "Note Editor"},
         {STRING_FOR_NOTE_EDITOR_VELOCITY, "Velocity"},
         {STRING_FOR_NOTE_EDITOR_PROBABILITY, "Probability"},

@@ -1431,6 +1431,8 @@ char const* nextActionToString(NextAction action) {
 		return "randomWalk";
 	case NextAction::RANDOM_OTHER:
 		return "randomOther";
+	case NextAction::NEAR:
+		return "randomNear";
 	default:
 		__builtin_unreachable();
 		return "";
@@ -1452,6 +1454,9 @@ NextAction stringToNextAction(char const* string) {
 	}
 	if (!strcmp(string, "randomOther")) {
 		return NextAction::RANDOM_OTHER;
+	}
+	if (!strcmp(string, "randomNear")) {
+		return NextAction::NEAR;
 	}
 	return NextAction::STOP;
 }
