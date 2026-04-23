@@ -785,6 +785,7 @@ void Session::processPendingNextActionTransitions() {
 		target->activeIfNoSolo = true;
 		target->onLaunch();
 		target->setPos(targetMstc, 0, false);
+		target->resumePlayback(targetMstc, true);
 		target->output->setActiveClip(targetMstc);
 		anyTransitionHappened = true;
 	}
