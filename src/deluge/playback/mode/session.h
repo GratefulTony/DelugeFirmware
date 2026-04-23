@@ -40,7 +40,8 @@ public:
 	void armAllClipsToStop(int32_t afterNumRepeats);
 	void armNextSection(int32_t oldSection, int32_t numRepetitions = -1);
 	void doLaunch(bool isFillLaunch);
-	void scheduleLaunchTiming(int64_t atTickCount, int32_t numRepeatsUntil, int32_t armedLaunchLengthForOneRepeat);
+	void scheduleLaunchTiming(int64_t atTickCount, int32_t numRepeatsUntil, int32_t armedLaunchLengthForOneRepeat,
+	                          bool isFromNextAction = false);
 	int32_t getNumSixteenthNotesRemainingTilLaunch();
 	void scheduleFillEvent(Clip* clip, int64_t atTickCount);
 	void cancelAllLaunchScheduling();
@@ -102,6 +103,11 @@ public:
 	int16_t numRepeatsTilLaunch;
 	int32_t currentArmedLaunchLengthForOneRepeat;
 	bool switchToArrangementAtLaunchEvent;
+
+	// True if the currently-pending launch event (launchEventAtSwungTickCount) was
+	// scheduled by a finite-repeat re-arm path rather than a user-initiated arm.
+	// Used to suppress the "Beats/Bars Remaining" popup for auto transitions.
+	bool launchEventIsFromNextAction = false;
 
 private:
 	bool giveClipOpportunityToBeginLinearRecording(Clip* clip, int32_t clipIndex, int32_t buttonPressLatency);

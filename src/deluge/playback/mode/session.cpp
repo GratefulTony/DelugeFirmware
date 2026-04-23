@@ -742,8 +742,18 @@ doNormalLaunch:
 
 				// If AudioClip recording just began...
 				if (distanceTilLaunchEvent) {
+					// Treat the event as next-action-driven if any active clip has a
+					// pending finite-repeat arming (count reached threshold this event).
+					bool anyNextActionArmed = false;
+					for (int32_t c = currentSong->sessionClips.getNumElements() - 1; c >= 0; c--) {
+						Clip* check = currentSong->sessionClips.getClipAtIndex(c);
+						if (check != nullptr && check->hasFiniteRepeatArming()) {
+							anyNextActionArmed = true;
+							break;
+						}
+					}
 					scheduleLaunchTiming(playbackHandler.lastSwungTickActioned + distanceTilLaunchEvent, 1,
-					                     distanceTilLaunchEvent);
+					                     distanceTilLaunchEvent, anyNextActionArmed);
 					armingChanged();
 				}
 			}
@@ -787,14 +797,15 @@ void Session::justAbortedSomeLinearRecording() {
 	}
 }
 
-void Session::scheduleLaunchTiming(int64_t atTickCount, int32_t numRepeatsUntil,
-                                   int32_t armedLaunchLengthForOneRepeat) {
+void Session::scheduleLaunchTiming(int64_t atTickCount, int32_t numRepeatsUntil, int32_t armedLaunchLengthForOneRepeat,
+                                   bool isFromNextAction) {
 	if (atTickCount > launchEventAtSwungTickCount) {
 		playbackHandler.stopOutputRecordingAtLoopEnd = false;
 		switchToArrangementAtLaunchEvent = false;
 		launchEventAtSwungTickCount = atTickCount;
 		numRepeatsTilLaunch = numRepeatsUntil;
 		currentArmedLaunchLengthForOneRepeat = armedLaunchLengthForOneRepeat;
+		launchEventIsFromNextAction = isFromNextAction;
 
 		int32_t ticksTilLaunchEvent = atTickCount - playbackHandler.lastSwungTickActioned;
 		if (playbackHandler.swungTicksTilNextEvent > ticksTilLaunchEvent) {
@@ -828,6 +839,7 @@ void Session::scheduleFillEvent(Clip* clip, int64_t atTickCount) {
 
 void Session::cancelAllLaunchScheduling() {
 	launchEventAtSwungTickCount = 0;
+	launchEventIsFromNextAction = false;
 }
 
 void Session::launchSchedulingMightNeedCancelling() {
@@ -2299,8 +2311,18 @@ yeahNahItsOn:
 
 		// If just became armed (audio clip began recording)... The placement of this probably isn't quite ideal...
 		else if (distanceTilLaunchEvent) {
+			// Treat the event as next-action-driven if any active clip has a
+			// pending finite-repeat arming (count reached threshold this event).
+			bool anyNextActionArmed = false;
+			for (int32_t c = currentSong->sessionClips.getNumElements() - 1; c >= 0; c--) {
+				Clip* check = currentSong->sessionClips.getClipAtIndex(c);
+				if (check != nullptr && check->hasFiniteRepeatArming()) {
+					anyNextActionArmed = true;
+					break;
+				}
+			}
 			scheduleLaunchTiming(playbackHandler.lastSwungTickActioned + distanceTilLaunchEvent, 1,
-			                     distanceTilLaunchEvent);
+			                     distanceTilLaunchEvent, anyNextActionArmed);
 			armingChanged(); // This isn't really ideal. Is here for AudioClips which just armed themselves in setPos()
 			                 // call
 		}
