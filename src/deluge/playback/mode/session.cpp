@@ -2253,11 +2253,37 @@ yeahNahItsOn:
 					}
 				}
 
-				// Finite-repeat clips need a launch event scheduled at loopLength so
-				// doLaunch's re-arm block can tick their counter. Without this, a clip
-				// armed while transport is stopped and started via Play plays forever.
+				// Simulate doLaunch's re-arm block for finite-repeat clips at transport-start.
+				// In the manual-trigger path, activation and the first clipRepeatCount++ happen
+				// in the same launch event (Pass 3 activation + the re-arm block right below
+				// it), so the transition arms one loop after the clip starts. Transport-start
+				// activates via resetPlayPos (not doLaunch), so without this simulation the
+				// first counter-tick would be delayed a full loop, giving 2 loops of the source
+				// before the transition fires. Replicating the re-arm block here restores
+				// one-loop semantics.
 				if (clip->clipRepeats != 0) {
+					clip->clipRepeatCount++;
 					distanceTilLaunchEvent = std::max(distanceTilLaunchEvent, clip->loopLength);
+
+					if (clip->clipRepeatCount >= clip->clipRepeats) {
+						if (clip->nextAction == NextAction::STOP) {
+							clip->armState = ArmState::ON_NORMAL;
+						}
+						else {
+							Clip* target = view.findNextActionTarget(clip, clip->nextAction);
+							if (target != nullptr && target != clip) {
+								clip->armState = ArmState::ON_NORMAL;
+								// No Pass-3 clobber to worry about here (resetPlayPos is single-pass),
+								// so the target arm can be set directly.
+								target->armState = ArmState::ON_NORMAL;
+							}
+							else {
+								// RANDOM picked self or degenerate block — keep playing,
+								// reset counter for next cycle.
+								clip->clipRepeatCount = 0;
+							}
+						}
+					}
 				}
 			}
 
