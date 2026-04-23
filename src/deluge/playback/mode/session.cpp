@@ -371,6 +371,16 @@ void Session::doLaunch(bool isFillLaunch) {
 	}
 	int32_t distanceTilLaunchEvent = 0; // For if clips automatically armed cos they just started recording a loop
 
+	// Clips whose armState should be set to ON_NORMAL after all iteration passes
+	// complete. Used by the finite-repeat re-arm block to arm a transition target
+	// without that arm being clobbered by Pass 3's activation branch for that
+	// target (Pass 3 would clear the arm at line ~572 and then skip activation
+	// because `output->alreadyGotItsNewClip` is already true for the source's
+	// Output — same Output as target for same-track transitions).
+	constexpr int32_t kMaxPendingArms = 16;
+	Clip* pendingArms[kMaxPendingArms];
+	int32_t pendingArmCount = 0;
+
 	// Ok, now action all currently playing clips. This includes clips armed to start recording or stop - including ones
 	// which weren't actually armed to stop but need to stop in order to make way for other ones which were armed to
 	// start. But we can't action the starting of any Clips yet, until all stopping is done.
@@ -648,8 +658,12 @@ doNormalLaunch:
 				else {
 					Clip* target = view.findNextActionTarget(clip, clip->nextAction);
 					if (target != nullptr && target != clip) {
-						clip->armState = ArmState::ON_NORMAL;   // toggle self off
-						target->armState = ArmState::ON_NORMAL; // toggle target on
+						clip->armState = ArmState::ON_NORMAL; // toggle self off
+						// Defer target arm until after Pass 3 finishes iterating so Pass 3's
+						// activation branch doesn't clobber it (see explanation above).
+						if (pendingArmCount < kMaxPendingArms) {
+							pendingArms[pendingArmCount++] = target;
+						}
 					}
 					else {
 						// No valid transition target (degenerate block, or RANDOM picked self).
@@ -742,6 +756,13 @@ doNormalLaunch:
 			playbackHandler.recording = RecordingMode::OFF;
 			playbackHandler.setLedStates();
 		}
+	}
+
+	// Apply deferred finite-repeat target arms now that Pass 3 is complete.
+	// These are seen by Pass 1 of the next launch event, where per-Output
+	// launch bookkeeping is reset for them correctly.
+	for (int32_t i = 0; i < pendingArmCount; i++) {
+		pendingArms[i]->armState = ArmState::ON_NORMAL;
 	}
 
 	AudioEngine::bypassCulling = true;
