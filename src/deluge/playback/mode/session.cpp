@@ -2252,6 +2252,13 @@ yeahNahItsOn:
 						distanceTilLaunchEvent = std::max(distanceTilLaunchEvent, clip->loopLength);
 					}
 				}
+
+				// Finite-repeat clips need a launch event scheduled at loopLength so
+				// doLaunch's re-arm block can tick their counter. Without this, a clip
+				// armed while transport is stopped and started via Play plays forever.
+				if (clip->clipRepeats != 0) {
+					distanceTilLaunchEvent = std::max(distanceTilLaunchEvent, clip->loopLength);
+				}
 			}
 
 			// Rohan: Not quite sure why we needed to set this here?
