@@ -146,6 +146,20 @@ A `Favourites` feature has been added to the browser for most file types. The `F
 - The selected clip in `Song Grid View` (which is the last clip you interacted with), now shows a `pulsing / breathing` animation whereby the clip pad will fade in and out between the clip's normal colour and a blurred colour.
 - This will help you keep track of what clip midi follow is currently controlling and what clip is selected for loop recording.
 
+##### Per-clip Next Action
+- Each clip can now auto-advance to another clip in the same track (or stop) after a configurable number of loops. Two new menu entries under `Clip Settings` (hold a clip pad, press `Select encoder`):
+  - **`Clip Repeats`**: how many loops the clip plays before the action fires. Values: `Inf` (default, loop forever), `1`, `2`, `4`, `8`, `16`.
+  - **`Next Action`**: what to do when the repeat count is reached. Options:
+    - `Stop` — the clip stops (equivalent to the legacy `Once` launch style).
+    - `Next` / `Prev` — advance forward or backward through the clips in the current column (wraps at block edges).
+    - `Random` — uniform random over the current block (may stay on self).
+    - `Random Other` — uniform random over the non-self clips in the block (always advances).
+    - `Random Walk` — step ±1 each transition, reflecting off block edges.
+    - `Random Near` — geometric-distributed step length (biased toward adjacent clips with occasional bigger jumps), reflecting off block edges.
+- Navigation stays inside the current contiguous block of clips in the column — empty rows act as hard walls, so you can segment a track into independent loops.
+- The `Once` option has been removed from the `Launch Style` menu. Existing songs saved with `launchStyle="once"` are loaded as `(Clip Repeats = 1, Next Action = Stop)` automatically — behaviourally identical.
+- The "Beats Remaining" / "Loops Remaining" popup is suppressed for auto next-action transitions (it still appears for user-armed launches).
+
 #### <ins>Audio Clips</ins>
 - Added audio output modes, and changed audio clip monitoring to be seperate from source selection. Monitoring is now on
 when the output is a SAMPLER or a LOOPER, chosen by turning the select knob in an audio clip.

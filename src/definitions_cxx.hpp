@@ -1098,7 +1098,18 @@ enum class ClipType {
 	AUDIO,
 };
 
-enum class LaunchStyle { DEFAULT, FILL, ONCE };
+enum class LaunchStyle { DEFAULT, FILL };
+
+enum class NextAction : uint8_t {
+	STOP,
+	NEXT,
+	PREV,
+	RANDOM,
+	RANDOM_WALK,
+	RANDOM_OTHER,
+	NEAR,
+};
+constexpr uint8_t kNumNextActions = 7;
 
 enum class StartupSongMode { BLANK, TEMPLATE, LASTOPENED, LASTSAVED };
 constexpr auto kNumStartupSongMode = util::to_underlying(StartupSongMode::LASTSAVED) + 1;

@@ -101,6 +101,7 @@ public:
 
 	void activateMacro(uint32_t y);
 	Clip* findNextClipForOutput(Output* output);
+	Clip* findNextActionTarget(Clip* source, NextAction mode);
 	bool renderMacros(int32_t column, uint32_t y, int32_t selectedMacro, RGB image[][kDisplayWidth + kSideBarWidth],
 	                  uint8_t occupancyMask[][kDisplayWidth + kSideBarWidth]);
 

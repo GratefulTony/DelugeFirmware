@@ -270,7 +270,7 @@ git commit -m "next-action: read clipRepeats/nextAction (with legacy 'once' tran
 
 **Step 1: Build**
 
-Run: `./dbt build release`
+Run: `./dbt build`
 Expected: success, no new warnings.
 
 **Step 2: Flash**
@@ -564,7 +564,7 @@ Also check `launch_style.h` for `kNumValues` — if it's `3`, change to `2`.
 **Step 5: Build**
 
 ```bash
-./dbt build release
+./dbt build
 ```
 
 Expected: compiles cleanly. If any ONCE reference is left, the compiler catches it — fix the call site.
@@ -726,7 +726,7 @@ Note: `random(x)` is the existing firmware RNG — see `src/deluge/util/function
 **Step 2: Build + format**
 
 ```bash
-./dbt build release
+./dbt build
 ./dbt format
 ```
 
@@ -923,7 +923,7 @@ git commit -m "next-action: wire Clip Repeats and Next Action into ClipSettingsM
 ### Task 4.5: Build + hardware smoke
 
 ```bash
-./dbt build release && ./dbt loadfw
+./dbt build && ./dbt loadfw
 ```
 
 **Hardware checklist:**
@@ -1030,3 +1030,8 @@ Use the `superpowers:requesting-code-review` skill to package the branch for rev
 - Configurable per-clip *ordering* within the block (today: section-ascending). Expose as a per-clip flag if users want reverse-by-default blocks.
 - Chain definitions by explicit targets (clip A → clip C skipping B). Out of scope; grid-derived ordering is what the design commits to.
 - Runtime-toggleable random seed for reproducible live sets. YAGNI until asked.
+- **RANDOM_NEAR / Lévy-flight mode** — random transitions biased toward adjacent clips with a heavy tail for occasional far jumps. Needs a design pass on the weighting distribution and the UX knob (if any).
+- **Suppress "beats remaining" popup when a next-action is the event driver** — the countdown popup makes sense for user-armed launches but is visual clutter when transitions are automatic per-clip. Investigation target: wherever the popup is triggered by `scheduleLaunchTiming` / `armingChanged`; gate it on whether the pending launch was set up by a finite-repeat re-arm vs. a user action.
+- **Blinking/armed-state visual during pending next-action countdown** — the classic arm-based transitions show a blinking pad while the countdown runs. Our deferred-transition mechanism doesn't set `armState`, so no blink appears. Audio + mid-playback render both work; only the "something is coming" visual cue is missing. Tractable polish: key a new pad color (or blink state) off `Clip::pendingNextActionTransition`, or mirror `armState = ON_NORMAL` at the wrap purely for visual purposes while ensuring no downstream handler acts on it.
+- **Solo carry-over on next-action transitions** — if the source clip is `soloingInSessionMode` when its threshold hits, `Session::processPendingNextActionTransitions` deactivates source but never propagates the solo state to the target, and never clears `soloingInSessionMode` on source. After the swap, `Song::isClipActive(source)` still returns true (lingering solo flag) and `currentSong->anyClipsSoloing` is stale. Likely fix: carry solo across (`target->soloingInSessionMode = clip->soloingInSessionMode; clip->soloingInSessionMode = false;`) and call `currentSong->reassessWhetherAnyClipsSoloing()` for the STOP case. Phase-5 hardware testing did not exercise solo + next-action.
+- **Vestigial popup-suppression flag and predicate** — `Session::launchEventIsFromNextAction` and `Clip::hasFiniteRepeatArming()` were introduced earlier to suppress the "Beats Remaining" popup and to exempt finite-repeat-armed clips from arm-clearing sweeps (in session.cpp:1773 and song.cpp:3263). After the deferred-transition decouple removed the original re-arm block, the predicate window is one tick and the user-driven sweep paths effectively never overlap. The two `anyNextActionArmed` scans in session.cpp (~lines 720, 2320) are dead in the common case. Cleanup: either delete the flag + predicate + their callers (~20 lines), or rewrite their comments to call out the rare-overlap-only contract. Harmless either way; pure hygiene.

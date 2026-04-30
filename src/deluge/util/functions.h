@@ -189,6 +189,8 @@ char const* sequenceDirectionModeToString(SequenceDirection sequenceDirectionMod
 SequenceDirection stringToSequenceDirectionMode(char const* string);
 char const* launchStyleToString(LaunchStyle launchStyle);
 LaunchStyle stringToLaunchStyle(char const* string);
+char const* nextActionToString(NextAction action);
+NextAction stringToNextAction(char const* string);
 
 char const* getInstrumentFolder(OutputType outputType);
 

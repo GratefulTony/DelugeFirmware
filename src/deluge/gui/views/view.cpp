@@ -89,6 +89,7 @@
 #include "storage/file_item.h"
 #include "storage/flash_storage.h"
 #include "storage/storage_manager.h"
+#include "util/functions.h"
 
 namespace params = deluge::modulation::params;
 namespace encoders = deluge::hid::encoders;
@@ -2726,15 +2727,15 @@ RGB View::getClipMuteSquareColour(Clip* clip, RGB thisColour, bool allowMIDIFlas
 	// Or if not soloing...
 	else {
 		if (!clip->activeIfNoSolo) {
-			switch (clip->launchStyle) {
-			case LaunchStyle::FILL:
-				thisColour = menu_item::fillColourMenu.getRGB(); // colours::red_orange;
-				break;
-			case LaunchStyle::ONCE:
-				thisColour = menu_item::onceColourMenu.getRGB(); // colours::red_orange;
-				break;
-			default:
-				// If it's stopped, red.
+			if (clip->launchStyle == LaunchStyle::FILL) {
+				thisColour = menu_item::fillColourMenu.getRGB();
+			}
+			// Any clip that will transition after a finite number of loops gets the
+			// old "once" colour — visual cue that this clip has a plan.
+			else if (clip->clipRepeats != 0) {
+				thisColour = menu_item::onceColourMenu.getRGB();
+			}
+			else {
 				thisColour = menu_item::stoppedColourMenu.getRGB();
 			}
 		}
@@ -2987,6 +2988,148 @@ Clip* View::findNextClipForOutput(Output* output) {
 	}
 
 	return nullptr;
+}
+
+Clip* View::findNextActionTarget(Clip* source, NextAction mode) {
+	if (!source || !source->output) {
+		return nullptr;
+	}
+	if (mode == NextAction::STOP) {
+		return nullptr; // caller doesn't need a target for STOP
+	}
+
+	// Collect all clips on the same Output, indexed with their section number.
+	// Stack-bounded: cap at kMaxPerOutput to avoid heap and to bound the sort.
+	// If exceeded, fall back to STOP semantics by returning nullptr.
+	constexpr int32_t kMaxPerOutput = 64;
+	struct Entry {
+		uint8_t section;
+		Clip* clip;
+	};
+	Entry entries[kMaxPerOutput];
+	int32_t count = 0;
+
+	for (int32_t i = 0; i < currentSong->sessionClips.getNumElements(); i++) {
+		Clip* c = currentSong->sessionClips.getClipAtIndex(i);
+		if (!c || c->output != source->output) {
+			continue;
+		}
+		if (count >= kMaxPerOutput) {
+			return nullptr;
+		}
+		entries[count++] = {c->section, c};
+	}
+	if (count == 0) {
+		return nullptr;
+	}
+
+	// Insertion sort by section ascending (count is tiny; std::sort would drag in deps).
+	for (int32_t i = 1; i < count; i++) {
+		Entry tmp = entries[i];
+		int32_t j = i;
+		while (j > 0 && entries[j - 1].section > tmp.section) {
+			entries[j] = entries[j - 1];
+			j--;
+		}
+		entries[j] = tmp;
+	}
+
+	// Locate source in the sorted list.
+	int32_t sourceIdx = -1;
+	for (int32_t i = 0; i < count; i++) {
+		if (entries[i].clip == source) {
+			sourceIdx = i;
+			break;
+		}
+	}
+	if (sourceIdx < 0) {
+		return nullptr;
+	}
+
+	// Contiguous block bounds (inclusive). "Contiguous" = consecutive section
+	// numbers with no gap.
+	int32_t blockStart = sourceIdx;
+	while (blockStart > 0 && entries[blockStart - 1].section + 1 == entries[blockStart].section) {
+		blockStart--;
+	}
+	int32_t blockEnd = sourceIdx;
+	while (blockEnd < count - 1 && entries[blockEnd + 1].section == entries[blockEnd].section + 1) {
+		blockEnd++;
+	}
+	int32_t blockLen = blockEnd - blockStart + 1;
+
+	auto atBlockIdx = [&](int32_t idxInBlock) -> Clip* { return entries[blockStart + idxInBlock].clip; };
+	int32_t srcInBlock = sourceIdx - blockStart;
+
+	switch (mode) {
+	case NextAction::NEXT:
+		return atBlockIdx((srcInBlock + 1) % blockLen);
+	case NextAction::PREV:
+		return atBlockIdx((srcInBlock - 1 + blockLen) % blockLen);
+	case NextAction::RANDOM:
+		if (blockLen == 1) {
+			return source;
+		}
+		return atBlockIdx(random(blockLen - 1));
+	case NextAction::RANDOM_WALK: {
+		if (blockLen == 1) {
+			return source;
+		}
+		bool forward = (random(1) != 0);
+		// Reflect off boundaries so we stay inside the block.
+		if (srcInBlock == 0) {
+			forward = true;
+		}
+		else if (srcInBlock == blockLen - 1) {
+			forward = false;
+		}
+		int32_t signedStep = forward ? 1 : -1;
+		return atBlockIdx(srcInBlock + signedStep);
+	}
+	case NextAction::RANDOM_OTHER: {
+		if (blockLen == 1) {
+			return source; // degenerate block — nothing else to pick
+		}
+		// Uniform over (blockLen - 1) non-self slots in the block.
+		int32_t pick = random(blockLen - 2); // [0, blockLen - 2]
+		if (pick >= srcInBlock) {
+			pick++; // skip source slot
+		}
+		return atBlockIdx(pick);
+	}
+	case NextAction::NEAR: {
+		if (blockLen == 1) {
+			return source;
+		}
+		// Geometric-like step: start at 1, flip coin to extend, truncate at blockLen-1.
+		// Gives P(step=1) ~= 0.5, P(step=2) ~= 0.25, etc., biased toward adjacent.
+		int32_t step = 1;
+		while (step < (blockLen - 1) && (random(1) == 0)) {
+			step++;
+		}
+		bool forward = (random(1) != 0);
+		// Reflect off block boundaries — if the chosen direction would land
+		// outside the block, flip direction instead of wrapping.
+		if (forward && srcInBlock + step >= blockLen) {
+			forward = false;
+		}
+		else if (!forward && srcInBlock - step < 0) {
+			forward = true;
+		}
+		int32_t newIdx = srcInBlock + (forward ? step : -step);
+		// Clamp defensively (shouldn't be needed after reflection, but cheap).
+		if (newIdx < 0) {
+			newIdx = 0;
+		}
+		if (newIdx >= blockLen) {
+			newIdx = blockLen - 1;
+		}
+		return atBlockIdx(newIdx);
+	}
+	case NextAction::STOP:
+	default:
+		return nullptr;
+	}
 }
 
 /*

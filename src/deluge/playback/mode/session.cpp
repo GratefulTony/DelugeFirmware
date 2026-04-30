@@ -594,6 +594,7 @@ doNormalLaunch:
 					if (!wasArmedToStartSoloing) {
 						clip->activeIfNoSolo = true;
 					}
+					clip->onLaunch();
 
 					ModelStackWithTimelineCounter* modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
 
@@ -630,12 +631,12 @@ doNormalLaunch:
 			}
 		}
 
-		// Arm it again if a ONCE clip, so it stops at the launchEvent
-		if (!isFillLaunch && (clip->activeIfNoSolo || clip->soloingInSessionMode)
-		    && clip->launchStyle == LaunchStyle::ONCE && clip->armState == ArmState::OFF) {
-			clip->armState = ArmState::ON_NORMAL;
-			distanceTilLaunchEvent = std::max(distanceTilLaunchEvent, clip->loopLength);
-		}
+		// Finite-repeat counting and transition-arming now live in
+		// Clip::processCurrentPos (flag-set on loop-wrap) and
+		// Session::processPendingNextActionTransitions (swap at tail of
+		// doTickForward). That decouples per-clip counting from the global
+		// launch-event cadence, so parallel finite-repeat clips with differing
+		// loopLengths each transition at their own boundary.
 
 		bool clipActiveAfter = clip->soloingInSessionMode || (clip->activeIfNoSolo && !anySoloingAfter);
 
@@ -705,8 +706,18 @@ doNormalLaunch:
 
 				// If AudioClip recording just began...
 				if (distanceTilLaunchEvent) {
+					// Treat the event as next-action-driven if any active clip has a
+					// pending finite-repeat arming (count reached threshold this event).
+					bool anyNextActionArmed = false;
+					for (int32_t c = currentSong->sessionClips.getNumElements() - 1; c >= 0; c--) {
+						Clip* check = currentSong->sessionClips.getClipAtIndex(c);
+						if (check != nullptr && check->hasFiniteRepeatArming()) {
+							anyNextActionArmed = true;
+							break;
+						}
+					}
 					scheduleLaunchTiming(playbackHandler.lastSwungTickActioned + distanceTilLaunchEvent, 1,
-					                     distanceTilLaunchEvent);
+					                     distanceTilLaunchEvent, anyNextActionArmed);
 					armingChanged();
 				}
 			}
@@ -722,6 +733,73 @@ doNormalLaunch:
 	}
 
 	AudioEngine::bypassCulling = true;
+}
+
+// Scan sessionClips for clips that Clip::processCurrentPos flagged for a
+// finite-repeat transition during this tick, and perform the swap here —
+// outside the per-clip tick iteration in doTickForward. Mutating source/
+// target state inline inside processCurrentPos broke the mechanism (see
+// reverted commit 669f7027); deferring to here avoids that.
+void Session::processPendingNextActionTransitions() {
+	bool anyTransitionHappened = false;
+	for (int32_t c = currentSong->sessionClips.getNumElements() - 1; c >= 0; c--) {
+		Clip* clip = currentSong->sessionClips.getClipAtIndex(c);
+		if (clip == nullptr || !clip->pendingNextActionTransition) {
+			continue;
+		}
+		clip->pendingNextActionTransition = false;
+
+		if (!clip->activeIfNoSolo && !clip->soloingInSessionMode) {
+			// Clip was deactivated between flag-set and now; skip.
+			continue;
+		}
+		if (clip->armState != ArmState::OFF) {
+			// User armed this clip for something else; defer to user action.
+			continue;
+		}
+
+		char modelStackMemory[MODEL_STACK_MAX_SIZE];
+		ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
+
+		if (clip->nextAction == NextAction::STOP) {
+			clip->clipRepeatCount = 0;
+			clip->activeIfNoSolo = false;
+			clip->expectNoFurtherTicks(currentSong, true);
+			anyTransitionHappened = true;
+			continue;
+		}
+
+		Clip* target = view.findNextActionTarget(clip, clip->nextAction);
+		if (target == nullptr || target == clip) {
+			// Stay-on-self or degenerate block — keep playing, reset counter.
+			clip->clipRepeatCount = 0;
+			continue;
+		}
+
+		// Direct swap: deactivate source, activate target at pos 0.
+		clip->activeIfNoSolo = false;
+		clip->expectNoFurtherTicks(currentSong, true);
+
+		ModelStackWithTimelineCounter* targetMstc = modelStack->addTimelineCounter(target);
+		target->soloingInSessionMode = false;
+		target->activeIfNoSolo = true;
+		target->onLaunch();
+		target->setPos(targetMstc, 0, false);
+		// Trigger any notes starting at position 0 — normal flow would do this
+		// via doTickForward's per-clip iteration, but we activated target at
+		// the tail of that iteration, so it gets skipped this tick. Call
+		// processCurrentPos explicitly with ticksSinceLast=0 so InstrumentClip
+		// / AudioClip note-row / sample triggering runs at pos=0.
+		target->processCurrentPos(targetMstc, 0);
+		target->output->setActiveClip(targetMstc);
+		anyTransitionHappened = true;
+	}
+
+	if (anyTransitionHappened) {
+		// Ensure session view repaints so pad colors reflect the swap immediately
+		// instead of waiting for some unrelated refresh trigger.
+		sessionView.requestRendering(getRootUI(), 0xFFFFFFFF, 0xFFFFFFFF);
+	}
 }
 
 void Session::justAbortedSomeLinearRecording() {
@@ -743,14 +821,15 @@ void Session::justAbortedSomeLinearRecording() {
 	}
 }
 
-void Session::scheduleLaunchTiming(int64_t atTickCount, int32_t numRepeatsUntil,
-                                   int32_t armedLaunchLengthForOneRepeat) {
+void Session::scheduleLaunchTiming(int64_t atTickCount, int32_t numRepeatsUntil, int32_t armedLaunchLengthForOneRepeat,
+                                   bool isFromNextAction) {
 	if (atTickCount > launchEventAtSwungTickCount) {
 		playbackHandler.stopOutputRecordingAtLoopEnd = false;
 		switchToArrangementAtLaunchEvent = false;
 		launchEventAtSwungTickCount = atTickCount;
 		numRepeatsTilLaunch = numRepeatsUntil;
 		currentArmedLaunchLengthForOneRepeat = armedLaunchLengthForOneRepeat;
+		launchEventIsFromNextAction = isFromNextAction;
 
 		int32_t ticksTilLaunchEvent = atTickCount - playbackHandler.lastSwungTickActioned;
 		if (playbackHandler.swungTicksTilNextEvent > ticksTilLaunchEvent) {
@@ -784,6 +863,7 @@ void Session::scheduleFillEvent(Clip* clip, int64_t atTickCount) {
 
 void Session::cancelAllLaunchScheduling() {
 	launchEventAtSwungTickCount = 0;
+	launchEventIsFromNextAction = false;
 }
 
 void Session::launchSchedulingMightNeedCancelling() {
@@ -1035,6 +1115,7 @@ void Session::toggleClipStatus(Clip* clip, int32_t* clipIndex, bool doInstant, i
 			// If Deluge not playing, easy
 			if (!playbackHandler.isEitherClockActive()) {
 				clip->activeIfNoSolo = true;
+				clip->onLaunch();
 
 				char modelStackMemory[MODEL_STACK_MAX_SIZE];
 				ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
@@ -1266,6 +1347,7 @@ void Session::armSectionWhenNeitherClockActive(ModelStack* modelStack, int32_t s
 
 		if (clip->section == section && !clip->activeIfNoSolo) {
 			clip->activeIfNoSolo = true;
+			clip->onLaunch();
 
 			ModelStackWithTimelineCounter* modelStackWithTimelineCounter = modelStack->addTimelineCounter(clip);
 
@@ -1373,6 +1455,7 @@ void Session::armClipsWithNothingToSyncTo(uint8_t section, Clip* clip) {
 	// If just one Clip...
 	if (clip) {
 		clip->activeIfNoSolo = true;
+		clip->onLaunch();
 		currentSong->assertActiveness(modelStack->addTimelineCounter(clip));
 	}
 	else // Or, if a whole section...
@@ -1381,6 +1464,7 @@ void Session::armClipsWithNothingToSyncTo(uint8_t section, Clip* clip) {
 			Clip* thisClip = currentSong->sessionClips.getClipAtIndex(c);
 			if (thisClip->section == section) {
 				thisClip->activeIfNoSolo = true;
+				thisClip->onLaunch();
 				currentSong->assertActiveness(modelStack->addTimelineCounter(thisClip)); // Very inefficient
 			}
 		}
@@ -1686,7 +1770,7 @@ wantActive:
 					// If it's already active (less common)...
 					if (thisClip->activeIfNoSolo) {
 						// If it's armed to stop, cancel that
-						if (thisClip->armState != ArmState::OFF && thisClip->launchStyle != LaunchStyle::ONCE) {
+						if (thisClip->armState != ArmState::OFF && !thisClip->hasFiniteRepeatArming()) {
 							thisClip->armState = ArmState::OFF;
 						}
 						output->nextClipFoundShouldGetArmed = true;
@@ -1818,6 +1902,7 @@ void Session::armClipToStartOrSoloUsingQuantization(Clip* thisClip, bool doLateS
 			}
 
 			thisClip->activeIfNoSolo = true;
+			thisClip->onLaunch();
 
 			// Must call this before setPos, because that does stuff with ParamManagers
 			currentSong->assertActiveness(modelStack, playbackHandler.getActualArrangementRecordPos() - pos);
@@ -1885,6 +1970,7 @@ void Session::scheduleFillClip(Clip* clip) {
 				}
 
 				clip->activeIfNoSolo = true;
+				clip->onLaunch();
 
 				// Must call this before setPos, because that does stuff with ParamManagers
 				currentSong->assertActiveness(modelStack, playbackHandler.getActualArrangementRecordPos() - pos);
@@ -2173,6 +2259,7 @@ void Session::resetPlayPos(int32_t newPos, bool doingComplete, int32_t buttonPre
 		// act on it here
 		if (clip->isPendingOverdub) {
 			clip->activeIfNoSolo = true;
+			clip->onLaunch();
 			clip->armState = ArmState::OFF;
 			goto yeahNahItsOn;
 		}
@@ -2201,6 +2288,10 @@ yeahNahItsOn:
 						distanceTilLaunchEvent = std::max(distanceTilLaunchEvent, clip->loopLength);
 					}
 				}
+
+				// Finite-repeat counting starts fresh at transport-start via
+				// onLaunch() reset elsewhere, and is driven by loop-wrap detection
+				// inside Clip::processCurrentPos from here on.
 			}
 
 			// Rohan: Not quite sure why we needed to set this here?
@@ -2215,8 +2306,18 @@ yeahNahItsOn:
 
 		// If just became armed (audio clip began recording)... The placement of this probably isn't quite ideal...
 		else if (distanceTilLaunchEvent) {
+			// Treat the event as next-action-driven if any active clip has a
+			// pending finite-repeat arming (count reached threshold this event).
+			bool anyNextActionArmed = false;
+			for (int32_t c = currentSong->sessionClips.getNumElements() - 1; c >= 0; c--) {
+				Clip* check = currentSong->sessionClips.getClipAtIndex(c);
+				if (check != nullptr && check->hasFiniteRepeatArming()) {
+					anyNextActionArmed = true;
+					break;
+				}
+			}
 			scheduleLaunchTiming(playbackHandler.lastSwungTickActioned + distanceTilLaunchEvent, 1,
-			                     distanceTilLaunchEvent);
+			                     distanceTilLaunchEvent, anyNextActionArmed);
 			armingChanged(); // This isn't really ideal. Is here for AudioClips which just armed themselves in setPos()
 			                 // call
 		}
@@ -2480,6 +2581,12 @@ void Session::doTickForward(int32_t posIncrement) {
 	    }
 	}
 	*/
+
+	// Action any pending next-action transitions that processCurrentPos detected
+	// at loop wraps during this tick. Doing this AFTER all per-clip tick work
+	// is done — outside processCurrentPos iteration — avoids mid-iteration
+	// state mutation on the source clip that broke commit 669f7027.
+	processPendingNextActionTransitions();
 }
 
 void Session::resyncToSongTicks(Song* song) {

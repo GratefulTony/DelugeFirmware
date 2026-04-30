@@ -2261,7 +2261,7 @@ void SessionView::renderOLED(deluge::hid::display::oled_canvas::Canvas& canvas) 
 	if (playbackHandler.isEitherClockActive()) {
 		// Session playback
 		if (currentPlaybackMode == &session) {
-			if (session.launchEventAtSwungTickCount) {
+			if (session.launchEventAtSwungTickCount && !session.launchEventIsFromNextAction) {
 				intToString(session.numRepeatsTilLaunch, &loopsRemainingText[17]);
 				deluge::hid::display::OLED::clearMainImage();
 				deluge::hid::display::OLED::drawPermanentPopupLookingText(loopsRemainingText);
@@ -2725,8 +2725,10 @@ void SessionView::displayPotentialTempoChange(UI* ui) {
 /// display number of bars or quarter notes remaining until a launch event
 int32_t SessionView::displayLoopsRemainingPopup(bool ephemeral) {
 	int32_t sixteenthNotesRemaining = session.getNumSixteenthNotesRemainingTilLaunch();
-	// only show pop-up if you're not in any other UI mode
-	if (currentUIMode == UI_MODE_NONE) {
+	// Only show pop-up if you're not in any other UI mode, AND the pending
+	// launch event wasn't scheduled by an auto next-action transition (for
+	// those we skip the countdown to reduce visual clutter).
+	if (currentUIMode == UI_MODE_NONE && !session.launchEventIsFromNextAction) {
 		if (sixteenthNotesRemaining > 0) {
 			DEF_STACK_STRING_BUF(popupMsg, 40);
 			if (sixteenthNotesRemaining > 16) {
