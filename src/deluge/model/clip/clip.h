@@ -200,6 +200,27 @@ public:
 	uint32_t indexForSaving; // For use only while saving song
 
 	LaunchStyle launchStyle;
+	// Next-action behavior (subsumes old LaunchStyle::ONCE).
+	// clipRepeats == 0 means infinite loop (today's DEFAULT behavior).
+	// Otherwise valid values are {1, 2, 4, 8, 16}.
+	uint8_t clipRepeats = 0;
+	NextAction nextAction = NextAction::STOP;
+	// Runtime-only: incremented at each loop-boundary launch event while
+	// this clip is playing; compared against clipRepeats.
+	uint8_t clipRepeatCount = 0;
+	// Runtime-only: set by Clip::processCurrentPos when a finite-repeat clip
+	// wraps past its programmed repeat count. Consumed by
+	// Session::processPendingNextActionTransitions at the tail of doTickForward.
+	// Not serialized.
+	bool pendingNextActionTransition = false;
+
+	// Reset counter; call when this clip becomes active on a launch event.
+	void onLaunch();
+
+	// True when a finite-repeat clip has reached its programmed repeat count and
+	// is therefore expected to toggle (stop or hand off) at the next launch event.
+	// Replaces the old LaunchStyle::ONCE-specific exemption checks.
+	inline bool hasFiniteRepeatArming() const { return clipRepeats != 0 && clipRepeatCount >= clipRepeats; }
 	int64_t fillEventAtTickCount;
 	bool overdubsShouldCloneOutput;
 

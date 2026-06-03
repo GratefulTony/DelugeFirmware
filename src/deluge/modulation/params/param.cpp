@@ -178,6 +178,8 @@ char const* getPatchedParamShortName(ParamType type) {
 	    [GLOBAL_MACRO_2]                 = "Macro 2",
 	    [GLOBAL_MACRO_3]                 = "Macro 3",
 	    [GLOBAL_MACRO_4]                 = "Macro 4",
+	    [GLOBAL_HARM_FINE]               = "Harm fine",
+	    [GLOBAL_HARM_LEVEL]              = "Harm level",
 	    [GLOBAL_DISPERSER_TOPO]          = "Disp topo",
 	    [GLOBAL_DISPERSER_TWIST]         = "Disp twist",
 	    [GLOBAL_SCATTER_MACRO]           = "Scat macro",
@@ -276,6 +278,8 @@ char const* getPatchedParamDisplayName(int32_t p) {
 	    [GLOBAL_MACRO_2] = STRING_FOR_MACRO_2,
 	    [GLOBAL_MACRO_3] = STRING_FOR_MACRO_3,
 	    [GLOBAL_MACRO_4] = STRING_FOR_MACRO_4,
+	    [GLOBAL_HARM_FINE] = STRING_FOR_PARAM_GLOBAL_HARM_FINE,
+	    [GLOBAL_HARM_LEVEL] = STRING_FOR_PARAM_GLOBAL_HARM_LEVEL,
 	    [GLOBAL_DISPERSER_TOPO] = STRING_FOR_DISPERSER_TOPO,
 	    [GLOBAL_DISPERSER_TWIST] = STRING_FOR_DISPERSER_TWIST,
 	    [GLOBAL_SCATTER_MACRO] = STRING_FOR_SCATTER_MACRO,
@@ -743,6 +747,11 @@ constexpr char const* paramNameForFileConst(Kind const kind, ParamType const par
 			return "globalEroderCharacter";
 		case GLOBAL_ERODER_CUTOFF:
 			return "globalEroderCutoff";
+
+		case GLOBAL_HARM_LEVEL:
+			return "globalHarmLevel";
+		case GLOBAL_HARM_FINE:
+			return "globalHarmFine";
 
 		case GLOBAL_SCATTER_ZONE_A:
 			return "globalScatterZoneA";

@@ -1402,9 +1402,6 @@ char const* launchStyleToString(LaunchStyle launchStyle) {
 	case LaunchStyle::FILL:
 		return "fill";
 
-	case LaunchStyle::ONCE:
-		return "once";
-
 	default:
 		__builtin_unreachable();
 		return "";
@@ -1415,12 +1412,53 @@ LaunchStyle stringToLaunchStyle(char const* string) {
 	if (!strcmp(string, "fill")) {
 		return LaunchStyle::FILL;
 	}
-	else if (!strcmp(string, "once")) {
-		return LaunchStyle::ONCE;
-	}
 	else {
 		return LaunchStyle::DEFAULT;
 	}
+}
+
+char const* nextActionToString(NextAction action) {
+	switch (action) {
+	case NextAction::STOP:
+		return "stop";
+	case NextAction::NEXT:
+		return "next";
+	case NextAction::PREV:
+		return "prev";
+	case NextAction::RANDOM:
+		return "random";
+	case NextAction::RANDOM_WALK:
+		return "randomWalk";
+	case NextAction::RANDOM_OTHER:
+		return "randomOther";
+	case NextAction::NEAR:
+		return "randomNear";
+	default:
+		__builtin_unreachable();
+		return "";
+	}
+}
+
+NextAction stringToNextAction(char const* string) {
+	if (!strcmp(string, "next")) {
+		return NextAction::NEXT;
+	}
+	if (!strcmp(string, "prev")) {
+		return NextAction::PREV;
+	}
+	if (!strcmp(string, "random")) {
+		return NextAction::RANDOM;
+	}
+	if (!strcmp(string, "randomWalk")) {
+		return NextAction::RANDOM_WALK;
+	}
+	if (!strcmp(string, "randomOther")) {
+		return NextAction::RANDOM_OTHER;
+	}
+	if (!strcmp(string, "randomNear")) {
+		return NextAction::NEAR;
+	}
+	return NextAction::STOP;
 }
 
 char const* getInstrumentFolder(OutputType outputType) {

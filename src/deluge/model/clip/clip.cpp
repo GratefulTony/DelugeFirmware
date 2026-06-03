@@ -57,6 +57,9 @@ Clip::Clip(ClipType newType) : type(newType) {
 	originalLength = 0;
 	armedForRecording = true;
 	launchStyle = LaunchStyle::DEFAULT;
+	clipRepeats = 0;
+	nextAction = NextAction::STOP;
+	clipRepeatCount = 0;
 	fillEventAtTickCount = 0;
 
 	// initialize automation clip view variables
@@ -94,6 +97,9 @@ void Clip::cloneFrom(Clip const* otherClip) {
 	repeatCount = otherClip->repeatCount;
 	armedForRecording = otherClip->armedForRecording;
 	launchStyle = otherClip->launchStyle;
+	clipRepeats = otherClip->clipRepeats;
+	nextAction = otherClip->nextAction;
+	// clipRepeatCount is runtime-only; don't copy.
 }
 
 void Clip::copyBasicsFrom(Clip const* otherClip) {
@@ -102,6 +108,9 @@ void Clip::copyBasicsFrom(Clip const* otherClip) {
 	// modKnobMode = otherClip->modKnobMode;
 	section = otherClip->section;
 	launchStyle = otherClip->launchStyle;
+	clipRepeats = otherClip->clipRepeats;
+	nextAction = otherClip->nextAction;
+	// clipRepeatCount is runtime-only; don't copy.
 	onAutomationClipView = otherClip->onAutomationClipView;
 }
 
@@ -260,6 +269,17 @@ void Clip::processCurrentPos(ModelStackWithTimelineCounter* modelStack, uint32_t
 		// going to hit next etc.
 		if (!lastProcessedPos) { // Possibly only just became the case, above.
 			repeatCount++;
+
+			// Finite-repeat counting (reverse playback wrap). See the matching
+			// block in the forward-wrap branch below for the full rationale.
+			if (clipRepeats != 0 && (activeIfNoSolo || soloingInSessionMode) && launchStyle != LaunchStyle::FILL
+			    && armState == ArmState::OFF && playbackHandler.isEitherClockActive()) {
+				clipRepeatCount++;
+				if (clipRepeatCount >= clipRepeats) {
+					pendingNextActionTransition = true;
+				}
+			}
+
 			if (sequenceDirectionMode == SequenceDirection::PINGPONG) {
 				lastProcessedPos = -lastProcessedPos; // In case it did get left of zero.
 				currentlyPlayingReversed = !currentlyPlayingReversed;
@@ -285,6 +305,20 @@ playingForwardNow:
 
 			lastProcessedPos -= loopLength;
 			repeatCount++;
+
+			// Finite-repeat counting: detect loop-wrap and flag transition
+			// when the count reaches the programmed repeat threshold. The
+			// actual swap is performed later by Session::processPendingNext
+			// ActionTransitions at the tail of doTickForward, outside per-
+			// clip tick iteration — see commit 669f7027's revert for why
+			// mutating source/target state inline broke things.
+			if (clipRepeats != 0 && (activeIfNoSolo || soloingInSessionMode) && launchStyle != LaunchStyle::FILL
+			    && armState == ArmState::OFF && playbackHandler.isEitherClockActive()) {
+				clipRepeatCount++;
+				if (clipRepeatCount >= clipRepeats) {
+					pendingNextActionTransition = true;
+				}
+			}
 
 			if (sequenceDirectionMode == SequenceDirection::PINGPONG) {
 				// Normally we'll have hit the exact loop point, meaning lastProcessedPos will have wrapped to 0, above.
@@ -587,6 +621,11 @@ Error Clip::undoDetachmentFromOutput(ModelStackWithTimelineCounter* modelStack) 
 	return Error::NONE;
 }
 
+void Clip::onLaunch() {
+	clipRepeatCount = 0;
+	pendingNextActionTransition = false;
+}
+
 // ----- TimelineCounter implementation -------
 
 int32_t Clip::getLoopLength() const {
@@ -688,6 +727,12 @@ void Clip::writeDataToFile(Serializer& writer, Song* song) {
 	if (launchStyle != LaunchStyle::DEFAULT) {
 		writer.writeAttribute("launchStyle", launchStyleToString(launchStyle));
 	}
+	if (clipRepeats != 0) {
+		writer.writeAttribute("clipRepeats", clipRepeats);
+	}
+	if (nextAction != NextAction::STOP) {
+		writer.writeAttribute("nextAction", nextActionToString(nextAction));
+	}
 }
 
 void Clip::writeMidiCommandsToFile(Serializer& writer, Song* song) {
@@ -763,7 +808,24 @@ void Clip::readTagFromFile(Deserializer& reader, char const* tagName, Song* song
 	}
 
 	else if (!strcmp(tagName, "launchStyle")) {
-		launchStyle = stringToLaunchStyle(reader.readTagOrAttributeValue());
+		char const* value = reader.readTagOrAttributeValue();
+		// Legacy translation: "once" maps to the new-model (1, STOP) and
+		// leaves launchStyle at DEFAULT. Done here (not in stringToLaunchStyle)
+		// so the enum can drop ONCE in Phase 2.
+		if (!strcmp(value, "once")) {
+			launchStyle = LaunchStyle::DEFAULT;
+			clipRepeats = 1;
+			nextAction = NextAction::STOP;
+		}
+		else {
+			launchStyle = stringToLaunchStyle(value);
+		}
+	}
+	else if (!strcmp(tagName, "clipRepeats")) {
+		clipRepeats = reader.readTagOrAttributeValueInt();
+	}
+	else if (!strcmp(tagName, "nextAction")) {
+		nextAction = stringToNextAction(reader.readTagOrAttributeValue());
 	}
 
 	/*

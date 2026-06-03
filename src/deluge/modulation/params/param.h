@@ -158,6 +158,8 @@ enum Global : ParamType {
 	GLOBAL_MACRO_2,                       // Macro routing node 2
 	GLOBAL_MACRO_3,                       // Macro routing node 3
 	GLOBAL_MACRO_4,                       // Macro routing node 4
+	GLOBAL_HARM_FINE,                     // Harm sub oscillator fine tune (+/-12 semitones)
+	GLOBAL_HARM_LEVEL,                    // Harm sub oscillator level (hybrid: base ± modulation)
 
 	// Global zone params begin (patcher outputs cables only, DSP combines with preset)
 	FIRST_GLOBAL_ZONE,

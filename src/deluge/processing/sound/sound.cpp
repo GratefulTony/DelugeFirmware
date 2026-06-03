@@ -194,6 +194,7 @@ void Sound::initParams(ParamManager* paramManager) {
 	patchedParams->params[params::LOCAL_OSC_B_VOLUME].setCurrentValueBasicForSetup(2147483647);
 	patchedParams->params[params::GLOBAL_VOLUME_POST_FX].setCurrentValueBasicForSetup(
 	    getParamFromUserValue(params::GLOBAL_VOLUME_POST_FX, 40));
+	patchedParams->params[params::GLOBAL_HARM_LEVEL].setCurrentValueBasicForSetup(-2147483648); // min = silence
 	patchedParams->params[params::GLOBAL_VOLUME_POST_REVERB_SEND].setCurrentValueBasicForSetup(0);
 	patchedParams->params[params::LOCAL_FOLD].setCurrentValueBasicForSetup(-2147483648);
 	patchedParams->params[params::LOCAL_HPF_RESONANCE].setCurrentValueBasicForSetup(-2147483648);
@@ -1712,6 +1713,8 @@ void Sound::noteOff(ModelStackWithThreeMainThings* modelStack, ArpeggiatorBase* 
 void Sound::noteOnPostArpeggiator(ModelStackWithSoundFlags* modelStack, int32_t noteCodePreArp, int32_t noteCodePostArp,
                                   int32_t velocity, int16_t const* mpeValues, uint32_t sampleSyncLength,
                                   int32_t ticksLate, uint32_t samplesLate, int32_t fromMIDIChannel) {
+	harm.harmNoteOn();
+
 	const ActiveVoice* voiceToReuse = nullptr;
 	const ActiveVoice* voiceForLegato = nullptr;
 
@@ -1901,6 +1904,12 @@ void Sound::allNotesOff(ModelStackWithThreeMainThings* modelStack, ArpeggiatorBa
 
 // noteCode = ALL_NOTES_OFF (default) means stop *any* voice, regardless of noteCode
 void Sound::noteOffPostArpeggiator(ModelStackWithSoundFlags* modelStack, int32_t noteCode) {
+	if (noteCode == ALL_NOTES_OFF) {
+		harm.harmAllNotesOff();
+	}
+	else {
+		harm.harmNoteOff();
+	}
 	// Send midi note offs out for specific notes,
 	// but only if the type of sound allows note tails (if not, note off was already sent right after its note on)
 	if (outputMidiChannel != MIDI_CHANNEL_NONE && allowNoteTails(modelStack, true)) {
@@ -2299,6 +2308,7 @@ void Sound::reassessRenderSkippingStatus(ModelStackWithSoundFlags* modelStack, b
 	bool skippingStatusNow =
 	    (voices_.empty() && (delay.repeatsUntilAbandon == 0u) && !stutterer.isStuttering(this)
 	     && !disperser.delay.hasEnergy() // Disperser tail still ringing
+	     && (harm.envelope <= 0.0f)      // Harm envelope still releasing
 	     && ((arpSettings == nullptr) || !getArp()->hasAnyInputNotesActive() || arpSettings->mode == ArpMode::OFF));
 
 	if (skippingStatusNow != skippingRendering) {
@@ -2790,6 +2800,9 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 	};
 	processStutter(sound_stereo, paramManager, modulatedScatterValues);
 
+	// Utility (volume, pan, stereo width) - gain staging before DOTT
+	utility.render(sound_stereo);
+
 	// DOTT (multiband compressor) - runs after stutter
 	if (dottEnabled) {
 		applyMultibandCompressorParams(paramManager);
@@ -2803,7 +2816,63 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		          !voices_.empty(), reverbSendAmount >> 1);
 	}
 
+	// Harm: gate from noteOn/noteOff counter, pitch from last-note-priority with voice fallback
+	int32_t harmNoteCode = lastNoteCode;
+	bool harmVoicesHeld = harm.isGateOpen();
+
+	// If lastNoteCode's voice is releasing, fall back to a still-held voice's pitch
+	if (harmVoicesHeld && !voices_.empty()) {
+		bool lastNoteStillHeld = false;
+		int32_t fallbackNote = lastNoteCode;
+		for (auto& voice : voices_) {
+			auto envState = voice->envelopes[0].state;
+			if (envState != EnvelopeStage::RELEASE && envState != EnvelopeStage::FAST_RELEASE
+			    && envState != EnvelopeStage::OFF) {
+				fallbackNote = voice->noteCodeAfterArpeggiation;
+				if (voice->noteCodeAfterArpeggiation == lastNoteCode) {
+					lastNoteStillHeld = true;
+				}
+			}
+		}
+		if (!lastNoteStillHeld) {
+			harmNoteCode = fallbackNote;
+		}
+	}
+
+	// Harm: safety — if no voices exist but gate is stuck, force it closed
+	if (voices_.empty() && harm.isGateOpen()) {
+		harm.harmAllNotesOff();
+	}
+
+	// Harm: compute pitch bend in semitones
+	float harmBendSemitones = 0.0f;
+	if (harm.isEnabled() && monophonicExpressionValues[0] != 0) {
+		ExpressionParamSet* expressionParams = paramManager->getExpressionParamSet();
+		if (expressionParams) {
+			// monophonicExpressionValues[0] is Q31 representing +-1.0
+			// Multiply by bend range to get semitones
+			harmBendSemitones = (static_cast<float>(monophonicExpressionValues[0]) / static_cast<float>(ONE_Q31))
+			                    * static_cast<float>(expressionParams->bendRanges[BEND_RANGE_MAIN]);
+		}
+	}
+
+	// Harm: read patched params for mod matrix
+	int32_t harmLevelMod = paramFinalValues[params::GLOBAL_HARM_LEVEL - params::FIRST_GLOBAL];
+	int32_t harmFineMod = paramFinalValues[params::GLOBAL_HARM_FINE - params::FIRST_GLOBAL];
+
+	// Harm notch - strip the harmonic frequency pre-reverb
+	if (harm.isHpfEnabled()) {
+		harm.renderHpf(sound_stereo, harmNoteCode, harmBendSemitones, harmFineMod);
+	}
+
 	processReverbSendAndVolume(sound_stereo, reverbBuffer, postFXVolume, postReverbVolume, reverbSendAmount, 0, true);
+
+	// Harm oscillator - add clean harmonic back post-reverb (dry)
+	// Skip entirely when level produces zero gain (saves all per-buffer transcendentals)
+	q31_t harmLevelGain = std::max(static_cast<int32_t>(0), harmLevelMod + (ONE_Q31 >> 2));
+	if (harm.isOscEnabled() && (harmLevelGain > 0 || harm.envelope > 0.0f)) {
+		harm.renderOsc(sound_stereo, harmNoteCode, harmVoicesHeld, harmBendSemitones, harmLevelMod, harmFineMod);
+	}
 
 	q31_t compThreshold = paramManager->getUnpatchedParamSet()->getValue(params::UNPATCHED_COMPRESSOR_THRESHOLD);
 	compressor.setThreshold(compThreshold);
@@ -5513,6 +5582,8 @@ void Sound::wontBeRenderedForAWhile() {
 
 	getArp()->reset(); // Surely this shouldn't be quite necessary?
 	sidechain.status = EnvelopeStage::OFF;
+	harm.envelope = 0.0f;
+	harm.harmAllNotesOff();
 
 	// Tell it to just cut the MODFX tail - we needa change status urgently!
 	reassessRenderSkippingStatus(nullptr, true);

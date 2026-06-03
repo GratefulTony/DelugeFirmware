@@ -27,6 +27,7 @@
 #include "hid/display/oled.h"
 #include "hid/led/indicator_leds.h"
 #include "hid/led/pad_leds.h"
+#include "io/debug/log.h"
 #include "model/action/action_logger.h"
 #include "model/clip/instrument_clip.h"
 #include "model/instrument/kit.h"
@@ -191,6 +192,13 @@ void AudioRecorder::endRecordingSoon(int32_t buttonLatency) {
 }
 
 void AudioRecorder::slowRoutine() {
+	// While stem export is driving, it manages the recorder's lifecycle itself — calling
+	// finishRecording here causes a race with cardRoutine (which also uses the recorder and
+	// internally yields during SD operations). The destruction here can invalidate pointers
+	// cardRoutine is holding, leading to a hardfault when cardRoutine resumes.
+	if (stemExport.processStarted) {
+		return;
+	}
 	if (recordingSource >= AUDIO_INPUT_CHANNEL_FIRST_INTERNAL_OPTION) {
 		if (recorder->status >= RecorderStatus::COMPLETE) {
 			indicator_leds::setLedState(IndicatorLED::RECORD, (playbackHandler.recording == RecordingMode::NORMAL));
@@ -266,13 +274,16 @@ void AudioRecorder::process() {
 
 // Returns error code
 void AudioRecorder::finishRecording() {
+	D_PRINTLN("AR::finishRecording: pre-discard");
 	recorder->pointerHeldElsewhere = false;
 
 	AudioEngine::discardRecorder(recorder);
+	D_PRINTLN("AR::finishRecording: post-discard");
 
 	recorder = nullptr;
 	recordingSource = AudioInputChannel::NONE;
 	display->removeLoadingAnimation();
+	D_PRINTLN("AR::finishRecording: done");
 }
 
 ActionResult AudioRecorder::padAction(int32_t x, int32_t y, int32_t velocity) {

@@ -81,8 +81,10 @@
 #include "gui/menu_item/fx/clipping.h"
 #include "gui/menu_item/fx/disperser.h"
 #include "gui/menu_item/fx/eroder.h"
+#include "gui/menu_item/fx/harm.h"
 #include "gui/menu_item/fx/shaper.h"
 #include "gui/menu_item/fx/sine_shaper.h"
+#include "gui/menu_item/fx/utility.h"
 #include "gui/menu_item/gate/mode.h"
 #include "gui/menu_item/gate/off_time.h"
 #include "gui/menu_item/gate/selection.h"
@@ -802,6 +804,34 @@ HorizontalMenu eroderSubMenu{
     {&eroderCutoffMenu, &eroderToneMenu, &eroderCharacterMenu, &eroderMixMenu},
 };
 
+// Utility - channel strip (volume, pan, width)
+fx::UtilityVolume utilityVolumeMenu{STRING_FOR_UTILITY_VOLUME};
+fx::UtilityPanL utilityPanLMenu{STRING_FOR_UTILITY_PAN_L};
+fx::UtilityPanR utilityPanRMenu{STRING_FOR_UTILITY_PAN_R};
+fx::UtilityWidth utilityWidthMenu{STRING_FOR_UTILITY_WIDTH};
+
+HorizontalMenu utilitySubMenu{
+    STRING_FOR_UTILITY_MENU,
+    {&utilityVolumeMenu, &utilityPanLMenu, &utilityPanRMenu, &utilityWidthMenu},
+};
+
+// Harm - note-tracking HPF + clean sub oscillator
+fx::HarmHarmonic harmHarmonicMenu{STRING_FOR_HARM_HARMONIC};
+patched_param::Integer harmFineMenu{STRING_FOR_HARM_FINE, STRING_FOR_HARM_FINE, params::GLOBAL_HARM_FINE};
+patched_param::Integer harmLevelMenu{STRING_FOR_HARM_LEVEL, STRING_FOR_HARM_LEVEL, params::GLOBAL_HARM_LEVEL};
+fx::HarmPhase harmPhaseMenu{STRING_FOR_HARM_PHASE};
+fx::HarmAttack harmAttackMenu{STRING_FOR_HARM_ATTACK};
+fx::HarmRelease harmReleaseMenu{STRING_FOR_HARM_RELEASE};
+fx::HarmHpf harmHpfMenu{STRING_FOR_HARM_NOTCH};
+fx::HarmPorta harmPortaMenu{STRING_FOR_HARM_PORTA};
+
+HorizontalMenu harmSubMenu{
+    STRING_FOR_HARM_MENU,
+    {&harmHarmonicMenu, &harmFineMenu, &harmLevelMenu, &harmPhaseMenu, &harmAttackMenu, &harmReleaseMenu, &harmHpfMenu,
+     &harmPortaMenu},
+    HorizontalMenu::Layout::DYNAMIC,
+};
+
 // Shaping submenu - contains Sine Shaper, Table Shaper, Automodulator, Disperser, and Eroder
 submenu::Shaping shapingMenu{
     STRING_FOR_SHAPING,
@@ -1018,6 +1048,7 @@ Submenu globalFXMenu{
         &globalModFXMenu,
         &globalDistortionMenu,
         &dott_menu,
+        &utilitySubMenu,
     },
 };
 
@@ -1075,6 +1106,7 @@ Submenu audioClipFXMenu{
         &shapingMenu,
         &audioClipDistortionMenu,
         &dott_menu,
+        &utilitySubMenu,
     },
 };
 
@@ -1596,6 +1628,8 @@ Submenu soundFXMenu{
         &soundDistortionMenu,
         &noiseMenu,
         &dott_menu,
+        &harmSubMenu,
+        &utilitySubMenu,
     },
 };
 

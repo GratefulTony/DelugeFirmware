@@ -703,6 +703,11 @@ void renderAudioForStemExport(size_t numSamples) {
 		renderReverb(numSamples);
 		renderSongFX(numSamples);
 	}
+	else if (stemExport.bakeReverbOnly) {
+		// Bake reverb into main mix but skip master FX / vol / compressor — so when the
+		// bounced WAV is played back through a new track, master only applies once.
+		renderReverb(numSamples);
+	}
 
 	// If we're recording final output for offline stem export with song FX
 	// Check if we have a recorder
@@ -1586,7 +1591,6 @@ LiveInputBuffer* getOrCreateLiveInputBuffer(OscType inputType, bool mayCreate) {
 bool createdNewRecorder;
 
 void doRecorderCardRoutines() {
-
 	SampleRecorder** prevPointer = &firstRecorder;
 	int32_t count = 0;
 	while (true) {
@@ -1720,6 +1724,7 @@ errorAfterAllocation:
 
 // PLEASE don't call this if there's any chance you might be in the SD card routine...
 void discardRecorder(SampleRecorder* recorder) {
+	D_PRINTLN("discardRecorder: enter recorder=%p", (void*)recorder);
 	int32_t count = 0;
 	SampleRecorder** prevPointer = &firstRecorder;
 	while (*prevPointer) {
@@ -1736,8 +1741,11 @@ void discardRecorder(SampleRecorder* recorder) {
 		prevPointer = &(*prevPointer)->next;
 	}
 
+	D_PRINTLN("discardRecorder: pre-dtor");
 	recorder->~SampleRecorder();
+	D_PRINTLN("discardRecorder: pre-dealloc");
 	delugeDealloc(recorder);
+	D_PRINTLN("discardRecorder: done");
 }
 
 bool isAnyInternalRecordingHappening() {

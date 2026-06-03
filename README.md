@@ -26,29 +26,64 @@ Highly experimental and for most users, not a replacement for the main community
 
 ### Features (vs Main)
 
+#### Workflow
+
+| Feature | Description |
+|---------|-------------|
+| **Bounce in Place** | Render a synth/kit/audio clip (or a whole track) through its current FX chain into a new AudioClip on a new adjacent AudioOutput. Source clip and output remain intact. Menu: clip context menu → "Bounce Clip" (single) or "Bounce Track" (every clip on the source output). Synth/audio sources record pre-reverb (MIX channel) so reverb is recreated live on the bounced clip; kits bake per-drum reverb into the WAV but preserve the kit-wide send as a live send (a single clip send can't model per-drum variation). Reverb-send automation is cloned onto the new clip via AutoParam::cloneFrom, preserving curves. Sample clusters are pre-primed before the render so audio-clip and sample-based kit-drum sources don't record leading silence while SD loads. Playback window is trimmed to exactly clipLength-in-samples so AudioClip's timestretch engine runs at ratio 1.0 (no mid-clip artifacts). Gain stage set to unity (overriding the AudioClip 25% default) so the bounced clip plays at source level. |
+| **Retrospective Sampler** | Lookback buffer for capturing audio after the fact. Sources: Input, Master mix, or Focused Track. Duration modes: time-based (5/15/30/60 sec) or bar-synced (1/2/4 bars). Bar modes tag filenames with BPM. See [testing guide](docs/features/retrospective-sampler-testing.md). |
+| **Sound Cloning (Grid/Kit)** | Clone sounds via pad gestures. **Grid view:** hold a clip pad + press an empty column to clone the synth track (sound + notes). **Kit view:** hold an occupied audition pad + press an empty row to clone the drum sound. Cloned sounds are independent copies with unique names for reliable save/reload. |
+| **Record Source Selection** | Choose the recording source for Record to Sample via Sound Editor → Actions → Record source. Options: Left input (auto-detect, default), Stereo input, Balanced input, Deluge mix (no fx), Deluge output (fx). Enables resampling the Deluge's own output directly into a sample slot. Setting persists across power cycles. |
+
+#### Effects
+
 | Feature | Description |
 |---------|-------------|
 | **Scatter (Bird Brain)** | Beat-repeat, slice manipulation effect and granular looper. Rate knob controls slice length. Grain mode with dual-voice crossfade. pWrite and density are patchable params. See [testing guide](docs/features/scatter-testing.md). |
 | **Featherverb** | Lightweight 4-tap FDN/allpass cascade reverb. 77 KB buffer vs Mutable's 128 KB. See [testing guide](docs/features/featherverb-testing.md). |
 | **Multiband OTT Compressor (DOTT)** | 3-band upward/downward compressor with CHARACTER, RATIO, VIBE, and SKEW controls. 8 vibe zones for dynamic character. Can function as full downward, full upward, or anywhere in between. Aggressively optimized. Includes band-level metering. See [testing guide](docs/features/dott-testing.md). |
-| **Retrospective Sampler** | Lookback buffer for capturing audio after the fact. Sources: Input, Master mix, or Focused Track. Duration modes: time-based (5/15/30/60 sec) or bar-synced (1/2/4 bars). Bar modes tag filenames with BPM. See [testing guide](docs/features/retrospective-sampler-testing.md). |
 | **Sine Shaper (HOOT)** | Harmonic waveshaping with drive, harmonic content, symmetry, and mix controls. Adds musical saturation and overtones. See [testing guide](docs/features/sine-shaper-testing.md). |
 | **Table Shaper (PELLET)** | XY wavetable-based waveshaper with smooth interpolation between shapes. See [testing guide](docs/features/table-shaper-testing.md). |
 | **Disperser (OWLPASS)** | Allpass cascade effect with zone-based topology. Available per-voice and in GlobalEffectable chain. High CPU usage with >8 stages. |
-| **Pulse Width Triangle** | New oscillator type (TrianglePW / TRPW). Triangle wave with dead-zone pulse width control — PW knob compresses the triangle into a narrower region with silence in the dead zone. Waveform visualization in pulse width menu. |
 | **Automodulator** | Automodulation effect with phi triangle routing and 4-point XY LFO wavetable. Available per-voice and in GlobalEffectable chain. |
+| **Eroder** | Noise-modulated delay line comb filter with IIR feedback. SVF-filtered noise (bandpass) + zero-crossing sample-and-hold + pitched triangle modulator drive a short delay line. Phi triangle banks on freq (delay, feedback, soft clip, fold, HPF cutoff, pitched mod depth) and character (depth, resonance, S&H blend, width, pitched mod offset). Pitch tracking on comb, SVF, HPF, and triangle. Q31 integer waveshaping (soft clip + triangle fold). Available per-voice and in GlobalEffectable chain. |
+| **Utility Effect** | Channel-strip utility with four controls: Volume (−∞ to +12dB gain staging), Pan L and Pan R (independent per-channel panning, 0=hard left, 127=hard right), and Stereo Width (0%=mono, 100%=normal, 200%=exaggerated). Placed before DOTT in the signal chain. Available on synth tracks, kit rows, audio clips, and master. All params at default = zero CPU (bypass). |
+| **Harm Effect** | Harmonic rebuild tool: note-tracking notch filter (pre-reverb) strips a frequency, sine oscillator (post-reverb) adds it back clean. 102 harmonic ratios (denominators 1/2/3/4/8, numerators to 32) for precise interval selection. Notch filter is a biquad with width control (surgical to wide). Oscillator has AR envelope, portamento, phase catchup (click-free retrigger over ~24 cycles), and pink noise output scaling (−3dB/oct, calibrated at 40Hz). Level and Fine Tune are mod matrix targets (hybrid patched params). Pitch bend tracking. Last-note-priority pitch with fallback to held voices. Sound-only (synth tracks and kit rows). ~3200 cycles/buffer (0.28% CPU). |
+
+#### Synthesis
+
+| Feature | Description |
+|---------|-------------|
+| **Pulse Width Triangle** | New oscillator type (TrianglePW / TRPW). Triangle wave with dead-zone pulse width control — PW knob compresses the triangle into a narrower region with silence in the dead zone. Waveform visualization in pulse width menu. |
 | **Phi Morph Oscillator** | Procedural oscillator generating waveforms from phi-triangle banks. Two zone knobs (A/B) each produce a distinct 8-segment waveform shape. Crossfade (Wave Position) morphs between them with morph excitation effects (amplitude overshoot, curvature boost, phase distortion). Waveform shaping via sine blend, odd symmetry, windowing, and slope matching. Per-sample modifiers: phase jitter, amplitude-dependent noise, asymmetric gain for even harmonics. Supports pulse width modulation. |
+| **Unison Index Modulation Source** | New per-voice modulation source (`UNISON_INDEX`) that assigns a unique value to each unison voice. Patch it to any oscillator-level parameter (pitch, volume, phase width, wave index, phase, carrier/modulator feedback, start offset) for per-voice timbral variation from a single note. Three knobs in the Unison menu control the distribution: **Shape** (8 zones: Linear, Power, S-Curve, Step, Triangle, Sine, Random, Drift), **Mapping** (8 zones: Symmetric, Anti-sym, Pitch+, Pitch−, Center-out, Rotate, Pairs, Shuffle), and **Curve** (bipolar warp from center-heavy to edge-heavy). Drift shape provides per-block bounded random walk for evolving textures. All zone knobs have intra-zone meta parameters for fine control. |
+
+#### Sampling
+
+| Feature | Description |
+|---------|-------------|
 | **Gate Sample Mode** | New sample repeat mode for drum kit rows. Notes act as mute/unmute gates — the sample loops for the duration of the note. If BPM is detected in the filename (e.g. `_120BPM` or bare `_120_`), the sample is tempo-synced and phase-locked so triggering mid-bar starts at the position it would have reached if playing since the downbeat. Without BPM in the filename the sample still gates normally, just without time-stretching or phase-lock. **Gate View Editor:** Press SCALE in kit mode to enter gate view (SCALE LED lights, "GATE" popup). Green pads = audible, red pads = muted. Tap to toggle. Hold first + tap second on same row to span-fill. Hold a green pad + twist vertical encoder to set per-segment attack (fade-in, 0-127), horizontal encoder for release (fade-out). Hold multiple green pads simultaneously to adjust all at once. Exponential time scaling: 0 = instant, ~64 = 50ms, ~96 = 400ms, 127 = ~2.4s. Values are saved per gate segment and serialized with the song. Also available for audio clips. |
 | **Loop Crossfade** | True dual-read crossfade at loop boundaries. Configurable duration (0–1000 ms) per source in the sample menu. When approaching the loop end, a second read from the loop start fades in while the main read fades out — seamless blending with no volume dip. Works from the first loop iteration by reading the fade-in from the sample cache while the uncached path fades out. For split-loop offset wrapping, time-stretch mode, and pingpong loops, falls back to fade-out/fade-in envelopes (still smoother than no crossfade). |
 | **Loop Pingpong** | New PINGPONG sample repeat mode. Playback bounces between loop start and end points instead of jumping back. Each unison voice tracks its own direction independently. After note-off while going backward, playback continues to loop start then stops. |
 | **Plockable Sample Start Offset** | Patchable (plockable) sample start offset — varies per-step via parameter locks. Offset applied as a fraction of the sample-start-to-loop-end region. Split-loop architecture: when offset crosses the loop start, the voice plays offset→loop-end first, then loops normally from loop start. Works with timestretch, reverse, and pingpong. `offsetWraps` toggle wraps past loop-end back to sample start for full-range modulation. Live offset updates during playback for looping modes (repitched and time-stretch). |
-| **Eroder** | Noise-modulated delay line comb filter with IIR feedback. SVF-filtered noise (bandpass) + zero-crossing sample-and-hold + pitched triangle modulator drive a short delay line. Phi triangle banks on freq (delay, feedback, soft clip, fold, HPF cutoff, pitched mod depth) and character (depth, resonance, S&H blend, width, pitched mod offset). Pitch tracking on comb, SVF, HPF, and triangle. Q31 integer waveshaping (soft clip + triangle fold). Available per-voice and in GlobalEffectable chain. |
-| **Sound Cloning (Grid/Kit)** | Clone sounds via pad gestures. **Grid view:** hold a clip pad + press an empty column to clone the synth track (sound + notes). **Kit view:** hold an occupied audition pad + press an empty row to clone the drum sound. Cloned sounds are independent copies with unique names for reliable save/reload. |
-| **Record Source Selection** | Choose the recording source for Record to Sample via Sound Editor → Actions → Record source. Options: Left input (auto-detect, default), Stereo input, Balanced input, Deluge mix (no fx), Deluge output (fx). Enables resampling the Deluge's own output directly into a sample slot. Setting persists across power cycles. |
-| **Unison Index Modulation Source** | New per-voice modulation source (`UNISON_INDEX`) that assigns a unique value to each unison voice. Patch it to any oscillator-level parameter (pitch, volume, phase width, wave index, phase, carrier/modulator feedback, start offset) for per-voice timbral variation from a single note. Three knobs in the Unison menu control the distribution: **Shape** (8 zones: Linear, Power, S-Curve, Step, Triangle, Sine, Random, Drift), **Mapping** (8 zones: Symmetric, Anti-sym, Pitch+, Pitch−, Center-out, Rotate, Pairs, Shuffle), and **Curve** (bipolar warp from center-heavy to edge-heavy). Drift shape provides per-block bounded random walk for evolving textures. All zone knobs have intra-zone meta parameters for fine control. |
+
+#### Modulation
+
+| Feature | Description |
+|---------|-------------|
 | **Macros (MACRO 1–4)** | Four global modulation sources that are also patchable parameters. Assign any mod source to a Macro, then patch the Macro to multiple destinations — enables modulation-of-modulation (e.g. LFO→Macro→Filter+Pitch). One-frame evaluation delay prevents feedback. Self-routing is blocked. Available in the mod matrix as both sources and destinations. Default value 50% (bipolar center). |
+
+#### MIDI
+
+| Feature | Description |
+|---------|-------------|
 | **MIDI Follow: Mod Knob CC** | Map 16 consecutive MIDI CCs to the Deluge's 16 mod knob slots (8 pages × 2 knobs). Menu: MIDI → MIDI Follow → Mod Knob CC. Set a base CC number (1–112); CCs from base to base+15 control mod knobs in order. Supports CC learn. Value 0 = OFF. Persisted in flash storage. |
 | **MIDI Follow: CC Presets** | Switchable CC mapping presets. Drop `.XML` mapping files into `SETTINGS/MIDIFollow/` on the SD card. Menu: MIDI → MIDI Follow → CC Preset — scroll through available presets and select to load. A `Standard.XML` preset is auto-created from firmware defaults on first boot. Selected preset is persisted to `SETTINGS/MIDIFollow.XML` for reboot survival. Community can share controller-specific mapping files. |
+
+#### Developer
+
+| Feature | Description |
+|---------|-------------|
 | **FX Benchmarking Framework** | Performance profiling tools for DSP development. |
 
 ### For Developers
