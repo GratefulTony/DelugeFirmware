@@ -1429,6 +1429,11 @@ readNonTimestretched:
 					cacheHandoffPending = false;
 					if (attachCacheAtLoopStart(guide, sample, phaseIncrement, timeStretchRatio, interpolationBufferSize,
 					                           loopingType, priorityRating)) {
+						// numSamples was already decremented for this whole uncached read; the
+						// un-rendered remainder is in numSamplesThisUncachedRead. Both goto
+						// targets re-derive their chunk from numSamples, so hand it back
+						// (otherwise they'd see 0 → E155).
+						numSamples += numSamplesThisUncachedRead;
 						if (!writingToCache) {
 							// Reading an existing cache from the loop start
 							if (loopFadeInSamplesTotal > 0) {
