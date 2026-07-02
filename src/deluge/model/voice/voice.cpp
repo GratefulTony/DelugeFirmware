@@ -2756,6 +2756,19 @@ pitchTooHigh:
 				goto instantUnassign;
 			}
 
+			// Loop crossfade can only truly crossfade via the sample cache, and exact
+			// native-rate playback never gets one — so at root pitch, crossfade degrades
+			// to a fade-out/fade-in dip. Nudge the rate by 1/2^24 (far below a millicent;
+			// ~1 sample of drift per 6 minutes) so these voices take the resampled/caching
+			// pipeline and crossfade like every other pitch.
+			if (phaseIncrement == kMaxSampleValue && loopingType != LoopType::NONE
+			    && timeStretchRatio == kMaxSampleValue && !guides[s].pingpongActive && !guides[s].loopSplit
+			    && !guides[s].sequenceSyncLengthTicks
+			    && sound.sources[s].sampleControls.interpolationMode == InterpolationMode::SMOOTH
+			    && static_cast<SampleHolderForVoice*>(guides[s].audioFileHolder)->loopCrossfadeMs > 0) {
+				phaseIncrement = kMaxSampleValue + 1;
+			}
+
 			int32_t interpolationBufferSize;
 
 			// If pitch adjustment...
