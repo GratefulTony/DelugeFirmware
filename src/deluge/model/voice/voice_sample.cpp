@@ -1426,9 +1426,12 @@ readNonTimestretched:
 				int32_t currentByte = getPlayByteLowLevel(sample, guide);
 				int32_t overshootBytes = (currentByte - loopStartByte) * guide->playDirection;
 				if (overshootBytes >= 0 && overshootBytes < (bytesPerSample << 6)) {
-					cacheHandoffPending = false;
+					// Only disarm on success: a failed attach (transient CPU direness, cache
+					// RAM unavailable) retries at the next loop restart instead of condemning
+					// the whole note to uncached fade-dip loops.
 					if (attachCacheAtLoopStart(guide, sample, phaseIncrement, timeStretchRatio, interpolationBufferSize,
 					                           loopingType, priorityRating)) {
+						cacheHandoffPending = false;
 						// numSamples was already decremented for this whole uncached read; the
 						// un-rendered remainder is in numSamplesThisUncachedRead. Both goto
 						// targets re-derive their chunk from numSamples, so hand it back
@@ -2548,9 +2551,6 @@ bool VoiceSample::attachCacheAtLoopStart(SamplePlaybackGuide* guide, Sample* sam
 	if (guide->sequenceSyncLengthTicks && (playbackHandler.isExternalClockActive())) {
 		return false;
 	}
-	if (interpolationBufferSize != kInterpolationMaxNumSamples) {
-		return false;
-	}
 
 	int32_t bytesPerSample = sample->numChannels * sample->byteDepth;
 	int32_t loopStartByte = (int32_t)guide->getLoopStartPlaybackAtByte();
@@ -2566,8 +2566,12 @@ bool VoiceSample::attachCacheAtLoopStart(SamplePlaybackGuide* guide, Sample* sam
 		return false;
 	}
 
+	// Like possiblySetUpCache: transient CPU direness downgrades interpolation quality,
+	// which mustn't be baked into a cache - but reading an existing one is still fine.
+	bool mayCreate = (interpolationBufferSize == kInterpolationMaxNumSamples);
+
 	cache = sample->getOrCreateCache((SampleHolder*)guide->audioFileHolder, phaseIncrement, timeStretchRatio,
-	                                 guide->playDirection == -1, true, &writingToCache, skipSamplesAtStart);
+	                                 guide->playDirection == -1, mayCreate, &writingToCache, skipSamplesAtStart);
 	if (!cache) {
 		return false;
 	}
@@ -2577,6 +2581,7 @@ bool VoiceSample::attachCacheAtLoopStart(SamplePlaybackGuide* guide, Sample* sam
 	setupCacheLoopPoints(guide, sample, loopingType);
 	if (!reassessReassessmentLocation(guide, sample, priorityRating)) {
 		cache = nullptr;
+		writingToCache = false;
 		return false;
 	}
 	return true;
