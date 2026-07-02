@@ -1778,14 +1778,6 @@ cantBeDoingOscSyncForFirstOsc:
 				int32_t effModAmp[kNumModulators];
 				int32_t effModAmpInc[kNumModulators];
 				int32_t effModFeedback[kNumModulators];
-				for (int32_t m = 0; m < kNumModulators; m++) {
-					effModAmp[m] = modulatorAmplitudeLastTime[m] + unisonModVolumeOffsets[m];
-					int32_t effModAmpTarget =
-					    paramFinalValues[params::LOCAL_MODULATOR_0_VOLUME + m] + unisonModVolumeOffsets[m];
-					effModAmpInc[m] = (effModAmpTarget - effModAmp[m]) / numSamples;
-					effModFeedback[m] =
-					    paramFinalValues[params::LOCAL_MODULATOR_0_FEEDBACK + m] + unisonModFeedbackOffsets[m];
-				}
 
 				// Per-unison effective carrier amplitude and feedback
 				// Volume offset is in paramFinalValues space but sourceAmplitudes is scaled down
@@ -1793,21 +1785,48 @@ cantBeDoingOscSyncForFirstOsc:
 				int32_t effCarrierAmp[kNumSources];
 				int32_t effCarrierAmpInc[kNumSources];
 				int32_t effCarrierFeedback[kNumSources];
-				for (int32_t s = 0; s < kNumSources; s++) {
-					int32_t scaledVolOffset = 0;
-					if (unisonCarrierVolumeOffsets[s] != 0) {
-						int32_t baseParam = paramFinalValues[params::LOCAL_OSC_A_VOLUME + s];
-						if (baseParam != 0) {
-							scaledVolOffset = static_cast<int32_t>(
-							    (static_cast<int64_t>(unisonCarrierVolumeOffsets[s]) * sourceAmplitudes[s])
-							    / baseParam);
-						}
+
+				if (hasUnisonModFM) {
+					for (int32_t m = 0; m < kNumModulators; m++) {
+						effModAmp[m] = modulatorAmplitudeLastTime[m] + unisonModVolumeOffsets[m];
+						int32_t effModAmpTarget =
+						    paramFinalValues[params::LOCAL_MODULATOR_0_VOLUME + m] + unisonModVolumeOffsets[m];
+						effModAmpInc[m] = (effModAmpTarget - effModAmp[m]) / numSamples;
+						effModFeedback[m] =
+						    paramFinalValues[params::LOCAL_MODULATOR_0_FEEDBACK + m] + unisonModFeedbackOffsets[m];
 					}
-					effCarrierAmp[s] = sourceAmplitudesNow[s] + scaledVolOffset;
-					int32_t effCarrierAmpTarget = sourceAmplitudes[s] + scaledVolOffset;
-					effCarrierAmpInc[s] = (effCarrierAmpTarget - effCarrierAmp[s]) / numSamples;
-					effCarrierFeedback[s] =
-					    paramFinalValues[params::LOCAL_CARRIER_0_FEEDBACK + s] + unisonCarrierFeedbackOffsets[s];
+
+					for (int32_t s = 0; s < kNumSources; s++) {
+						int32_t scaledVolOffset = 0;
+						if (unisonCarrierVolumeOffsets[s] != 0) {
+							int32_t baseParam = paramFinalValues[params::LOCAL_OSC_A_VOLUME + s];
+							if (baseParam != 0) {
+								scaledVolOffset = static_cast<int32_t>(
+								    (static_cast<int64_t>(unisonCarrierVolumeOffsets[s]) * sourceAmplitudes[s])
+								    / baseParam);
+							}
+						}
+						effCarrierAmp[s] = sourceAmplitudesNow[s] + scaledVolOffset;
+						int32_t effCarrierAmpTarget = sourceAmplitudes[s] + scaledVolOffset;
+						effCarrierAmpInc[s] = (effCarrierAmpTarget - effCarrierAmp[s]) / numSamples;
+						effCarrierFeedback[s] =
+						    paramFinalValues[params::LOCAL_CARRIER_0_FEEDBACK + s] + unisonCarrierFeedbackOffsets[s];
+					}
+				}
+				else {
+					// No UNISON_INDEX modulation: all offsets are zero, so the effective values
+					// equal the block-rate precomputed ones. Copying them avoids numUnison
+					// software divisions per block (Cortex-A9 has no hardware divide).
+					for (int32_t m = 0; m < kNumModulators; m++) {
+						effModAmp[m] = modulatorAmplitudeLastTime[m];
+						effModAmpInc[m] = modulatorsActive[m] ? modulatorAmplitudeIncrements[m] : 0;
+						effModFeedback[m] = paramFinalValues[params::LOCAL_MODULATOR_0_FEEDBACK + m];
+					}
+					for (int32_t s = 0; s < kNumSources; s++) {
+						effCarrierAmp[s] = sourceAmplitudesNow[s];
+						effCarrierAmpInc[s] = sourceAmplitudeIncrements[s];
+						effCarrierFeedback[s] = paramFinalValues[params::LOCAL_CARRIER_0_FEEDBACK + s];
+					}
 				}
 
 				// Modulators
@@ -2503,6 +2522,9 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
 								int32_t rel = ((newByte - audioStart) % physLen + physLen) % physLen;
 								newByte = audioStart + (rel / bytesPerFrame) * bytesPerFrame;
 							}
+							// If this reader was caching (or waiting to), re-arm the loop-restart
+							// cache handoff so caching re-engages after the re-seek
+							bool reArmCacheHandoff = (vs->cache != nullptr) || vs->cacheHandoffPending;
 							if (vs->cache) {
 								LoopType lt = guides[s].getLoopingType(sound.sources[s]);
 								vs->stopUsingCache(&guides[s], offsetSample, getPriorityRating(), lt != LoopType::NONE);
@@ -2515,6 +2537,7 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
 							                                      getPriorityRating())) {
 								vs->pendingSamplesLate = 1;
 							}
+							vs->cacheHandoffPending = reArmCacheHandoff;
 							// Short anti-click fade-in
 							if (vs->loopFadeInSamplesTotal > 0) {
 								vs->loopFadeInSamplesRemaining =
@@ -2749,27 +2772,28 @@ pitchTooHigh:
 				// velocity or note is affecting pitch), and stretch-syncing.
 				if (!voiceSample->doneFirstRenderYet && !tryToStartMidNote
 				    && portaEnvelopePos == 0xFFFFFFFF) { // No porta
+					// Start offset shifted the play start away from the loop restart position:
+					// the first pass is asymmetric, so a cache keyed at the play start can't
+					// represent the loop. Handled below via possiblySetUpOffsetLoopCache
+					// (loop-start-keyed cache, attached now or at the first loop restart).
+					bool offsetAsymmetric = (loopingType != LoopType::NONE)
+					                        && (guides[s].startPlaybackAtByte != guides[s].loopStartPlaybackAtByte);
+
 					// Split-loop from offset wrapping can't use cache.
-					// This means loop crossfade is unavailable when start offset
-					// causes the loop region to wrap around the sample boundary.
 					// TODO: support split-loop caching by concatenating the two
 					// halves into a linear cache region.
 					if (guides[s].loopSplit) {
 						goto dontUseCache;
 					}
 
+					// The loop-restart cache handoff assumes plain forward low-level looping
+					if (offsetAsymmetric && (guides[s].pingpongActive || timeStretchRatio != kMaxSampleValue)) {
+						goto dontUseCache;
+					}
+
 					// If looping, make sure the loop isn't too short. If so, caching just wouldn't sound good /
 					// accurate
 					if (loopingType != LoopType::NONE) {
-						// If start offset has shifted the play start ahead of the loop
-						// restart position, the cache can't represent the asymmetric first
-						// iteration correctly (its loop-start maps to cache byte 0 which
-						// is the offset position, not the original start). Skip caching.
-						if (guides[s].startPlaybackAtByte != guides[s].loopStartPlaybackAtByte
-						    && voiceSample->loopFadeInSamplesTotal == 0) {
-							goto dontUseCache;
-						}
-
 						SampleHolderForVoice* holder = (SampleHolderForVoice*)guides[s].audioFileHolder;
 						int32_t loopStart = holder->loopStartPos ? holder->loopStartPos : holder->startPos;
 						int32_t loopEnd = holder->loopEndPos ? holder->loopEndPos : holder->endPos;
@@ -2820,9 +2844,17 @@ pitchTooHigh:
 
 					{
 						// If still here, we can use cache
-						bool everythingOk = voiceSample->possiblySetUpCache(
-						    &sound.sources[s].sampleControls, &guides[s], phaseIncrement, timeStretchRatio,
-						    getPriorityRating(), loopingType);
+						bool everythingOk;
+						if (offsetAsymmetric) {
+							everythingOk = voiceSample->possiblySetUpOffsetLoopCache(
+							    &sound.sources[s].sampleControls, &guides[s], phaseIncrement, timeStretchRatio,
+							    loopingType, getPriorityRating());
+						}
+						else {
+							everythingOk = voiceSample->possiblySetUpCache(&sound.sources[s].sampleControls, &guides[s],
+							                                               phaseIncrement, timeStretchRatio,
+							                                               getPriorityRating(), loopingType);
+						}
 						if (!everythingOk) {
 							goto instantUnassign;
 						}
@@ -2867,10 +2899,15 @@ dontUseCache: {}
 					crossfadeSamples = std::min(crossfadeSamples, loopLengthSamples / 2);
 				}
 
-				voiceSample->loopFadeInSamplesTotal = crossfadeSamples;
+				// Only update on change, so the Q31 step division runs at edit rate, not render rate
+				if (crossfadeSamples != voiceSample->loopFadeInSamplesTotal) {
+					voiceSample->loopFadeInSamplesTotal = crossfadeSamples;
+					voiceSample->loopFadeStepQ31 = (crossfadeSamples > 0) ? 0x7FFFFFFF / crossfadeSamples : 0;
+				}
 			}
 			else {
 				voiceSample->loopFadeInSamplesTotal = 0;
+				voiceSample->loopFadeStepQ31 = 0;
 			}
 
 			bool stillActive = voiceSample->render(
