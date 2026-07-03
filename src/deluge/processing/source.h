@@ -97,6 +97,17 @@ public:
 	float phiGendyGamma{0.0f};
 	deluge::dsp::PhiGendyCache* phiGendyCache{nullptr};
 
+	// Zone-style stereo knob, shared by the phi family: position WITHIN each
+	// 128-wide zone = stereo amount (every zone starts mono; knob 0 = mono),
+	// zone index = stereo character (per-algorithm phi params)
+	uint16_t phiStereoZone{0};
+
+	[[nodiscard]] bool isPhiFamily() const {
+		return oscType == OscType::PHI_MORPH || oscType == OscType::PHI_WEAVE || oscType == OscType::PHI_VOX
+		       || oscType == OscType::PHI_SWARM || oscType == OscType::PHI_GENDY;
+	}
+	[[nodiscard]] bool phiStereoActive() const { return isPhiFamily() && (phiStereoZone & 127u) != 0; }
+
 	int8_t timeStretchAmount;
 	bool offsetWraps{true}; // When true, start offset wraps playhead modularly; when false, clamps at boundary
 

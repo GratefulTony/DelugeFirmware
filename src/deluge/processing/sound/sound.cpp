@@ -4132,6 +4132,10 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			source->phiGendyGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
 			reader.exitTag("phiGendyGamma");
 		}
+		else if (!strcmp(tagName, "phiStereoZone")) {
+			source->phiStereoZone = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiStereoZone");
+		}
 		/*
 		else if (!strcmp(tagName, "sampleSync")) {
 		    source->sampleSync = stringToBool(reader.readTagContents());
@@ -4561,6 +4565,11 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 				if (source->phiSwarmGamma != 0.0f) {
 					writer.writeAttribute("phiSwarmGamma", static_cast<int32_t>(source->phiSwarmGamma * 10.0f));
 				}
+			}
+
+			// Shared phi-family stereo zone
+			if (source->isPhiFamily() && source->phiStereoZone != 0) {
+				writer.writeAttribute("phiStereoZone", source->phiStereoZone);
 			}
 
 			// PHI_GENDY: persist zone knobs, phase offsets, and gamma
@@ -5780,6 +5789,10 @@ bool Sound::renderingVoicesInStereo(ModelStackWithSoundFlags* modelStack) {
 	}
 
 	if (unisonStereoSpread && numUnison > 1) {
+		return true;
+	}
+
+	if (sources[0].phiStereoActive() || sources[1].phiStereoActive()) {
 		return true;
 	}
 

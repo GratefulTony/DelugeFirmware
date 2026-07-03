@@ -130,6 +130,7 @@ void Source::cloneFrom(Source* other) {
 	phiGendyPhaseOffsetA = other->phiGendyPhaseOffsetA;
 	phiGendyPhaseOffsetB = other->phiGendyPhaseOffsetB;
 	phiGendyGamma = other->phiGendyGamma;
+	phiStereoZone = other->phiStereoZone;
 	// phiGendyCache is lazy-allocated, don't clone it
 	delete phiGendyCache;
 	phiGendyCache = nullptr;
@@ -222,6 +223,10 @@ bool Source::renderInStereo(Sound* s, SampleHolder* sampleHolder) {
 	}
 
 	if (s->unisonStereoSpread && s->numUnison > 1) {
+		return true;
+	}
+
+	if (phiStereoActive()) {
 		return true;
 	}
 
