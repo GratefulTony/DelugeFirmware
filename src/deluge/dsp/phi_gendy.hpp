@@ -113,8 +113,13 @@ struct PhiGendyCache {
 	float a[kPhiGendyNumNodes]{}; // Breakpoint amplitudes
 	float v[kPhiGendyNumNodes]{}; // Breakpoint velocities (second-order walk)
 
-	// Scan table rebuilt each tick (extra entry duplicates node 0 for wrap)
+	// Scan table rebuilt each tick (extra entry duplicates node 0 for wrap).
+	// The render crossfades prev -> current across each buffer so the polygon
+	// moves continuously instead of stepping at the tick rate (same de-zipper
+	// as PHI_WEAVE; the walk's jumps remain in the SHAPE, not as clicks)
 	q31_t nodeQ[kPhiGendyNumNodes + 1]{};
+	q31_t nodeQPrev[kPhiGendyNumNodes + 1]{};
+	bool tablesValid{false};
 
 	q31_t smoothedCrossfade{INT32_MIN};
 	uint32_t lastTickTime{0xFFFFFFFF};

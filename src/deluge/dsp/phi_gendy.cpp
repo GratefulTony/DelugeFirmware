@@ -180,10 +180,15 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade) {
 	cache.noiseState = noise;
 	mean *= 1.0f / static_cast<float>(kPhiGendyNumNodes);
 
+	memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
 	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
 		cache.nodeQ[i] = static_cast<q31_t>((cache.a[i] - mean) * kGendyOutGain * kGendyRefAmplitude);
 	}
 	cache.nodeQ[kPhiGendyNumNodes] = cache.nodeQ[0];
+	if (!cache.tablesValid) { // First tick: nothing to fade from
+		memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
+		cache.tablesValid = true;
+	}
 }
 
 } // namespace
@@ -216,10 +221,15 @@ void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 	const uint32_t phaseWidth = pulseWidth ? (0xFFFFFFFF - (pulseWidth << 1)) : 0xFFFFFFFF;
 
+	// Tick crossfade ramp: prev polygon -> current polygon across this buffer
+	const q31_t tickFadeInc = 0x7FFFFFFF / numSamples;
+	q31_t tickFade = 0;
+
 	int32_t* thisSample = bufferStart;
 
 	for (int32_t n = 0; n < numSamples; n++) {
 		phase += phaseIncrement;
+		tickFade += tickFadeInc;
 		uint32_t evalPhase = phase + retriggerPhase;
 		if (applyAmplitude) {
 			amplitude += amplitudeIncrement;
@@ -235,12 +245,14 @@ void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferE
 			continue;
 		}
 
-		// Linear scan between breakpoints (branch-free lerp)
+		// Linear scan between breakpoints of both polygons, then tick lerp
 		uint32_t idx = evalPhase >> kPhiGendyNodeShift;
 		q31_t frac31 = static_cast<q31_t>((evalPhase & 0x0FFFFFFF) << 3);
-		q31_t base = cache.nodeQ[idx];
-		q31_t delta = cache.nodeQ[idx + 1] - base;
-		q31_t out = base + (multiply_32x32_rshift32(delta, frac31) << 1);
+		q31_t baseP = cache.nodeQPrev[idx];
+		q31_t wPrev = baseP + (multiply_32x32_rshift32(cache.nodeQPrev[idx + 1] - baseP, frac31) << 1);
+		q31_t baseC = cache.nodeQ[idx];
+		q31_t wCur = baseC + (multiply_32x32_rshift32(cache.nodeQ[idx + 1] - baseC, frac31) << 1);
+		q31_t out = wPrev + (multiply_32x32_rshift32(wCur - wPrev, tickFade) << 1);
 
 		if (applyAmplitude) {
 			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, out, amplitude);

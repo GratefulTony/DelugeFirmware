@@ -53,8 +53,9 @@ writhes together). Two Sounds get independent walks.
 - FX benchmark: `phi_gendy`/`render` — expect PHI_MORPH-class (~1k cycles/buffer)
 
 ## Known Characteristics (not bugs)
-- Breakpoints move mid-cycle (the walk ticks per buffer, not per waveform cycle);
-  at high entropy this adds edge-grit — it IS the sound. At low entropy it's inaudible
+- The walk ticks per buffer (not per waveform cycle), with the polygon crossfaded
+  continuously between ticks — motion is smooth at all entropy levels; the grit at high
+  entropy comes from the polygon's shape, not from stepping artifacts
 - DC is removed by mean subtraction each tick; extreme asymmetric cages may still lean
   on transient content
 - High notes traverse the polygon fast: entropy reads more as noisy sheen than motion
