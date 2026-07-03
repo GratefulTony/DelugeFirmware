@@ -58,6 +58,10 @@ static inline int32_t fadeScaleQ31(int32_t progress, int32_t stepQ31, int32_t sq
 	return (int32_t)(g * 2147483647.0f);
 }
 
+// How far past the raw loop end the first pingpong pass may keep playing while
+// waiting for a waveform extremum to reverse on (~11ms at 44.1kHz)
+constexpr int32_t kPingpongApexSeekMaxFrames = 512;
+
 // Read one frame's L-channel sample from the cache by byte position (24-bit value in
 // the high bytes, same offset pattern as the cached render path)
 static int32_t readCacheFrameL(SampleCache* cache, int32_t bytePos, Cluster** cluster, int32_t* prevClusterIdx) {
@@ -96,6 +100,7 @@ void VoiceSample::noteOn(SamplePlaybackGuide* guide, uint32_t samplesLate, int32
 	crossfadeCurveBlendQ31 = 0x40000000; // 50/50 compromise until measured
 	crossfadeCurveMeasured = false;
 	pingpongBouncePointsSnapped = false;
+	pingpongSeekTargetBytes = -1;
 	cacheHandoffPending = false;
 	justLoopedBack = false;
 	pingpongPlayDirection = guide->playDirection;
@@ -107,6 +112,7 @@ bool VoiceSample::noteOffWhenLoopEndPointExists(Voice* voice, VoiceSamplePlaybac
 	// If crossfade is active when note releases, reset it
 	crossfadeActive = false;
 	crossfadeCacheBytePos = 0;
+	pingpongSeekTargetBytes = -1; // Cancel any bounce-apex seek - we're no longer looping
 
 	if (cache) {
 		cacheLoopEndPointBytes = 2147483647;
@@ -214,6 +220,54 @@ void VoiceSample::setupCacheLoopPoints(SamplePlaybackGuide* guide, Sample* sampl
 		uint32_t loopEndPointCombinedIncrements =
 		    (loopEndPointSamplesBig + (combinedIncrement >> 1)) / combinedIncrement; // Rounds
 		cacheLoopEndPointBytes = loopEndPointCombinedIncrements * kCacheByteDepth * sample->numChannels;
+	}
+}
+
+// Snap the pingpong loop START onto a waveform extremum, preferring positions BELOW
+// the marker (continuing outward, mirroring the "wait for an extremum" behavior at the
+// loop end) where cached data exists, falling back to an inward search above it.
+void VoiceSample::snapPingpongLoopStart(int32_t frameSizeBytes) {
+	constexpr int32_t kSearchFrames = kPingpongApexSeekMaxFrames;
+
+	Cluster* cluster = nullptr;
+	int32_t prevIdx = -1;
+	int32_t prevSample = readCacheFrameL(cache, cacheLoopStartPointBytes, &cluster, &prevIdx);
+	int32_t prevDiff = 0;
+
+	// Outward: below the loop start (the attack region, cached during the first pass)
+	for (int32_t k = 1; k <= kSearchFrames; k++) {
+		int32_t pos = cacheLoopStartPointBytes - k * frameSizeBytes;
+		if (pos < 0) {
+			break;
+		}
+		int32_t s = readCacheFrameL(cache, pos, &cluster, &prevIdx);
+		int32_t diff = prevSample - s; // slope toward the loop start
+		if (k >= 2 && (diff == 0 || (prevDiff != 0 && ((diff ^ prevDiff) < 0)))) {
+			cacheLoopStartPointBytes -= (k - 1) * frameSizeBytes;
+			return;
+		}
+		prevDiff = diff;
+		prevSample = s;
+	}
+
+	// Inward fallback: above the loop start
+	cluster = nullptr;
+	prevIdx = -1;
+	prevSample = readCacheFrameL(cache, cacheLoopStartPointBytes, &cluster, &prevIdx);
+	prevDiff = 0;
+	for (int32_t k = 1; k <= kSearchFrames; k++) {
+		int32_t pos = cacheLoopStartPointBytes + k * frameSizeBytes;
+		if (pos >= cacheLoopEndPointBytes) {
+			break;
+		}
+		int32_t s = readCacheFrameL(cache, pos, &cluster, &prevIdx);
+		int32_t diff = s - prevSample; // slope away from the loop start
+		if (k >= 2 && (diff == 0 || (prevDiff != 0 && ((diff ^ prevDiff) < 0)))) {
+			cacheLoopStartPointBytes += (k - 1) * frameSizeBytes;
+			return;
+		}
+		prevDiff = diff;
+		prevSample = s;
 	}
 }
 
@@ -1398,12 +1452,51 @@ uncachedPlayback:
 		// If there's a cache, prepare to write to it
 		if (cache) {
 
+			// Pingpong "wait for an extremum": rather than reversing at the raw loop-end
+			// marker (an arbitrary phase - the reversal corner is loudest there), keep
+			// playing and writing a little further and reverse on the next waveform
+			// extremum. The apex found becomes the loop end for all later cycles.
+			if (loopingType == LoopType::LOW_LEVEL && !pingpongBouncePointsSnapped && pingpongSeekTargetBytes < 0
+			    && static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive) {
+				int32_t frameBytesPP = kCacheByteDepth * sampleSourceNumChannels;
+				if (cacheLoopEndPointBytes - cache->writeBytePos <= 2 * SSI_TX_BUFFER_NUM_SAMPLES * frameBytesPP) {
+					int32_t cap = cacheLoopEndPointBytes + kPingpongApexSeekMaxFrames * frameBytesPP;
+					int32_t waveLimit = cacheEndPointBytes - frameBytesPP;
+					int32_t target = std::min(cap, waveLimit);
+					if (target > cacheLoopEndPointBytes) {
+						pingpongSeekTargetBytes = target;
+						pingpongSeekScannedToBytes = cacheLoopEndPointBytes;
+						pingpongSeekFlip1Bytes = -1;
+						pingpongSeekFlip2Bytes = -1;
+						pingpongSeekPrevSample = INT32_MIN; // sentinel: no previous sample yet
+						pingpongSeekPrevDiff = 0;
+					}
+					else {
+						// Loop ends at the waveform end - no room; bounce raw
+						pingpongBouncePointsSnapped = true;
+					}
+				}
+			}
+
 			// If reached loop end, switch to playing the cached loop back
-			int32_t cachingBytesTilLoopEnd = cacheLoopEndPointBytes - cache->writeBytePos;
+			int32_t effectiveLoopEndBytes =
+			    (pingpongSeekTargetBytes >= 0) ? pingpongSeekTargetBytes : cacheLoopEndPointBytes;
+			int32_t cachingBytesTilLoopEnd = effectiveLoopEndBytes - cache->writeBytePos;
 			if (cachingBytesTilLoopEnd
 			    <= 0) { // Might be less than 0 if it was just changed... although the code that does that is suppose to
 				        // also detect that we're past it and restart the loop...
 				D_PRINTLN("Loop endpoint reached, writing cache");
+				if (pingpongSeekTargetBytes >= 0) {
+					// Seek concluded: the reached target (the predicted extremum, or the
+					// cap when none was found) becomes the loop end from now on. Snap the
+					// loop start too - its outward data was cached during this pass.
+					int32_t frameBytesPP = kCacheByteDepth * sampleSourceNumChannels;
+					cacheLoopEndPointBytes = pingpongSeekTargetBytes;
+					pingpongSeekTargetBytes = -1;
+					snapPingpongLoopStart(frameBytesPP);
+					pingpongBouncePointsSnapped = true;
+					cacheLoopLengthBytes = (uint32_t)(cacheLoopEndPointBytes - cacheLoopStartPointBytes);
+				}
 				switchToReadingCacheFromWriting();
 				// Clear uncached fade — cached crossfade handles subsequent loops
 				loopFadeInSamplesRemaining = 0;
@@ -1689,8 +1782,10 @@ readNonTimestretched:
 					loopFadeInSamplesRemaining = 0;
 				}
 			}
-			// Fade-out envelope (approaching loop boundary)
-			else if (loopFadeInSamplesTotal > 0 && loopingType != LoopType::NONE) {
+			// Fade-out envelope (approaching loop boundary). Not for pingpong: bounces
+			// don't crossfade, and their masking is handled by apex snapping instead.
+			else if (loopFadeInSamplesTotal > 0 && loopingType != LoopType::NONE
+			         && !static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive) {
 				// While writing a cache, the write->read switchover fires on the CACHE byte
 				// clock, so derive the fade distance from that same clock - the
 				// source-derived estimate below rounds differently and leaves the fade a
@@ -1897,6 +1992,52 @@ readNonTimestretched:
 			if (cache) {
 				cacheBytePos += numSamplesThisNonTimestretchedRead * kCacheByteDepth * sampleSourceNumChannels;
 				cache->writeBytePos = cacheBytePos; // These two were and are now still the same
+
+				// Pingpong apex seek: scan newly written frames for waveform extrema
+				// (slope sign flips). After two, the half-period is known, and the NEXT
+				// predicted extremum - safely ahead of playback - becomes the bounce
+				// target, so the reversal lands on it exactly.
+				if (pingpongSeekTargetBytes >= 0 && pingpongSeekFlip2Bytes < 0) {
+					int32_t frameBytesPP = kCacheByteDepth * sampleSourceNumChannels;
+					Cluster* scanCluster = nullptr;
+					int32_t scanPrevIdx = -1;
+					while (pingpongSeekScannedToBytes + frameBytesPP <= cache->writeBytePos) {
+						int32_t s = readCacheFrameL(cache, pingpongSeekScannedToBytes, &scanCluster, &scanPrevIdx);
+						if (pingpongSeekPrevSample == INT32_MIN) {
+							pingpongSeekPrevSample = s;
+							pingpongSeekScannedToBytes += frameBytesPP;
+							continue;
+						}
+						int32_t diff = s - pingpongSeekPrevSample;
+						if (diff == 0 || (pingpongSeekPrevDiff != 0 && ((diff ^ pingpongSeekPrevDiff) < 0))) {
+							int32_t apex = pingpongSeekScannedToBytes - frameBytesPP;
+							if (pingpongSeekFlip1Bytes < 0) {
+								pingpongSeekFlip1Bytes = apex;
+							}
+							else if (apex > pingpongSeekFlip1Bytes) {
+								pingpongSeekFlip2Bytes = apex;
+								// Predict the next extremum at/after the current write pos
+								int32_t hp = pingpongSeekFlip2Bytes - pingpongSeekFlip1Bytes;
+								int32_t minApex = cache->writeBytePos + frameBytesPP;
+								int32_t k = (minApex - pingpongSeekFlip2Bytes + hp - 1) / hp;
+								if (k < 1) {
+									k = 1;
+								}
+								int64_t predictedApex = (int64_t)pingpongSeekFlip2Bytes + (int64_t)k * hp;
+								int64_t newTarget = predictedApex + frameBytesPP;
+								if (newTarget < pingpongSeekTargetBytes) {
+									pingpongSeekTargetBytes = (int32_t)newTarget;
+								}
+								break;
+							}
+						}
+						if (diff != 0) {
+							pingpongSeekPrevDiff = diff;
+						}
+						pingpongSeekPrevSample = s;
+						pingpongSeekScannedToBytes += frameBytesPP;
+					}
+				}
 			}
 
 			numSamplesThisUncachedRead -= numSamplesThisNonTimestretchedRead;

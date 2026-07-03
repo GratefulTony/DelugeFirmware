@@ -100,6 +100,15 @@ public:
 	int32_t crossfadeCurveBlendQ31{0x40000000};
 	bool crossfadeCurveMeasured{false};
 	bool pingpongBouncePointsSnapped{false};
+	// Pingpong bounce-apex seek ("wait for an extremum"): while >= 0, the first pass
+	// keeps writing past the raw loop end toward this target, which gets refined onto
+	// the next predicted waveform extremum as slope flips are observed
+	int32_t pingpongSeekTargetBytes{-1};
+	int32_t pingpongSeekScannedToBytes{0};
+	int32_t pingpongSeekFlip1Bytes{-1};
+	int32_t pingpongSeekFlip2Bytes{-1};
+	int32_t pingpongSeekPrevSample{0};
+	int32_t pingpongSeekPrevDiff{0};
 	int32_t crossfadeCacheBytePos{0};
 	bool crossfadeActive{false};
 	bool cacheHandoffPending{false}; // Attach a loop-start-keyed cache at the first loop restart (start offset
@@ -116,6 +125,7 @@ private:
 	                            int32_t priorityRating);
 	void measureCrossfadeCurve(int32_t crossfadeLengthCacheBytes, int32_t frameSizeBytes);
 	void snapPingpongBouncePoints(int32_t frameSizeBytes);
+	void snapPingpongLoopStart(int32_t frameSizeBytes);
 
 	int32_t cacheBytePos = 0;
 	int8_t cachePlayDirection{1}; // Direction for reading cache in pingpong mode (1=forward, -1=backward)
