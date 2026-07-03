@@ -30,17 +30,16 @@ namespace deluge::dsp {
 
 namespace {
 
-// Cheap parabolic sine for the coupling forces (quality non-critical there;
-// only the audible output uses the interpolated table). Input: full uint32
-// phase; output ~Q31 bipolar with ~3% harmonic error.
-[[gnu::always_inline]] inline int32_t parabolicSine(uint32_t phase) {
-	int32_t x = static_cast<int32_t>(phase); // Half-cycles in Q31: [-1, 1)
-	int32_t ax = (x < 0) ? -x : x;
-	// 4 * x * (1 - |x|), peak +/-1 at |x| = 0.5. The -3 margin keeps the
-	// peak at 2^31 - 8 instead of exactly 2^31, which would wrap to
-	// INT32_MIN and flip the coupling force's sign at every extremum
-	// (audible as periodic bursts at the beat rate)
-	return multiply_32x32_rshift32(x, 0x7FFFFFFD - ax) << 3;
+// Triangle coupling force (Kuramoto theory only needs an odd periodic
+// coupling with a stable zero - verified equivalent tongue structure by
+// simulation). Unlike a sine, the force keeps CONSTANT slope up to a sharp
+// corner at the extremum: locks strain linearly, then release abruptly -
+// snappier pull-offs. Also multiply-free. Sine-phased: zero at 0, peak at
+// the quarter cycle.
+[[gnu::always_inline]] inline int32_t couplingTriangle(uint32_t phase) {
+	uint32_t p = phase + 0x40000000u;
+	uint32_t folded = (p < 0x80000000u) ? p : (0xFFFFFFFFu - p);
+	return static_cast<int32_t>((folded - 0x40000000u) << 1);
 }
 
 // Zone anchors (Still, Drift, Pull, Swarm, Flock, Surge, Fray, Chaos).
@@ -210,10 +209,10 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		// forces are slow signals (beat rates are Hz-scale), so they're
 		// recomputed every 4th sample and held - ~30% cheaper, inaudible
 		if ((n & 3) == 0) {
-			psinD1 = parabolicSine(thetaM - s1);
+			psinD1 = couplingTriangle(thetaM - s1);
 			pull1 = multiply_32x32_rshift32(psinD1, k1mPhase) << 1;
-			pull2 = multiply_32x32_rshift32(parabolicSine(thetaM - s2), k2mPhase) << 1;
-			chase = multiply_32x32_rshift32(parabolicSine(s1 - s2), k12Phase) << 1;
+			pull2 = multiply_32x32_rshift32(couplingTriangle(thetaM - s2), k2mPhase) << 1;
+			chase = multiply_32x32_rshift32(couplingTriangle(s1 - s2), k12Phase) << 1;
 		}
 
 		// Temperature: Langevin phase noise, one LCG draw split across slaves
