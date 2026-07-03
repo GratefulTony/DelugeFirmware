@@ -80,6 +80,10 @@ PhiGendyParams buildPhiGendyParams(uint16_t zone, float phaseOffset) {
 	p.widthStep = 0.0008f * std::pow(40.0f, wStepT);
 	float wRangeT = phi::evalTriangle(phase, 1.0f, kPhiGendyWidthRange);
 	float range = 0.25f + wRangeT * 0.60f; // 0.25..0.85
+	// Jump probability: exponential 0.004..0.5 per tick per breakpoint
+	// (calm = a snap every few seconds per node; top = ~170 jumps/sec)
+	float jumpT = phi::evalTriangle(phase, 1.0f, kPhiGendyJumpProb);
+	p.jumpProb = 0.004f * std::pow(125.0f, jumpT);
 	p.widthMin = (1.0f - range) * (1.0f / 16.0f);
 	p.widthMax = (1.0f + 2.0f * range) * (1.0f / 16.0f);
 
@@ -164,23 +168,30 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade) {
 			wi = 1.0f / 16.0f;
 		}
 	}
+	// Intermittency: startle raises the jump probability (gestures = flurries)
+	float jumpProb = cfInv * cache.bankA.jumpProb + cf * cache.bankB.jumpProb;
+	jumpProb = std::min(0.8f, jumpProb + cache.startleEnv * 2.0f);
+	uint32_t jumpGate = static_cast<uint32_t>(jumpProb * 4294967295.0f);
+
 	float wSum = 0.0f;
 	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
 		noise = noise * 1664525u + 1013904223u;
+		uint32_t gateDraw = noise;
+		noise = noise * 1664525u + 1013904223u;
 		float r = static_cast<float>(static_cast<int32_t>(noise)) * (1.0f / 2147483648.0f);
-		float vel = cache.vw[i] + wStep * r + cache.startleEnv * r * 0.06f + homePull * ((1.0f / 16.0f) - cache.w[i]);
-		vel = std::clamp(vel, -0.02f, 0.02f);
-		float wi = cache.w[i] + vel;
-		if (wi > wMax) {
-			wi = wMax + wMax - wi;
-			vel = -vel * 0.7f;
+		float wi = cache.w[i];
+		if (gateDraw < jumpGate) {
+			// Width jump: leap most of the way toward a fresh random width
+			float target = wMin + (wMax - wMin) * (r * 0.5f + 0.5f);
+			wi += (target - wi) * 0.7f;
+			cache.vw[i] = 0.0f;
 		}
-		if (wi < wMin) {
-			wi = wMin + wMin - wi;
-			vel = -vel * 0.7f;
+		else {
+			float vel = cache.vw[i] * 0.9f + wStep * r * 0.05f + homePull * ((1.0f / 16.0f) - wi);
+			cache.vw[i] = std::clamp(vel, -0.02f, 0.02f);
+			wi += cache.vw[i];
 		}
 		cache.w[i] = std::clamp(wi, wMin, wMax);
-		cache.vw[i] = vel;
 		wSum += cache.w[i];
 	}
 	float wNorm = 1.0f / wSum;
@@ -193,28 +204,31 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade) {
 		float home = cfInv * cache.bankA.home[i] + cf * cache.bankB.home[i];
 
 		noise = noise * 1664525u + 1013904223u;
-		float r1 = static_cast<float>(static_cast<int32_t>(noise)) * (1.0f / 2147483648.0f);
+		uint32_t gateDraw = noise;
 		noise = noise * 1664525u + 1013904223u;
-		float r2 = static_cast<float>(static_cast<int32_t>(noise)) * (1.0f / 2147483648.0f);
+		float r = static_cast<float>(static_cast<int32_t>(noise)) * (1.0f / 2147483648.0f);
 
-		// Second-order walk: velocity walks, position follows (GENDYN's
-		// double random walk gives drift with momentum)
-		float vel = cache.v[i] + step * r1 + cache.startleEnv * r2;
-		vel = std::clamp(vel, -velCap, velCap);
-
-		float amp = cache.a[i] + vel + homePull * (home - cache.a[i]);
-
-		// Elastic barriers: reflect, and bleed some momentum in the bounce
-		if (amp > bHi) {
-			amp = bHi + bHi - amp;
-			vel = -vel * 0.7f;
+		float amp = cache.a[i];
+		float vel = cache.v[i];
+		if (gateDraw < jumpGate) {
+			// JUMP: leap toward a fresh random target in the cage (Xenakis
+			// drew new breakpoints as discrete events). The render's tick
+			// crossfade turns each jump into a 3ms snap - click-free but
+			// immediate. Step size scales how far the leap commits.
+			float target = bLo + (bHi - bLo) * (r * 0.5f + 0.5f);
+			float commit = std::min(1.0f, 0.35f + step * 4.0f);
+			amp += (target - amp) * commit;
+			vel = 0.0f;
 		}
-		if (amp < bLo) {
-			amp = bLo + bLo - amp;
-			vel = -vel * 0.7f;
+		else {
+			// HOLD: spring toward home with faint drift - the shape stands
+			// still between events, so calm zones read as tonal, not vague
+			vel = vel * 0.9f + step * r * 0.08f;
+			vel = std::clamp(vel, -velCap, velCap);
+			amp += vel + homePull * (home - amp);
 		}
-		amp = std::clamp(amp, bLo, bHi); // Giant steps can overshoot the reflection
 
+		amp = std::clamp(amp, bLo, bHi);
 		cache.a[i] = amp;
 		cache.v[i] = vel;
 		mean += amp;

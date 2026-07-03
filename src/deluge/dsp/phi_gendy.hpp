@@ -102,6 +102,15 @@ inline constexpr phi::PhiTriConfig kPhiGendyStartle = {phi::kPhi300, 0.7f, 0.330
 inline constexpr phi::PhiTriConfig kPhiGendyWidthStep = {phi::kPhi225, 0.7f, 0.510f, false};
 inline constexpr phi::PhiTriConfig kPhiGendyWidthRange = {phi::kPhiN100, 0.6f, 0.350f, false};
 
+// INTERMITTENCY (walk v3): continuous walks are statistically stationary -
+// the same jitter every tick reads as vague wash. Breakpoints now mostly
+// HOLD (spring + faint drift) and, with this zone-controlled probability per
+// tick, JUMP toward a fresh random target in their cage (Xenakis drew new
+// breakpoints as discrete events). Low prob = a shape that stands still for
+// seconds then snaps; high prob = denser chaos than the old walk. Wider
+// character range, far less noise on average.
+inline constexpr phi::PhiTriConfig kPhiGendyJumpProb = {phi::kPhi275, 0.6f, 0.590f, false};
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -117,6 +126,7 @@ struct PhiGendyParams {
 	float widthStep;               // Duration-walk step size
 	float widthMin;                // Elastic width barriers (fractions of a segment's nominal 1/16)
 	float widthMax;
+	float jumpProb; // Per-tick, per-breakpoint probability of a jump event
 };
 
 struct PhiGendyCache {
