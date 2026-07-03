@@ -208,7 +208,11 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 	// (Shared walk: with a chord, the first-ticking voice sets the rate.)
 	float pitchScale = static_cast<float>(phaseIncrement) * (1.0f / 12742000.0f);
 	float jumpProb = cfInv * cache.bankA.jumpProb + cf * cache.bankB.jumpProb;
-	jumpProb = std::min(0.8f, jumpProb * pitchScale + cache.startleEnv * 2.0f);
+	// Startle adds a MILD probability boost, and (below) startle-era jumps
+	// commit only partway: sustained knob motion was triggering hundreds of
+	// full teleports per second - audible as crackle on the wave knob
+	jumpProb = std::min(0.8f, jumpProb * pitchScale + cache.startleEnv * 0.25f);
+	float startleSoften = 1.0f / (1.0f + cache.startleEnv * 6.0f);
 	uint32_t jumpGate = static_cast<uint32_t>(jumpProb * 4294967295.0f);
 
 	float wSum = 0.0f;
@@ -221,7 +225,7 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 		if (gateDraw < jumpGate) {
 			// Width jump: leap most of the way toward a fresh random width
 			float target = wMin + (wMax - wMin) * (r * 0.5f + 0.5f);
-			wi += (target - wi) * 0.7f;
+			wi += (target - wi) * 0.7f * startleSoften;
 			cache.vw[i] = 0.0f;
 		}
 		else {
@@ -254,7 +258,7 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 			// crossfade turns each jump into a 3ms snap - click-free but
 			// immediate. Step size scales how far the leap commits.
 			float target = bLo + (bHi - bLo) * (r * 0.5f + 0.5f);
-			float commit = std::min(1.0f, 0.35f + step * 4.0f);
+			float commit = std::min(1.0f, 0.35f + step * 4.0f) * startleSoften;
 			amp += (target - amp) * commit;
 			vel = 0.0f;
 		}
