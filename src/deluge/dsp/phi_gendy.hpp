@@ -111,6 +111,14 @@ inline constexpr phi::PhiTriConfig kPhiGendyWidthRange = {phi::kPhiN100, 0.6f, 0
 // character range, far less noise on average.
 inline constexpr phi::PhiTriConfig kPhiGendyJumpProb = {phi::kPhi275, 0.6f, 0.590f, false};
 
+// TONAL DIVERSITY: with intermittent walks, calm zones sit ON the home shape
+// most of the time - the home IS the tone. HomeFamily selects among six
+// archetypes (partials, ramp, square, spike, stairs, frozen noise); Curve
+// reshapes segment interpolation in the resampler from smooth (rounded,
+// dark) through linear to hold-like (staircase, buzzy).
+inline constexpr phi::PhiTriConfig kPhiGendyHomeFamily = {phi::kPhi100, 0.95f, 0.150f, false};
+inline constexpr phi::PhiTriConfig kPhiGendyCurve = {phi::kPhi250, 0.7f, 0.450f, true};
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -127,6 +135,7 @@ struct PhiGendyParams {
 	float widthMin;                // Elastic width barriers (fractions of a segment's nominal 1/16)
 	float widthMax;
 	float jumpProb; // Per-tick, per-breakpoint probability of a jump event
+	float curve;    // Segment interpolation shape: -1 hold-like .. 0 linear .. +1 smooth
 };
 
 struct PhiGendyCache {

@@ -87,10 +87,15 @@ PhiGendyParams buildPhiGendyParams(uint16_t zone, float phaseOffset) {
 	p.widthMin = (1.0f - range) * (1.0f / 16.0f);
 	p.widthMax = (1.0f + 2.0f * range) * (1.0f / 16.0f);
 
-	// Home shape: low phi partials over the polygon
+	// Home shape: family archetype selected by zone
 	float p1 = phi::evalTriangle(phase, 1.0f, kPhiGendyHomeP1) * 0.9f;
 	float p2 = phi::evalTriangle(phase, 1.0f, kPhiGendyHomeP2) * 0.6f;
 	float p3 = phi::evalTriangle(phase, 1.0f, kPhiGendyHomeP3) * 0.45f;
+	int32_t homeFamily = std::min(static_cast<int32_t>(5),
+	                              static_cast<int32_t>(phi::evalTriangle(phase, 1.0f, kPhiGendyHomeFamily) * 6.0f));
+	uint32_t frozenSeed = static_cast<uint32_t>(phase * 4096.0) * 2654435761u + 12345u;
+
+	p.curve = phi::evalTriangle(phase, 1.0f, kPhiGendyCurve);
 
 	float stepCycles = 1.0f + phi::evalTriangle(phase, 1.0f, {phi::kPhi050, 1.0f, 0.470f, false}) * 3.0f;
 	float barrierCycles = 1.0f + phi::evalTriangle(phase, 1.0f, {phi::kPhi325, 1.0f, 0.720f, false}) * 3.0f;
@@ -108,8 +113,36 @@ PhiGendyParams buildPhiGendyParams(uint16_t zone, float phaseOffset) {
 		p.barrierHi[i] = center + width;
 		p.barrierLo[i] = center - width;
 
-		float h = p1 * std::sin(kGendyTwoPi * nf) + p2 * std::sin(kGendyTwoPi * 2.0f * nf + 1.7f)
-		          + p3 * std::sin(kGendyTwoPi * 3.0f * nf + 4.1f);
+		float h;
+		switch (homeFamily) {
+		case 1: // RAMP: saw-like
+			h = 2.0f * nf - 1.0f;
+			break;
+		case 2: // SQUARE: hard-clipped fundamental
+			h = std::clamp(std::sin(kGendyTwoPi * nf + p2) * 3.0f, -1.0f, 1.0f);
+			break;
+		case 3: { // SPIKE: narrow raised-cosine bump (nasal/formant)
+			float d = nf - (0.5f + p3 * 0.4f);
+			d -= std::floor(d + 0.5f);
+			float wq = std::abs(d) * 5.0f;
+			h = (wq < 1.0f) ? (0.5f + 0.5f * std::cos(3.14159265f * wq)) * 2.0f - 0.5f : -0.5f;
+			break;
+		}
+		case 4: { // STAIRS: quantized partial-sum (organ/8-bit)
+			float raw = p1 * std::sin(kGendyTwoPi * nf) + p2 * std::sin(kGendyTwoPi * 2.0f * nf + 1.7f);
+			h = std::round(raw * 3.0f) * (1.0f / 3.0f);
+			break;
+		}
+		case 5: { // FROZEN NOISE: fixed random polygon per zone position (glassy)
+			frozenSeed = frozenSeed * 1664525u + 1013904223u;
+			h = static_cast<float>(static_cast<int32_t>(frozenSeed)) * (1.0f / 2147483648.0f);
+			break;
+		}
+		default: // PARTIALS: low phi partial sum
+			h = p1 * std::sin(kGendyTwoPi * nf) + p2 * std::sin(kGendyTwoPi * 2.0f * nf + 1.7f)
+			    + p3 * std::sin(kGendyTwoPi * 3.0f * nf + 4.1f);
+			break;
+		}
 		p.home[i] = h;
 		homePeak = std::max(homePeak, std::abs(h));
 	}
@@ -152,6 +185,7 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 
 	float velCap = cfInv * cache.bankA.velCap + cf * cache.bankB.velCap;
 	float homePull = cfInv * cache.bankA.homePull + cf * cache.bankB.homePull;
+	float curve = cfInv * cache.bankA.curve + cf * cache.bankB.curve;
 
 	uint32_t noise = cache.noiseState;
 	float mean = 0.0f;
@@ -271,10 +305,21 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 			segWidth = cache.w[seg] * wNorm;
 			invSegWidth = 1.0f / segWidth;
 		}
-		float frac = (u - segStart) * invSegWidth;
+		float frac = std::min((u - segStart) * invSegWidth, 1.0f);
+		// Curve: reshape the segment transition (smooth = rounded/dark,
+		// hold-like = staircase/buzzy)
+		if (curve > 0.0f) {
+			float ss = frac * frac * (3.0f - 2.0f * frac);
+			frac += curve * (ss - frac);
+		}
+		else if (curve < 0.0f) {
+			float f4 = frac * frac;
+			f4 *= f4;
+			frac += (-curve) * (f4 - frac);
+		}
 		float a0 = cache.a[seg] - mean;
 		float a1 = cache.a[(seg + 1) & (kPhiGendyNumNodes - 1)] - mean;
-		cache.nodeQ[j] = static_cast<q31_t>((a0 + (a1 - a0) * std::min(frac, 1.0f)) * scale);
+		cache.nodeQ[j] = static_cast<q31_t>((a0 + (a1 - a0) * frac) * scale);
 	}
 	cache.nodeQ[kPhiGendyScanNodes] = cache.nodeQ[0];
 	if (!cache.tablesValid) { // First tick: nothing to fade from
