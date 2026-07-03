@@ -281,6 +281,13 @@ namespace {
 // sinc^4 instead of linear's sinc^2 - this was the residual "lofi" fizz.
 // Taps are pre-shifted >>4 for Horner headroom and the result saturates on
 // the way back up (Catmull-Rom can overshoot the tap range by ~1.25x).
+// t^2 (3 - 2t) in Q31: zero derivative at both endpoints
+[[gnu::always_inline]] inline q31_t smoothstepQ31(q31_t t) {
+	q31_t t2 = multiply_32x32_rshift32(t, t) << 1;
+	q31_t q = 0x60000000 - (t >> 1); // (3 - 2t) / 4
+	return multiply_32x32_rshift32(t2, q) << 3;
+}
+
 [[gnu::always_inline]] inline q31_t scanCatmullRom(const q31_t* nodes, const q31_t* nodesPrev, uint32_t idx,
                                                    q31_t frac31, q31_t tickFade) {
 	q31_t taps[4];
@@ -345,7 +352,11 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 		nodesPrev = cache.nodeQMip1Prev;
 	}
 
-	// Tick crossfade ramp: prev table -> current table across this buffer
+	// Tick crossfade ramp: prev table -> current table across this buffer.
+	// The ramp is SHAPED with a smoothstep at use: a linear fade is C0 but
+	// its slope snaps at every buffer boundary (~344 Hz corners = residual
+	// "buffer rate hash"); smoothstep has zero slope at both ends, so node
+	// trajectories are C1 through the boundary.
 	const q31_t tickFadeInc = 0x7FFFFFFF / numSamples;
 	q31_t tickFade = 0;
 
@@ -365,7 +376,7 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 			uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
 			q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-			q31_t waveform = scanCatmullRom(nodes, nodesPrev, idx, frac31, tickFade);
+			q31_t waveform = scanCatmullRom(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
 
 			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, waveform, amplitude);
 			thisSample++;
@@ -385,7 +396,7 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 			uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
 			q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-			*thisSample = scanCatmullRom(nodes, nodesPrev, idx, frac31, tickFade);
+			*thisSample = scanCatmullRom(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
 			thisSample++;
 		}
 	}
