@@ -64,6 +64,7 @@ public:
 		    OscType::WAVETABLE,
 		    OscType::PHI_MORPH,
 		    OscType::PHI_WEAVE,
+		    OscType::PHI_VOX,
 		};
 
 		if (util::one_of(oldValue, needs_unassignment) || util::one_of(newValue, needs_unassignment)) {
@@ -93,6 +94,7 @@ public:
 		    l10n::getView(STRING_FOR_WAVETABLE),     //<
 		    l10n::getView(STRING_FOR_PHI_MORPH),     //<
 		    l10n::getView(STRING_FOR_PHI_WEAVE),     //<
+		    l10n::getView(STRING_FOR_PHI_VOX),       //<
 		};
 
 		if (soundEditor.currentSound->getSynthMode() == SynthMode::RINGMOD) {
@@ -166,6 +168,8 @@ public:
 				return OLED::phiMorphIcon;
 			case OscType::PHI_WEAVE:
 				return OLED::phiWeaveIcon;
+			case OscType::PHI_VOX:
+				return OLED::phiVoxIcon;
 			default:
 				return OLED::sineIcon;
 			}

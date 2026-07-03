@@ -46,7 +46,7 @@ for i in range(2):
             "oscillator/phi_morph_zone.md",
             name="STRING_FOR_PHI_ZONE_A",
             title="STRING_FOR_OSC_PHI_ZONE_A_MENU_TITLE",
-            available_when="Oscillator type must be PhiMorph",
+            available_when="Oscillator type must be PhiMorph, PhiWeave, or PhiVox (the zone selects a waveform for PhiMorph, physics for PhiWeave, or a voice character for PhiVox)",
         ),
         Menu(
             "osc::source::WaveIndex",
@@ -64,7 +64,7 @@ for i in range(2):
             "oscillator/phi_morph_zone.md",
             name="STRING_FOR_PHI_ZONE_B",
             title="STRING_FOR_OSC_PHI_ZONE_B_MENU_TITLE",
-            available_when="Oscillator type must be PhiMorph",
+            available_when="Oscillator type must be PhiMorph, PhiWeave, or PhiVox (the zone selects a waveform for PhiMorph, physics for PhiWeave, or a voice character for PhiVox)",
         ),
         Menu(
             "sample::Transpose",

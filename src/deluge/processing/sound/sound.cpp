@@ -4068,6 +4068,26 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			source->phiWeaveGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
 			reader.exitTag("phiWeaveGamma");
 		}
+		else if (!strcmp(tagName, "phiVoxZoneA")) {
+			source->phiVoxZoneA = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiVoxZoneA");
+		}
+		else if (!strcmp(tagName, "phiVoxZoneB")) {
+			source->phiVoxZoneB = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiVoxZoneB");
+		}
+		else if (!strcmp(tagName, "phiVoxPhaseA")) {
+			source->phiVoxPhaseOffsetA = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiVoxPhaseA");
+		}
+		else if (!strcmp(tagName, "phiVoxPhaseB")) {
+			source->phiVoxPhaseOffsetB = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiVoxPhaseB");
+		}
+		else if (!strcmp(tagName, "phiVoxGamma")) {
+			source->phiVoxGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiVoxGamma");
+		}
 		/*
 		else if (!strcmp(tagName, "sampleSync")) {
 		    source->sampleSync = stringToBool(reader.readTagContents());
@@ -4463,6 +4483,21 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 				}
 				if (source->phiWeaveGamma != 0.0f) {
 					writer.writeAttribute("phiWeaveGamma", static_cast<int32_t>(source->phiWeaveGamma * 10.0f));
+				}
+			}
+
+			// PHI_VOX: persist zone knobs, phase offsets, and gamma
+			if (source->oscType == OscType::PHI_VOX) {
+				writer.writeAttribute("phiVoxZoneA", source->phiVoxZoneA);
+				writer.writeAttribute("phiVoxZoneB", source->phiVoxZoneB);
+				if (source->phiVoxPhaseOffsetA != 0.0f) {
+					writer.writeAttribute("phiVoxPhaseA", static_cast<int32_t>(source->phiVoxPhaseOffsetA * 10.0f));
+				}
+				if (source->phiVoxPhaseOffsetB != 0.0f) {
+					writer.writeAttribute("phiVoxPhaseB", static_cast<int32_t>(source->phiVoxPhaseOffsetB * 10.0f));
+				}
+				if (source->phiVoxGamma != 0.0f) {
+					writer.writeAttribute("phiVoxGamma", static_cast<int32_t>(source->phiVoxGamma * 10.0f));
 				}
 			}
 justCloseTag:

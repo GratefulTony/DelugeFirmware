@@ -25,6 +25,7 @@
 namespace deluge::dsp {
 struct PhiMorphCache;
 struct PhiWeaveCache;
+struct PhiVoxCache;
 } // namespace deluge::dsp
 
 class Sound;
@@ -68,6 +69,14 @@ public:
 	float phiWeavePhaseOffsetB{0.0f};
 	float phiWeaveGamma{0.0f};
 	deluge::dsp::PhiWeaveCache* phiWeaveCache{nullptr};
+
+	// PHI_VOX zone parameters (same interface family)
+	uint16_t phiVoxZoneA{0};
+	uint16_t phiVoxZoneB{0};
+	float phiVoxPhaseOffsetA{0.0f};
+	float phiVoxPhaseOffsetB{0.0f};
+	float phiVoxGamma{0.0f};
+	deluge::dsp::PhiVoxCache* phiVoxCache{nullptr};
 
 	int8_t timeStretchAmount;
 	bool offsetWraps{true}; // When true, start offset wraps playhead modularly; when false, clamps at boundary
