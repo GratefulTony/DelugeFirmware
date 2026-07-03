@@ -327,12 +327,12 @@ void tickPhiWeave(PhiWeaveCache& cache, float cf) {
 
 namespace {
 
-// Catmull-Rom scan through the tick-crossfaded string. Taps are lerped
-// prev -> current first (same cost as per-table interpolation, simpler), then
-// a 4-point Hermite reconstructs the waveform: interpolation images fall as
-// sinc^4 instead of linear's sinc^2 - this was the residual "lofi" fizz.
-// Taps are pre-shifted >>4 for Horner headroom and the result saturates on
-// the way back up (Catmull-Rom can overshoot the tap range by ~1.25x).
+// Linear scan through the tick-crossfaded string: taps lerped
+// prev -> current, then spatial interpolation. Was briefly Catmull-Rom, but
+// once the energy floors and haptic smoother landed, the tables are smooth
+// enough that simulation showed linear within 0.3 dB of Catmull-Rom at every
+// zone and pitch - not worth 7 multiplies vs 3. (Padded table layout kept:
+// [0] = node 31, [1..32] = nodes, [33..34] = wrap - scan reads idx+1, idx+2.)
 // t^2 (3 - 2t) in Q31: zero derivative at both endpoints
 [[gnu::always_inline]] inline q31_t smoothstepQ31(q31_t t) {
 	q31_t t2 = multiply_32x32_rshift32(t, t) << 1;
@@ -340,26 +340,19 @@ namespace {
 	return multiply_32x32_rshift32(t2, q) << 3;
 }
 
-[[gnu::always_inline]] inline q31_t scanCatmullRom(const q31_t* nodes, const q31_t* nodesPrev, uint32_t idx,
-                                                   q31_t frac31, q31_t tickFade) {
-	q31_t taps[4];
-	for (int32_t k = 0; k < 4; k++) {
-		q31_t pv = nodesPrev[idx + k];
-		taps[k] = (pv + (multiply_32x32_rshift32(nodes[idx + k] - pv, tickFade) << 1)) >> 4;
-	}
-	q31_t c1 = (taps[2] - taps[0]) >> 1;
-	q31_t c2 = taps[0] + 2 * taps[2] - ((5 * taps[1] + taps[3]) >> 1);
-	q31_t c3 = ((3 * (taps[1] - taps[2])) >> 1) + ((taps[3] - taps[0]) >> 1);
-	q31_t r = c2 + (multiply_32x32_rshift32(frac31, c3) << 1);
-	r = c1 + (multiply_32x32_rshift32(frac31, r) << 1);
-	r = taps[1] + (multiply_32x32_rshift32(frac31, r) << 1);
-	return static_cast<q31_t>(std::clamp<int64_t>(static_cast<int64_t>(r) << 4, INT32_MIN, INT32_MAX));
+[[gnu::always_inline]] inline q31_t scanString(const q31_t* nodes, const q31_t* nodesPrev, uint32_t idx, q31_t frac31,
+                                               q31_t tickFade) {
+	q31_t pvA = nodesPrev[idx + 1];
+	q31_t a = pvA + (multiply_32x32_rshift32(nodes[idx + 1] - pvA, tickFade) << 1);
+	q31_t pvB = nodesPrev[idx + 2];
+	q31_t b = pvB + (multiply_32x32_rshift32(nodes[idx + 2] - pvB, tickFade) << 1);
+	return a + (multiply_32x32_rshift32(b - a, frac31) << 1);
 }
 
 } // namespace
 
 // ============================================================================
-// Main render: scan the ring per sample (Catmull-Rom, tick-crossfaded)
+// Main render: scan the ring per sample (linear, tick-crossfaded)
 // ============================================================================
 
 void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
@@ -450,7 +443,7 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 				uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
 				q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-				q31_t waveform = scanCatmullRom(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
+				q31_t waveform = scanString(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
 
 				*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, waveform, amplitude);
 				thisSample++;
@@ -471,7 +464,7 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 				uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
 				q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-				*thisSample = scanCatmullRom(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
+				*thisSample = scanString(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
 				thisSample++;
 			}
 		}
