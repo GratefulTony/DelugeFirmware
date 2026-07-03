@@ -250,7 +250,11 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 		pulseIdx[1] = static_cast<int32_t>(hi & 0xFu);
 	}
 
-	uint32_t prevEvalPhase = evalPhase;
+	// Seed the wrap detector with the PRE-buffer phase: seeding it with the
+	// first sample's own value made cycle wraps that fall exactly between
+	// buffers invisible - with carried state that meant missed burst resets
+	// (burst-position jitter even without modulation)
+	uint32_t prevEvalPhase = phase + retriggerPhase;
 	uint32_t noiseState = cache.noiseState;
 	const q31_t voicedNoise = cache.effVoicedNoise;
 	const bool morphing = cache.morphRamping;
