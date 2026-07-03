@@ -427,9 +427,30 @@ namespace {
 // Main render: scan the ring per sample (linear, tick-crossfaded)
 // ============================================================================
 
+namespace {
+// Stereo-zone characters: tap distance range + tonal tilt (R reads one mip
+// darker) + counter-scan (R mirrored within the cycle - heavy decorrelation)
+struct WeaveStereoChar {
+	float maxOffset; // Fraction of the ring
+	bool tilt;
+	bool counter;
+};
+constexpr WeaveStereoChar kWeaveStereoZones[8] = {
+    {0.03f, false, false},  // Slim: subtle widener
+    {0.06f, true, false},   // Near: close taps, darker right
+    {0.125f, false, false}, // Open
+    {0.125f, true, false},  // Tilt
+    {0.25f, false, false},  // Wide
+    {0.25f, false, true},   // Sway: counter-scanned right
+    {0.5f, true, false},    // Split: opposite pickups, darker right
+    {0.5f, true, true},     // Vast: everything
+};
+} // namespace
+
 void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
                     uint32_t phaseIncrement, uint32_t* startPhase, uint32_t retriggerPhase, int32_t amplitude,
-                    int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth) {
+                    int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth,
+                    int32_t* bufferRStart, uint16_t stereoZone) {
 
 #if ENABLE_FX_BENCHMARK
 	FX_BENCH_DECLARE(bench_render, "phi_weave", "render");
@@ -482,6 +503,26 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 		tabCur = cache.nodeQMip1;
 	}
 
+	// Stereo-zone setup: right-channel tap offset and table choice
+	const WeaveStereoChar& sc = kWeaveStereoZones[(stereoZone >> 7) & 7];
+	const float stereoAmount = static_cast<float>(stereoZone & 127u) * (1.0f / 127.0f);
+	const uint32_t tapOffset = static_cast<uint32_t>(stereoAmount * sc.maxOffset * 4294967296.0);
+	const q31_t* tabPrevR = tabPrev;
+	const q31_t* tabMidR = tabMid;
+	const q31_t* tabCurR = tabCur;
+	if (bufferRStart != nullptr && sc.tilt) { // Darker right: one mip level down
+		if (tabCur == cache.nodeQ) {
+			tabPrevR = cache.nodeQMip1Prev;
+			tabMidR = cache.nodeQMidMip1;
+			tabCurR = cache.nodeQMip1;
+		}
+		else {
+			tabPrevR = cache.nodeQMip2Prev;
+			tabMidR = cache.nodeQMidMip2;
+			tabCurR = cache.nodeQMip2;
+		}
+	}
+
 	// Two crossfade segments per buffer, one per physics sub-tick:
 	// prev -> mid over the first half, mid -> current over the second. Each
 	// ramp is smoothstep-shaped (zero slope at the ends), so node motion is
@@ -497,6 +538,9 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 		}
 		const q31_t* nodesPrev = (seg == 0) ? tabPrev : tabMid;
 		const q31_t* nodes = (seg == 0) ? tabMid : tabCur;
+		const q31_t* nodesPrevR = (seg == 0) ? tabPrevR : tabMidR;
+		const q31_t* nodesR = (seg == 0) ? tabMidR : tabCurR;
+		int32_t* thisSampleR = (bufferRStart != nullptr) ? (bufferRStart + segStart) : nullptr;
 		// Smoothstep fade advanced by FORWARD DIFFERENCES: a cubic at fixed
 		// steps needs only 3 adds per sample (was 3 multiplies through
 		// smoothstepQ31); exact up to float->q31 rounding of the deltas
@@ -522,6 +566,9 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 				if (evalPhase > phaseWidth) {
 					thisSample++;
+					if (thisSampleR != nullptr) {
+						thisSampleR++;
+					}
 					continue;
 				}
 
@@ -531,6 +578,15 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 				*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, waveform, amplitude);
 				thisSample++;
+
+				if (thisSampleR != nullptr) { // Second pickup for the right channel
+					uint32_t evalR = sc.counter ? (tapOffset - evalPhase) : (evalPhase + tapOffset);
+					uint32_t idxR = evalR >> kPhiWeaveNodeShift;
+					q31_t fracR = static_cast<q31_t>((evalR & 0x07FFFFFF) << 4);
+					q31_t wR = scanString(nodesR, nodesPrevR, idxR, fracR, tickFade);
+					*thisSampleR = multiply_accumulate_32x32_rshift32_rounded(*thisSampleR, wR, amplitude);
+					thisSampleR++;
+				}
 			}
 		}
 		else {

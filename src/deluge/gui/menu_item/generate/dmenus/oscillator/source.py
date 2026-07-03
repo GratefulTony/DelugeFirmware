@@ -75,6 +75,15 @@ for i in range(2):
             available_when="Oscillator type must be PhiVox",
         ),
         Menu(
+            "osc::PhiStereoZone",
+            f"osc{i}PhiStereoMenu",
+            ["{name}", "{title}", f"{i}"],
+            "oscillator/phi_stereo_zone.md",
+            name="STRING_FOR_PHI_STEREO",
+            title="STRING_FOR_OSC_PHI_STEREO_MENU_TITLE",
+            available_when="Oscillator type must be a phi-family oscillator (PhiMorph/PhiWeave/PhiVox/PhiSwarm/PhiGendy)",
+        ),
+        Menu(
             "sample::Transpose",
             f"source{i}TransposeMenu",
             ["{name}", "{title}", "params::LOCAL_OSC_A_PITCH_ADJUST", f"{i}"],

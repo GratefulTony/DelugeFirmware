@@ -3087,7 +3087,7 @@ dontUseCache: {}
 
 			int32_t* renderBuffer = oscBuffer;
 
-			if (stereoUnison) [[unlikely]] {
+			if (stereoBuffer) [[unlikely]] {
 				// TODO: I first wanted to integrate this with voiceSample->render()'s own
 				// amplitude control but it is just too complex - multiple copies of
 				// the amp logic depending if caching is used or not, timestretching or not,
@@ -3136,7 +3136,7 @@ dontUseCache: {}
 			    timeStretchRatio, effSourceAmplitude, effAmplitudeIncrement, interpolationBufferSize,
 			    sound.sources[s].sampleControls.interpolationMode, getPriorityRating());
 
-			if (stereoUnison) {
+			if (stereoBuffer) {
 				if (numChannels == 2) {
 					// TODO: society if renderBasicSource() took a StereoSample[] buffer already
 					for (int32_t i = 0; i < numSamples; i++) {
@@ -3312,7 +3312,7 @@ dontUseCache: {}
 			}
 
 			int32_t sourceAmplitudeNow = effSourceAmplitude;
-			if (stereoUnison) {
+			if (stereoBuffer) {
 				for (int i = 0; i < numSamples; i++) {
 					sourceAmplitudeNow += effAmplitudeIncrement;
 					int amplified = multiply_32x32_rshift32(uniBuf[i], sourceAmplitudeNow) << 6;
@@ -3350,7 +3350,7 @@ dontUseCache: {}
 			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
 
 			int32_t* renderBuffer = oscBuffer;
-			if (stereoUnison) {
+			if (stereoBuffer) {
 				renderBuffer = spareRenderingBuffer[2];
 				memset(renderBuffer, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
 			}
@@ -3367,7 +3367,7 @@ dontUseCache: {}
 			                    &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, effSourceAmplitude,
 			                    effAmplitudeIncrement, true, crossfade, pulseWidth);
 
-			if (stereoUnison) {
+			if (stereoBuffer) {
 				for (int32_t i = 0; i < numSamples; i++) {
 					oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
 					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;
@@ -3395,9 +3395,15 @@ dontUseCache: {}
 			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
 
 			int32_t* renderBuffer = oscBuffer;
-			if (stereoUnison) {
+			int32_t* renderBufferR = nullptr;
+			bool phiStereo = stereoBuffer && source.phiStereoActive();
+			if (stereoBuffer) {
 				renderBuffer = spareRenderingBuffer[2];
 				memset(renderBuffer, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
+				if (phiStereo) {
+					renderBufferR = spareRenderingBuffer[3];
+					memset(renderBufferR, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
+				}
 			}
 
 			int32_t* oscBufferEnd = renderBuffer + numSamples;
@@ -3410,12 +3416,14 @@ dontUseCache: {}
 			                                   + static_cast<uint32_t>(unisonPhaseOffset);
 			dsp::renderPhiWeave(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
 			                    &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, effSourceAmplitude,
-			                    effAmplitudeIncrement, true, crossfade, pulseWidth);
+			                    effAmplitudeIncrement, true, crossfade, pulseWidth, renderBufferR,
+			                    source.phiStereoZone);
 
-			if (stereoUnison) {
+			if (stereoBuffer) {
+				const int32_t* rightSrc = phiStereo ? renderBufferR : renderBuffer;
 				for (int32_t i = 0; i < numSamples; i++) {
 					oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
-					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;
+					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(rightSrc[i], amplitudeR) << 2;
 				}
 			}
 		}
@@ -3440,7 +3448,7 @@ dontUseCache: {}
 			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
 
 			int32_t* renderBuffer = oscBuffer;
-			if (stereoUnison) {
+			if (stereoBuffer) {
 				renderBuffer = spareRenderingBuffer[2];
 				memset(renderBuffer, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
 			}
@@ -3458,7 +3466,7 @@ dontUseCache: {}
 			                  effectiveRetriggerPhase, effSourceAmplitude, effAmplitudeIncrement, true, crossfade,
 			                  pulseWidth, source.phiVoxTracking);
 
-			if (stereoUnison) {
+			if (stereoBuffer) {
 				for (int32_t i = 0; i < numSamples; i++) {
 					oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
 					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;
@@ -3485,7 +3493,7 @@ dontUseCache: {}
 			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
 
 			int32_t* renderBuffer = oscBuffer;
-			if (stereoUnison) {
+			if (stereoBuffer) {
 				renderBuffer = spareRenderingBuffer[2];
 				memset(renderBuffer, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
 			}
@@ -3504,7 +3512,7 @@ dontUseCache: {}
 			                    effectiveRetriggerPhase, effSourceAmplitude, effAmplitudeIncrement, true, crossfade,
 			                    pulseWidth);
 
-			if (stereoUnison) {
+			if (stereoBuffer) {
 				for (int32_t i = 0; i < numSamples; i++) {
 					oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
 					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;
@@ -3532,7 +3540,7 @@ dontUseCache: {}
 			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
 
 			int32_t* renderBuffer = oscBuffer;
-			if (stereoUnison) {
+			if (stereoBuffer) {
 				renderBuffer = spareRenderingBuffer[2];
 				memset(renderBuffer, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
 			}
@@ -3549,7 +3557,7 @@ dontUseCache: {}
 			                    &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, effSourceAmplitude,
 			                    effAmplitudeIncrement, true, crossfade, pulseWidth);
 
-			if (stereoUnison) {
+			if (stereoBuffer) {
 				for (int32_t i = 0; i < numSamples; i++) {
 					oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
 					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;

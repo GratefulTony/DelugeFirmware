@@ -255,8 +255,13 @@ PhiWeaveParams buildPhiWeaveParams(uint16_t zone, float phaseOffset = 0.0f);
 
 /// Render PHI_WEAVE for one buffer. Advances the physics once per buffer
 /// (guarded by AudioEngine::audioSampleTimer), then scans the ring per sample.
+/// bufferRStart (nullable): stereo-zone dual-tap - the right channel reads a
+/// second "pickup position" on the same string. stereoZone: position within
+/// each 128-wide zone = tap distance (amount); zone index = character (tap
+/// range, tonal tilt via a darker mip, counter-scan mirroring).
 void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
                     uint32_t phaseIncrement, uint32_t* startPhase, uint32_t retriggerPhase, int32_t amplitude,
-                    int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth);
+                    int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth,
+                    int32_t* bufferRStart = nullptr, uint16_t stereoZone = 0);
 
 } // namespace deluge::dsp
