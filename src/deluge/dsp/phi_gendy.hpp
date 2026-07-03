@@ -118,6 +118,10 @@ inline constexpr phi::PhiTriConfig kPhiGendyJumpProb = {phi::kPhi275, 0.6f, 0.59
 // dark) through linear to hold-like (staircase, buzzy).
 inline constexpr phi::PhiTriConfig kPhiGendyHomeFamily = {phi::kPhi100, 0.95f, 0.150f, false};
 inline constexpr phi::PhiTriConfig kPhiGendyCurve = {phi::kPhi250, 0.7f, 0.450f, true};
+// Brilliance: spatial high-shelf baked into the scan table (slot-to-slot
+// first difference, pitch-invariant under scanning). Random polylines fall
+// at -12 dB/oct - twice a saw's slope - so GENDY reads dark without it.
+inline constexpr phi::PhiTriConfig kPhiGendyBrite = {phi::kPhi175, 0.7f, 0.700f, false};
 
 // ============================================================================
 // Types
@@ -136,6 +140,7 @@ struct PhiGendyParams {
 	float widthMax;
 	float jumpProb; // Per-tick, per-breakpoint probability of a jump event
 	float curve;    // Segment interpolation shape: -1 hold-like .. 0 linear .. +1 smooth
+	float brite;    // Spatial high-shelf amount (0..~1.8)
 };
 
 struct PhiGendyCache {

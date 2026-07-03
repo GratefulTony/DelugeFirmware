@@ -96,6 +96,8 @@ PhiGendyParams buildPhiGendyParams(uint16_t zone, float phaseOffset) {
 	uint32_t frozenSeed = static_cast<uint32_t>(phase * 4096.0) * 2654435761u + 12345u;
 
 	p.curve = phi::evalTriangle(phase, 1.0f, kPhiGendyCurve);
+	float briteT = phi::evalTriangle(phase, 1.0f, kPhiGendyBrite);
+	p.brite = briteT * briteT * 1.8f;
 
 	float stepCycles = 1.0f + phi::evalTriangle(phase, 1.0f, {phi::kPhi050, 1.0f, 0.470f, false}) * 3.0f;
 	float barrierCycles = 1.0f + phi::evalTriangle(phase, 1.0f, {phi::kPhi325, 1.0f, 0.720f, false}) * 3.0f;
@@ -186,6 +188,7 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 	float velCap = cfInv * cache.bankA.velCap + cf * cache.bankB.velCap;
 	float homePull = cfInv * cache.bankA.homePull + cf * cache.bankB.homePull;
 	float curve = cfInv * cache.bankA.curve + cf * cache.bankB.curve;
+	float brite = cfInv * cache.bankA.brite + cf * cache.bankB.brite;
 
 	uint32_t noise = cache.noiseState;
 	float mean = 0.0f;
@@ -297,6 +300,7 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 	// lerp (and the de-zipper crossfade) are unchanged
 	memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
 	float scale = cache.agcScale;
+	float slots[kPhiGendyScanNodes];
 	int32_t seg = 0;
 	float segStart = 0.0f;
 	float segWidth = cache.w[0] * wNorm;
@@ -319,11 +323,21 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 		else if (curve < 0.0f) {
 			float f4 = frac * frac;
 			f4 *= f4;
+			f4 *= f4; // f^8: near-staircase at full negative curve (bright crunch)
 			frac += (-curve) * (f4 - frac);
 		}
 		float a0 = cache.a[seg] - mean;
 		float a1 = cache.a[(seg + 1) & (kPhiGendyNumNodes - 1)] - mean;
-		cache.nodeQ[j] = static_cast<q31_t>((a0 + (a1 - a0) * frac) * scale);
+		slots[j] = a0 + (a1 - a0) * frac;
+	}
+	// Brilliance: circular slot-to-slot high-shelf (first difference), a
+	// pitch-invariant brightener applied entirely at tick time
+	float prevSlot = slots[kPhiGendyScanNodes - 1];
+	for (int32_t j = 0; j < kPhiGendyScanNodes; j++) {
+		float raw = slots[j];
+		float bright = (raw + brite * (raw - prevSlot)) * scale;
+		prevSlot = raw;
+		cache.nodeQ[j] = static_cast<q31_t>(std::clamp(bright, -2147483000.0f, 2147483000.0f));
 	}
 	cache.nodeQ[kPhiGendyScanNodes] = cache.nodeQ[0];
 	if (!cache.tablesValid) { // First tick: nothing to fade from
