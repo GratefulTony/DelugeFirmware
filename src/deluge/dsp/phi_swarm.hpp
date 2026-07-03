@@ -125,6 +125,11 @@ struct PhiSwarmCache {
 	q31_t prevCrossfade{INT32_MIN};
 	q31_t smoothedCrossfade{INT32_MIN};
 
+	// Previous buffer's slave increments: ramped to current across each
+	// buffer, because stepping them per buffer under wave-index modulation
+	// (env/LFO/unison on the morph) is 344 Hz FM buzz
+	uint32_t prevInc1{0};
+	uint32_t prevInc2{0};
 	float annealEnv{0.0f}; // Heat injected by crossfade motion, decays per buffer
 	float prevCf{-1.0f};
 	uint32_t lastEnvTime{0xFFFFFFFF};

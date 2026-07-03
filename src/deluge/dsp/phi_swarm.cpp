@@ -173,8 +173,22 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 	// Per-buffer conversions: everything scales with the master increment so
 	// locking behavior is pitch-invariant
-	uint32_t inc1 = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.ratio1FP) >> 16);
-	uint32_t inc2 = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.ratio2FP) >> 16);
+	uint32_t inc1Target = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.ratio1FP) >> 16);
+	uint32_t inc2Target = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.ratio2FP) >> 16);
+	// Ramp increments from last buffer's values (large jumps - new note,
+	// octave bend - snap instead of glide)
+	if (cache.prevInc1 == 0 || std::abs(static_cast<int32_t>(inc1Target - cache.prevInc1)) > (inc1Target >> 3)) {
+		cache.prevInc1 = inc1Target;
+	}
+	if (cache.prevInc2 == 0 || std::abs(static_cast<int32_t>(inc2Target - cache.prevInc2)) > (inc2Target >> 3)) {
+		cache.prevInc2 = inc2Target;
+	}
+	uint32_t inc1 = cache.prevInc1;
+	uint32_t inc2 = cache.prevInc2;
+	const int32_t inc1Step = static_cast<int32_t>(inc1Target - inc1) / numSamples;
+	const int32_t inc2Step = static_cast<int32_t>(inc2Target - inc2) / numSamples;
+	cache.prevInc1 = inc1Target;
+	cache.prevInc2 = inc2Target;
 	int32_t k1mPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.k1mFP) >> 16);
 	int32_t k2mPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.k2mFP) >> 16);
 	int32_t k12Phase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.k12FP) >> 16);
@@ -245,6 +259,8 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		                                         tempPhase)
 		                 << 1;
 
+		inc1 += inc1Step;
+		inc2 += inc2Step;
 		s1 += inc1 + pull1 + noise1;
 		s2 += inc2 + pull2 + chase + noise2;
 
