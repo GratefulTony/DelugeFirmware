@@ -138,6 +138,7 @@ PLACE_SDRAM_DATA Language seven_segment{
         {STRING_FOR_PHI_VOX, "VOX"},
         {STRING_FOR_FORMANT_TRACKING, "TRAK"},
         {STRING_FOR_PHI_SWARM, "SWRM"},
+        {STRING_FOR_PHI_GENDY, "GNDY"},
         {STRING_FOR_SQUARE, "SQUA"},
         {STRING_FOR_SAW, "SAW"},
         {STRING_FOR_SAMPLE_AND_HOLD, "S/H"},

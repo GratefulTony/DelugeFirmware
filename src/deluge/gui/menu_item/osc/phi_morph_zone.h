@@ -59,6 +59,8 @@ public:
 		static const char* const kVoxNames[8] = {"Breath", "Hum", "Round", "Open", "Bright", "Nasal", "Growl", "Rasp"};
 		static const char* const kSwarmNames[8] = {"Still", "Drift", "Pull", "Swarm",
 		                                           "Flock", "Surge", "Fray", "Chaos"};
+		static const char* const kGendyNames[8] = {"Haze", "Murmur", "Wander", "Ripple",
+		                                           "Boil", "Writhe", "Snarl",  "Frenzy"};
 		if (zoneIndex < 0 || zoneIndex >= 8) {
 			return "?";
 		}
@@ -69,6 +71,8 @@ public:
 			return kVoxNames[zoneIndex];
 		case OscType::PHI_SWARM:
 			return kSwarmNames[zoneIndex];
+		case OscType::PHI_GENDY:
+			return kGendyNames[zoneIndex];
 		default:
 			return kMorphNames[zoneIndex];
 		}
@@ -115,7 +119,7 @@ public:
 		const auto sound = static_cast<Sound*>(modControllable);
 		OscType type = sound->sources[sourceId_].oscType;
 		return type == OscType::PHI_MORPH || type == OscType::PHI_WEAVE || type == OscType::PHI_VOX
-		       || type == OscType::PHI_SWARM;
+		       || type == OscType::PHI_SWARM || type == OscType::PHI_GENDY;
 	}
 
 protected:
@@ -146,6 +150,8 @@ private:
 			return (zoneId_ == 0) ? source.phiVoxZoneA : source.phiVoxZoneB;
 		case OscType::PHI_SWARM:
 			return (zoneId_ == 0) ? source.phiSwarmZoneA : source.phiSwarmZoneB;
+		case OscType::PHI_GENDY:
+			return (zoneId_ == 0) ? source.phiGendyZoneA : source.phiGendyZoneB;
 		default:
 			return (zoneId_ == 0) ? source.phiMorphZoneA : source.phiMorphZoneB;
 		}
@@ -160,6 +166,8 @@ private:
 			return (zoneId_ == 0) ? source.phiVoxPhaseOffsetA : source.phiVoxPhaseOffsetB;
 		case OscType::PHI_SWARM:
 			return (zoneId_ == 0) ? source.phiSwarmPhaseOffsetA : source.phiSwarmPhaseOffsetB;
+		case OscType::PHI_GENDY:
+			return (zoneId_ == 0) ? source.phiGendyPhaseOffsetA : source.phiGendyPhaseOffsetB;
 		default:
 			return (zoneId_ == 0) ? source.phiMorphPhaseOffsetA : source.phiMorphPhaseOffsetB;
 		}
@@ -177,6 +185,9 @@ private:
 			break;
 		case OscType::PHI_SWARM:
 			gamma = source.phiSwarmGamma;
+			break;
+		case OscType::PHI_GENDY:
+			gamma = source.phiGendyGamma;
 			break;
 		default:
 			gamma = source.phiMorphGamma;

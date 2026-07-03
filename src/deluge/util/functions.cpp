@@ -820,6 +820,9 @@ char const* oscTypeToString(OscType oscType) {
 	case OscType::PHI_SWARM:
 		return "phiSwarm";
 
+	case OscType::PHI_GENDY:
+		return "phiGendy";
+
 	case OscType::INPUT_L:
 		return "inLeft";
 
@@ -874,6 +877,9 @@ OscType stringToOscType(char const* string) {
 	}
 	else if (!strcmp(string, "phiSwarm")) {
 		return OscType::PHI_SWARM;
+	}
+	else if (!strcmp(string, "phiGendy")) {
+		return OscType::PHI_GENDY;
 	}
 	else if (!strcmp(string, "inLeft")) {
 		return OscType::INPUT_L;

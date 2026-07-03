@@ -4112,6 +4112,26 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			source->phiSwarmGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
 			reader.exitTag("phiSwarmGamma");
 		}
+		else if (!strcmp(tagName, "phiGendyZoneA")) {
+			source->phiGendyZoneA = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiGendyZoneA");
+		}
+		else if (!strcmp(tagName, "phiGendyZoneB")) {
+			source->phiGendyZoneB = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiGendyZoneB");
+		}
+		else if (!strcmp(tagName, "phiGendyPhaseA")) {
+			source->phiGendyPhaseOffsetA = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiGendyPhaseA");
+		}
+		else if (!strcmp(tagName, "phiGendyPhaseB")) {
+			source->phiGendyPhaseOffsetB = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiGendyPhaseB");
+		}
+		else if (!strcmp(tagName, "phiGendyGamma")) {
+			source->phiGendyGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiGendyGamma");
+		}
 		/*
 		else if (!strcmp(tagName, "sampleSync")) {
 		    source->sampleSync = stringToBool(reader.readTagContents());
@@ -4540,6 +4560,21 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 				}
 				if (source->phiSwarmGamma != 0.0f) {
 					writer.writeAttribute("phiSwarmGamma", static_cast<int32_t>(source->phiSwarmGamma * 10.0f));
+				}
+			}
+
+			// PHI_GENDY: persist zone knobs, phase offsets, and gamma
+			if (source->oscType == OscType::PHI_GENDY) {
+				writer.writeAttribute("phiGendyZoneA", source->phiGendyZoneA);
+				writer.writeAttribute("phiGendyZoneB", source->phiGendyZoneB);
+				if (source->phiGendyPhaseOffsetA != 0.0f) {
+					writer.writeAttribute("phiGendyPhaseA", static_cast<int32_t>(source->phiGendyPhaseOffsetA * 10.0f));
+				}
+				if (source->phiGendyPhaseOffsetB != 0.0f) {
+					writer.writeAttribute("phiGendyPhaseB", static_cast<int32_t>(source->phiGendyPhaseOffsetB * 10.0f));
+				}
+				if (source->phiGendyGamma != 0.0f) {
+					writer.writeAttribute("phiGendyGamma", static_cast<int32_t>(source->phiGendyGamma * 10.0f));
 				}
 			}
 justCloseTag:

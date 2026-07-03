@@ -19,6 +19,7 @@
 #include "definitions_cxx.hpp"
 #include "dsp/dx/dx7note.h"
 #include "dsp/dx/engine.h"
+#include "dsp/phi_gendy.hpp"
 #include "dsp/phi_morph.hpp"
 #include "dsp/phi_swarm.hpp"
 #include "dsp/phi_vox.hpp"
@@ -57,6 +58,7 @@ Source::~Source() {
 	delete phiWeaveCache;
 	delete phiVoxCache;
 	delete phiSwarmCache;
+	delete phiGendyCache;
 }
 
 // Destructs the actual MultiRanges, but doesn't actually deallocate the memory, aka calling empty() on the Array - the
@@ -121,6 +123,16 @@ void Source::cloneFrom(Source* other) {
 	// phiSwarmCache is lazy-allocated, don't clone it
 	delete phiSwarmCache;
 	phiSwarmCache = nullptr;
+
+	// PHI_GENDY zone parameters
+	phiGendyZoneA = other->phiGendyZoneA;
+	phiGendyZoneB = other->phiGendyZoneB;
+	phiGendyPhaseOffsetA = other->phiGendyPhaseOffsetA;
+	phiGendyPhaseOffsetB = other->phiGendyPhaseOffsetB;
+	phiGendyGamma = other->phiGendyGamma;
+	// phiGendyCache is lazy-allocated, don't clone it
+	delete phiGendyCache;
+	phiGendyCache = nullptr;
 
 	// Deep copy DxPatch
 	if (other->dxPatch) {

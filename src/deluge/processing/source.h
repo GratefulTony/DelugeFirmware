@@ -27,6 +27,7 @@ struct PhiMorphCache;
 struct PhiWeaveCache;
 struct PhiVoxCache;
 struct PhiSwarmCache;
+struct PhiGendyCache;
 } // namespace deluge::dsp
 
 class Sound;
@@ -87,6 +88,14 @@ public:
 	float phiSwarmPhaseOffsetB{0.0f};
 	float phiSwarmGamma{0.0f};
 	deluge::dsp::PhiSwarmCache* phiSwarmCache{nullptr};
+
+	// PHI_GENDY zone parameters (same interface family)
+	uint16_t phiGendyZoneA{0};
+	uint16_t phiGendyZoneB{0};
+	float phiGendyPhaseOffsetA{0.0f};
+	float phiGendyPhaseOffsetB{0.0f};
+	float phiGendyGamma{0.0f};
+	deluge::dsp::PhiGendyCache* phiGendyCache{nullptr};
 
 	int8_t timeStretchAmount;
 	bool offsetWraps{true}; // When true, start offset wraps playhead modularly; when false, clamps at boundary

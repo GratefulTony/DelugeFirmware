@@ -66,6 +66,7 @@ public:
 		    OscType::PHI_WEAVE,
 		    OscType::PHI_VOX,
 		    OscType::PHI_SWARM,
+		    OscType::PHI_GENDY,
 		};
 
 		if (util::one_of(oldValue, needs_unassignment) || util::one_of(newValue, needs_unassignment)) {
@@ -97,6 +98,7 @@ public:
 		    l10n::getView(STRING_FOR_PHI_WEAVE),     //<
 		    l10n::getView(STRING_FOR_PHI_VOX),       //<
 		    l10n::getView(STRING_FOR_PHI_SWARM),     //<
+		    l10n::getView(STRING_FOR_PHI_GENDY),     //<
 		};
 
 		if (soundEditor.currentSound->getSynthMode() == SynthMode::RINGMOD) {
@@ -174,6 +176,8 @@ public:
 				return OLED::phiVoxIcon;
 			case OscType::PHI_SWARM:
 				return OLED::phiSwarmIcon;
+			case OscType::PHI_GENDY:
+				return OLED::phiGendyIcon;
 			default:
 				return OLED::sineIcon;
 			}

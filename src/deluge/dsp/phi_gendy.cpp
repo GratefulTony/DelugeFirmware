@@ -1,0 +1,261 @@
+/*
+ * Copyright © 2026 Owlet Records
+ *
+ * This file is part of The Synthstrom Audible Deluge Firmware.
+ *
+ * The Synthstrom Audible Deluge Firmware is free software: you can redistribute it and/or modify it under the
+ * terms of the GNU General Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with this program.
+ * If not, see <https://www.gnu.org/licenses/>.
+ *
+ * --- Additional terms under GNU GPL version 3 section 7 ---
+ * This file requires preservation of the above copyright notice and author attribution
+ * in all copies or substantial portions of this file.
+ */
+
+#include "dsp/phi_gendy.hpp"
+#include "io/debug/fx_benchmark.h"
+#include "processing/engines/audio_engine.h"
+#include <algorithm>
+#include <cmath>
+
+namespace deluge::dsp {
+
+// ============================================================================
+// Zone -> walk-law builder (runs only on zone/gamma change)
+// ============================================================================
+
+namespace {
+
+constexpr float kGendyTwoPi = 6.283185307f;
+constexpr float kGendyOutGain = 0.85f;
+constexpr float kGendyRefAmplitude = 1073741824.0f; // 2^30, matches sibling convention
+
+// Spatial landscape: a phi triangle evaluated around the polygon (same idiom
+// as PHI_WEAVE's ring landscapes)
+float gendySpatial(double zonePhase, float nodeFrac, float spatialCycles, const phi::PhiTriConfig& cfg) {
+	float wrapped =
+	    phi::wrapPhase(zonePhase * static_cast<double>(cfg.phiFreq) + static_cast<double>(nodeFrac * spatialCycles)
+	                   + static_cast<double>(cfg.phaseOffset));
+	if (cfg.bipolar) {
+		return deluge::dsp::triangleFloat(wrapped, cfg.duty);
+	}
+	return deluge::dsp::triangleSimpleUnipolar(wrapped, cfg.duty);
+}
+
+} // namespace
+
+PhiGendyParams buildPhiGendyParams(uint16_t zone, float phaseOffset) {
+	PhiGendyParams p{};
+
+	double phase = static_cast<double>(zone) / 1023.0 + static_cast<double>(phaseOffset);
+
+	// Entropy: exponential step-size range. Low zones drift almost
+	// imperceptibly; high zones jump hard enough that the reflections
+	// themselves become the sound (the Xenakis grit).
+	float stepT = phi::evalTriangle(phase, 1.0f, kPhiGendyStepBase);
+	float stepBase = 0.0015f * std::pow(180.0f, stepT); // 0.0015 .. 0.27
+
+	float barrierT = phi::evalTriangle(phase, 1.0f, kPhiGendyBarrierBase);
+	float barrierBase = 0.25f + barrierT * 0.75f; // 0.25 .. 1.0
+
+	p.velCap = 0.01f + phi::evalTriangle(phase, 1.0f, kPhiGendyVelCap) * 0.19f;
+
+	// Home pull fades as entropy rises: calm zones have a timbre to return
+	// to; frenzied zones are pure walk
+	float pullT = phi::evalTriangle(phase, 1.0f, kPhiGendyHomePull);
+	p.homePull = (0.02f + pullT * 0.20f) * (1.0f - stepT * 0.85f);
+
+	p.startleGain = 0.03f + phi::evalTriangle(phase, 1.0f, kPhiGendyStartle) * 0.25f;
+
+	// Home shape: low phi partials over the polygon
+	float p1 = phi::evalTriangle(phase, 1.0f, kPhiGendyHomeP1) * 0.9f;
+	float p2 = phi::evalTriangle(phase, 1.0f, kPhiGendyHomeP2) * 0.6f;
+	float p3 = phi::evalTriangle(phase, 1.0f, kPhiGendyHomeP3) * 0.45f;
+
+	float stepCycles = 1.0f + phi::evalTriangle(phase, 1.0f, {phi::kPhi050, 1.0f, 0.470f, false}) * 3.0f;
+	float barrierCycles = 1.0f + phi::evalTriangle(phase, 1.0f, {phi::kPhi325, 1.0f, 0.720f, false}) * 3.0f;
+
+	float homePeak = 0.0001f;
+	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
+		float nf = static_cast<float>(i) / static_cast<float>(kPhiGendyNumNodes);
+
+		// Per-node entropy and cage
+		float stepLand = 0.25f + 0.75f * gendySpatial(phase, nf, stepCycles, kPhiGendyStepLand);
+		p.step[i] = stepBase * stepLand;
+
+		float width = barrierBase * (0.30f + 0.70f * gendySpatial(phase, nf, barrierCycles, kPhiGendyBarrierLand));
+		float center = gendySpatial(phase, nf, 2.0f, kPhiGendyCenterLand) * (1.0f - width) * 0.6f;
+		p.barrierHi[i] = center + width;
+		p.barrierLo[i] = center - width;
+
+		float h = p1 * std::sin(kGendyTwoPi * nf) + p2 * std::sin(kGendyTwoPi * 2.0f * nf + 1.7f)
+		          + p3 * std::sin(kGendyTwoPi * 3.0f * nf + 4.1f);
+		p.home[i] = h;
+		homePeak = std::max(homePeak, std::abs(h));
+	}
+
+	// Normalize home into the cage and keep it audible
+	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
+		p.home[i] *= 0.8f / homePeak;
+		p.home[i] = std::clamp(p.home[i], p.barrierLo[i], p.barrierHi[i]);
+	}
+
+	return p;
+}
+
+// ============================================================================
+// The double random walk (once per audio buffer)
+// ============================================================================
+
+namespace {
+
+void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade) {
+	float cf = std::clamp(static_cast<float>(crossfade) / 2147483648.0f + 0.5f, 0.0f, 1.0f);
+	float cfInv = 1.0f - cf;
+
+	// Startle: crossfade motion (and note-on) kicks velocity noise into the
+	// walkers - the morph gesture. Decays fast; it's an event, not a state.
+	if (cache.prevCf >= 0.0f) {
+		float gain = cfInv * cache.bankA.startleGain + cf * cache.bankB.startleGain;
+		float kick = std::abs(cf - cache.prevCf) * gain * 30.0f;
+		if (cache.startlePending) {
+			kick = std::max(kick, gain);
+			cache.startlePending = false;
+		}
+		cache.startleEnv = std::max(kick, cache.startleEnv * 0.5f);
+	}
+	else if (cache.startlePending) {
+		cache.startleEnv = cfInv * cache.bankA.startleGain + cf * cache.bankB.startleGain;
+		cache.startlePending = false;
+	}
+	cache.prevCf = cf;
+
+	float velCap = cfInv * cache.bankA.velCap + cf * cache.bankB.velCap;
+	float homePull = cfInv * cache.bankA.homePull + cf * cache.bankB.homePull;
+
+	uint32_t noise = cache.noiseState;
+	float mean = 0.0f;
+
+	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
+		// Walk LAWS morph; walker STATE persists (click-free by construction)
+		float step = cfInv * cache.bankA.step[i] + cf * cache.bankB.step[i];
+		float bHi = cfInv * cache.bankA.barrierHi[i] + cf * cache.bankB.barrierHi[i];
+		float bLo = cfInv * cache.bankA.barrierLo[i] + cf * cache.bankB.barrierLo[i];
+		float home = cfInv * cache.bankA.home[i] + cf * cache.bankB.home[i];
+
+		noise = noise * 1664525u + 1013904223u;
+		float r1 = static_cast<float>(static_cast<int32_t>(noise)) * (1.0f / 2147483648.0f);
+		noise = noise * 1664525u + 1013904223u;
+		float r2 = static_cast<float>(static_cast<int32_t>(noise)) * (1.0f / 2147483648.0f);
+
+		// Second-order walk: velocity walks, position follows (GENDYN's
+		// double random walk gives drift with momentum)
+		float vel = cache.v[i] + step * r1 + cache.startleEnv * r2;
+		vel = std::clamp(vel, -velCap, velCap);
+
+		float amp = cache.a[i] + vel + homePull * (home - cache.a[i]);
+
+		// Elastic barriers: reflect, and bleed some momentum in the bounce
+		if (amp > bHi) {
+			amp = bHi + bHi - amp;
+			vel = -vel * 0.7f;
+		}
+		if (amp < bLo) {
+			amp = bLo + bLo - amp;
+			vel = -vel * 0.7f;
+		}
+		amp = std::clamp(amp, bLo, bHi); // Giant steps can overshoot the reflection
+
+		cache.a[i] = amp;
+		cache.v[i] = vel;
+		mean += amp;
+	}
+	cache.noiseState = noise;
+	mean *= 1.0f / static_cast<float>(kPhiGendyNumNodes);
+
+	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
+		cache.nodeQ[i] = static_cast<q31_t>((cache.a[i] - mean) * kGendyOutGain * kGendyRefAmplitude);
+	}
+	cache.nodeQ[kPhiGendyNumNodes] = cache.nodeQ[0];
+}
+
+} // namespace
+
+// ============================================================================
+// Main render: scan the current polygon at the note pitch
+// ============================================================================
+
+void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
+                    uint32_t phaseIncrement, uint32_t* startPhase, uint32_t retriggerPhase, int32_t amplitude,
+                    int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth) {
+
+#if ENABLE_FX_BENCHMARK
+	FX_BENCH_DECLARE(bench_render, "phi_gendy", "render");
+	FX_BENCH_START(bench_render);
+#endif
+
+	// Advance the walk once per audio buffer, shared across voices/unison
+	if (AudioEngine::audioSampleTimer != cache.lastTickTime) {
+		cache.lastTickTime = AudioEngine::audioSampleTimer;
+		tickPhiGendy(cache, crossfade);
+	}
+
+	uint32_t phase = *startPhase;
+	uint32_t phaseAtEnd = phase + phaseIncrement * static_cast<uint32_t>(numSamples);
+
+	// Match the triangle-oscillator amplitude convention (as the siblings do)
+	amplitude <<= 1;
+	amplitudeIncrement <<= 1;
+
+	const uint32_t phaseWidth = pulseWidth ? (0xFFFFFFFF - (pulseWidth << 1)) : 0xFFFFFFFF;
+
+	int32_t* thisSample = bufferStart;
+
+	for (int32_t n = 0; n < numSamples; n++) {
+		phase += phaseIncrement;
+		uint32_t evalPhase = phase + retriggerPhase;
+		if (applyAmplitude) {
+			amplitude += amplitudeIncrement;
+		}
+
+		if (evalPhase > phaseWidth) {
+			if (applyAmplitude) {
+				thisSample++;
+			}
+			else {
+				*thisSample++ = 0;
+			}
+			continue;
+		}
+
+		// Linear scan between breakpoints (branch-free lerp)
+		uint32_t idx = evalPhase >> kPhiGendyNodeShift;
+		q31_t frac31 = static_cast<q31_t>((evalPhase & 0x0FFFFFFF) << 3);
+		q31_t base = cache.nodeQ[idx];
+		q31_t delta = cache.nodeQ[idx + 1] - base;
+		q31_t out = base + (multiply_32x32_rshift32(delta, frac31) << 1);
+
+		if (applyAmplitude) {
+			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, out, amplitude);
+			thisSample++;
+		}
+		else {
+			*thisSample++ = out;
+		}
+	}
+
+	*startPhase = phaseAtEnd;
+
+#if ENABLE_FX_BENCHMARK
+	FX_BENCH_STOP(bench_render);
+#endif
+}
+
+} // namespace deluge::dsp
