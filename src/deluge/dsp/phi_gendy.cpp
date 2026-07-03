@@ -386,9 +386,28 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 // Main render: scan the current polygon at the note pitch
 // ============================================================================
 
+namespace {
+struct GendyStereoChar {
+	float maxOffset; // Fraction of the cycle
+	bool counter;    // Right tap mirrored within the cycle
+	bool lag;        // Right tap reads the previous tick's polygon
+};
+constexpr GendyStereoChar kGendyStereoZones[8] = {
+    {0.03f, false, false},  // Slim
+    {0.0625f, false, true}, // Near: close tap, one tick behind
+    {0.125f, false, false}, // Open
+    {0.125f, false, true},  // Tilt: lagged
+    {0.25f, false, false},  // Wide
+    {0.25f, true, false},   // Sway: counter-scanned
+    {0.5f, false, true},    // Split
+    {0.5f, true, true},     // Vast
+};
+} // namespace
+
 void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
                     uint32_t phaseIncrement, uint32_t* startPhase, uint32_t retriggerPhase, int32_t amplitude,
-                    int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth) {
+                    int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth,
+                    int32_t* bufferRStart, uint16_t stereoZone) {
 
 #if ENABLE_FX_BENCHMARK
 	FX_BENCH_DECLARE(bench_render, "phi_gendy", "render");
@@ -424,6 +443,10 @@ void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferE
 	const q31_t fd3 = static_cast<q31_t>((y3 - 3.0f * y2 + 3.0f * y1) * 2147483647.0f);
 
 	int32_t* thisSample = bufferStart;
+	int32_t* thisSampleR = bufferRStart;
+	const GendyStereoChar& sc = kGendyStereoZones[(stereoZone >> 7) & 7];
+	const uint32_t tapOffset =
+	    static_cast<uint32_t>(static_cast<float>(stereoZone & 127u) * (1.0f / 127.0f) * sc.maxOffset * 4294967296.0);
 
 	for (int32_t n = 0; n < numSamples; n++) {
 		phase += phaseIncrement;
@@ -438,9 +461,15 @@ void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferE
 		if (evalPhase > phaseWidth) {
 			if (applyAmplitude) {
 				thisSample++;
+				if (thisSampleR != nullptr) {
+					thisSampleR++;
+				}
 			}
 			else {
 				*thisSample++ = 0;
+				if (thisSampleR != nullptr) {
+					*thisSampleR++ = 0;
+				}
 			}
 			continue;
 		}
@@ -460,6 +489,30 @@ void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferE
 		}
 		else {
 			*thisSample++ = out;
+		}
+
+		if (thisSampleR != nullptr) { // Second tap for the right channel
+			uint32_t evalR = sc.counter ? (tapOffset - evalPhase) : (evalPhase + tapOffset);
+			uint32_t idxR = evalR >> kPhiGendyNodeShift;
+			q31_t fracR = static_cast<q31_t>((evalR & 0x03FFFFFF) << 5);
+			q31_t bP = cache.nodeQPrev[idxR];
+			q31_t wP = bP + (multiply_32x32_rshift32(cache.nodeQPrev[idxR + 1] - bP, fracR) << 1);
+			q31_t outR;
+			if (sc.lag) { // Previous tick's polygon only: ~3ms micro-slap
+				outR = wP;
+			}
+			else {
+				q31_t bC = cache.nodeQ[idxR];
+				q31_t wC = bC + (multiply_32x32_rshift32(cache.nodeQ[idxR + 1] - bC, fracR) << 1);
+				outR = wP + (multiply_32x32_rshift32(wC - wP, tickFade) << 1);
+			}
+			if (applyAmplitude) {
+				*thisSampleR = multiply_accumulate_32x32_rshift32_rounded(*thisSampleR, outR, amplitude);
+				thisSampleR++;
+			}
+			else {
+				*thisSampleR++ = outR;
+			}
 		}
 	}
 

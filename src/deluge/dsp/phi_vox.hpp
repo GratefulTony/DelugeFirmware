@@ -162,9 +162,12 @@ PhiVoxParams buildPhiVoxParams(uint16_t zone, float phaseOffset = 0.0f);
 /// formantState packs per-voice formant phase (28b) + pulse index (4b) per
 /// formant into an otherwise-unused per-voice uint64 - carrying it across
 /// buffers instead of re-deriving eliminates morph-time phase teleports
+/// bufferRStart (nullable): stereo-zone formant separation - F1 leans left,
+/// F2 leans right (the vowel spreads across the field like a mouth opening)
 void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
                   uint32_t phaseIncrement, uint32_t* startPhase, uint64_t* formantState, uint32_t retriggerPhase,
                   int32_t amplitude, int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade,
-                  uint32_t pulseWidth, int32_t trackingAmount);
+                  uint32_t pulseWidth, int32_t trackingAmount, int32_t* bufferRStart = nullptr,
+                  uint16_t stereoZone = 0);
 
 } // namespace deluge::dsp

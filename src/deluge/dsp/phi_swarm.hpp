@@ -153,9 +153,12 @@ PhiSwarmParams buildPhiSwarmParams(uint16_t zone, float phaseOffset = 0.0f);
 
 /// Render PHI_SWARM for one buffer. slavePhases packs the two per-voice slave
 /// phase accumulators (lo 32 = slave 1, hi 32 = slave 2).
+/// bufferRStart (nullable): stereo-zone slave separation - the two slaves
+/// lean into opposite channels (mid/side); 'flip' zones oppose the beat-AM
+/// between channels (pulling becomes autopan)
 void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
                     uint32_t phaseIncrement, uint32_t* startPhase, uint64_t* slavePhases, uint32_t retriggerPhase,
                     int32_t amplitude, int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade,
-                    uint32_t pulseWidth);
+                    uint32_t pulseWidth, int32_t* bufferRStart = nullptr, uint16_t stereoZone = 0);
 
 } // namespace deluge::dsp

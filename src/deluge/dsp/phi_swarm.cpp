@@ -127,10 +127,27 @@ PhiSwarmParams buildPhiSwarmParams(uint16_t zone, float phaseOffset) {
 // Main render
 // ============================================================================
 
+namespace {
+struct SwarmStereoChar {
+	float sep; // Slave separation into the sides
+	bool beatFlip;
+};
+constexpr SwarmStereoChar kSwarmStereoZones[8] = {
+    {0.20f, false}, // Slim
+    {0.40f, false}, // Near
+    {0.60f, false}, // Open
+    {0.60f, true},  // Tilt: beat opposition
+    {0.85f, false}, // Wide
+    {0.50f, true},  // Sway: moderate sep, breathing L against R
+    {1.00f, false}, // Split
+    {1.00f, true},  // Vast
+};
+} // namespace
+
 void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
                     uint32_t phaseIncrement, uint32_t* startPhase, uint64_t* slavePhases, uint32_t retriggerPhase,
                     int32_t amplitude, int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade,
-                    uint32_t pulseWidth) {
+                    uint32_t pulseWidth, int32_t* bufferRStart, uint16_t stereoZone) {
 
 #if ENABLE_FX_BENCHMARK
 	FX_BENCH_DECLARE(bench_render, "phi_swarm", "render");
@@ -264,6 +281,13 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 	int32_t pull2 = 0;
 	int32_t chase = 0;
 	q31_t beatGain = 0x7FFFFFFF;
+	q31_t beatGainR = 0x7FFFFFFF;
+	int32_t* thisSampleR = bufferRStart;
+	const SwarmStereoChar& ssc = kSwarmStereoZones[(stereoZone >> 7) & 7];
+	const float stereoAmt = static_cast<float>(stereoZone & 127u) * (1.0f / 127.0f);
+	const q31_t sepQ = static_cast<q31_t>(stereoAmt * ssc.sep * 2147483647.0f);
+	// Beat opposition: the right channel's beat depth flips with amount
+	const q31_t wBeatRScale = ssc.beatFlip ? static_cast<q31_t>((1.0f - 2.0f * stereoAmt) * 2147483647.0f) : 0x7FFFFFFF;
 
 	for (int32_t n = 0; n < numSamples; n++) {
 		phase += phaseIncrement;
@@ -282,6 +306,9 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 			// Beat gain rides the same subsample (it consumes psinD1, which
 			// only changes here); the wBeat ramp is coarse-grained with it
 			beatGain = (0x7FFFFFFF - wBeat) + multiply_32x32_rshift32(psinD1, wBeat);
+			q31_t wBeatR = multiply_32x32_rshift32(wBeat, wBeatRScale) << 1;
+			q31_t wBeatRAbs = (wBeatR < 0) ? -wBeatR : wBeatR;
+			beatGainR = (0x7FFFFFFF - wBeatRAbs) + multiply_32x32_rshift32(psinD1, wBeatR);
 			pull2 = multiply_32x32_rshift32(couplingTriangle(thetaM - s2), k2mPhase) << 1;
 			chase = multiply_32x32_rshift32(couplingTriangle(s1 - s2), k12Phase) << 1;
 		}
@@ -329,23 +356,39 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		q31_t o1 = SineOsc::doFMNew(w1p, 0);
 		q31_t o2 = SineOsc::doFMNew(w2p, 0);
 
-		q31_t out = multiply_32x32_rshift32(o1, w1) << 1;
-		out = add_saturate(out, multiply_32x32_rshift32(o2, w2) << 1);
+		q31_t m1 = multiply_32x32_rshift32(o1, w1) << 1;
+		q31_t m2 = multiply_32x32_rshift32(o2, w2) << 1;
 		q31_t ring = multiply_32x32_rshift32(o1, o2) << 1;
-		out = add_saturate(out, multiply_32x32_rshift32(ring, wRing) << 1);
+		q31_t mid = add_saturate(add_saturate(m1, m2), multiply_32x32_rshift32(ring, wRing) << 1);
 
 		// Beat-AM: the coupling sine IS the beat waveform (flat when locked,
 		// slow-asymmetric when pulling, cycling when free) - breathe the
 		// output level with it so the phase drift is directly audible.
 		// gain in [1 - 2*wBeat, 1]: never clips
-		out = multiply_32x32_rshift32(out, beatGain) << 1;
-
-		if (applyAmplitude) {
-			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, out, amplitude);
-			thisSample++;
+		if (thisSampleR != nullptr) { // Slave separation: mid/side split
+			q31_t side = multiply_32x32_rshift32(m1 - m2, sepQ) << 1;
+			q31_t outL = multiply_32x32_rshift32(add_saturate(mid, side), beatGain) << 1;
+			q31_t outR = multiply_32x32_rshift32(add_saturate(mid, -side), beatGainR) << 1;
+			if (applyAmplitude) {
+				*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, outL, amplitude);
+				thisSample++;
+				*thisSampleR = multiply_accumulate_32x32_rshift32_rounded(*thisSampleR, outR, amplitude);
+				thisSampleR++;
+			}
+			else {
+				*thisSample++ = outL;
+				*thisSampleR++ = outR;
+			}
 		}
 		else {
-			*thisSample++ = out;
+			q31_t out = multiply_32x32_rshift32(mid, beatGain) << 1;
+			if (applyAmplitude) {
+				*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, out, amplitude);
+				thisSample++;
+			}
+			else {
+				*thisSample++ = out;
+			}
 		}
 	}
 

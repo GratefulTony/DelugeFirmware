@@ -208,8 +208,11 @@ struct PhiGendyCache {
 
 PhiGendyParams buildPhiGendyParams(uint16_t zone, float phaseOffset = 0.0f);
 
+/// bufferRStart (nullable): stereo-zone dual tap on the polygon; 'lag' zones
+/// read the right tap from the PREVIOUS tick's polygon (a ~3ms micro-slap)
 void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
                     uint32_t phaseIncrement, uint32_t* startPhase, uint32_t retriggerPhase, int32_t amplitude,
-                    int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth);
+                    int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth,
+                    int32_t* bufferRStart = nullptr, uint16_t stereoZone = 0);
 
 } // namespace deluge::dsp

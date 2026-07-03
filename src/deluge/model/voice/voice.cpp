@@ -3448,9 +3448,15 @@ dontUseCache: {}
 			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
 
 			int32_t* renderBuffer = oscBuffer;
+			int32_t* renderBufferR = nullptr;
+			bool phiStereo = stereoBuffer && source.phiStereoActive();
 			if (stereoBuffer) {
 				renderBuffer = spareRenderingBuffer[2];
 				memset(renderBuffer, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
+				if (phiStereo) {
+					renderBufferR = spareRenderingBuffer[3];
+					memset(renderBufferR, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
+				}
 			}
 
 			int32_t* oscBufferEnd = renderBuffer + numSamples;
@@ -3493,9 +3499,15 @@ dontUseCache: {}
 			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
 
 			int32_t* renderBuffer = oscBuffer;
+			int32_t* renderBufferR = nullptr;
+			bool phiStereo = stereoBuffer && source.phiStereoActive();
 			if (stereoBuffer) {
 				renderBuffer = spareRenderingBuffer[2];
 				memset(renderBuffer, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
+				if (phiStereo) {
+					renderBufferR = spareRenderingBuffer[3];
+					memset(renderBufferR, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
+				}
 			}
 
 			int32_t* oscBufferEnd = renderBuffer + numSamples;
@@ -3540,9 +3552,15 @@ dontUseCache: {}
 			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
 
 			int32_t* renderBuffer = oscBuffer;
+			int32_t* renderBufferR = nullptr;
+			bool phiStereo = stereoBuffer && source.phiStereoActive();
 			if (stereoBuffer) {
 				renderBuffer = spareRenderingBuffer[2];
 				memset(renderBuffer, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
+				if (phiStereo) {
+					renderBufferR = spareRenderingBuffer[3];
+					memset(renderBufferR, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
+				}
 			}
 
 			int32_t* oscBufferEnd = renderBuffer + numSamples;
