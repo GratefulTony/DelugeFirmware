@@ -3470,12 +3470,13 @@ dontUseCache: {}
 			dsp::renderPhiVox(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
 			                  &unisonParts[u].sources[s].oscPos, &unisonParts[u].sources[s].prevPhaseScaler,
 			                  effectiveRetriggerPhase, effSourceAmplitude, effAmplitudeIncrement, true, crossfade,
-			                  pulseWidth, source.phiVoxTracking);
+			                  pulseWidth, source.phiVoxTracking, renderBufferR, source.phiStereoZone);
 
 			if (stereoBuffer) {
+				const int32_t* rightSrc = phiStereo ? renderBufferR : renderBuffer;
 				for (int32_t i = 0; i < numSamples; i++) {
 					oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
-					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;
+					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(rightSrc[i], amplitudeR) << 2;
 				}
 			}
 		}
@@ -3522,12 +3523,13 @@ dontUseCache: {}
 			dsp::renderPhiSwarm(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
 			                    &unisonParts[u].sources[s].oscPos, &unisonParts[u].sources[s].prevPhaseScaler,
 			                    effectiveRetriggerPhase, effSourceAmplitude, effAmplitudeIncrement, true, crossfade,
-			                    pulseWidth);
+			                    pulseWidth, renderBufferR, source.phiStereoZone);
 
 			if (stereoBuffer) {
+				const int32_t* rightSrc = phiStereo ? renderBufferR : renderBuffer;
 				for (int32_t i = 0; i < numSamples; i++) {
 					oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
-					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;
+					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(rightSrc[i], amplitudeR) << 2;
 				}
 			}
 		}
@@ -3573,12 +3575,14 @@ dontUseCache: {}
 			                                   + static_cast<uint32_t>(unisonPhaseOffset);
 			dsp::renderPhiGendy(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
 			                    &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, effSourceAmplitude,
-			                    effAmplitudeIncrement, true, crossfade, pulseWidth);
+			                    effAmplitudeIncrement, true, crossfade, pulseWidth, renderBufferR,
+			                    source.phiStereoZone);
 
 			if (stereoBuffer) {
+				const int32_t* rightSrc = phiStereo ? renderBufferR : renderBuffer;
 				for (int32_t i = 0; i < numSamples; i++) {
 					oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
-					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;
+					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(rightSrc[i], amplitudeR) << 2;
 				}
 			}
 		}
