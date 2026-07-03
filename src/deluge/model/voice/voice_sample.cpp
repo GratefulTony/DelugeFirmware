@@ -1510,72 +1510,90 @@ readNonTimestretched:
 			}
 			// Fade-out envelope (approaching loop boundary)
 			else if (loopFadeInSamplesTotal > 0 && loopingType != LoopType::NONE) {
-				int32_t endByte = guide->getBytePosToEndOrLoopPlayback();
-				if (endByte != 0) {
-					int32_t currentByte = getPlayByteLowLevel(sample, guide);
-					int32_t bytesPerSamp = sample->numChannels * sample->byteDepth;
-					int32_t distBytes = (endByte - currentByte) * guide->playDirection;
+				// While writing a cache, the write->read switchover fires on the CACHE byte
+				// clock, so derive the fade distance from that same clock - the
+				// source-derived estimate below rounds differently and leaves the fade a
+				// sample or two adrift of the switchover (a tiny click at the boundary).
+				int32_t distOutputSamples = -1;
+				if (cache) {
+					int32_t xfFrameBytes = kCacheByteDepth * sampleSourceNumChannels;
+					int32_t distCacheBytes = cacheLoopEndPointBytes - cacheBytePos;
+					// Cheap gate: only divide when near the fade zone
+					if (distCacheBytes <= (loopFadeInSamplesTotal + SSI_TX_BUFFER_NUM_SAMPLES + 1) * xfFrameBytes) {
+						distOutputSamples = (int32_t)((uint32_t)distCacheBytes / (uint8_t)xfFrameBytes);
+					}
+				}
+				else {
+					int32_t endByte = guide->getBytePosToEndOrLoopPlayback();
+					if (endByte != 0) {
+						int32_t currentByte = getPlayByteLowLevel(sample, guide);
+						int32_t bytesPerSamp = sample->numChannels * sample->byteDepth;
+						int32_t distBytes = (endByte - currentByte) * guide->playDirection;
 
-					// Cheap proximity gate: skip the division-heavy exact computation while
-					// far from the boundary. Threshold is a conservative over-estimate of the
-					// fade zone (plus one max render window), recomputed only on pitch change.
-					if (phaseIncrement != fadeZoneLastPhaseIncrement || loopFadeInSamplesTotal != fadeZoneLastTotal) {
-						fadeZoneLastPhaseIncrement = phaseIncrement;
-						fadeZoneLastTotal = loopFadeInSamplesTotal;
-						int64_t zoneOutputSamples = (int64_t)loopFadeInSamplesTotal + SSI_TX_BUFFER_NUM_SAMPLES;
-						int64_t zoneSourceSamples = (phaseIncrement == kMaxSampleValue)
-						                                ? zoneOutputSamples
-						                                : ((zoneOutputSamples * (uint32_t)phaseIncrement) >> 24) + 1;
-						fadeZoneThresholdBytes =
-						    (int32_t)std::min(zoneSourceSamples * bytesPerSamp, (int64_t)INT32_MAX);
+						// Cheap proximity gate: skip the division-heavy exact computation while
+						// far from the boundary. Threshold is a conservative over-estimate of the
+						// fade zone (plus one max render window), recomputed only on pitch change.
+						if (phaseIncrement != fadeZoneLastPhaseIncrement
+						    || loopFadeInSamplesTotal != fadeZoneLastTotal) {
+							fadeZoneLastPhaseIncrement = phaseIncrement;
+							fadeZoneLastTotal = loopFadeInSamplesTotal;
+							int64_t zoneOutputSamples = (int64_t)loopFadeInSamplesTotal + SSI_TX_BUFFER_NUM_SAMPLES;
+							int64_t zoneSourceSamples =
+							    (phaseIncrement == kMaxSampleValue)
+							        ? zoneOutputSamples
+							        : ((zoneOutputSamples * (uint32_t)phaseIncrement) >> 24) + 1;
+							fadeZoneThresholdBytes =
+							    (int32_t)std::min(zoneSourceSamples * bytesPerSamp, (int64_t)INT32_MAX);
+						}
+
+						if (distBytes <= fadeZoneThresholdBytes) {
+							int32_t distSourceSamples = distBytes / bytesPerSamp;
+
+							if (phaseIncrement == kMaxSampleValue) {
+								distOutputSamples = distSourceSamples;
+							}
+							else {
+								distOutputSamples = ((int64_t)distSourceSamples << 24) / phaseIncrement;
+							}
+						}
+					}
+				}
+
+				{
+					// If the crossfade zone starts within this window, end the window
+					// exactly there, so the fade begins with its full length (starting
+					// it mid-window leaves it incomplete at the loop restart - an
+					// audible step every pass)
+					if (distOutputSamples > loopFadeInSamplesTotal
+					    && distOutputSamples - loopFadeInSamplesTotal < numSamplesThisNonTimestretchedRead) {
+						numSamplesThisNonTimestretchedRead = distOutputSamples - loopFadeInSamplesTotal;
 					}
 
-					if (distBytes <= fadeZoneThresholdBytes) {
-						int32_t distSourceSamples = distBytes / bytesPerSamp;
+					if (distOutputSamples >= 0 && distOutputSamples <= loopFadeInSamplesTotal) {
+						// Compute fade-out for main (uncached) read
+						int32_t scaleAtStart = fadeScaleQ31(distOutputSamples, loopFadeStepQ31);
 
-						int32_t distOutputSamples;
-						if (phaseIncrement == kMaxSampleValue) {
-							distOutputSamples = distSourceSamples;
+						int32_t distAfterRead = distOutputSamples - numSamplesThisNonTimestretchedRead;
+						if (distAfterRead < 0) {
+							distAfterRead = 0;
 						}
-						else {
-							distOutputSamples = ((int64_t)distSourceSamples << 24) / phaseIncrement;
-						}
+						int32_t scaleAtEnd = fadeScaleQ31(distAfterRead, loopFadeStepQ31);
 
-						// If the crossfade zone starts within this window, end the window
-						// exactly there, so the fade begins with its full length (starting
-						// it mid-window leaves it incomplete at the loop restart - an
-						// audible step every pass)
-						if (distOutputSamples > loopFadeInSamplesTotal
-						    && distOutputSamples - loopFadeInSamplesTotal < numSamplesThisNonTimestretchedRead) {
-							numSamplesThisNonTimestretchedRead = distOutputSamples - loopFadeInSamplesTotal;
-						}
+						int32_t ampAtStart = multiply_32x32_rshift32(renderAmplitude, scaleAtStart) << 1;
+						int32_t ampAtEnd =
+						    multiply_32x32_rshift32(renderAmplitude
+						                                + renderAmplitudeIncrement * numSamplesThisNonTimestretchedRead,
+						                            scaleAtEnd)
+						    << 1;
 
-						if (distOutputSamples >= 0 && distOutputSamples <= loopFadeInSamplesTotal) {
-							// Compute fade-out for main (uncached) read
-							int32_t scaleAtStart = fadeScaleQ31(distOutputSamples, loopFadeStepQ31);
+						renderAmplitude = ampAtStart;
+						renderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisNonTimestretchedRead;
 
-							int32_t distAfterRead = distOutputSamples - numSamplesThisNonTimestretchedRead;
-							if (distAfterRead < 0) {
-								distAfterRead = 0;
-							}
-							int32_t scaleAtEnd = fadeScaleQ31(distAfterRead, loopFadeStepQ31);
-
-							int32_t ampAtStart = multiply_32x32_rshift32(renderAmplitude, scaleAtStart) << 1;
-							int32_t ampAtEnd =
-							    multiply_32x32_rshift32(
-							        renderAmplitude + renderAmplitudeIncrement * numSamplesThisNonTimestretchedRead,
-							        scaleAtEnd)
-							    << 1;
-
-							renderAmplitude = ampAtStart;
-							renderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisNonTimestretchedRead;
-
-							// Activate crossfade-in from cache if cache has loop-start data
-							if (!crossfadeActive && cache && cache->writeBytePos > 0) {
-								crossfadeActive = true;
-								crossfadeCacheBytePos = cacheLoopStartPointBytes;
-								loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
-							}
+						// Activate crossfade-in from cache if cache has loop-start data
+						if (!crossfadeActive && cache && cache->writeBytePos > 0) {
+							crossfadeActive = true;
+							crossfadeCacheBytePos = cacheLoopStartPointBytes;
+							loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
 						}
 					}
 				}
