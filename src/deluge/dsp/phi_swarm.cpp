@@ -264,6 +264,7 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 	int32_t pull1 = 0;
 	int32_t pull2 = 0;
 	int32_t chase = 0;
+	q31_t beatGain = 0x7FFFFFFF;
 
 	for (int32_t n = 0; n < numSamples; n++) {
 		phase += phaseIncrement;
@@ -279,16 +280,24 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		if ((n & 3) == 0) {
 			psinD1 = couplingTriangle(thetaM - s1);
 			pull1 = multiply_32x32_rshift32(psinD1, k1mPhase) << 1;
+			// Beat gain rides the same subsample (it consumes psinD1, which
+			// only changes here); the wBeat ramp is coarse-grained with it
+			beatGain = (0x7FFFFFFF - wBeat) + multiply_32x32_rshift32(psinD1, wBeat);
 			pull2 = multiply_32x32_rshift32(couplingTriangle(thetaM - s2), k2mPhase) << 1;
 			chase = multiply_32x32_rshift32(couplingTriangle(s1 - s2), k12Phase) << 1;
 		}
 
 		// Temperature: Langevin phase noise, one LCG draw split across slaves
-		noiseState = noiseState * 1664525u + 1013904223u;
-		int32_t noise1 = multiply_32x32_rshift32(static_cast<int32_t>(noiseState), tempPhase) << 1;
-		int32_t noise2 = multiply_32x32_rshift32(static_cast<int32_t>(noiseState << 13 | noiseState >> 19), //<
-		                                         tempPhase)
-		                 << 1;
+		// (cold zones - Still with no anneal heat - skip the whole path)
+		int32_t noise1 = 0;
+		int32_t noise2 = 0;
+		if (tempPhase != 0) {
+			noiseState = noiseState * 1664525u + 1013904223u;
+			noise1 = multiply_32x32_rshift32(static_cast<int32_t>(noiseState), tempPhase) << 1;
+			noise2 = multiply_32x32_rshift32(static_cast<int32_t>(noiseState << 13 | noiseState >> 19), //<
+			                                 tempPhase)
+			         << 1;
+		}
 
 		inc1 += inc1Step;
 		inc2 += inc2Step;
@@ -321,7 +330,6 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		// slow-asymmetric when pulling, cycling when free) - breathe the
 		// output level with it so the phase drift is directly audible.
 		// gain in [1 - 2*wBeat, 1]: never clips
-		q31_t beatGain = (0x7FFFFFFF - wBeat) + multiply_32x32_rshift32(psinD1, wBeat);
 		out = multiply_32x32_rshift32(out, beatGain) << 1;
 
 		if (applyAmplitude) {

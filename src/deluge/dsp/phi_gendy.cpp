@@ -391,15 +391,26 @@ void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 	const uint32_t phaseWidth = pulseWidth ? (0xFFFFFFFF - (pulseWidth << 1)) : 0xFFFFFFFF;
 
-	// Tick crossfade ramp: prev polygon -> current polygon across this buffer
-	const q31_t tickFadeInc = 0x7FFFFFFF / numSamples;
+	// Tick crossfade: smoothstep advanced by forward differences (3 adds per
+	// sample; see PHI_WEAVE). The fade was plain-linear here before - the
+	// smoothstep shaping also brings GENDY's tick boundaries to C1 for free.
+	float hf = 1.0f / static_cast<float>(numSamples);
+	auto ss = [](float t) { return t * t * (3.0f - 2.0f * t); };
+	float y1 = ss(hf);
+	float y2 = ss(2.0f * hf);
+	float y3 = ss(3.0f * hf);
 	q31_t tickFade = 0;
+	q31_t fd1 = static_cast<q31_t>(y1 * 2147483647.0f);
+	q31_t fd2 = static_cast<q31_t>((y2 - 2.0f * y1) * 2147483647.0f);
+	const q31_t fd3 = static_cast<q31_t>((y3 - 3.0f * y2 + 3.0f * y1) * 2147483647.0f);
 
 	int32_t* thisSample = bufferStart;
 
 	for (int32_t n = 0; n < numSamples; n++) {
 		phase += phaseIncrement;
-		tickFade += tickFadeInc;
+		tickFade += fd1;
+		fd1 += fd2;
+		fd2 += fd3;
 		uint32_t evalPhase = phase + retriggerPhase;
 		if (applyAmplitude) {
 			amplitude += amplitudeIncrement;

@@ -471,14 +471,26 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 		}
 		const q31_t* nodesPrev = (seg == 0) ? tabPrev : tabMid;
 		const q31_t* nodes = (seg == 0) ? tabMid : tabCur;
-		const q31_t tickFadeInc = 0x7FFFFFFF / segLen;
+		// Smoothstep fade advanced by FORWARD DIFFERENCES: a cubic at fixed
+		// steps needs only 3 adds per sample (was 3 multiplies through
+		// smoothstepQ31); exact up to float->q31 rounding of the deltas
+		float hf = 1.0f / static_cast<float>(segLen);
+		auto ss = [](float t) { return t * t * (3.0f - 2.0f * t); };
+		float y1 = ss(hf);
+		float y2 = ss(2.0f * hf);
+		float y3 = ss(3.0f * hf);
 		q31_t tickFade = 0;
+		q31_t fd1 = static_cast<q31_t>(y1 * 2147483647.0f);
+		q31_t fd2 = static_cast<q31_t>((y2 - 2.0f * y1) * 2147483647.0f);
+		const q31_t fd3 = static_cast<q31_t>((y3 - 3.0f * y2 + 3.0f * y1) * 2147483647.0f);
 
 		if (applyAmplitude) {
 			for (int32_t n = segStart; n < segEnd; n++) {
 				phase += phaseIncrement;
 				amplitude += amplitudeIncrement;
-				tickFade += tickFadeInc;
+				tickFade += fd1;
+				fd1 += fd2;
+				fd2 += fd3;
 				travelAcc += travelInc;
 				uint32_t evalPhase = phase + travelAcc;
 
@@ -489,7 +501,7 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 				uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
 				q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-				q31_t waveform = scanString(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
+				q31_t waveform = scanString(nodes, nodesPrev, idx, frac31, tickFade);
 
 				*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, waveform, amplitude);
 				thisSample++;
@@ -498,7 +510,9 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 		else {
 			for (int32_t n = segStart; n < segEnd; n++) {
 				phase += phaseIncrement;
-				tickFade += tickFadeInc;
+				tickFade += fd1;
+				fd1 += fd2;
+				fd2 += fd3;
 				travelAcc += travelInc;
 				uint32_t evalPhase = phase + travelAcc;
 
@@ -510,7 +524,7 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 				uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
 				q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-				*thisSample = scanString(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
+				*thisSample = scanString(nodes, nodesPrev, idx, frac31, tickFade);
 				thisSample++;
 			}
 		}

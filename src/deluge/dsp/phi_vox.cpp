@@ -146,6 +146,7 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 			for (int32_t k = 0; k < kPhiVoxMaxPulses; k++) {
 				float g = cfInv * cache.bankA.formant[f].pulseGain[k] + cf * cache.bankB.formant[f].pulseGain[k];
 				cache.effPulseGain[f][k] = static_cast<q31_t>(g * 2147483647.0f);
+				cache.effPulseGainAbs[f][k] = static_cast<q31_t>(std::abs(g) * 2147483647.0f);
 				gainSum += g;
 			}
 			// DC compensation: mean of the burst = 0.5 * sum(gains) * (Tformant/Tnote).
@@ -261,15 +262,16 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 			out = add_saturate(out, multiply_32x32_rshift32(rc, gain) << 1);
 			// Envelope follows the GAINED pulse so noise stays inside the burst
 			// (silent gap stays silent - no hiss between glottal pulses)
-			q31_t gainAbs = (gain < 0) ? -gain : gain;
-			envelope = std::max(envelope, multiply_32x32_rshift32(rc, gainAbs) << 1);
+			envelope = std::max(envelope, multiply_32x32_rshift32(rc, cache.effPulseGainAbs[f][pulseIdx[f]]) << 1);
 		}
 
 		// Voiced-gated noise: breath + articulation bursts live inside the
 		// pulse envelope, so consonants articulate rather than hiss
-		noiseState = noiseState * 1664525u + 1013904223u;
-		q31_t noise = multiply_32x32_rshift32(static_cast<int32_t>(noiseState), voicedNoise);
-		out = add_saturate(out, multiply_32x32_rshift32(noise, envelope) << 1);
+		if (voicedNoise != 0) { // Breathless zones skip the whole noise path
+			noiseState = noiseState * 1664525u + 1013904223u;
+			q31_t noise = multiply_32x32_rshift32(static_cast<int32_t>(noiseState), voicedNoise);
+			out = add_saturate(out, multiply_32x32_rshift32(noise, envelope) << 1);
+		}
 
 		if (applyAmplitude) {
 			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, out, amplitude);

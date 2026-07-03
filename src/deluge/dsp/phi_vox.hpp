@@ -113,6 +113,7 @@ struct PhiVoxCache {
 	uint32_t effFormantInc[kPhiVoxNumFormants]{};
 	float effNoteRatio[kPhiVoxNumFormants]{};
 	q31_t effPulseGain[kPhiVoxNumFormants][kPhiVoxMaxPulses]{};
+	q31_t effPulseGainAbs[kPhiVoxNumFormants][kPhiVoxMaxPulses]{}; // For the noise-gate envelope
 	q31_t effVoicedNoise{};                  // breath + articulation burst, Q31, gated by pulse envelope in render
 	float effMeanComp[kPhiVoxNumFormants]{}; // DC compensation numerators (× noteInc/formantInc at render)
 
