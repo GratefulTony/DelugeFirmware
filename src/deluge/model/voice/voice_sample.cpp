@@ -58,6 +58,12 @@ static inline int32_t fadeScaleQ31(int32_t progress, int32_t stepQ31, int32_t sq
 	return (int32_t)(g * 2147483647.0f);
 }
 
+// Short fixed anti-click envelope for pingpong bounces: a reversal flips the waveform's
+// derivative (and no curve choice helps), so a brief symmetric dip masks the corner.
+// Deliberately independent of the loop-crossfade length - a bounce is not a crossfade.
+constexpr int32_t kPingpongBounceFadeSamples = 128;
+constexpr int32_t kPingpongBounceFadeStepQ31 = 0x7FFFFFFF / kPingpongBounceFadeSamples;
+
 void VoiceSample::beenUnassigned(bool wontBeUsedAgain) {
 	unassignAllReasons(wontBeUsedAgain);
 	endTimeStretching();
@@ -81,6 +87,7 @@ void VoiceSample::noteOn(SamplePlaybackGuide* guide, uint32_t samplesLate, int32
 	crossfadeCacheBytePos = 0;
 	crossfadeCurveBlendQ31 = 0x40000000; // 50/50 compromise until measured
 	crossfadeCurveMeasured = false;
+	pingpongBounceFadeRemaining = 0;
 	cacheHandoffPending = false;
 	justLoopedBack = false;
 	pingpongPlayDirection = guide->playDirection;
@@ -782,9 +789,11 @@ readCachedWindow:
 			if (bytesTilLoopEndPoint <= 0) {
 				D_PRINTLN("Loop endpoint reached, reading cache");
 				if (pingpongCacheMode) {
-					// Pingpong: bounce backward from loop end
+					// Pingpong: bounce backward from loop end. Skip the endpoint frame -
+					// the forward leg just played it (playing it twice smears the mirror).
 					cachePlayDirection = -1;
-					cacheBytePos = cacheLoopEndPointBytes - frameSizeBytes;
+					cacheBytePos = cacheLoopEndPointBytes - 2 * frameSizeBytes;
+					pingpongBounceFadeRemaining = kPingpongBounceFadeSamples;
 				}
 				else {
 					// Normal loop: if crossfade was active, take over from crossfade head
@@ -797,9 +806,6 @@ readCachedWindow:
 						cacheBytePos -= cacheLoopLengthBytes;
 					}
 				}
-				if (pingpongCacheMode && loopFadeInSamplesTotal > 0) {
-					loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
-				}
 				goto readCachedWindow;
 			}
 		}
@@ -807,11 +813,10 @@ readCachedWindow:
 			// Backward (pingpong): check loop start point
 			if (cacheBytePos <= cacheLoopStartPointBytes) {
 				D_PRINTLN("Loop start reached (pingpong), reading cache");
+				// Skip the start frame - the backward leg just played it
 				cachePlayDirection = 1;
-				cacheBytePos = cacheLoopStartPointBytes;
-				if (loopFadeInSamplesTotal > 0) {
-					loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
-				}
+				cacheBytePos = cacheLoopStartPointBytes + frameSizeBytes;
+				pingpongBounceFadeRemaining = kPingpongBounceFadeSamples;
 				goto readCachedWindow;
 			}
 			// For crossfade fade-out: distance to loop start boundary when going backward
@@ -1011,8 +1016,41 @@ readCachedWindow:
 				loopFadeInSamplesRemaining = 0;
 			}
 		}
+		else if (pingpongCacheMode
+		         && (pingpongBounceFadeRemaining > 0
+		             || bytesTilLoopEndPoint <= (kPingpongBounceFadeSamples + 1) * frameSizeBytes)) {
+			// Anti-click envelope around pingpong bounces: a short symmetric dip built
+			// from min(frames since last bounce, frames until next bounce), independent
+			// of the loop-crossfade setting. bytesTilLoopEndPoint holds the distance to
+			// the upcoming bounce in both directions.
+			int32_t distFrames = (int32_t)((uint32_t)bytesTilLoopEndPoint / (uint8_t)frameSizeBytes);
+			int32_t sinceFrames = kPingpongBounceFadeSamples - pingpongBounceFadeRemaining;
+
+			int32_t envStartFrames = std::min(distFrames, sinceFrames);
+			int32_t envEndFrames =
+			    std::min(distFrames - numSamplesThisCacheRead, sinceFrames + numSamplesThisCacheRead);
+			if (envEndFrames < 0) {
+				envEndFrames = 0;
+			}
+
+			int32_t scaleStart =
+			    (int32_t)std::min((int64_t)envStartFrames * kPingpongBounceFadeStepQ31, (int64_t)0x7FFFFFFF);
+			int32_t scaleEnd =
+			    (int32_t)std::min((int64_t)envEndFrames * kPingpongBounceFadeStepQ31, (int64_t)0x7FFFFFFF);
+
+			int32_t ampAtStart = multiply_32x32_rshift32(amplitude, scaleStart) << 1;
+			int32_t ampAtEnd =
+			    multiply_32x32_rshift32(amplitude + amplitudeIncrement * numSamplesThisCacheRead, scaleEnd) << 1;
+			cacheRenderAmplitude = ampAtStart;
+			cacheRenderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisCacheRead;
+
+			pingpongBounceFadeRemaining -= numSamplesThisCacheRead;
+			if (pingpongBounceFadeRemaining < 0) {
+				pingpongBounceFadeRemaining = 0;
+			}
+		}
 		else if (loopFadeInSamplesRemaining > 0) {
-			// Non-crossfade fade-in (pingpong or other cases)
+			// Non-crossfade fade-in (restart cases)
 			int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
 			int32_t fadeStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31, crossfadeCurveBlendQ31);
 			int32_t fadeEnd =
