@@ -157,10 +157,15 @@ struct PhiWeaveCache {
 	// smoothed string so spatial zigzag modes don't fold past Nyquist)
 	q31_t nodeQMip1[kPhiWeaveNumNodes + 3]{};
 	q31_t nodeQMip2[kPhiWeaveNumNodes + 3]{};
-	// Previous tick's tables: the render crossfades prev -> current across
-	// each buffer so the string moves continuously instead of stepping once
-	// per tick (the per-buffer step sprayed ~344Hz sidebands around every
-	// partial - it read as aliasing at all pitches)
+	// The physics runs TWO half-dt sub-ticks per buffer; the render crossfades
+	// prev -> mid over the first half of the buffer and mid -> current over
+	// the second (each segment smoothstep-shaped, so node motion is C1 at
+	// every join). Without this the string's state stepped at the buffer rate
+	// - audible hash, worst on low notes in stiff/bowed zones whose fast
+	// modes sit near the tick-rate Nyquist.
+	q31_t nodeQMid[kPhiWeaveNumNodes + 3]{};
+	q31_t nodeQMidMip1[kPhiWeaveNumNodes + 3]{};
+	q31_t nodeQMidMip2[kPhiWeaveNumNodes + 3]{};
 	q31_t nodeQPrev[kPhiWeaveNumNodes + 3]{};
 	q31_t nodeQMip1Prev[kPhiWeaveNumNodes + 3]{};
 	q31_t nodeQMip2Prev[kPhiWeaveNumNodes + 3]{};

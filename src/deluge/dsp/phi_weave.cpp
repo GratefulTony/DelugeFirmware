@@ -129,7 +129,13 @@ PhiWeaveParams buildPhiWeaveParams(uint16_t zone, float phaseOffset) {
 
 namespace {
 
-void tickPhiWeave(PhiWeaveCache& cache, float cf) {
+// One physics sub-tick at HALF the original per-buffer dt: spring constants
+// scale by 1/4 (dt^2), first-order terms (damping, bow/travel rates, velocity
+// bounds) by 1/2, AGC release by its square root. The string's audible mode
+// frequencies and decay are unchanged - but its motion is sampled at ~688 Hz
+// instead of ~344 Hz, pushing tick-sampling images of fast modes up an octave
+// and halving their amplitude. Returns the AGC output scale.
+float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 	const PhiWeaveParams& a = cache.bankA;
 	const PhiWeaveParams& b = cache.bankB;
 	float cfInv = 1.0f - cf;
@@ -150,8 +156,8 @@ void tickPhiWeave(PhiWeaveCache& cache, float cf) {
 	float travelRate = cfInv * a.travelRate + cf * b.travelRate;
 	float outGain = cfInv * a.outGain + cf * b.outGain;
 
-	// Bow oscillation (triangle, cheap)
-	cache.bowPhase += bowRate;
+	// Bow oscillation (triangle, cheap; half-dt rate)
+	cache.bowPhase += bowRate * 0.5f;
 	if (cache.bowPhase >= 1.0f) {
 		cache.bowPhase -= 1.0f;
 	}
@@ -203,9 +209,10 @@ void tickPhiWeave(PhiWeaveCache& cache, float cf) {
 		float noise = static_cast<float>(static_cast<int32_t>(cache.noiseState)) * (1.0f / 2147483648.0f);
 		bowForce += noise * morphBow * 0.02f;
 
-		float accel = c * (xm1 + xp1 - 2.0f * x[i]) - k * (x[i] - home) - d * v[i] + bowForce;
+		// Half-dt scalings: spring terms and forcing x1/4, damping x1/2
+		float accel = 0.25f * (c * (xm1 + xp1 - 2.0f * x[i]) - k * (x[i] - home) + bowForce) - 0.5f * d * v[i];
 		v[i] += accel;
-		v[i] = std::clamp(v[i], -kPhiWeaveMaxVelocity, kPhiWeaveMaxVelocity);
+		v[i] = std::clamp(v[i], -kPhiWeaveMaxVelocity * 0.5f, kPhiWeaveMaxVelocity * 0.5f);
 	}
 
 	// Position update after all accelerations (keeps neighbor reads consistent)
@@ -218,11 +225,11 @@ void tickPhiWeave(PhiWeaveCache& cache, float cf) {
 	// Slow AGC: normalize output so quiet zones (soft home shapes, heavy
 	// damping) and violent ones land at comparable loudness. Attack instant,
 	// release ~1.5s of ticks.
-	cache.agcPeak = std::max(peak, cache.agcPeak * 0.998f);
+	cache.agcPeak = std::max(peak, cache.agcPeak * 0.999f); // sqrt(0.998) per half-dt step
 	float scale = outGain * kPhiWeaveRefAmplitude / std::max(cache.agcPeak, 0.35f);
 
-	// Ring rotation under the scan head
-	cache.travelPhase += travelRate;
+	// Ring rotation under the scan head (half-dt rate)
+	cache.travelPhase += travelRate * 0.5f;
 	if (cache.travelPhase >= 1.0f) {
 		cache.travelPhase -= 1.0f;
 	}
@@ -231,22 +238,21 @@ void tickPhiWeave(PhiWeaveCache& cache, float cf) {
 	}
 	cache.travelOffset = static_cast<uint32_t>(cache.travelPhase * 4294967296.0);
 
-	// Snapshot the outgoing tables: this tick's render crossfades from them
-	memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
-	memcpy(cache.nodeQMip1Prev, cache.nodeQMip1, sizeof(cache.nodeQMip1Prev));
-	memcpy(cache.nodeQMip2Prev, cache.nodeQMip2, sizeof(cache.nodeQMip2Prev));
+	return scale;
+}
 
+void buildPhiWeaveTables(PhiWeaveCache& cache, float scale, q31_t* t0, q31_t* t1, q31_t* t2) {
 	for (int32_t i = 0; i < kPhiWeaveNumNodes; i++) {
-		float s = x[i] * scale;
+		float s = cache.x[i] * scale;
 		s = std::clamp(s, -2147483000.0f, 2147483000.0f);
-		cache.nodeQ[i + 1] = static_cast<q31_t>(s);
+		t0[i + 1] = static_cast<q31_t>(s);
 	}
 	auto pad = [](q31_t* t) {
 		t[0] = t[kPhiWeaveNumNodes];
 		t[kPhiWeaveNumNodes + 1] = t[1];
 		t[kPhiWeaveNumNodes + 2] = t[2];
 	};
-	pad(cache.nodeQ);
+	pad(t0);
 
 	// Anti-aliasing mips: circular 3-tap binomial smoothing. One pass nulls
 	// the spatial Nyquist (adjacent-node zigzag) entirely; the second clears
@@ -260,13 +266,29 @@ void tickPhiWeave(PhiWeaveCache& cache, float cf) {
 		}
 		pad(dst);
 	};
-	binomial(cache.nodeQ, cache.nodeQMip1);
-	binomial(cache.nodeQMip1, cache.nodeQMip2);
+	binomial(t0, t1);
+	binomial(t1, t2);
+}
+
+// Per audio buffer: two physics sub-ticks, building the mid and current table
+// sets; the render crossfades prev -> mid -> current across the buffer
+void tickPhiWeave(PhiWeaveCache& cache, float cf) {
+	memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
+	memcpy(cache.nodeQMip1Prev, cache.nodeQMip1, sizeof(cache.nodeQMip1Prev));
+	memcpy(cache.nodeQMip2Prev, cache.nodeQMip2, sizeof(cache.nodeQMip2Prev));
+
+	float scaleMid = stepPhiWeavePhysics(cache, cf);
+	buildPhiWeaveTables(cache, scaleMid, cache.nodeQMid, cache.nodeQMidMip1, cache.nodeQMidMip2);
+	float scaleCur = stepPhiWeavePhysics(cache, cf);
+	buildPhiWeaveTables(cache, scaleCur, cache.nodeQ, cache.nodeQMip1, cache.nodeQMip2);
 
 	if (!cache.tablesValid) { // First tick: nothing to fade from
 		memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
 		memcpy(cache.nodeQMip1Prev, cache.nodeQMip1, sizeof(cache.nodeQMip1Prev));
 		memcpy(cache.nodeQMip2Prev, cache.nodeQMip2, sizeof(cache.nodeQMip2Prev));
+		memcpy(cache.nodeQMid, cache.nodeQ, sizeof(cache.nodeQMid));
+		memcpy(cache.nodeQMidMip1, cache.nodeQMip1, sizeof(cache.nodeQMidMip1));
+		memcpy(cache.nodeQMidMip2, cache.nodeQMip2, sizeof(cache.nodeQMidMip2));
 		cache.tablesValid = true;
 	}
 }
@@ -341,64 +363,77 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 	// Pitch-adaptive table select: ~700 Hz and ~1800 Hz fundamentals
 	// (phase-increment thresholds at 44.1kHz; the Catmull-Rom scan's sinc^4
 	// image rolloff lets full detail run higher than linear scanning did)
-	const q31_t* nodes = cache.nodeQ;
-	const q31_t* nodesPrev = cache.nodeQPrev;
+	const q31_t* tabPrev = cache.nodeQPrev;
+	const q31_t* tabMid = cache.nodeQMid;
+	const q31_t* tabCur = cache.nodeQ;
 	if (phaseIncrement > 175304787u) {
-		nodes = cache.nodeQMip2;
-		nodesPrev = cache.nodeQMip2Prev;
+		tabPrev = cache.nodeQMip2Prev;
+		tabMid = cache.nodeQMidMip2;
+		tabCur = cache.nodeQMip2;
 	}
 	else if (phaseIncrement > 68174083u) {
-		nodes = cache.nodeQMip1;
-		nodesPrev = cache.nodeQMip1Prev;
+		tabPrev = cache.nodeQMip1Prev;
+		tabMid = cache.nodeQMidMip1;
+		tabCur = cache.nodeQMip1;
 	}
 
-	// Tick crossfade ramp: prev table -> current table across this buffer.
-	// The ramp is SHAPED with a smoothstep at use: a linear fade is C0 but
-	// its slope snaps at every buffer boundary (~344 Hz corners = residual
-	// "buffer rate hash"); smoothstep has zero slope at both ends, so node
-	// trajectories are C1 through the boundary.
-	const q31_t tickFadeInc = 0x7FFFFFFF / numSamples;
-	q31_t tickFade = 0;
-
+	// Two crossfade segments per buffer, one per physics sub-tick:
+	// prev -> mid over the first half, mid -> current over the second. Each
+	// ramp is smoothstep-shaped (zero slope at the ends), so node motion is
+	// C1 at every join and at buffer boundaries.
 	int32_t* thisSample = bufferStart;
+	int32_t segStart = 0;
 
-	if (applyAmplitude) {
-		for (int32_t n = 0; n < numSamples; n++) {
-			phase += phaseIncrement;
-			amplitude += amplitudeIncrement;
-			tickFade += tickFadeInc;
-			uint32_t evalPhase = phase + scanOffset;
-
-			if (evalPhase > phaseWidth) {
-				thisSample++;
-				continue;
-			}
-
-			uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
-			q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-			q31_t waveform = scanCatmullRom(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
-
-			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, waveform, amplitude);
-			thisSample++;
+	for (int32_t seg = 0; seg < 2; seg++) {
+		int32_t segEnd = (seg == 0) ? (numSamples >> 1) : numSamples;
+		int32_t segLen = segEnd - segStart;
+		if (segLen <= 0) {
+			continue;
 		}
-	}
-	else {
-		for (int32_t n = 0; n < numSamples; n++) {
-			phase += phaseIncrement;
-			tickFade += tickFadeInc;
-			uint32_t evalPhase = phase + scanOffset;
+		const q31_t* nodesPrev = (seg == 0) ? tabPrev : tabMid;
+		const q31_t* nodes = (seg == 0) ? tabMid : tabCur;
+		const q31_t tickFadeInc = 0x7FFFFFFF / segLen;
+		q31_t tickFade = 0;
 
-			if (evalPhase > phaseWidth) {
-				*thisSample = 0;
+		if (applyAmplitude) {
+			for (int32_t n = segStart; n < segEnd; n++) {
+				phase += phaseIncrement;
+				amplitude += amplitudeIncrement;
+				tickFade += tickFadeInc;
+				uint32_t evalPhase = phase + scanOffset;
+
+				if (evalPhase > phaseWidth) {
+					thisSample++;
+					continue;
+				}
+
+				uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
+				q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
+				q31_t waveform = scanCatmullRom(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
+
+				*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, waveform, amplitude);
 				thisSample++;
-				continue;
 			}
-
-			uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
-			q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-			*thisSample = scanCatmullRom(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
-			thisSample++;
 		}
+		else {
+			for (int32_t n = segStart; n < segEnd; n++) {
+				phase += phaseIncrement;
+				tickFade += tickFadeInc;
+				uint32_t evalPhase = phase + scanOffset;
+
+				if (evalPhase > phaseWidth) {
+					*thisSample = 0;
+					thisSample++;
+					continue;
+				}
+
+				uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
+				q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
+				*thisSample = scanCatmullRom(nodes, nodesPrev, idx, frac31, smoothstepQ31(tickFade));
+				thisSample++;
+			}
+		}
+		segStart = segEnd;
 	}
 
 	*startPhase = phaseAtEnd;
