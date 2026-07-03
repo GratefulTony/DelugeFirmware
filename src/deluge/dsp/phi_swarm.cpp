@@ -45,8 +45,11 @@ namespace {
 // Zone anchors (Still, Drift, Pull, Swarm, Flock, Surge, Fray, Chaos).
 // Ratios sit on / near / far-from Arnold tongues; couplings and temperature
 // trace the path from crystalline lock to melted noise.
-constexpr float kAnchorRatio1[8] = {1.000f, 1.004f, 1.022f, 1.618f, 1.260f, 1.720f, 2.330f, 1.414f};
-constexpr float kAnchorRatio2[8] = {2.000f, 1.997f, 1.508f, 2.618f, 1.190f, 3.110f, 3.870f, 2.236f};
+// Anchors nudged toward simple rationals for pitch focus (5/4, 7/4, 9/4,
+// 3/1, 4/1); Swarm keeps its phi pair and Chaos its irrationals - those
+// zones' identities ARE off-pitch
+constexpr float kAnchorRatio1[8] = {1.000f, 1.004f, 1.022f, 1.618f, 1.250f, 1.750f, 2.250f, 1.414f};
+constexpr float kAnchorRatio2[8] = {2.000f, 1.997f, 1.508f, 2.618f, 1.200f, 3.000f, 4.000f, 2.236f};
 constexpr float kAnchorKM[8] = {0.0200f, 0.0022f, 0.0080f, 0.0060f, 0.0015f, 0.0080f, 0.0025f, 0.1200f};
 constexpr float kAnchorK12[8] = {0.0020f, 0.0010f, 0.0020f, 0.0060f, 0.0250f, 0.0080f, 0.0040f, 0.0600f};
 constexpr float kAnchorTemp[8] = {0.0000f, 0.0003f, 0.0007f, 0.0020f, 0.0015f, 0.0090f, 0.0220f, 0.0550f};
@@ -73,10 +76,13 @@ PhiSwarmParams buildPhiSwarmParams(uint16_t zone, float phaseOffset) {
 	// Ratio wander: multiplicative, up to ~+/-6% - enough to cross a tongue
 	// boundary (lock <-> pull <-> quasiperiodic) without leaving the anchor's
 	// musical neighborhood
+	// Wander tightened from +/-0.085 oct: slaves stay near harmonic ratios,
+	// so unlocked zones read as slow beating around the pitch instead of
+	// freely-detuned partials
 	float r1 =
-	    lerpAnchor(kAnchorRatio1, zf, zi) * std::exp2(phi::evalTriangle(phase, 1.0f, kPhiSwarmRatio1Wander) * 0.085f);
+	    lerpAnchor(kAnchorRatio1, zf, zi) * std::exp2(phi::evalTriangle(phase, 1.0f, kPhiSwarmRatio1Wander) * 0.040f);
 	float r2 =
-	    lerpAnchor(kAnchorRatio2, zf, zi) * std::exp2(phi::evalTriangle(phase, 1.0f, kPhiSwarmRatio2Wander) * 0.085f);
+	    lerpAnchor(kAnchorRatio2, zf, zi) * std::exp2(phi::evalTriangle(phase, 1.0f, kPhiSwarmRatio2Wander) * 0.040f);
 	p.ratio1FP = static_cast<uint32_t>(std::clamp(r1, 0.25f, 8.0f) * 65536.0f);
 	p.ratio2FP = static_cast<uint32_t>(std::clamp(r2, 0.25f, 8.0f) * 65536.0f);
 
