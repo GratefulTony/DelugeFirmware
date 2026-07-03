@@ -231,6 +231,11 @@ void tickPhiWeave(PhiWeaveCache& cache, float cf) {
 	}
 	cache.travelOffset = static_cast<uint32_t>(cache.travelPhase * 4294967296.0);
 
+	// Snapshot the outgoing tables: this tick's render crossfades from them
+	memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
+	memcpy(cache.nodeQMip1Prev, cache.nodeQMip1, sizeof(cache.nodeQMip1Prev));
+	memcpy(cache.nodeQMip2Prev, cache.nodeQMip2, sizeof(cache.nodeQMip2Prev));
+
 	for (int32_t i = 0; i < kPhiWeaveNumNodes; i++) {
 		float s = x[i] * scale;
 		s = std::clamp(s, -2147483000.0f, 2147483000.0f);
@@ -254,6 +259,13 @@ void tickPhiWeave(PhiWeaveCache& cache, float cf) {
 	binomial(cache.nodeQ, cache.nodeQMip1);
 	binomial(cache.nodeQMip1, cache.nodeQMip2);
 	binomial(cache.nodeQMip2, cache.nodeQMip2);
+
+	if (!cache.tablesValid) { // First tick: nothing to fade from
+		memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
+		memcpy(cache.nodeQMip1Prev, cache.nodeQMip1, sizeof(cache.nodeQMip1Prev));
+		memcpy(cache.nodeQMip2Prev, cache.nodeQMip2, sizeof(cache.nodeQMip2Prev));
+		cache.tablesValid = true;
+	}
 }
 
 } // namespace
@@ -293,18 +305,27 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 	// Pitch-adaptive table select: ~500 Hz and ~1200 Hz fundamentals
 	// (phase-increment thresholds at 44.1kHz)
 	const q31_t* nodes = cache.nodeQ;
+	const q31_t* nodesPrev = cache.nodeQPrev;
 	if (phaseIncrement > 116869858u) {
 		nodes = cache.nodeQMip2;
+		nodesPrev = cache.nodeQMip2Prev;
 	}
 	else if (phaseIncrement > 48695774u) {
 		nodes = cache.nodeQMip1;
+		nodesPrev = cache.nodeQMip1Prev;
 	}
+
+	// Tick crossfade ramp: prev table -> current table across this buffer
+	const q31_t tickFadeInc = 0x7FFFFFFF / numSamples;
+	q31_t tickFade = 0;
+
 	int32_t* thisSample = bufferStart;
 
 	if (applyAmplitude) {
 		for (int32_t n = 0; n < numSamples; n++) {
 			phase += phaseIncrement;
 			amplitude += amplitudeIncrement;
+			tickFade += tickFadeInc;
 			uint32_t evalPhase = phase + scanOffset;
 
 			if (evalPhase > phaseWidth) {
@@ -314,9 +335,11 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 			uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
 			q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-			q31_t base = nodes[idx];
-			q31_t delta = nodes[idx + 1] - base;
-			q31_t waveform = base + (multiply_32x32_rshift32(delta, frac31) << 1);
+			q31_t baseP = nodesPrev[idx];
+			q31_t wPrev = baseP + (multiply_32x32_rshift32(nodesPrev[idx + 1] - baseP, frac31) << 1);
+			q31_t baseC = nodes[idx];
+			q31_t wCur = baseC + (multiply_32x32_rshift32(nodes[idx + 1] - baseC, frac31) << 1);
+			q31_t waveform = wPrev + (multiply_32x32_rshift32(wCur - wPrev, tickFade) << 1);
 
 			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, waveform, amplitude);
 			thisSample++;
@@ -325,6 +348,7 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 	else {
 		for (int32_t n = 0; n < numSamples; n++) {
 			phase += phaseIncrement;
+			tickFade += tickFadeInc;
 			uint32_t evalPhase = phase + scanOffset;
 
 			if (evalPhase > phaseWidth) {
@@ -335,9 +359,11 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 			uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
 			q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-			q31_t base = nodes[idx];
-			q31_t delta = nodes[idx + 1] - base;
-			*thisSample = base + (multiply_32x32_rshift32(delta, frac31) << 1);
+			q31_t baseP = nodesPrev[idx];
+			q31_t wPrev = baseP + (multiply_32x32_rshift32(nodesPrev[idx + 1] - baseP, frac31) << 1);
+			q31_t baseC = nodes[idx];
+			q31_t wCur = baseC + (multiply_32x32_rshift32(nodes[idx + 1] - baseC, frac31) << 1);
+			*thisSample = wPrev + (multiply_32x32_rshift32(wCur - wPrev, tickFade) << 1);
 			thisSample++;
 		}
 	}

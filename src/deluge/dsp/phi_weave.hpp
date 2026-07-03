@@ -154,6 +154,14 @@ struct PhiWeaveCache {
 	// smoothed string so spatial zigzag modes don't fold past Nyquist)
 	q31_t nodeQMip1[kPhiWeaveNumNodes + 1]{};
 	q31_t nodeQMip2[kPhiWeaveNumNodes + 1]{};
+	// Previous tick's tables: the render crossfades prev -> current across
+	// each buffer so the string moves continuously instead of stepping once
+	// per tick (the per-buffer step sprayed ~344Hz sidebands around every
+	// partial - it read as aliasing at all pitches)
+	q31_t nodeQPrev[kPhiWeaveNumNodes + 1]{};
+	q31_t nodeQMip1Prev[kPhiWeaveNumNodes + 1]{};
+	q31_t nodeQMip2Prev[kPhiWeaveNumNodes + 1]{};
+	bool tablesValid{false};
 
 	// IIR-smoothed crossfade, advanced once per buffer by the caller (same
 	// convention as PhiMorphCache)
