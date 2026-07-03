@@ -129,7 +129,7 @@ PhiGendyParams buildPhiGendyParams(uint16_t zone, float phaseOffset) {
 
 namespace {
 
-void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade) {
+void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement) {
 	float cf = std::clamp(static_cast<float>(crossfade) / 2147483648.0f + 0.5f, 0.0f, 1.0f);
 	float cfInv = 1.0f - cf;
 
@@ -168,9 +168,13 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade) {
 			wi = 1.0f / 16.0f;
 		}
 	}
-	// Intermittency: startle raises the jump probability (gestures = flurries)
+	// Intermittency: startle raises the jump probability (gestures = flurries).
+	// The rate scales with PITCH (reference C3), so the character is snaps
+	// per waveform cycle, not per second - consistent across the keyboard.
+	// (Shared walk: with a chord, the first-ticking voice sets the rate.)
+	float pitchScale = static_cast<float>(phaseIncrement) * (1.0f / 12742000.0f);
 	float jumpProb = cfInv * cache.bankA.jumpProb + cf * cache.bankB.jumpProb;
-	jumpProb = std::min(0.8f, jumpProb + cache.startleEnv * 2.0f);
+	jumpProb = std::min(0.8f, jumpProb * pitchScale + cache.startleEnv * 2.0f);
 	uint32_t jumpGate = static_cast<uint32_t>(jumpProb * 4294967295.0f);
 
 	float wSum = 0.0f;
@@ -297,7 +301,7 @@ void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferE
 	// Advance the walk once per audio buffer, shared across voices/unison
 	if (AudioEngine::audioSampleTimer != cache.lastTickTime) {
 		cache.lastTickTime = AudioEngine::audioSampleTimer;
-		tickPhiGendy(cache, crossfade);
+		tickPhiGendy(cache, crossfade, phaseIncrement);
 	}
 
 	uint32_t phase = *startPhase;
