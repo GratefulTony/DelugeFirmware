@@ -74,6 +74,15 @@ PhiGendyParams buildPhiGendyParams(uint16_t zone, float phaseOffset) {
 
 	p.startleGain = 0.03f + phi::evalTriangle(phase, 1.0f, kPhiGendyStartle) * 0.25f;
 
+	// Duration walk: step exponential 0.0008..0.032 (lurch rate); barriers
+	// widen with range t so narrow segments can approach spikes at the top
+	float wStepT = phi::evalTriangle(phase, 1.0f, kPhiGendyWidthStep);
+	p.widthStep = 0.0008f * std::pow(40.0f, wStepT);
+	float wRangeT = phi::evalTriangle(phase, 1.0f, kPhiGendyWidthRange);
+	float range = 0.25f + wRangeT * 0.60f; // 0.25..0.85
+	p.widthMin = (1.0f - range) * (1.0f / 16.0f);
+	p.widthMax = (1.0f + 2.0f * range) * (1.0f / 16.0f);
+
 	// Home shape: low phi partials over the polygon
 	float p1 = phi::evalTriangle(phase, 1.0f, kPhiGendyHomeP1) * 0.9f;
 	float p2 = phi::evalTriangle(phase, 1.0f, kPhiGendyHomeP2) * 0.6f;
@@ -143,6 +152,39 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade) {
 	uint32_t noise = cache.noiseState;
 	float mean = 0.0f;
 
+	// Duration walk: widths take their own second-order step in elastic
+	// barriers, startled by the same morph kicks, then renormalize so the
+	// cycle length (pitch) stays exact
+	float wStep = cfInv * cache.bankA.widthStep + cf * cache.bankB.widthStep;
+	float wMin = cfInv * cache.bankA.widthMin + cf * cache.bankB.widthMin;
+	float wMax = cfInv * cache.bankA.widthMax + cf * cache.bankB.widthMax;
+	if (!cache.widthsInit) {
+		cache.widthsInit = true;
+		for (float& wi : cache.w) {
+			wi = 1.0f / 16.0f;
+		}
+	}
+	float wSum = 0.0f;
+	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
+		noise = noise * 1664525u + 1013904223u;
+		float r = static_cast<float>(static_cast<int32_t>(noise)) * (1.0f / 2147483648.0f);
+		float vel = cache.vw[i] + wStep * r + cache.startleEnv * r * 0.06f + homePull * ((1.0f / 16.0f) - cache.w[i]);
+		vel = std::clamp(vel, -0.02f, 0.02f);
+		float wi = cache.w[i] + vel;
+		if (wi > wMax) {
+			wi = wMax + wMax - wi;
+			vel = -vel * 0.7f;
+		}
+		if (wi < wMin) {
+			wi = wMin + wMin - wi;
+			vel = -vel * 0.7f;
+		}
+		cache.w[i] = std::clamp(wi, wMin, wMax);
+		cache.vw[i] = vel;
+		wSum += cache.w[i];
+	}
+	float wNorm = 1.0f / wSum;
+
 	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
 		// Walk LAWS morph; walker STATE persists (click-free by construction)
 		float step = cfInv * cache.bankA.step[i] + cf * cache.bankB.step[i];
@@ -180,11 +222,29 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade) {
 	cache.noiseState = noise;
 	mean *= 1.0f / static_cast<float>(kPhiGendyNumNodes);
 
+	// Resample the variable-width polygon onto the uniform scan grid: the
+	// duration walk lives entirely at tick time; the render's cheap uniform
+	// lerp (and the de-zipper crossfade) are unchanged
 	memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
-	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
-		cache.nodeQ[i] = static_cast<q31_t>((cache.a[i] - mean) * kGendyOutGain * kGendyRefAmplitude);
+	float scale = kGendyOutGain * kGendyRefAmplitude;
+	int32_t seg = 0;
+	float segStart = 0.0f;
+	float segWidth = cache.w[0] * wNorm;
+	float invSegWidth = 1.0f / segWidth;
+	for (int32_t j = 0; j < kPhiGendyScanNodes; j++) {
+		float u = static_cast<float>(j) * (1.0f / static_cast<float>(kPhiGendyScanNodes));
+		while (u >= segStart + segWidth && seg < kPhiGendyNumNodes - 1) {
+			segStart += segWidth;
+			seg++;
+			segWidth = cache.w[seg] * wNorm;
+			invSegWidth = 1.0f / segWidth;
+		}
+		float frac = (u - segStart) * invSegWidth;
+		float a0 = cache.a[seg] - mean;
+		float a1 = cache.a[(seg + 1) & (kPhiGendyNumNodes - 1)] - mean;
+		cache.nodeQ[j] = static_cast<q31_t>((a0 + (a1 - a0) * std::min(frac, 1.0f)) * scale);
 	}
-	cache.nodeQ[kPhiGendyNumNodes] = cache.nodeQ[0];
+	cache.nodeQ[kPhiGendyScanNodes] = cache.nodeQ[0];
 	if (!cache.tablesValid) { // First tick: nothing to fade from
 		memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
 		cache.tablesValid = true;
@@ -245,9 +305,9 @@ void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferE
 			continue;
 		}
 
-		// Linear scan between breakpoints of both polygons, then tick lerp
+		// Linear scan between scan-grid slots of both polygons, then tick lerp
 		uint32_t idx = evalPhase >> kPhiGendyNodeShift;
-		q31_t frac31 = static_cast<q31_t>((evalPhase & 0x0FFFFFFF) << 3);
+		q31_t frac31 = static_cast<q31_t>((evalPhase & 0x03FFFFFF) << 5);
 		q31_t baseP = cache.nodeQPrev[idx];
 		q31_t wPrev = baseP + (multiply_32x32_rshift32(cache.nodeQPrev[idx + 1] - baseP, frac31) << 1);
 		q31_t baseC = cache.nodeQ[idx];

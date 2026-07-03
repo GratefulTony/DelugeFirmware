@@ -14,7 +14,9 @@ walkers in a cage.
 - Serra, M.-H. **"Stochastic Composition and Stochastic Timbre: GENDY3 by Iannis
   Xenakis."** *Computer Music Journal* 17(1), 1993. — The definitive technical analysis.
 - Hoffmann, P. **"The New GENDYN Program."** *Computer Music Journal* 24(2), 2000. — The
-  reconstruction whose algorithm this implementation follows (minus duration walks).
+  reconstruction whose algorithm this implementation follows — including duration walks,
+  which here renormalize total cycle length each tick so pitch stays locked while the
+  harmonic skeleton lurches.
 - Luque, S. **"The Stochastic Synthesis of Iannis Xenakis."** *Leonardo Music Journal*
   19, 2009. — Historical and musical context.
 
@@ -30,10 +32,14 @@ a[i] += v[i] + homePull*(home[i] - a[i])
 reflect a[i] off [barrierLo[i], barrierHi[i]], bleeding momentum
 ```
 
-Voices scan the current polygon at their note pitch (the same branch-free lerp skeleton
-as PHI_WEAVE). **Unlike Xenakis's original, the cycle length is locked**: his duration
-walks made pitch itself wander, which is glorious in a concert hall and unusable on a
-groovebox. Here pitch is stable and only the timbre writhes.
+Segment **widths** walk too (the duration-walk half of GENDYN), between their own
+elastic barriers — but the widths renormalize to a constant cycle length each tick, so
+**pitch stays locked** while the harmonic skeleton itself lurches. (Xenakis let total
+duration wander, which is glorious in a concert hall and unusable on a groovebox.) The
+variable-width polygon is resampled onto a uniform 64-slot scan table at tick time, so
+the render remains the same branch-free lerp as PHI_WEAVE. Amplitude-only walks tilt the
+spectrum over a static frame — the source of the v1 "vagueness"; width walks move the
+frame.
 
 ![Waterfall](images/gendy_fig1_waterfall.svg)
 

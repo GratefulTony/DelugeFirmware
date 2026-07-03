@@ -54,14 +54,16 @@ namespace deluge::dsp {
 //   Serra, M.-H., "Stochastic Composition and Stochastic Timbre: GENDY3 by
 //     Iannis Xenakis", Computer Music Journal 17(1), 1993.
 //   Hoffmann, P., "The New GENDYN Program", Computer Music Journal 24(2),
-//     2000 (the algorithm as implemented here, minus duration walks).
+//     2000 (the algorithm as implemented here, including duration walks -
+//     ours renormalize total cycle length so pitch stays locked).
 //   Luque, S., "The Stochastic Synthesis of Iannis Xenakis", Leonardo Music
 //     Journal 19, 2009.
 // Deep dive with figures: docs/dev/phi-gendy-stochastic.md
 // ============================================================================
 
-inline constexpr int32_t kPhiGendyNumNodes = 16;
-inline constexpr int32_t kPhiGendyNodeShift = 28; // 32 - log2(16)
+inline constexpr int32_t kPhiGendyNumNodes = 16;  // Walking breakpoints
+inline constexpr int32_t kPhiGendyScanNodes = 64; // Uniform scan table (variable-width polygon resampled onto it)
+inline constexpr int32_t kPhiGendyNodeShift = 26; // 32 - log2(64)
 
 // ============================================================================
 // Phi Triangle Bank Configurations
@@ -91,6 +93,15 @@ inline constexpr phi::PhiTriConfig kPhiGendyHomeP3 = {phi::kPhiN025, 0.5f, 0.930
 // Startle: how strongly crossfade MOTION kicks the walkers (from zone B)
 inline constexpr phi::PhiTriConfig kPhiGendyStartle = {phi::kPhi300, 0.7f, 0.330f, false};
 
+// DURATION WALKS (the deferred Xenakis element): segment WIDTHS perform their
+// own second-order walk in elastic barriers, renormalized so cycle length -
+// and therefore pitch - is exact. Amplitude walks tilt the spectrum; width
+// walks move the harmonic SKELETON itself (the "vague -> immediate" fix).
+// WidthStep = lurch rate (immediacy); WidthRange = how narrow/wide segments
+// may go (breadth - near-zero widths are formant-like spikes).
+inline constexpr phi::PhiTriConfig kPhiGendyWidthStep = {phi::kPhi225, 0.7f, 0.510f, false};
+inline constexpr phi::PhiTriConfig kPhiGendyWidthRange = {phi::kPhiN100, 0.6f, 0.350f, false};
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -103,6 +114,9 @@ struct PhiGendyParams {
 	float velCap;                  // Momentum limit
 	float homePull;                // Spring toward home (0 at high entropy)
 	float startleGain;             // Morph-motion kick
+	float widthStep;               // Duration-walk step size
+	float widthMin;                // Elastic width barriers (fractions of a segment's nominal 1/16)
+	float widthMax;
 };
 
 struct PhiGendyCache {
@@ -110,15 +124,19 @@ struct PhiGendyCache {
 	PhiGendyParams bankB{};
 
 	// Walker state: one shared polygon per Sound (never interpolated by morph)
-	float a[kPhiGendyNumNodes]{}; // Breakpoint amplitudes
-	float v[kPhiGendyNumNodes]{}; // Breakpoint velocities (second-order walk)
+	float a[kPhiGendyNumNodes]{};  // Breakpoint amplitudes
+	float v[kPhiGendyNumNodes]{};  // Breakpoint velocities (second-order walk)
+	float w[kPhiGendyNumNodes]{};  // Segment widths (duration walk; sum renormalized to 1)
+	float vw[kPhiGendyNumNodes]{}; // Width velocities
+	bool widthsInit{false};
 
-	// Scan table rebuilt each tick (extra entry duplicates node 0 for wrap).
-	// The render crossfades prev -> current across each buffer so the polygon
-	// moves continuously instead of stepping at the tick rate (same de-zipper
-	// as PHI_WEAVE; the walk's jumps remain in the SHAPE, not as clicks)
-	q31_t nodeQ[kPhiGendyNumNodes + 1]{};
-	q31_t nodeQPrev[kPhiGendyNumNodes + 1]{};
+	// Uniform scan table, rebuilt each tick by resampling the variable-width
+	// polygon (extra entry duplicates position 0 for wrap). The render
+	// crossfades prev -> current across each buffer so the polygon moves
+	// continuously instead of stepping at the tick rate (same de-zipper as
+	// PHI_WEAVE; the walk's jumps remain in the SHAPE, not as clicks)
+	q31_t nodeQ[kPhiGendyScanNodes + 1]{};
+	q31_t nodeQPrev[kPhiGendyScanNodes + 1]{};
 	bool tablesValid{false};
 
 	q31_t smoothedCrossfade{INT32_MIN};

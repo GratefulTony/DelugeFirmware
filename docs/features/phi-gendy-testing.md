@@ -60,6 +60,13 @@ writhes together). Two Sounds get independent walks.
   on transient content
 - High notes traverse the polygon fast: entropy reads more as noisy sheen than motion
 
+## Duration Walks (v2)
+Segment widths now walk too (renormalized — pitch stays locked): the harmonic skeleton
+lurches rather than just tilting. Zone positions vary lurch rate and width range; extreme
+positions produce near-spike segments (formant-like). The startle kicks widths as well,
+so knob gestures audibly rearrange the waveform. Verify: pitch stability at all
+settings, and calm zones should now feel present rather than vague.
+
 ## Tuning Status
 Anchors/banks v1, not ear-tuned. Likeliest tweaks: entropy range endpoints, home pull
 strength, startle gain, barrier-width range.
