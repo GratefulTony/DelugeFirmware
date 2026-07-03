@@ -843,6 +843,15 @@ readCachedWindow:
 				int32_t bytesTilXfClusterEnd = Cluster::size - xfBytePosWithinCluster;
 				bytesTilThisWindowEnd = std::min(bytesTilThisWindowEnd, bytesTilXfClusterEnd);
 			}
+			// Or if the crossfade zone starts within this window, end the window exactly
+			// there, so the fade begins with its full length. Triggering mid-window made
+			// the fade run up to a window short, ending in an audible step at the loop
+			// boundary (the still-fading-out stream got cut off part-way).
+			else if (!pingpongCacheMode && crossfadeLengthCacheBytes > 0
+			         && bytesTilLoopEndPoint > crossfadeLengthCacheBytes) {
+				bytesTilThisWindowEnd =
+				    std::min(bytesTilThisWindowEnd, bytesTilLoopEndPoint - crossfadeLengthCacheBytes);
+			}
 		}
 		else {
 			// Backward: limited by cluster start and loop start
@@ -1528,7 +1537,16 @@ readNonTimestretched:
 							distOutputSamples = ((int64_t)distSourceSamples << 24) / phaseIncrement;
 						}
 
-						if (distOutputSamples >= 0 && distOutputSamples < loopFadeInSamplesTotal) {
+						// If the crossfade zone starts within this window, end the window
+						// exactly there, so the fade begins with its full length (starting
+						// it mid-window leaves it incomplete at the loop restart - an
+						// audible step every pass)
+						if (distOutputSamples > loopFadeInSamplesTotal
+						    && distOutputSamples - loopFadeInSamplesTotal < numSamplesThisNonTimestretchedRead) {
+							numSamplesThisNonTimestretchedRead = distOutputSamples - loopFadeInSamplesTotal;
+						}
+
+						if (distOutputSamples >= 0 && distOutputSamples <= loopFadeInSamplesTotal) {
 							// Compute fade-out for main (uncached) read
 							int32_t scaleAtStart = fadeScaleQ31(distOutputSamples, loopFadeStepQ31);
 
