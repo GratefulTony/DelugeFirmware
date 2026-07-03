@@ -236,11 +236,25 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade) {
 	cache.noiseState = noise;
 	mean *= 1.0f / static_cast<float>(kPhiGendyNumNodes);
 
+	// Slow AGC: normalize the polygon's peak so narrow-cage zones land at
+	// the same loudness as wide ones (instant attack, ~1.5s release, slewed
+	// scale so level changes never step at tick rate)
+	float peak = 0.0f;
+	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
+		peak = std::max(peak, std::abs(cache.a[i] - mean));
+	}
+	cache.agcPeak = std::max(peak, cache.agcPeak * 0.998f);
+	float scaleTarget = kGendyOutGain * kGendyRefAmplitude / std::max(cache.agcPeak, 0.30f);
+	if (cache.agcScale == 0.0f) {
+		cache.agcScale = scaleTarget;
+	}
+	cache.agcScale += 0.10f * (scaleTarget - cache.agcScale);
+
 	// Resample the variable-width polygon onto the uniform scan grid: the
 	// duration walk lives entirely at tick time; the render's cheap uniform
 	// lerp (and the de-zipper crossfade) are unchanged
 	memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
-	float scale = kGendyOutGain * kGendyRefAmplitude;
+	float scale = cache.agcScale;
 	int32_t seg = 0;
 	float segStart = 0.0f;
 	float segWidth = cache.w[0] * wNorm;
