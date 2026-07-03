@@ -36,8 +36,11 @@ namespace {
 [[gnu::always_inline]] inline int32_t parabolicSine(uint32_t phase) {
 	int32_t x = static_cast<int32_t>(phase); // Half-cycles in Q31: [-1, 1)
 	int32_t ax = (x < 0) ? -x : x;
-	// 4 * x * (1 - |x|), peak +/-1 at |x| = 0.5
-	return multiply_32x32_rshift32(x, 0x7FFFFFFF - ax) << 3;
+	// 4 * x * (1 - |x|), peak +/-1 at |x| = 0.5. The -3 margin keeps the
+	// peak at 2^31 - 8 instead of exactly 2^31, which would wrap to
+	// INT32_MIN and flip the coupling force's sign at every extremum
+	// (audible as periodic bursts at the beat rate)
+	return multiply_32x32_rshift32(x, 0x7FFFFFFD - ax) << 3;
 }
 
 // Zone anchors (Still, Drift, Pull, Swarm, Flock, Surge, Fray, Chaos).
@@ -90,8 +93,10 @@ PhiSwarmParams buildPhiSwarmParams(uint16_t zone, float phaseOffset) {
 	float balance = phi::evalTriangle(phase, 1.0f, kPhiSwarmBalanceWander) * 0.35f;
 	float ring = lerpAnchor(kAnchorRing, zf, zi) * (0.5f + phi::evalTriangle(phase, 1.0f, kPhiSwarmRingWander));
 	ring = std::clamp(ring, 0.0f, 0.7f);
-	float w1 = (0.5f + balance) * (1.0f - ring * 0.5f);
-	float w2 = (0.5f - balance) * (1.0f - ring * 0.5f);
+	// Weights sum to <= 1 so coincident slave peaks can't clip the saturating
+	// output sum (w1 + w2 + wRing > 1 hard-clipped in pulses at the beat rate)
+	float w1 = (0.5f + balance) * (1.0f - ring);
+	float w2 = (0.5f - balance) * (1.0f - ring);
 	p.w1 = static_cast<q31_t>(w1 * 2147483647.0f);
 	p.w2 = static_cast<q31_t>(w2 * 2147483647.0f);
 	p.wRing = static_cast<q31_t>(ring * 2147483647.0f);
