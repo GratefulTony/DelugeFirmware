@@ -132,6 +132,11 @@ struct PhiWeaveParams {
 	float stiffness[kPhiWeaveNumNodes];
 	float coupling[kPhiWeaveNumNodes];
 	float damping[kPhiWeaveNumNodes];
+	// Bow-force energy balance: min(1, sqrt(damping/ref)) per node. A bow
+	// pumping an underdamped node reaches equilibrium energy ~ F^2/d, which
+	// explodes where damping bottoms out (that WAS the mid-Silk hash: churn
+	// energy rivaling the carrier). Scaling force by sqrt(d) bounds it.
+	float bowBalance[kPhiWeaveNumNodes];
 	float home[kPhiWeaveNumNodes];
 	float bowDepth;
 	float bowRate;

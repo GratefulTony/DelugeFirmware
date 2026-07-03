@@ -80,11 +80,16 @@ PhiWeaveParams buildPhiWeaveParams(uint16_t zone, float phaseOffset) {
 
 		float stiffLand = 1.0f + 0.8f * evalSpatial(phase, nf, stiffCycles, kPhiWeaveStiffLand1)
 		                  + 0.5f * evalSpatial(phase, nf, stiffCycles * 2.0f, kPhiWeaveStiffLand2);
-		p.stiffness[i] = std::clamp(stiffBase * stiffLand, 0.0002f, 0.12f);
+		// Floors raised from sim-validated full-map sweep: stiffness anchors
+		// the home-shape carrier (without it, low-k zones wander so far the
+		// churn sidebands rival the carrier); damping bounds the pluck's
+		// free-ring to well under a second (tau = 1/d was ~6s at the old floor)
+		p.stiffness[i] = std::clamp(stiffBase * stiffLand, 0.006f, 0.12f);
 
 		float dampLand = 1.0f + 0.85f * evalSpatial(phase, nf, dampCycles, kPhiWeaveDampLand1)
 		                 + 0.5f * evalSpatial(phase, nf, dampCycles * 3.0f, kPhiWeaveDampLand2);
-		p.damping[i] = std::clamp(dampBase * dampLand, 0.0005f, 0.09f);
+		p.damping[i] = std::clamp(dampBase * dampLand, 0.0025f, 0.09f);
+		p.bowBalance[i] = std::min(1.0f, std::sqrt(p.damping[i] * (1.0f / 0.015f)));
 
 		float coupleLand = 1.0f + 0.6f * evalSpatial(phase, nf, stiffCycles, kPhiWeaveCoupleLand);
 		p.coupling[i] = std::clamp(coupleBase * coupleLand, 0.004f, 0.45f);
@@ -208,7 +213,8 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 		float bd = nf - bowPos;
 		bd -= static_cast<float>(static_cast<int32_t>(bd + 1.5f)) - 1.0f; // wrap to [-0.5, 0.5)
 		float bw = std::abs(bd) * invSpread;
-		float bowForce = (bw < 1.0f) ? bowVal * (0.5f + 0.5f * std::cos(3.14159265f * bw)) : 0.0f;
+		float bowBal = cfInv * a.bowBalance[i] + cf * b.bowBalance[i];
+		float bowForce = (bw < 1.0f) ? bowVal * bowBal * (0.5f + 0.5f * std::cos(3.14159265f * bw)) : 0.0f;
 
 		// Morph-bow: broadband agitation (cheap LCG noise)
 		cache.noiseState = cache.noiseState * 1664525u + 1013904223u;
