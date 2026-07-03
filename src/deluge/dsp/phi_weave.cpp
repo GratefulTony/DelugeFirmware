@@ -120,6 +120,10 @@ PhiWeaveParams buildPhiWeaveParams(uint16_t zone, float phaseOffset) {
 	p.morphBowGain = 0.5f + phi::evalTriangle(phase, 1.0f, kPhiWeaveMorphBow) * 4.0f;
 	p.outGain = 0.70f + phi::evalTriangle(phase, 1.0f, kPhiWeaveOutGain) * 0.55f;
 
+	// 0.09..0.55 exponential: scan-smoother cutoff ~10..60 Hz at the sub-tick rate
+	float shimmerT = phi::evalTriangle(phase, 1.0f, kPhiWeaveShimmer);
+	p.shimmerAlpha = 0.09f * std::pow(6.1f, shimmerT);
+
 	return p;
 }
 
@@ -216,10 +220,15 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 	}
 
 	// Position update after all accelerations (keeps neighbor reads consistent)
+	float shimmerAlpha = cfInv * a.shimmerAlpha + cf * b.shimmerAlpha;
+	float* xs = cache.xSmooth;
 	for (int32_t i = 0; i < kPhiWeaveNumNodes; i++) {
 		x[i] += v[i];
 		x[i] = std::clamp(x[i], -kPhiWeaveMaxDisplacement, kPhiWeaveMaxDisplacement);
-		peak = std::max(peak, std::abs(x[i]));
+		// Scan smoother: the physics can run hot, but the scan head follows
+		// at haptic rates - fast modes shape the energy, not the sidebands
+		xs[i] += shimmerAlpha * (x[i] - xs[i]);
+		peak = std::max(peak, std::abs(xs[i]));
 	}
 
 	// Slow AGC: normalize output so quiet zones (soft home shapes, heavy
@@ -243,7 +252,7 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 
 void buildPhiWeaveTables(PhiWeaveCache& cache, float scale, q31_t* t0, q31_t* t1, q31_t* t2) {
 	for (int32_t i = 0; i < kPhiWeaveNumNodes; i++) {
-		float s = cache.x[i] * scale;
+		float s = cache.xSmooth[i] * scale;
 		s = std::clamp(s, -2147483000.0f, 2147483000.0f);
 		t0[i + 1] = static_cast<q31_t>(s);
 	}

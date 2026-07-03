@@ -111,6 +111,13 @@ inline constexpr phi::PhiTriConfig kPhiWeavePluckAmp = {phi::kPhi250, 0.6f, 0.82
 
 // --- Morph bow: how strongly crossfade MOTION excites the ring (from zone B) ---
 
+// Scan focus: cutoff of the per-node smoother between the physics and the
+// scan head. Scanned synthesis wants the scanned shape moving at HAPTIC rates
+// (Verplank/Mathews: hand speeds); the raw string's fast modes (up to ~100Hz
+// in stiff zones) read as pitch-independent inharmonic hash. Low = focused
+// slow morph, high = shimmery (fast-mode sidebands up to ~60Hz let through).
+inline constexpr phi::PhiTriConfig kPhiWeaveShimmer = {phi::kPhi067, 0.6f, 0.240f, false};
+
 inline constexpr phi::PhiTriConfig kPhiWeaveMorphBow = {phi::kPhi175, 0.7f, 0.150f, false};
 
 // --- Output gain trim ---
@@ -136,6 +143,7 @@ struct PhiWeaveParams {
 	float pluckAmp;
 	float morphBowGain;
 	float outGain;
+	float shimmerAlpha; // Per-sub-tick one-pole coefficient for the scan smoother
 };
 
 struct PhiWeaveCache {
@@ -146,6 +154,7 @@ struct PhiWeaveCache {
 	// Morphing interpolates the laws, never the state, so it cannot click.
 	float x[kPhiWeaveNumNodes]{};
 	float v[kPhiWeaveNumNodes]{};
+	float xSmooth[kPhiWeaveNumNodes]{}; // What the scan head sees (haptic-rate lowpass of x)
 
 	// Scan table rebuilt each tick ([32] duplicates [0] for wrap-free lerp)
 	// Scan tables, padded for the Catmull-Rom scan: [0] = node 31 (prelude),
