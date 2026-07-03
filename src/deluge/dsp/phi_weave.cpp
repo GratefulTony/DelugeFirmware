@@ -237,6 +237,23 @@ void tickPhiWeave(PhiWeaveCache& cache, float cf) {
 		cache.nodeQ[i] = static_cast<q31_t>(s);
 	}
 	cache.nodeQ[kPhiWeaveNumNodes] = cache.nodeQ[0];
+
+	// Anti-aliasing mips: circular 3-tap binomial smoothing. One pass nulls
+	// the spatial Nyquist (adjacent-node zigzag) entirely; the second pass
+	// (applied twice more) clears the top two octaves for the highest notes.
+	auto binomial = [](const q31_t* src, q31_t* dst) {
+		for (int32_t i = 0; i < kPhiWeaveNumNodes; i++) {
+			int32_t prev = (i == 0) ? kPhiWeaveNumNodes - 1 : i - 1;
+			int32_t next = (i == kPhiWeaveNumNodes - 1) ? 0 : i + 1;
+			dst[i] = static_cast<q31_t>(
+			    (static_cast<int64_t>(src[prev]) + 2 * static_cast<int64_t>(src[i]) + static_cast<int64_t>(src[next]))
+			    >> 2);
+		}
+		dst[kPhiWeaveNumNodes] = dst[0];
+	};
+	binomial(cache.nodeQ, cache.nodeQMip1);
+	binomial(cache.nodeQMip1, cache.nodeQMip2);
+	binomial(cache.nodeQMip2, cache.nodeQMip2);
 }
 
 } // namespace
@@ -273,7 +290,15 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 	// Pulse width deadzone: phase beyond phaseWidth outputs zero (parity with PHI_MORPH)
 	const uint32_t phaseWidth = pulseWidth ? (0xFFFFFFFF - (pulseWidth << 1)) : 0xFFFFFFFF;
 
+	// Pitch-adaptive table select: ~500 Hz and ~1200 Hz fundamentals
+	// (phase-increment thresholds at 44.1kHz)
 	const q31_t* nodes = cache.nodeQ;
+	if (phaseIncrement > 116869858u) {
+		nodes = cache.nodeQMip2;
+	}
+	else if (phaseIncrement > 48695774u) {
+		nodes = cache.nodeQMip1;
+	}
 	int32_t* thisSample = bufferStart;
 
 	if (applyAmplitude) {

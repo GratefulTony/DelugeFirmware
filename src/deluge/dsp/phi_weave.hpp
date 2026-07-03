@@ -149,6 +149,11 @@ struct PhiWeaveCache {
 
 	// Scan table rebuilt each tick ([32] duplicates [0] for wrap-free lerp)
 	q31_t nodeQ[kPhiWeaveNumNodes + 1]{};
+	// Pitch-adaptive anti-aliasing: spatially smoothed copies of the scan
+	// table, selected per buffer by phase increment (high notes read the
+	// smoothed string so spatial zigzag modes don't fold past Nyquist)
+	q31_t nodeQMip1[kPhiWeaveNumNodes + 1]{};
+	q31_t nodeQMip2[kPhiWeaveNumNodes + 1]{};
 
 	// IIR-smoothed crossfade, advanced once per buffer by the caller (same
 	// convention as PhiMorphCache)
