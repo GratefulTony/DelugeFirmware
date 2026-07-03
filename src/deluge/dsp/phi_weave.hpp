@@ -148,19 +148,22 @@ struct PhiWeaveCache {
 	float v[kPhiWeaveNumNodes]{};
 
 	// Scan table rebuilt each tick ([32] duplicates [0] for wrap-free lerp)
-	q31_t nodeQ[kPhiWeaveNumNodes + 1]{};
+	// Scan tables, padded for the Catmull-Rom scan: [0] = node 31 (prelude),
+	// [1..32] = nodes 0..31, [33] = node 0, [34] = node 1. Scan index i reads
+	// taps [i..i+3].
+	q31_t nodeQ[kPhiWeaveNumNodes + 3]{};
 	// Pitch-adaptive anti-aliasing: spatially smoothed copies of the scan
 	// table, selected per buffer by phase increment (high notes read the
 	// smoothed string so spatial zigzag modes don't fold past Nyquist)
-	q31_t nodeQMip1[kPhiWeaveNumNodes + 1]{};
-	q31_t nodeQMip2[kPhiWeaveNumNodes + 1]{};
+	q31_t nodeQMip1[kPhiWeaveNumNodes + 3]{};
+	q31_t nodeQMip2[kPhiWeaveNumNodes + 3]{};
 	// Previous tick's tables: the render crossfades prev -> current across
 	// each buffer so the string moves continuously instead of stepping once
 	// per tick (the per-buffer step sprayed ~344Hz sidebands around every
 	// partial - it read as aliasing at all pitches)
-	q31_t nodeQPrev[kPhiWeaveNumNodes + 1]{};
-	q31_t nodeQMip1Prev[kPhiWeaveNumNodes + 1]{};
-	q31_t nodeQMip2Prev[kPhiWeaveNumNodes + 1]{};
+	q31_t nodeQPrev[kPhiWeaveNumNodes + 3]{};
+	q31_t nodeQMip1Prev[kPhiWeaveNumNodes + 3]{};
+	q31_t nodeQMip2Prev[kPhiWeaveNumNodes + 3]{};
 	bool tablesValid{false};
 
 	// IIR-smoothed crossfade, advanced once per buffer by the caller (same

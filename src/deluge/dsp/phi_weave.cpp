@@ -239,26 +239,29 @@ void tickPhiWeave(PhiWeaveCache& cache, float cf) {
 	for (int32_t i = 0; i < kPhiWeaveNumNodes; i++) {
 		float s = x[i] * scale;
 		s = std::clamp(s, -2147483000.0f, 2147483000.0f);
-		cache.nodeQ[i] = static_cast<q31_t>(s);
+		cache.nodeQ[i + 1] = static_cast<q31_t>(s);
 	}
-	cache.nodeQ[kPhiWeaveNumNodes] = cache.nodeQ[0];
+	auto pad = [](q31_t* t) {
+		t[0] = t[kPhiWeaveNumNodes];
+		t[kPhiWeaveNumNodes + 1] = t[1];
+		t[kPhiWeaveNumNodes + 2] = t[2];
+	};
+	pad(cache.nodeQ);
 
 	// Anti-aliasing mips: circular 3-tap binomial smoothing. One pass nulls
-	// the spatial Nyquist (adjacent-node zigzag) entirely; the second pass
-	// (applied twice more) clears the top two octaves for the highest notes.
-	auto binomial = [](const q31_t* src, q31_t* dst) {
+	// the spatial Nyquist (adjacent-node zigzag) entirely; the second clears
+	// the top octave for the highest notes. (The Catmull-Rom scan's sinc^4
+	// image rolloff handles the rest.)
+	auto binomial = [&pad](const q31_t* src, q31_t* dst) {
 		for (int32_t i = 0; i < kPhiWeaveNumNodes; i++) {
-			int32_t prev = (i == 0) ? kPhiWeaveNumNodes - 1 : i - 1;
-			int32_t next = (i == kPhiWeaveNumNodes - 1) ? 0 : i + 1;
-			dst[i] = static_cast<q31_t>(
-			    (static_cast<int64_t>(src[prev]) + 2 * static_cast<int64_t>(src[i]) + static_cast<int64_t>(src[next]))
+			dst[i + 1] = static_cast<q31_t>(
+			    (static_cast<int64_t>(src[i]) + 2 * static_cast<int64_t>(src[i + 1]) + static_cast<int64_t>(src[i + 2]))
 			    >> 2);
 		}
-		dst[kPhiWeaveNumNodes] = dst[0];
+		pad(dst);
 	};
 	binomial(cache.nodeQ, cache.nodeQMip1);
 	binomial(cache.nodeQMip1, cache.nodeQMip2);
-	binomial(cache.nodeQMip2, cache.nodeQMip2);
 
 	if (!cache.tablesValid) { // First tick: nothing to fade from
 		memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
@@ -270,8 +273,34 @@ void tickPhiWeave(PhiWeaveCache& cache, float cf) {
 
 } // namespace
 
+namespace {
+
+// Catmull-Rom scan through the tick-crossfaded string. Taps are lerped
+// prev -> current first (same cost as per-table interpolation, simpler), then
+// a 4-point Hermite reconstructs the waveform: interpolation images fall as
+// sinc^4 instead of linear's sinc^2 - this was the residual "lofi" fizz.
+// Taps are pre-shifted >>4 for Horner headroom and the result saturates on
+// the way back up (Catmull-Rom can overshoot the tap range by ~1.25x).
+[[gnu::always_inline]] inline q31_t scanCatmullRom(const q31_t* nodes, const q31_t* nodesPrev, uint32_t idx,
+                                                   q31_t frac31, q31_t tickFade) {
+	q31_t taps[4];
+	for (int32_t k = 0; k < 4; k++) {
+		q31_t pv = nodesPrev[idx + k];
+		taps[k] = (pv + (multiply_32x32_rshift32(nodes[idx + k] - pv, tickFade) << 1)) >> 4;
+	}
+	q31_t c1 = (taps[2] - taps[0]) >> 1;
+	q31_t c2 = taps[0] + 2 * taps[2] - ((5 * taps[1] + taps[3]) >> 1);
+	q31_t c3 = ((3 * (taps[1] - taps[2])) >> 1) + ((taps[3] - taps[0]) >> 1);
+	q31_t r = c2 + (multiply_32x32_rshift32(frac31, c3) << 1);
+	r = c1 + (multiply_32x32_rshift32(frac31, r) << 1);
+	r = taps[1] + (multiply_32x32_rshift32(frac31, r) << 1);
+	return static_cast<q31_t>(std::clamp<int64_t>(static_cast<int64_t>(r) << 4, INT32_MIN, INT32_MAX));
+}
+
+} // namespace
+
 // ============================================================================
-// Main render: scan the ring per sample (linear interp, branch-free)
+// Main render: scan the ring per sample (Catmull-Rom, tick-crossfaded)
 // ============================================================================
 
 void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
@@ -302,15 +331,16 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 	// Pulse width deadzone: phase beyond phaseWidth outputs zero (parity with PHI_MORPH)
 	const uint32_t phaseWidth = pulseWidth ? (0xFFFFFFFF - (pulseWidth << 1)) : 0xFFFFFFFF;
 
-	// Pitch-adaptive table select: ~500 Hz and ~1200 Hz fundamentals
-	// (phase-increment thresholds at 44.1kHz)
+	// Pitch-adaptive table select: ~700 Hz and ~1800 Hz fundamentals
+	// (phase-increment thresholds at 44.1kHz; the Catmull-Rom scan's sinc^4
+	// image rolloff lets full detail run higher than linear scanning did)
 	const q31_t* nodes = cache.nodeQ;
 	const q31_t* nodesPrev = cache.nodeQPrev;
-	if (phaseIncrement > 116869858u) {
+	if (phaseIncrement > 175304787u) {
 		nodes = cache.nodeQMip2;
 		nodesPrev = cache.nodeQMip2Prev;
 	}
-	else if (phaseIncrement > 48695774u) {
+	else if (phaseIncrement > 68174083u) {
 		nodes = cache.nodeQMip1;
 		nodesPrev = cache.nodeQMip1Prev;
 	}
@@ -335,11 +365,7 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 			uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
 			q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-			q31_t baseP = nodesPrev[idx];
-			q31_t wPrev = baseP + (multiply_32x32_rshift32(nodesPrev[idx + 1] - baseP, frac31) << 1);
-			q31_t baseC = nodes[idx];
-			q31_t wCur = baseC + (multiply_32x32_rshift32(nodes[idx + 1] - baseC, frac31) << 1);
-			q31_t waveform = wPrev + (multiply_32x32_rshift32(wCur - wPrev, tickFade) << 1);
+			q31_t waveform = scanCatmullRom(nodes, nodesPrev, idx, frac31, tickFade);
 
 			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, waveform, amplitude);
 			thisSample++;
@@ -359,11 +385,7 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 			uint32_t idx = evalPhase >> kPhiWeaveNodeShift;
 			q31_t frac31 = static_cast<q31_t>((evalPhase & 0x07FFFFFF) << 4);
-			q31_t baseP = nodesPrev[idx];
-			q31_t wPrev = baseP + (multiply_32x32_rshift32(nodesPrev[idx + 1] - baseP, frac31) << 1);
-			q31_t baseC = nodes[idx];
-			q31_t wCur = baseC + (multiply_32x32_rshift32(nodes[idx + 1] - baseC, frac31) << 1);
-			*thisSample = wPrev + (multiply_32x32_rshift32(wCur - wPrev, tickFade) << 1);
+			*thisSample = scanCatmullRom(nodes, nodesPrev, idx, frac31, tickFade);
 			thisSample++;
 		}
 	}
