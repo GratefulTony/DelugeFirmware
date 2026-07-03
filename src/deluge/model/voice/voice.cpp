@@ -2785,12 +2785,18 @@ pitchTooHigh:
 				// velocity or note is affecting pitch), and stretch-syncing.
 				if (!voiceSample->doneFirstRenderYet && !tryToStartMidNote
 				    && portaEnvelopePos == 0xFFFFFFFF) { // No porta
-					// Start offset shifted the play start away from the loop restart position:
-					// the first pass is asymmetric, so a cache keyed at the play start can't
-					// represent the loop. Handled below via possiblySetUpOffsetLoopCache
-					// (loop-start-keyed cache, attached now or at the first loop restart).
-					bool offsetAsymmetric = (loopingType != LoopType::NONE)
-					                        && (guides[s].startPlaybackAtByte != guides[s].loopStartPlaybackAtByte);
+					// Start offset shifted the play start PAST the loop start: the first pass
+					// is asymmetric and a cache keyed at the play start can't represent the
+					// loop (it would map to a negative position). Handled below via
+					// possiblySetUpOffsetLoopCache (loop-start-keyed cache, attached now or
+					// at the first loop restart). The normal attack-then-loop layout (start
+					// at or BEFORE the loop start) maps fine into a start-keyed cache and
+					// must take the regular possiblySetUpCache path.
+					bool offsetAsymmetric =
+					    (loopingType != LoopType::NONE)
+					    && ((int32_t)(guides[s].startPlaybackAtByte - guides[s].loopStartPlaybackAtByte)
+					            * guides[s].playDirection
+					        > 0);
 
 					// Split-loop from offset wrapping can't use cache.
 					// TODO: support split-loop caching by concatenating the two
