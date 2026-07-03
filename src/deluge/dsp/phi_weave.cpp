@@ -114,6 +114,7 @@ PhiWeaveParams buildPhiWeaveParams(uint16_t zone, float phaseOffset) {
 	// Bow oscillation capped ~16 Hz: faster bowing stamped inharmonic
 	// sidebands on every partial (excitation must be haptic-rate too)
 	p.bowRate = 0.002f + phi::evalTriangle(phase, 1.0f, kPhiWeaveBowRate) * 0.045f;
+	p.bowMode = static_cast<uint8_t>(std::min(4.0f, phi::evalTriangle(phase, 1.0f, kPhiWeaveBowMode) * 5.0f));
 	p.bowPos = phi::evalTriangle(phase, 1.0f, kPhiWeaveBowPos);
 	p.bowSpread = 0.06f + phi::evalTriangle(phase, 1.0f, kPhiWeaveBowSpread) * 0.20f;
 
@@ -167,12 +168,47 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 	float travelRate = cfInv * a.travelRate + cf * b.travelRate;
 	float outGain = cfInv * a.outGain + cf * b.outGain;
 
-	// Bow oscillation (triangle, cheap; half-dt rate)
+	// Bow excitation: shared state advances once (half-dt rate); each bank's
+	// MODE shapes it, then the two forces crossfade (click-free mixed morphs)
 	cache.bowPhase += bowRate * 0.5f;
 	if (cache.bowPhase >= 1.0f) {
 		cache.bowPhase -= 1.0f;
 	}
-	float bowVal = (deluge::dsp::triangleSimpleUnipolar(cache.bowPhase, 1.0f) * 2.0f - 1.0f) * bowDepth;
+	cache.noiseState = cache.noiseState * 1664525u + 1013904223u;
+	float bowRand = static_cast<float>(static_cast<int32_t>(cache.noiseState)) * (1.0f / 2147483648.0f);
+	cache.bowLP += std::min(1.0f, bowRate * 8.0f) * (bowRand - cache.bowLP);
+	cache.bowWalk += bowRate * 2.0f * bowRand;
+	if (cache.bowWalk > 1.0f) {
+		cache.bowWalk = 2.0f - cache.bowWalk;
+	}
+	else if (cache.bowWalk < -1.0f) {
+		cache.bowWalk = -2.0f - cache.bowWalk;
+	}
+
+	auto bowShape = [&cache](uint8_t mode) -> float {
+		float p = cache.bowPhase;
+		switch (mode) {
+		case 1: // STICKSLIP: slow drag, fast snap
+			return (p < 0.85f) ? (p * (2.0f / 0.85f) - 1.0f) : ((1.0f - p) * (2.0f / 0.15f) - 1.0f);
+		case 2: // NOISE: lowpassed turbulence
+			return std::clamp(cache.bowLP * 3.0f, -1.0f, 1.0f);
+		case 3: // PULSES: alternating-sign raised-cosine taps
+			if (p < 0.25f) {
+				return 0.5f - 0.5f * std::cos(p * (2.0f * 3.14159265f / 0.25f));
+			}
+			if (p >= 0.5f && p < 0.75f) {
+				return -(0.5f - 0.5f * std::cos((p - 0.5f) * (2.0f * 3.14159265f / 0.25f)));
+			}
+			return 0.0f;
+		case 4: // WALK: Brownian pressure
+			return cache.bowWalk;
+		default: // TRIANGLE
+			return deluge::dsp::triangleSimpleUnipolar(p, 1.0f) * 2.0f - 1.0f;
+		}
+	};
+	float shapeA = bowShape(a.bowMode);
+	float shapeB = (b.bowMode == a.bowMode) ? shapeA : bowShape(b.bowMode);
+	float bowVal = (cfInv * shapeA + cf * shapeB) * bowDepth;
 	float invSpread = 1.0f / bowSpread;
 
 	float* x = cache.x;

@@ -99,6 +99,13 @@ inline constexpr phi::PhiTriConfig kPhiWeaveBowRate = {phi::kPhi100, 0.8f, 0.370
 inline constexpr phi::PhiTriConfig kPhiWeaveBowPos = {phi::kPhi200, 1.0f, 0.740f, false};
 inline constexpr phi::PhiTriConfig kPhiWeaveBowSpread = {phi::kPhiN100, 0.7f, 0.880f, false};
 
+// Bow mode: zone position selects the excitation character (evaluated per
+// bank; forces crossfade under morph, so mixed-mode morphs are click-free).
+// 0 TRIANGLE smooth push-pull | 1 STICKSLIP slow drag, fast snap (Helmholtz
+// friction at haptic rate) | 2 NOISE lowpassed turbulence (rate = color) |
+// 3 PULSES alternating-sign taps | 4 WALK Brownian pressure wander
+inline constexpr phi::PhiTriConfig kPhiWeaveBowMode = {phi::kPhi150, 0.9f, 0.680f, false};
+
 // --- Travel: slow rotation of the ring under the scan head (chorus-like drift) ---
 
 inline constexpr phi::PhiTriConfig kPhiWeaveTravel = {phi::kPhi067, 0.5f, 0.250f, true};
@@ -137,6 +144,7 @@ struct PhiWeaveParams {
 	// explodes where damping bottoms out (that WAS the mid-Silk hash: churn
 	// energy rivaling the carrier). Scaling force by sqrt(d) bounds it.
 	float bowBalance[kPhiWeaveNumNodes];
+	uint8_t bowMode; // See kPhiWeaveBowMode
 	float home[kPhiWeaveNumNodes];
 	float bowDepth;
 	float bowRate;
@@ -201,6 +209,8 @@ struct PhiWeaveCache {
 	                      // offset from ring rotation
 	float travelPhase{0.0f};
 	float bowPhase{0.0f};
+	float bowLP{0.0f};       // NOISE bow: lowpassed turbulence state
+	float bowWalk{0.0f};     // WALK bow: Brownian pressure state
 	float prevTickCf{-1.0f}; // For morph-bow (crossfade velocity)
 	float agcPeak{1.0f};     // Slow output normalization tracker
 	uint32_t noiseState{0x2545F491u};
