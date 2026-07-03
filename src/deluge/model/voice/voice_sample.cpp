@@ -2704,6 +2704,15 @@ bool VoiceSample::possiblySetUpCache(SampleControls* sampleControls, SamplePlayb
 		cachePlayDirection = 1; // Cache always starts reading forward (written forward)
 
 		setupCacheLoopPoints(guide, (Sample*)guide->audioFileHolder->audioFile, loopingType);
+
+		// Repeat note with the loop already fully cached: snap the pingpong bounce
+		// apexes onto waveform extrema right away, so even the FIRST bounce is smooth.
+		// (On the first note at a pitch this can only happen at the first bounce -
+		// the data doesn't exist earlier.)
+		if (static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive && !writingToCache
+		    && cacheLoopEndPointBytes != 2147483647 && cache->writeBytePos >= cacheLoopEndPointBytes) {
+			snapPingpongBouncePoints(kCacheByteDepth * cacheSetupSample->numChannels);
+		}
 		bool result = reassessReassessmentLocation(guide, (Sample*)guide->audioFileHolder->audioFile, priorityRating);
 		// Probably no need to check we haven't shot past the new reassessmentLocation, since surely that's going to be
 		// further into the future now we're not obeying loop points at low level?
