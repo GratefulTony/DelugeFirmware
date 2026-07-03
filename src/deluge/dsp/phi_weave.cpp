@@ -84,12 +84,12 @@ PhiWeaveParams buildPhiWeaveParams(uint16_t zone, float phaseOffset) {
 		// the home-shape carrier (without it, low-k zones wander so far the
 		// churn sidebands rival the carrier); damping bounds the pluck's
 		// free-ring to well under a second (tau = 1/d was ~6s at the old floor)
-		p.stiffness[i] = std::clamp(stiffBase * stiffLand, 0.006f, 0.12f);
+		p.stiffness[i] = std::clamp(stiffBase * stiffLand, 0.016f, 0.12f);
 
 		float dampLand = 1.0f + 0.85f * evalSpatial(phase, nf, dampCycles, kPhiWeaveDampLand1)
 		                 + 0.5f * evalSpatial(phase, nf, dampCycles * 3.0f, kPhiWeaveDampLand2);
-		p.damping[i] = std::clamp(dampBase * dampLand, 0.0025f, 0.09f);
-		p.bowBalance[i] = std::min(1.0f, std::sqrt(p.damping[i] * (1.0f / 0.015f)));
+		p.damping[i] = std::clamp(dampBase * dampLand, 0.006f, 0.09f);
+		p.bowBalance[i] = 0.60f * std::min(1.0f, std::sqrt(p.damping[i] * (1.0f / 0.0255f)));
 
 		float coupleLand = 1.0f + 0.6f * evalSpatial(phase, nf, stiffCycles, kPhiWeaveCoupleLand);
 		p.coupling[i] = std::clamp(coupleBase * coupleLand, 0.004f, 0.45f);

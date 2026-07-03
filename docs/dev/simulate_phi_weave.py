@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Full PHI_WEAVE pipeline simulation: physics, tables, CR scan, all fixes.
+"""Full PHI_WEAVE pipeline simulation: physics, tables, scan, all fixes.
+SYNC NOTE: firmware now applies (searched via this sim, 2026-07-03):
+stiffness floor 0.016, damping floor 0.006, bowBalance = 0.60*min(1,
+sqrt(d/0.0255)) per node, linear scan. Apply these on top of build() when
+reproducing firmware behavior.
 Reproduce the mid-Silk hash, then bisect."""
 
 import numpy as np
