@@ -375,7 +375,11 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 	// a hard waveform discontinuity every 2.9ms wherever a zone position has
 	// nonzero travel (broadband, pitch-independent hash at those settings).
 	uint32_t travelAcc = retriggerPhase + cache.travelOffsetPrev;
-	const uint32_t travelInc = (cache.travelOffset - cache.travelOffsetPrev) / static_cast<uint32_t>(numSamples);
+	// SIGNED delta/divide: travel runs both directions, and unsigned division
+	// of a wrapped negative delta yields a garbage ~1/numSamples-of-a-cycle
+	// step (instant broadband noise at negative-travel zone positions)
+	const uint32_t travelInc =
+	    static_cast<uint32_t>(static_cast<int32_t>(cache.travelOffset - cache.travelOffsetPrev) / numSamples);
 
 	// Match the triangle-oscillator amplitude convention (as PHI_MORPH does)
 	amplitude <<= 1;
