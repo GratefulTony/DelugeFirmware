@@ -87,6 +87,9 @@ inline constexpr phi::PhiTriConfig kPhiSwarmRingWander = {phi::kPhi350, 0.5f, 0.
 // Anneal gain: how strongly crossfade MOTION heats the network (from zone B)
 inline constexpr phi::PhiTriConfig kPhiSwarmAnneal = {phi::kPhi250, 0.7f, 0.090f, false};
 
+// Beat-AM depth wander: how audibly the slave-1 phase drift breathes the level
+inline constexpr phi::PhiTriConfig kPhiSwarmBeatWander = {phi::kPhi150, 0.6f, 0.520f, false};
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -101,6 +104,7 @@ struct PhiSwarmParams {
 	q31_t w1;        // Output weights
 	q31_t w2;
 	q31_t wRing; // sin(s1)*sin(s2) cross term (sum/difference partials)
+	q31_t wBeat; // Beat-AM: slave-1 phase drift breathes the output level
 	float annealGain;
 };
 

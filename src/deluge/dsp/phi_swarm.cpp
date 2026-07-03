@@ -50,8 +50,11 @@ constexpr float kAnchorRatio1[8] = {1.000f, 1.004f, 1.022f, 1.618f, 1.260f, 1.72
 constexpr float kAnchorRatio2[8] = {2.000f, 1.997f, 1.508f, 2.618f, 1.190f, 3.110f, 3.870f, 2.236f};
 constexpr float kAnchorKM[8] = {0.0200f, 0.0022f, 0.0080f, 0.0060f, 0.0015f, 0.0080f, 0.0025f, 0.1200f};
 constexpr float kAnchorK12[8] = {0.0020f, 0.0010f, 0.0020f, 0.0060f, 0.0250f, 0.0080f, 0.0040f, 0.0600f};
-constexpr float kAnchorTemp[8] = {0.0000f, 0.0002f, 0.0004f, 0.0012f, 0.0008f, 0.0060f, 0.0150f, 0.0400f};
+constexpr float kAnchorTemp[8] = {0.0000f, 0.0003f, 0.0007f, 0.0020f, 0.0015f, 0.0090f, 0.0220f, 0.0550f};
 constexpr float kAnchorRing[8] = {0.10f, 0.12f, 0.20f, 0.30f, 0.25f, 0.45f, 0.35f, 0.50f};
+// Beat-AM is strongest where the beat IS the story (Drift/Pull), present
+// everywhere the swarm moves, minimal when locked
+constexpr float kAnchorBeat[8] = {0.05f, 0.40f, 0.50f, 0.30f, 0.35f, 0.30f, 0.25f, 0.20f};
 
 float lerpAnchor(const float* table, float pos, int32_t idx) {
 	return table[idx] + (table[idx + 1] - table[idx]) * pos;
@@ -101,6 +104,9 @@ PhiSwarmParams buildPhiSwarmParams(uint16_t zone, float phaseOffset) {
 	p.w2 = static_cast<q31_t>(w2 * 2147483647.0f);
 	p.wRing = static_cast<q31_t>(ring * 2147483647.0f);
 
+	float beat = lerpAnchor(kAnchorBeat, zf, zi) * (0.5f + phi::evalTriangle(phase, 1.0f, kPhiSwarmBeatWander));
+	p.wBeat = static_cast<q31_t>(std::clamp(beat, 0.0f, 0.45f) * 2147483647.0f);
+
 	p.annealGain = 0.004f + phi::evalTriangle(phase, 1.0f, kPhiSwarmAnneal) * 0.05f;
 
 	return p;
@@ -139,6 +145,7 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		cache.eff.w1 = lerpQ(cache.bankA.w1, cache.bankB.w1);
 		cache.eff.w2 = lerpQ(cache.bankA.w2, cache.bankB.w2);
 		cache.eff.wRing = lerpQ(cache.bankA.wRing, cache.bankB.wRing);
+		cache.eff.wBeat = lerpQ(cache.bankA.wBeat, cache.bankB.wBeat);
 		cache.prevCrossfade = crossfade;
 	}
 
@@ -169,6 +176,8 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 	const q31_t w1 = cache.eff.w1;
 	const q31_t w2 = cache.eff.w2;
 	const q31_t wRing = cache.eff.wRing;
+	const q31_t wBeat = cache.eff.wBeat;
+	const q31_t beatGainBase = 0x7FFFFFFF - wBeat;
 
 	uint32_t phase = *startPhase;
 	uint32_t phaseAtEnd = phase + phaseIncrement * static_cast<uint32_t>(numSamples);
@@ -193,7 +202,8 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 		// Adler coupling: each slave is pulled toward (a rational relation
 		// with) the master; slave 1 additionally drags slave 2
-		int32_t pull1 = multiply_32x32_rshift32(parabolicSine(thetaM - s1), k1mPhase) << 1;
+		int32_t psinD1 = parabolicSine(thetaM - s1);
+		int32_t pull1 = multiply_32x32_rshift32(psinD1, k1mPhase) << 1;
 		int32_t pull2 = multiply_32x32_rshift32(parabolicSine(thetaM - s2), k2mPhase) << 1;
 		int32_t chase = multiply_32x32_rshift32(parabolicSine(s1 - s2), k12Phase) << 1;
 
@@ -224,6 +234,13 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		out = add_saturate(out, multiply_32x32_rshift32(o2, w2) << 1);
 		q31_t ring = multiply_32x32_rshift32(o1, o2) << 1;
 		out = add_saturate(out, multiply_32x32_rshift32(ring, wRing) << 1);
+
+		// Beat-AM: the coupling sine IS the beat waveform (flat when locked,
+		// slow-asymmetric when pulling, cycling when free) - breathe the
+		// output level with it so the phase drift is directly audible.
+		// gain in [1 - 2*wBeat, 1]: never clips
+		q31_t beatGain = beatGainBase + multiply_32x32_rshift32(psinD1, wBeat);
+		out = multiply_32x32_rshift32(out, beatGain) << 1;
 
 		if (applyAmplitude) {
 			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, out, amplitude);
