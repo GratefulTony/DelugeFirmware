@@ -93,6 +93,12 @@ public:
 	int32_t loopFadeInSamplesRemaining{0};
 	int32_t loopFadeInSamplesTotal{0};
 	int32_t loopFadeStepQ31{0}; // 0x7FFFFFFF / loopFadeInSamplesTotal, kept in sync by Voice
+	// Adaptive crossfade curve: blend between linear (0, equal-gain, for correlated
+	// material) and sqrt (0x7FFFFFFF, equal-power, for uncorrelated material) fade
+	// shapes. Starts at the 50/50 compromise; measured from the cached loop regions at
+	// the first cached-crossfade trigger (measureCrossfadeCurve).
+	int32_t crossfadeCurveBlendQ31{0x40000000};
+	bool crossfadeCurveMeasured{false};
 	int32_t crossfadeCacheBytePos{0};
 	bool crossfadeActive{false};
 	bool cacheHandoffPending{false}; // Attach a loop-start-keyed cache at the first loop restart (start offset
@@ -107,6 +113,7 @@ private:
 	bool attachCacheAtLoopStart(SamplePlaybackGuide* guide, Sample* sample, int32_t phaseIncrement,
 	                            int32_t timeStretchRatio, int32_t interpolationBufferSize, LoopType loopingType,
 	                            int32_t priorityRating);
+	void measureCrossfadeCurve(int32_t crossfadeLengthCacheBytes, int32_t frameSizeBytes);
 
 	int32_t cacheBytePos = 0;
 	int8_t cachePlayDirection{1}; // Direction for reading cache in pingpong mode (1=forward, -1=backward)

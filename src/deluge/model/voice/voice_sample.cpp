@@ -35,14 +35,16 @@ extern "C" {}
 
 extern int32_t spareRenderingBuffer[][SSI_TX_BUFFER_NUM_SAMPLES];
 
-// Q31 equal-power fade scale: sqrt(progress * (0x7FFFFFFF / total)), clamped to full
-// scale. stepQ31 is precomputed when the crossfade length is set (Cortex-A9 has no
-// hardware divide). The sqrt makes complementary fades power-constant: the two streams
-// of a loop crossfade are generally uncorrelated, so linear (equal-gain) fades summed
-// to a ~3dB dip in loudness at the midpoint of every crossfade - audible as a volume
-// dip at each loop boundary even when the crossfade machinery works perfectly. Runs at
-// render-window rate (not per sample), so the float sqrt is a non-cost.
-static inline int32_t fadeScaleQ31(int32_t progress, int32_t stepQ31) {
+// Q31 fade scale with an adaptive curve: blends linear (equal-gain) and sqrt
+// (equal-power) shapes. stepQ31 is precomputed when the crossfade length is set
+// (Cortex-A9 has no hardware divide). Which shape keeps a crossfade's loudness constant
+// depends on how correlated the two streams are: correlated material sums coherently
+// (linear fades stay flat, sqrt fades hump +3dB), uncorrelated material sums in power
+// (sqrt fades stay flat, linear fades dip -3dB). sqrtBlendQ31 comes from measuring the
+// actual correlation of the cached loop-start and loop-end regions - see
+// measureCrossfadeCurve(). Runs at render-window rate (not per sample), so the float
+// math is a non-cost.
+static inline int32_t fadeScaleQ31(int32_t progress, int32_t stepQ31, int32_t sqrtBlendQ31) {
 	int64_t linear = (int64_t)progress * stepQ31;
 	if (linear <= 0) {
 		return 0;
@@ -51,7 +53,9 @@ static inline int32_t fadeScaleQ31(int32_t progress, int32_t stepQ31) {
 		return 0x7FFFFFFF;
 	}
 	float p = (float)linear * (1.0f / 2147483648.0f);
-	return (int32_t)(sqrtf(p) * 2147483647.0f);
+	float b = (float)sqrtBlendQ31 * (1.0f / 2147483648.0f);
+	float g = b * sqrtf(p) + (1.0f - b) * p;
+	return (int32_t)(g * 2147483647.0f);
 }
 
 void VoiceSample::beenUnassigned(bool wontBeUsedAgain) {
@@ -75,6 +79,8 @@ void VoiceSample::noteOn(SamplePlaybackGuide* guide, uint32_t samplesLate, int32
 	loopFadeInSamplesRemaining = 0;
 	crossfadeActive = false;
 	crossfadeCacheBytePos = 0;
+	crossfadeCurveBlendQ31 = 0x40000000; // 50/50 compromise until measured
+	crossfadeCurveMeasured = false;
 	cacheHandoffPending = false;
 	justLoopedBack = false;
 	pingpongPlayDirection = guide->playDirection;
@@ -194,6 +200,75 @@ void VoiceSample::setupCacheLoopPoints(SamplePlaybackGuide* guide, Sample* sampl
 		    (loopEndPointSamplesBig + (combinedIncrement >> 1)) / combinedIncrement; // Rounds
 		cacheLoopEndPointBytes = loopEndPointCombinedIncrements * kCacheByteDepth * sample->numChannels;
 	}
+}
+
+// Measure the zero-lag correlation between the cached loop-start and loop-end regions -
+// the two streams of the loop crossfade - and derive the fade curve blend from it.
+// Correlated material (e.g. a phase-aligned tonal loop) sums coherently and needs
+// equal-gain (linear) fades to hold constant loudness; uncorrelated material sums in
+// power and needs equal-power (sqrt) fades. The blend covers everything in between.
+// Both regions must be fully written to the cache before calling. Strided to <=512
+// points, so this is a few thousand cycles, once per note.
+void VoiceSample::measureCrossfadeCurve(int32_t crossfadeLengthCacheBytes, int32_t frameSizeBytes) {
+	crossfadeCurveMeasured = true;
+
+	int32_t numFadeFrames = (int32_t)((uint32_t)crossfadeLengthCacheBytes / (uint8_t)frameSizeBytes);
+	if (numFadeFrames <= 0) {
+		return;
+	}
+	int32_t strideFrames = (numFadeFrames >> 9) + 1;
+
+	int32_t posA = cacheLoopStartPointBytes;
+	int32_t posB = cacheLoopEndPointBytes - crossfadeLengthCacheBytes;
+	int32_t prevClusterA = -1;
+	int32_t prevClusterB = -1;
+	Cluster* clusterA = nullptr;
+	Cluster* clusterB = nullptr;
+	int64_t sumAA = 0;
+	int64_t sumBB = 0;
+	int64_t sumAB = 0;
+
+	for (int32_t i = 0; i < numFadeFrames; i += strideFrames) {
+		int32_t pA = posA + i * frameSizeBytes;
+		int32_t pB = posB + i * frameSizeBytes;
+		int32_t idxA = pA >> Cluster::size_magnitude;
+		int32_t idxB = pB >> Cluster::size_magnitude;
+		if (idxA != prevClusterA) {
+			clusterA = cache->getCluster(idxA);
+			prevClusterA = idxA;
+			if (!clusterA) {
+				return; // Keep the compromise curve
+			}
+		}
+		if (idxB != prevClusterB) {
+			clusterB = cache->getCluster(idxB);
+			prevClusterB = idxB;
+			if (!clusterB) {
+				return;
+			}
+		}
+		// Same offset-read pattern as the cached render path (L channel; the stray LSB
+		// byte is noise-floor and irrelevant to a correlation estimate)
+		int32_t a = (*(int32_t*)&clusterA->data[(pA & (Cluster::size - 1)) - 4 + kCacheByteDepth]) >> 8;
+		int32_t b = (*(int32_t*)&clusterB->data[(pB & (Cluster::size - 1)) - 4 + kCacheByteDepth]) >> 8;
+		sumAA += (int64_t)a * a;
+		sumBB += (int64_t)b * b;
+		sumAB += (int64_t)a * b;
+	}
+
+	if (sumAA == 0 || sumBB == 0) {
+		return; // Silence - the curve won't matter; keep the compromise
+	}
+
+	float rho = (float)sumAB / sqrtf((float)sumAA * (float)sumBB);
+	float blend = 1.0f - rho; // rho >= 1 -> pure linear; rho <= 0 -> pure sqrt
+	if (blend < 0.0f) {
+		blend = 0.0f;
+	}
+	if (blend > 1.0f) {
+		blend = 1.0f;
+	}
+	crossfadeCurveBlendQ31 = (int32_t)(blend * 2147483647.0f);
 }
 
 // Returns a status such as LateStartAttemptStatus::WAIT
@@ -694,6 +769,11 @@ readCachedWindow:
 			// Enter crossfade region when approaching loop end (forward only, non-pingpong)
 			if (!crossfadeActive && !pingpongCacheMode && crossfadeLengthCacheBytes > 0 && bytesTilLoopEndPoint > 0
 			    && bytesTilLoopEndPoint <= crossfadeLengthCacheBytes) {
+				// First cached crossfade with both loop regions written: measure their
+				// correlation once and adapt the fade curve to the material
+				if (!crossfadeCurveMeasured && cache->writeBytePos >= cacheLoopEndPointBytes) {
+					measureCrossfadeCurve(crossfadeLengthCacheBytes, frameSizeBytes);
+				}
 				crossfadeActive = true;
 				crossfadeCacheBytePos = cacheLoopStartPointBytes;
 				loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
@@ -892,13 +972,15 @@ readCachedWindow:
 			// True crossfade: main fades out, crossfade read fades in
 			int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
 
-			int32_t fadeInStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31);
-			int32_t fadeInEnd = fadeScaleQ31(fadeProgress + numSamplesThisCacheRead, loopFadeStepQ31);
+			int32_t fadeInStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31, crossfadeCurveBlendQ31);
+			int32_t fadeInEnd =
+			    fadeScaleQ31(fadeProgress + numSamplesThisCacheRead, loopFadeStepQ31, crossfadeCurveBlendQ31);
 
 			// Main read fades OUT — sqrt of the REMAINING fraction (not 1 - fadeIn, which
 			// would break the equal-power pairing)
-			int32_t fadeOutStart = fadeScaleQ31(loopFadeInSamplesRemaining, loopFadeStepQ31);
-			int32_t fadeOutEnd = fadeScaleQ31(loopFadeInSamplesRemaining - numSamplesThisCacheRead, loopFadeStepQ31);
+			int32_t fadeOutStart = fadeScaleQ31(loopFadeInSamplesRemaining, loopFadeStepQ31, crossfadeCurveBlendQ31);
+			int32_t fadeOutEnd = fadeScaleQ31(loopFadeInSamplesRemaining - numSamplesThisCacheRead, loopFadeStepQ31,
+			                                  crossfadeCurveBlendQ31);
 
 			int32_t mainAmpStart = multiply_32x32_rshift32(amplitude, fadeOutStart) << 1;
 			int32_t mainAmpEnd =
@@ -923,8 +1005,9 @@ readCachedWindow:
 		else if (loopFadeInSamplesRemaining > 0) {
 			// Non-crossfade fade-in (pingpong or other cases)
 			int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
-			int32_t fadeStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31);
-			int32_t fadeEnd = fadeScaleQ31(fadeProgress + numSamplesThisCacheRead, loopFadeStepQ31);
+			int32_t fadeStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31, crossfadeCurveBlendQ31);
+			int32_t fadeEnd =
+			    fadeScaleQ31(fadeProgress + numSamplesThisCacheRead, loopFadeStepQ31, crossfadeCurveBlendQ31);
 			int32_t ampAtStart = multiply_32x32_rshift32(amplitude, fadeStart) << 1;
 			int32_t ampAtEnd =
 			    multiply_32x32_rshift32(amplitude + amplitudeIncrement * numSamplesThisCacheRead, fadeEnd) << 1;
@@ -1012,12 +1095,12 @@ readCachedWindow:
 					// Apply simple fade-out using distance to loop end
 					int32_t distSamples = bytesTilLoopEndPoint / frameSizeBytes;
 					if (distSamples > 0 && distSamples < loopFadeInSamplesTotal) {
-						int32_t scaleStart = fadeScaleQ31(distSamples, loopFadeStepQ31);
+						int32_t scaleStart = fadeScaleQ31(distSamples, loopFadeStepQ31, crossfadeCurveBlendQ31);
 						int32_t distAfter = distSamples - numSamplesThisCacheRead;
 						if (distAfter < 0) {
 							distAfter = 0;
 						}
-						int32_t scaleEnd = fadeScaleQ31(distAfter, loopFadeStepQ31);
+						int32_t scaleEnd = fadeScaleQ31(distAfter, loopFadeStepQ31, crossfadeCurveBlendQ31);
 						cacheRenderAmplitude = multiply_32x32_rshift32(amplitude, scaleStart) << 1;
 						int32_t ampEnd =
 						    multiply_32x32_rshift32(amplitude + amplitudeIncrement * numSamplesThisCacheRead, scaleEnd)
@@ -1492,8 +1575,9 @@ readNonTimestretched:
 				int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
 
 				// Fade scale at start/end of window (Q31: 0 = silent, 0x7FFFFFFF = full)
-				int32_t fadeStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31);
-				int32_t fadeEnd = fadeScaleQ31(fadeProgress + numSamplesThisNonTimestretchedRead, loopFadeStepQ31);
+				int32_t fadeStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31, crossfadeCurveBlendQ31);
+				int32_t fadeEnd = fadeScaleQ31(fadeProgress + numSamplesThisNonTimestretchedRead, loopFadeStepQ31,
+				                               crossfadeCurveBlendQ31);
 
 				int32_t ampAtStart = multiply_32x32_rshift32(amplitude, fadeStart) << 1;
 				int32_t ampAtEnd = multiply_32x32_rshift32(
@@ -1571,13 +1655,13 @@ readNonTimestretched:
 
 					if (distOutputSamples >= 0 && distOutputSamples <= loopFadeInSamplesTotal) {
 						// Compute fade-out for main (uncached) read
-						int32_t scaleAtStart = fadeScaleQ31(distOutputSamples, loopFadeStepQ31);
+						int32_t scaleAtStart = fadeScaleQ31(distOutputSamples, loopFadeStepQ31, crossfadeCurveBlendQ31);
 
 						int32_t distAfterRead = distOutputSamples - numSamplesThisNonTimestretchedRead;
 						if (distAfterRead < 0) {
 							distAfterRead = 0;
 						}
-						int32_t scaleAtEnd = fadeScaleQ31(distAfterRead, loopFadeStepQ31);
+						int32_t scaleAtEnd = fadeScaleQ31(distAfterRead, loopFadeStepQ31, crossfadeCurveBlendQ31);
 
 						int32_t ampAtStart = multiply_32x32_rshift32(renderAmplitude, scaleAtStart) << 1;
 						int32_t ampAtEnd =
@@ -1632,8 +1716,9 @@ readNonTimestretched:
 			// The uncached render above applied fade-out. Now add fade-in from cache loop start.
 			if (crossfadeActive && cache && loopFadeInSamplesRemaining > 0) {
 				int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
-				int32_t fadeInStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31);
-				int32_t fadeInEnd = fadeScaleQ31(fadeProgress + numSamplesThisNonTimestretchedRead, loopFadeStepQ31);
+				int32_t fadeInStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31, crossfadeCurveBlendQ31);
+				int32_t fadeInEnd = fadeScaleQ31(fadeProgress + numSamplesThisNonTimestretchedRead, loopFadeStepQ31,
+				                                 crossfadeCurveBlendQ31);
 
 				int32_t xfAmpStart = multiply_32x32_rshift32(amplitude, fadeInStart) << 1;
 				int32_t xfAmpEnd = multiply_32x32_rshift32(
