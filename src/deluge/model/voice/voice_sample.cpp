@@ -58,11 +58,26 @@ static inline int32_t fadeScaleQ31(int32_t progress, int32_t stepQ31, int32_t sq
 	return (int32_t)(g * 2147483647.0f);
 }
 
-// Short fixed anti-click envelope for pingpong bounces: a reversal flips the waveform's
-// derivative (and no curve choice helps), so a brief symmetric dip masks the corner.
+// Short fixed anti-click envelope for pingpong bounces. The bounce apexes get snapped
+// onto waveform extrema (see snapPingpongBouncePoints), which removes most of the
+// reversal corner; this brief dip only guards imperfect extrema, so it can be tiny.
 // Deliberately independent of the loop-crossfade length - a bounce is not a crossfade.
-constexpr int32_t kPingpongBounceFadeSamples = 128;
+constexpr int32_t kPingpongBounceFadeSamples = 32;
 constexpr int32_t kPingpongBounceFadeStepQ31 = 0x7FFFFFFF / kPingpongBounceFadeSamples;
+
+// Read one frame's L-channel sample from the cache by byte position (24-bit value in
+// the high bytes, same offset pattern as the cached render path)
+static int32_t readCacheFrameL(SampleCache* cache, int32_t bytePos, Cluster** cluster, int32_t* prevClusterIdx) {
+	int32_t idx = bytePos >> Cluster::size_magnitude;
+	if (idx != *prevClusterIdx) {
+		*cluster = cache->getCluster(idx);
+		*prevClusterIdx = idx;
+	}
+	if (!*cluster) {
+		return 0;
+	}
+	return (*(int32_t*)&(*cluster)->data[(bytePos & (Cluster::size - 1)) - 4 + kCacheByteDepth]) >> 8;
+}
 
 void VoiceSample::beenUnassigned(bool wontBeUsedAgain) {
 	unassignAllReasons(wontBeUsedAgain);
@@ -88,6 +103,7 @@ void VoiceSample::noteOn(SamplePlaybackGuide* guide, uint32_t samplesLate, int32
 	crossfadeCurveBlendQ31 = 0x40000000; // 50/50 compromise until measured
 	crossfadeCurveMeasured = false;
 	pingpongBounceFadeRemaining = 0;
+	pingpongBouncePointsSnapped = false;
 	cacheHandoffPending = false;
 	justLoopedBack = false;
 	pingpongPlayDirection = guide->playDirection;
@@ -207,6 +223,66 @@ void VoiceSample::setupCacheLoopPoints(SamplePlaybackGuide* guide, Sample* sampl
 		    (loopEndPointSamplesBig + (combinedIncrement >> 1)) / combinedIncrement; // Rounds
 		cacheLoopEndPointBytes = loopEndPointCombinedIncrements * kCacheByteDepth * sample->numChannels;
 	}
+}
+
+// Nudge the cached pingpong bounce points onto nearby waveform extrema. A reversal
+// flips the waveform's derivative, which is an audible corner in general - but at a
+// local peak/trough the mirror is smooth. Search inward only (where cache data exists),
+// capped small enough to be timing-neutral (<3ms of loop-length change per end).
+void VoiceSample::snapPingpongBouncePoints(int32_t frameSizeBytes) {
+	pingpongBouncePointsSnapped = true;
+
+	constexpr int32_t kSearchFrames = 128;
+
+	// Loop end: find the last extremum before the end point; the apex frame becomes the
+	// final frame the forward leg plays
+	{
+		Cluster* cluster = nullptr;
+		int32_t prevIdx = -1;
+		int32_t prevSample = readCacheFrameL(cache, cacheLoopEndPointBytes - frameSizeBytes, &cluster, &prevIdx);
+		int32_t prevDiff = 0;
+		for (int32_t k = 2; k <= kSearchFrames; k++) {
+			int32_t pos = cacheLoopEndPointBytes - k * frameSizeBytes;
+			if (pos <= cacheLoopStartPointBytes) {
+				break;
+			}
+			int32_t s = readCacheFrameL(cache, pos, &cluster, &prevIdx);
+			int32_t diff = prevSample - s; // slope toward the loop end
+			if (diff == 0 || (prevDiff != 0 && ((diff ^ prevDiff) < 0))) {
+				// Extremum (or plateau) at the previous frame - snap the end there
+				cacheLoopEndPointBytes -= (k - 1) * frameSizeBytes;
+				break;
+			}
+			prevDiff = diff;
+			prevSample = s;
+		}
+	}
+
+	// Loop start: find the first extremum after the start point; the apex frame becomes
+	// the final frame the backward leg plays
+	{
+		Cluster* cluster = nullptr;
+		int32_t prevIdx = -1;
+		int32_t prevSample = readCacheFrameL(cache, cacheLoopStartPointBytes, &cluster, &prevIdx);
+		int32_t prevDiff = 0;
+		for (int32_t k = 1; k <= kSearchFrames; k++) {
+			int32_t pos = cacheLoopStartPointBytes + k * frameSizeBytes;
+			if (pos >= cacheLoopEndPointBytes) {
+				break;
+			}
+			int32_t s = readCacheFrameL(cache, pos, &cluster, &prevIdx);
+			int32_t diff = s - prevSample; // slope away from the loop start
+			if (k >= 2 && (diff == 0 || (prevDiff != 0 && ((diff ^ prevDiff) < 0)))) {
+				// Extremum (or plateau) at the previous frame - snap the start there
+				cacheLoopStartPointBytes += (k - 1) * frameSizeBytes;
+				break;
+			}
+			prevDiff = diff;
+			prevSample = s;
+		}
+	}
+
+	cacheLoopLengthBytes = (uint32_t)(cacheLoopEndPointBytes - cacheLoopStartPointBytes);
 }
 
 // Measure the zero-lag correlation between the cached loop-start and loop-end regions -
@@ -789,6 +865,10 @@ readCachedWindow:
 			if (bytesTilLoopEndPoint <= 0) {
 				D_PRINTLN("Loop endpoint reached, reading cache");
 				if (pingpongCacheMode) {
+					// Snap bounce apexes onto waveform extrema once the loop is cached
+					if (!pingpongBouncePointsSnapped && cache->writeBytePos >= cacheLoopEndPointBytes) {
+						snapPingpongBouncePoints(frameSizeBytes);
+					}
 					// Pingpong: bounce backward from loop end. Skip the endpoint frame -
 					// the forward leg just played it (playing it twice smears the mirror).
 					cachePlayDirection = -1;

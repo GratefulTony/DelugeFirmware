@@ -100,6 +100,7 @@ public:
 	int32_t crossfadeCurveBlendQ31{0x40000000};
 	bool crossfadeCurveMeasured{false};
 	int32_t pingpongBounceFadeRemaining{0}; // Counts down the short anti-click fade after a cached pingpong bounce
+	bool pingpongBouncePointsSnapped{false};
 	int32_t crossfadeCacheBytePos{0};
 	bool crossfadeActive{false};
 	bool cacheHandoffPending{false}; // Attach a loop-start-keyed cache at the first loop restart (start offset
@@ -115,6 +116,7 @@ private:
 	                            int32_t timeStretchRatio, int32_t interpolationBufferSize, LoopType loopingType,
 	                            int32_t priorityRating);
 	void measureCrossfadeCurve(int32_t crossfadeLengthCacheBytes, int32_t frameSizeBytes);
+	void snapPingpongBouncePoints(int32_t frameSizeBytes);
 
 	int32_t cacheBytePos = 0;
 	int8_t cachePlayDirection{1}; // Direction for reading cache in pingpong mode (1=forward, -1=backward)
