@@ -130,6 +130,11 @@ struct PhiSwarmCache {
 	// (env/LFO/unison on the morph) is 344 Hz FM buzz
 	uint32_t prevInc1{0};
 	uint32_t prevInc2{0};
+	// Previous buffer's output weights, ramped for the same reason (AM steps)
+	q31_t prevW1{INT32_MIN};
+	q31_t prevW2{0};
+	q31_t prevWRing{0};
+	q31_t prevWBeat{0};
 	float annealEnv{0.0f}; // Heat injected by crossfade motion, decays per buffer
 	float prevCf{-1.0f};
 	uint32_t lastEnvTime{0xFFFFFFFF};

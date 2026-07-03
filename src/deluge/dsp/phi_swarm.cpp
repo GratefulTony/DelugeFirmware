@@ -194,11 +194,26 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 	int32_t k12Phase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.k12FP) >> 16);
 	int32_t tempPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.effTempFP) >> 16);
 
-	const q31_t w1 = cache.eff.w1;
-	const q31_t w2 = cache.eff.w2;
-	const q31_t wRing = cache.eff.wRing;
-	const q31_t wBeat = cache.eff.wBeat;
-	const q31_t beatGainBase = 0x7FFFFFFF - wBeat;
+	// Output weights ramp from last buffer's values (AM stepped at 344 Hz
+	// under wave-index modulation otherwise)
+	if (cache.prevW1 == INT32_MIN) {
+		cache.prevW1 = cache.eff.w1;
+		cache.prevW2 = cache.eff.w2;
+		cache.prevWRing = cache.eff.wRing;
+		cache.prevWBeat = cache.eff.wBeat;
+	}
+	q31_t w1 = cache.prevW1;
+	q31_t w2 = cache.prevW2;
+	q31_t wRing = cache.prevWRing;
+	q31_t wBeat = cache.prevWBeat;
+	const q31_t w1Step = (cache.eff.w1 - w1) / numSamples;
+	const q31_t w2Step = (cache.eff.w2 - w2) / numSamples;
+	const q31_t wRingStep = (cache.eff.wRing - wRing) / numSamples;
+	const q31_t wBeatStep = (cache.eff.wBeat - wBeat) / numSamples;
+	cache.prevW1 = cache.eff.w1;
+	cache.prevW2 = cache.eff.w2;
+	cache.prevWRing = cache.eff.wRing;
+	cache.prevWBeat = cache.eff.wBeat;
 
 	// Phase-distortion factors: first-half and second-half slopes in Q28
 	// (two 64/32 divides per buffer; ~4 cycles per warp per sample)
@@ -261,6 +276,10 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 		inc1 += inc1Step;
 		inc2 += inc2Step;
+		w1 += w1Step;
+		w2 += w2Step;
+		wRing += wRingStep;
+		wBeat += wBeatStep;
 		s1 += inc1 + pull1 + noise1;
 		s2 += inc2 + pull2 + chase + noise2;
 
@@ -286,7 +305,7 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		// slow-asymmetric when pulling, cycling when free) - breathe the
 		// output level with it so the phase drift is directly audible.
 		// gain in [1 - 2*wBeat, 1]: never clips
-		q31_t beatGain = beatGainBase + multiply_32x32_rshift32(psinD1, wBeat);
+		q31_t beatGain = (0x7FFFFFFF - wBeat) + multiply_32x32_rshift32(psinD1, wBeat);
 		out = multiply_32x32_rshift32(out, beatGain) << 1;
 
 		if (applyAmplitude) {
