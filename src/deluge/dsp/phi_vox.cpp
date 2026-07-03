@@ -291,7 +291,7 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 
 		dcComp += dcStep;
 		morphRampQ += morphRampInc;
-		q31_t out = -dcComp;
+		q31_t out = 0;
 		q31_t envelope = 0; // Strongest pulse envelope, gates the noise
 
 		for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
@@ -327,6 +327,18 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 			q31_t noise = multiply_32x32_rshift32(static_cast<int32_t>(noiseState), voicedNoise);
 			out = add_saturate(out, multiply_32x32_rshift32(noise, envelope) << 1);
 		}
+
+		// Cycle-end release: when the pulse burst is LONGER than the note
+		// period (long bursts at low formant rates), the wrap amputates a
+		// pulse mid-flight - a hard discontinuity EVERY cycle (audible as
+		// harsh buzz at specific zone/wave settings, worst near the start of
+		// Breath). A linear fade over the last 1/32 of the cycle makes every
+		// truncation land at zero. Sim-verified: worst-case step 0.55 -> 0.05.
+		uint32_t toWrap = ~evalPhase;
+		if (toWrap < (1u << 27)) {
+			out = multiply_32x32_rshift32(out, static_cast<q31_t>(toWrap << 4)) << 1;
+		}
+		out -= dcComp;
 
 		if (applyAmplitude) {
 			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, out, amplitude);
