@@ -188,15 +188,9 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 			cache.wRingLast = cache.eff.wRing;
 			cache.wBeatLast = cache.eff.wBeat;
 		}
-		// Big ratio jumps (zone change) snap instead of glide
-		if (std::abs(static_cast<int32_t>(cache.eff.ratio1FP - cache.ratio1Last))
-		    > static_cast<int32_t>(cache.eff.ratio1FP >> 3)) {
-			cache.ratio1Last = cache.eff.ratio1FP;
-		}
-		if (std::abs(static_cast<int32_t>(cache.eff.ratio2FP - cache.ratio2Last))
-		    > static_cast<int32_t>(cache.eff.ratio2FP >> 3)) {
-			cache.ratio2Last = cache.eff.ratio2FP;
-		}
+		// (No magnitude-based snap: ramps handle any CONTINUOUS morph speed -
+		// fast LFOs on the wave index were tripping the old >1/8 snap and
+		// clicking. Zone changes snap via the bank-rebuild reset instead.)
 		cache.ratio1From = cache.ratio1Last;
 		cache.ratio2From = cache.ratio2Last;
 		cache.ratio1Last = cache.eff.ratio1FP;
@@ -209,6 +203,14 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		cache.w2Last = cache.eff.w2;
 		cache.wRingLast = cache.eff.wRing;
 		cache.wBeatLast = cache.eff.wBeat;
+		if (cache.skew1Last == 0) {
+			cache.skew1Last = cache.eff.skew1;
+			cache.skew2Last = cache.eff.skew2;
+		}
+		cache.skew1From = cache.skew1Last;
+		cache.skew2From = cache.skew2Last;
+		cache.skew1Last = cache.eff.skew1;
+		cache.skew2Last = cache.eff.skew2;
 	}
 
 	// Per-buffer conversions: everything scales with the master increment so
@@ -237,14 +239,31 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 	const q31_t wRingStep = (cache.eff.wRing - wRing) / numSamples;
 	const q31_t wBeatStep = (cache.eff.wBeat - wBeat) / numSamples;
 
-	// Phase-distortion factors: first-half and second-half slopes in Q28
-	// (two 64/32 divides per buffer; ~4 cycles per warp per sample)
+	// Phase-distortion factors: first-half and second-half slopes in Q28.
+	// When the skew is MOVING (wave modulation), the warped phase lerps
+	// between the previous and current buffer's warps - un-ramped, the
+	// waveform shape stepped at 344 Hz (clicks under modulation)
 	const uint32_t skew1 = cache.eff.skew1;
 	const uint32_t skew2 = cache.eff.skew2;
 	const uint32_t rise1 = static_cast<uint32_t>((1ULL << 59) / skew1);
 	const uint32_t fall1 = static_cast<uint32_t>((1ULL << 59) / (4294967296ULL - skew1));
 	const uint32_t rise2 = static_cast<uint32_t>((1ULL << 59) / skew2);
 	const uint32_t fall2 = static_cast<uint32_t>((1ULL << 59) / (4294967296ULL - skew2));
+	const bool skewRamping = (cache.skew1From != skew1) || (cache.skew2From != skew2);
+	uint32_t rise1F = rise1;
+	uint32_t fall1F = fall1;
+	uint32_t rise2F = rise2;
+	uint32_t fall2F = fall2;
+	const uint32_t skew1F = cache.skew1From;
+	const uint32_t skew2F = cache.skew2From;
+	q31_t skewRamp = 0;
+	q31_t skewRampInc = 0x7FFFFFFF / numSamples;
+	if (skewRamping) {
+		rise1F = static_cast<uint32_t>((1ULL << 59) / skew1F);
+		fall1F = static_cast<uint32_t>((1ULL << 59) / (4294967296ULL - skew1F));
+		rise2F = static_cast<uint32_t>((1ULL << 59) / skew2F);
+		fall2F = static_cast<uint32_t>((1ULL << 59) / (4294967296ULL - skew2F));
+	}
 	auto warp = [](uint32_t ph, uint32_t skew, uint32_t rise, uint32_t fall) -> uint32_t {
 		if (ph < skew) {
 			return static_cast<uint32_t>((static_cast<uint64_t>(ph) * rise) >> 28);
@@ -324,8 +343,17 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 			continue;
 		}
 
-		q31_t o1 = SineOsc::doFMNew(warp(s1, skew1, rise1, fall1), 0);
-		q31_t o2 = SineOsc::doFMNew(warp(s2, skew2, rise2, fall2), 0);
+		uint32_t w1p = warp(s1, skew1, rise1, fall1);
+		uint32_t w2p = warp(s2, skew2, rise2, fall2);
+		if (skewRamping) {
+			skewRamp += skewRampInc;
+			uint32_t w1f = warp(s1, skew1F, rise1F, fall1F);
+			uint32_t w2f = warp(s2, skew2F, rise2F, fall2F);
+			w1p = w1f + static_cast<uint32_t>((static_cast<int64_t>(static_cast<int32_t>(w1p - w1f)) * skewRamp) >> 31);
+			w2p = w2f + static_cast<uint32_t>((static_cast<int64_t>(static_cast<int32_t>(w2p - w2f)) * skewRamp) >> 31);
+		}
+		q31_t o1 = SineOsc::doFMNew(w1p, 0);
+		q31_t o2 = SineOsc::doFMNew(w2p, 0);
 
 		q31_t out = multiply_32x32_rshift32(o1, w1) << 1;
 		out = add_saturate(out, multiply_32x32_rshift32(o2, w2) << 1);

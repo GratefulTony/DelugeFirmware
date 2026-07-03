@@ -140,6 +140,10 @@ struct PhiSwarmCache {
 	q31_t w2From{0};
 	q31_t wRingFrom{0};
 	q31_t wBeatFrom{0};
+	uint32_t skew1From{0};
+	uint32_t skew2From{0};
+	uint32_t skew1Last{0};
+	uint32_t skew2Last{0};
 	q31_t w1Last{INT32_MIN};
 	q31_t w2Last{0};
 	q31_t wRingLast{0};

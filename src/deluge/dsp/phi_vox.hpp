@@ -114,7 +114,19 @@ struct PhiVoxCache {
 	float effNoteRatio[kPhiVoxNumFormants]{};
 	q31_t effPulseGain[kPhiVoxNumFormants][kPhiVoxMaxPulses]{};
 	q31_t effPulseGainAbs[kPhiVoxNumFormants][kPhiVoxMaxPulses]{}; // For the noise-gate envelope
-	q31_t effVoicedNoise{};                  // breath + articulation burst, Q31, gated by pulse envelope in render
+	q31_t effVoicedNoise{}; // breath + articulation burst, Q31, gated by pulse envelope in render
+
+	// Previous-buffer snapshots for morph ramps: stepping increments/gains
+	// per buffer under wave modulation was audible (and the old stateless
+	// phase re-derivation TELEPORTED the burst mid-cycle every buffer)
+	uint32_t effFormantIncFrom[kPhiVoxNumFormants]{};
+	float effNoteRatioFrom[kPhiVoxNumFormants]{};
+	float effMeanCompFrom[kPhiVoxNumFormants]{};
+	q31_t effPulseGainFrom[kPhiVoxNumFormants][kPhiVoxMaxPulses]{};
+	q31_t effPulseGainAbsFrom[kPhiVoxNumFormants][kPhiVoxMaxPulses]{};
+	bool morphRamping{false};
+	uint32_t effVersion{0};
+	uint32_t effVersionSeen{0};
 	float effMeanComp[kPhiVoxNumFormants]{}; // DC compensation numerators (× noteInc/formantInc at render)
 
 	q31_t prevCrossfade{INT32_MIN};
@@ -147,9 +159,12 @@ PhiVoxParams buildPhiVoxParams(uint16_t zone, float phaseOffset = 0.0f);
 /// incrementally (adds and carries only) within it.
 /// trackingAmount 0..50: blends formant frequencies from fixed Hz (0, vocal
 /// behavior) to note-relative ratios (50, harmonic-locked overtone behavior)
+/// formantState packs per-voice formant phase (28b) + pulse index (4b) per
+/// formant into an otherwise-unused per-voice uint64 - carrying it across
+/// buffers instead of re-deriving eliminates morph-time phase teleports
 void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
-                  uint32_t phaseIncrement, uint32_t* startPhase, uint32_t retriggerPhase, int32_t amplitude,
-                  int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth,
-                  int32_t trackingAmount);
+                  uint32_t phaseIncrement, uint32_t* startPhase, uint64_t* formantState, uint32_t retriggerPhase,
+                  int32_t amplitude, int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade,
+                  uint32_t pulseWidth, int32_t trackingAmount);
 
 } // namespace deluge::dsp

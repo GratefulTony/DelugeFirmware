@@ -123,9 +123,9 @@ PhiVoxParams buildPhiVoxParams(uint16_t zone, float phaseOffset) {
 // ============================================================================
 
 void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
-                  uint32_t phaseIncrement, uint32_t* startPhase, uint32_t retriggerPhase, int32_t amplitude,
-                  int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth,
-                  int32_t trackingAmount) {
+                  uint32_t phaseIncrement, uint32_t* startPhase, uint64_t* formantState, uint32_t retriggerPhase,
+                  int32_t amplitude, int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade,
+                  uint32_t pulseWidth, int32_t trackingAmount) {
 
 #if ENABLE_FX_BENCHMARK
 	FX_BENCH_DECLARE(bench_render, "phi_vox", "render");
@@ -135,6 +135,12 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 	// Rebuild the crossfaded effective tables when the (smoothed) crossfade moves.
 	// Cheap: 2 formant increments + 32 gain lerps.
 	if (crossfade != cache.prevCrossfade) {
+		// Outgoing eff values become this buffer's ramp start points
+		memcpy(cache.effFormantIncFrom, cache.effFormantInc, sizeof(cache.effFormantIncFrom));
+		memcpy(cache.effNoteRatioFrom, cache.effNoteRatio, sizeof(cache.effNoteRatioFrom));
+		memcpy(cache.effMeanCompFrom, cache.effMeanComp, sizeof(cache.effMeanCompFrom));
+		memcpy(cache.effPulseGainFrom, cache.effPulseGain, sizeof(cache.effPulseGainFrom));
+		memcpy(cache.effPulseGainAbsFrom, cache.effPulseGainAbs, sizeof(cache.effPulseGainAbsFrom));
 		float cf = std::clamp(static_cast<float>(crossfade) / 2147483648.0f + 0.5f, 0.0f, 1.0f);
 		float cfInv = 1.0f - cf;
 		for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
@@ -154,6 +160,7 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 			cache.effMeanComp[f] = 0.5f * gainSum;
 		}
 		cache.prevCrossfade = crossfade;
+		cache.effVersion++;
 	}
 
 	// Articulation envelope: crossfade VELOCITY injects a consonant burst.
@@ -170,25 +177,45 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 		float breath = cfInv * cache.bankA.breath + cf * cache.bankB.breath;
 		float noiseAmt = std::min(breath + cache.artEnv, 0.9f);
 		cache.effVoicedNoise = static_cast<q31_t>(noiseAmt * 2147483647.0f);
+
+		// Morph-ramp snapshots (once per buffer, shared across voices)
+		cache.morphRamping = (cache.effVersion != cache.effVersionSeen);
+		if (cache.morphRamping) {
+			cache.effVersionSeen = cache.effVersion;
+		}
+		else {
+			// Parked: From == To, ramps degenerate to the static values
+			memcpy(cache.effFormantIncFrom, cache.effFormantInc, sizeof(cache.effFormantIncFrom));
+			memcpy(cache.effNoteRatioFrom, cache.effNoteRatio, sizeof(cache.effNoteRatioFrom));
+			memcpy(cache.effMeanCompFrom, cache.effMeanComp, sizeof(cache.effMeanCompFrom));
+			memcpy(cache.effPulseGainFrom, cache.effPulseGain, sizeof(cache.effPulseGainFrom));
+			memcpy(cache.effPulseGainAbsFrom, cache.effPulseGainAbs, sizeof(cache.effPulseGainAbsFrom));
+		}
 	}
 
 	// Formant tracking: blend each formant's increment from fixed Hz (vocal)
-	// toward a note-relative ratio (harmonic-locked overtone behavior)
+	// toward a note-relative ratio. From/To pairs ramp across the buffer -
+	// per-buffer steps were audible under wave modulation
 	float track = static_cast<float>(trackingAmount) * (1.0f / 50.0f);
 	uint32_t finalInc[kPhiVoxNumFormants];
-	for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
-		float incAbs = static_cast<float>(cache.effFormantInc[f]);
-		float incTracked = cache.effNoteRatio[f] * static_cast<float>(phaseIncrement);
-		float inc = incAbs + (incTracked - incAbs) * track;
-		finalInc[f] = static_cast<uint32_t>(std::clamp(inc, 60.0f * 97391.5f, 8000.0f * 97391.5f));
-	}
-
-	// DC compensation for this buffer's pitch: mean = comp * (noteInc / formantInc)
+	int32_t incStep[kPhiVoxNumFormants];
 	q31_t dcComp = 0;
+	q31_t dcCompTo = 0;
 	for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
-		float ratio = static_cast<float>(phaseIncrement) / static_cast<float>(finalInc[f]);
-		dcComp += static_cast<q31_t>(cache.effMeanComp[f] * std::min(ratio, 1.0f) * 2147483647.0f);
+		float incAbsF = static_cast<float>(cache.effFormantIncFrom[f]);
+		float incFrom = incAbsF + (cache.effNoteRatioFrom[f] * static_cast<float>(phaseIncrement) - incAbsF) * track;
+		float incAbsT = static_cast<float>(cache.effFormantInc[f]);
+		float incTo = incAbsT + (cache.effNoteRatio[f] * static_cast<float>(phaseIncrement) - incAbsT) * track;
+		uint32_t from = static_cast<uint32_t>(std::clamp(incFrom, 60.0f * 97391.5f, 8000.0f * 97391.5f));
+		uint32_t to = static_cast<uint32_t>(std::clamp(incTo, 60.0f * 97391.5f, 8000.0f * 97391.5f));
+		finalInc[f] = from;
+		incStep[f] = static_cast<int32_t>(to - from) / numSamples;
+		float ratioF = static_cast<float>(phaseIncrement) / static_cast<float>(from);
+		float ratioT = static_cast<float>(phaseIncrement) / static_cast<float>(to);
+		dcComp += static_cast<q31_t>(cache.effMeanCompFrom[f] * std::min(ratioF, 1.0f) * 2147483647.0f);
+		dcCompTo += static_cast<q31_t>(cache.effMeanComp[f] * std::min(ratioT, 1.0f) * 2147483647.0f);
 	}
+	const q31_t dcStep = (dcCompTo - dcComp) / numSamples;
 
 	uint32_t phase = *startPhase;
 	uint32_t phaseAtEnd = phase + phaseIncrement * static_cast<uint32_t>(numSamples);
@@ -199,22 +226,36 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 
 	const uint32_t phaseWidth = pulseWidth ? (0xFFFFFFFF - (pulseWidth << 1)) : 0xFFFFFFFF;
 
-	// Derive formant state from the cycle phase at buffer start (stateless per
-	// voice): samples into the cycle, then formant cycles elapsed (= pulse
-	// index, high word) and formant phase (low word) in one 64-bit multiply.
+	// Formant state carries across buffers per voice (phase 28b + index 4b
+	// per formant, packed in an otherwise-unused uint64). Re-deriving it per
+	// buffer teleported the burst mid-cycle whenever the increments moved.
+	// Derivation remains as the init path (state == 0: fresh voice).
 	uint32_t evalPhase = phase + phaseIncrement + retriggerPhase;
-	uint32_t samplesIntoCycle = evalPhase / phaseIncrement; // One divide per buffer
 	uint32_t fPhase[kPhiVoxNumFormants];
 	int32_t pulseIdx[kPhiVoxNumFormants];
-	for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
-		uint64_t elapsed = static_cast<uint64_t>(samplesIntoCycle) * finalInc[f];
-		pulseIdx[f] = std::min(static_cast<int32_t>(elapsed >> 32), kPhiVoxMaxPulses - 1);
-		fPhase[f] = static_cast<uint32_t>(elapsed);
+	if (*formantState == 0) {
+		uint32_t samplesIntoCycle = evalPhase / phaseIncrement; // One divide, init only
+		for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
+			uint64_t elapsed = static_cast<uint64_t>(samplesIntoCycle) * finalInc[f];
+			pulseIdx[f] = std::min(static_cast<int32_t>(elapsed >> 32), kPhiVoxMaxPulses - 1);
+			fPhase[f] = static_cast<uint32_t>(elapsed);
+		}
+	}
+	else {
+		uint32_t lo = static_cast<uint32_t>(*formantState);
+		uint32_t hi = static_cast<uint32_t>(*formantState >> 32);
+		fPhase[0] = lo & 0xFFFFFFF0u;
+		pulseIdx[0] = static_cast<int32_t>(lo & 0xFu);
+		fPhase[1] = hi & 0xFFFFFFF0u;
+		pulseIdx[1] = static_cast<int32_t>(hi & 0xFu);
 	}
 
 	uint32_t prevEvalPhase = evalPhase;
 	uint32_t noiseState = cache.noiseState;
 	const q31_t voicedNoise = cache.effVoicedNoise;
+	const bool morphing = cache.morphRamping;
+	q31_t morphRampQ = 0;
+	const q31_t morphRampInc = 0x7FFFFFFF / numSamples;
 	int32_t* thisSample = bufferStart;
 
 	for (int32_t n = 0; n < numSamples; n++) {
@@ -244,10 +285,13 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 			continue;
 		}
 
+		dcComp += dcStep;
+		morphRampQ += morphRampInc;
 		q31_t out = -dcComp;
 		q31_t envelope = 0; // Strongest pulse envelope, gates the noise
 
 		for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
+			finalInc[f] += static_cast<uint32_t>(incStep[f]);
 			uint32_t newPhase = fPhase[f] + finalInc[f];
 			if (newPhase < fPhase[f] && pulseIdx[f] < kPhiVoxMaxPulses - 1) {
 				pulseIdx[f]++; // Formant period completed: next pulse
@@ -259,10 +303,17 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 			q31_t rc = 0x3FFFFFFF - (cosv >> 1); // [0, ~Q31]
 
 			q31_t gain = cache.effPulseGain[f][pulseIdx[f]];
+			q31_t gainAbs = cache.effPulseGainAbs[f][pulseIdx[f]];
+			if (morphing) { // Lerp gains from last buffer's tables while the wave moves
+				q31_t gF = cache.effPulseGainFrom[f][pulseIdx[f]];
+				gain = gF + (multiply_32x32_rshift32(gain - gF, morphRampQ) << 1);
+				q31_t gaF = cache.effPulseGainAbsFrom[f][pulseIdx[f]];
+				gainAbs = gaF + (multiply_32x32_rshift32(gainAbs - gaF, morphRampQ) << 1);
+			}
 			out = add_saturate(out, multiply_32x32_rshift32(rc, gain) << 1);
 			// Envelope follows the GAINED pulse so noise stays inside the burst
 			// (silent gap stays silent - no hiss between glottal pulses)
-			envelope = std::max(envelope, multiply_32x32_rshift32(rc, cache.effPulseGainAbs[f][pulseIdx[f]]) << 1);
+			envelope = std::max(envelope, multiply_32x32_rshift32(rc, gainAbs) << 1);
 		}
 
 		// Voiced-gated noise: breath + articulation bursts live inside the
@@ -283,6 +334,8 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 	}
 
 	cache.noiseState = noiseState;
+	*formantState = (static_cast<uint64_t>((fPhase[1] & 0xFFFFFFF0u) | static_cast<uint32_t>(pulseIdx[1])) << 32)
+	                | ((fPhase[0] & 0xFFFFFFF0u) | static_cast<uint32_t>(pulseIdx[0]));
 	*startPhase = phaseAtEnd;
 
 #if ENABLE_FX_BENCHMARK

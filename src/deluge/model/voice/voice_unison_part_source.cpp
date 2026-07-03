@@ -32,6 +32,11 @@ bool VoiceUnisonPartSource::noteOn(Voice* voice, Source* source, VoiceSamplePlay
                                    uint32_t oscRetriggerPhase, bool resetEverything, SynthMode synthMode,
                                    uint8_t velocity) {
 
+	// Fresh per-voice scratch state for its various users (TRIANGLE_PW phase
+	// scaler, PHI_SWARM slave phases, PHI_VOX formant state) - voices are
+	// pooled, so stale values otherwise leak across notes
+	prevPhaseScaler = 0;
+
 	if (synthMode != SynthMode::FM && source->oscType == OscType::SAMPLE) {
 
 		if ((guide->audioFileHolder == nullptr) || (guide->audioFileHolder->audioFile == nullptr)

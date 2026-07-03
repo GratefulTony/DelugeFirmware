@@ -1772,8 +1772,8 @@ cantBeDoingOscSyncForFirstOsc:
 						memset(spareRenderingBuffer[s + 2], 0, numSamples * sizeof(int32_t));
 						dsp::renderPhiVox(cache, spareRenderingBuffer[s + 2], spareRenderingBuffer[s + 2] + numSamples,
 						                  numSamples, phaseIncrements[s], &unisonParts[u].sources[s].oscPos,
-						                  effectiveRetriggerPhase, 0, 0, false, crossfade, pulseWidth,
-						                  source.phiVoxTracking);
+						                  &unisonParts[u].sources[s].prevPhaseScaler, effectiveRetriggerPhase, 0, 0,
+						                  false, crossfade, pulseWidth, source.phiVoxTracking);
 					}
 					else if (oscType == OscType::PHI_SWARM) {
 						auto& source = sound.sources[s];
@@ -1786,6 +1786,8 @@ cantBeDoingOscSyncForFirstOsc:
 						if (cache.needsUpdate(source.phiSwarmZoneA, source.phiSwarmZoneB, effOffA, effOffB)) {
 							cache.bankA = dsp::buildPhiSwarmParams(source.phiSwarmZoneA, effOffA);
 							cache.bankB = dsp::buildPhiSwarmParams(source.phiSwarmZoneB, effOffB);
+							cache.ratio1Last = 0; // Zone change: snap the morph ramps
+							cache.skew1Last = 0;
 							cache.prevZoneA = source.phiSwarmZoneA;
 							cache.prevZoneB = source.phiSwarmZoneB;
 							cache.prevPhaseOffsetA = effOffA;
@@ -3456,8 +3458,9 @@ dontUseCache: {}
 			                                   + static_cast<uint32_t>(paramFinalValues[params::LOCAL_OSC_A_PHASE + s])
 			                                   + static_cast<uint32_t>(unisonPhaseOffset);
 			dsp::renderPhiVox(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
-			                  &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, effSourceAmplitude,
-			                  effAmplitudeIncrement, true, crossfade, pulseWidth, source.phiVoxTracking);
+			                  &unisonParts[u].sources[s].oscPos, &unisonParts[u].sources[s].prevPhaseScaler,
+			                  effectiveRetriggerPhase, effSourceAmplitude, effAmplitudeIncrement, true, crossfade,
+			                  pulseWidth, source.phiVoxTracking);
 
 			if (stereoUnison) {
 				for (int32_t i = 0; i < numSamples; i++) {
@@ -3477,6 +3480,8 @@ dontUseCache: {}
 			if (cache.needsUpdate(source.phiSwarmZoneA, source.phiSwarmZoneB, effOffA, effOffB)) {
 				cache.bankA = dsp::buildPhiSwarmParams(source.phiSwarmZoneA, effOffA);
 				cache.bankB = dsp::buildPhiSwarmParams(source.phiSwarmZoneB, effOffB);
+				cache.ratio1Last = 0; // Zone change: snap the morph ramps
+				cache.skew1Last = 0;
 				cache.prevZoneA = source.phiSwarmZoneA;
 				cache.prevZoneB = source.phiSwarmZoneB;
 				cache.prevPhaseOffsetA = effOffA;
