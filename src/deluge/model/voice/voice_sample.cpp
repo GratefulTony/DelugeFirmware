@@ -104,6 +104,7 @@ void VoiceSample::noteOn(SamplePlaybackGuide* guide, uint32_t samplesLate, int32
 	crossfadeCurveMeasured = false;
 	pingpongBounceFadeRemaining = 0;
 	pingpongBouncePointsSnapped = false;
+	pingpongBounceApexesGood = false;
 	cacheHandoffPending = false;
 	justLoopedBack = false;
 	pingpongPlayDirection = guide->playDirection;
@@ -233,6 +234,8 @@ void VoiceSample::snapPingpongBouncePoints(int32_t frameSizeBytes) {
 	pingpongBouncePointsSnapped = true;
 
 	constexpr int32_t kSearchFrames = 128;
+	bool foundEnd = false;
+	bool foundStart = false;
 
 	// Loop end: find the last extremum before the end point; the apex frame becomes the
 	// final frame the forward leg plays
@@ -249,8 +252,10 @@ void VoiceSample::snapPingpongBouncePoints(int32_t frameSizeBytes) {
 			int32_t s = readCacheFrameL(cache, pos, &cluster, &prevIdx);
 			int32_t diff = prevSample - s; // slope toward the loop end
 			if (diff == 0 || (prevDiff != 0 && ((diff ^ prevDiff) < 0))) {
-				// Extremum (or plateau) at the previous frame - snap the end there
-				cacheLoopEndPointBytes -= (k - 1) * frameSizeBytes;
+				// Extremum (or plateau) at the previous frame: make it the bounce apex,
+				// i.e. the final frame the forward leg plays (apex = end - one frame)
+				cacheLoopEndPointBytes -= (k - 2) * frameSizeBytes;
+				foundEnd = true;
 				break;
 			}
 			prevDiff = diff;
@@ -275,6 +280,7 @@ void VoiceSample::snapPingpongBouncePoints(int32_t frameSizeBytes) {
 			if (k >= 2 && (diff == 0 || (prevDiff != 0 && ((diff ^ prevDiff) < 0)))) {
 				// Extremum (or plateau) at the previous frame - snap the start there
 				cacheLoopStartPointBytes += (k - 1) * frameSizeBytes;
+				foundStart = true;
 				break;
 			}
 			prevDiff = diff;
@@ -283,6 +289,11 @@ void VoiceSample::snapPingpongBouncePoints(int32_t frameSizeBytes) {
 	}
 
 	cacheLoopLengthBytes = (uint32_t)(cacheLoopEndPointBytes - cacheLoopStartPointBytes);
+
+	// With both apexes on true extrema the reversals are smooth and the anti-click
+	// envelope would itself be the loudest artifact (a full-depth notch on steady
+	// material) - only keep it when an extremum couldn't be found.
+	pingpongBounceApexesGood = foundEnd && foundStart;
 }
 
 // Measure the zero-lag correlation between the cached loop-start and loop-end regions -
@@ -873,7 +884,9 @@ readCachedWindow:
 					// the forward leg just played it (playing it twice smears the mirror).
 					cachePlayDirection = -1;
 					cacheBytePos = cacheLoopEndPointBytes - 2 * frameSizeBytes;
-					pingpongBounceFadeRemaining = kPingpongBounceFadeSamples;
+					if (!pingpongBounceApexesGood) {
+						pingpongBounceFadeRemaining = kPingpongBounceFadeSamples;
+					}
 				}
 				else {
 					// Normal loop: if crossfade was active, take over from crossfade head
@@ -896,7 +909,9 @@ readCachedWindow:
 				// Skip the start frame - the backward leg just played it
 				cachePlayDirection = 1;
 				cacheBytePos = cacheLoopStartPointBytes + frameSizeBytes;
-				pingpongBounceFadeRemaining = kPingpongBounceFadeSamples;
+				if (!pingpongBounceApexesGood) {
+					pingpongBounceFadeRemaining = kPingpongBounceFadeSamples;
+				}
 				goto readCachedWindow;
 			}
 			// For crossfade fade-out: distance to loop start boundary when going backward
@@ -1096,7 +1111,7 @@ readCachedWindow:
 				loopFadeInSamplesRemaining = 0;
 			}
 		}
-		else if (pingpongCacheMode
+		else if (pingpongCacheMode && !pingpongBounceApexesGood
 		         && (pingpongBounceFadeRemaining > 0
 		             || bytesTilLoopEndPoint <= (kPingpongBounceFadeSamples + 1) * frameSizeBytes)) {
 			// Anti-click envelope around pingpong bounces: a short symmetric dip built
