@@ -1663,15 +1663,12 @@ readNonTimestretched:
 						}
 					}
 
-					// Need at least kCacheByteDepth bytes from start for safe read
-					if (xfByteInCluster < 4 - kCacheByteDepth) {
-						crossfadeCacheBytePos += frameSizeBytes;
-						xfAmpStart += xfAmpInc;
-						xfWritePos += numChannelsInOutputBuffer;
-						continue;
-					}
-
-					// Read L channel — same offset pattern as cached render path
+					// Read L channel — same offset pattern as the cached render path. At
+					// xfByteInCluster == 0 this reads one byte before data[] (a Cluster
+					// header byte lands in the inaudible LSB), exactly like the cached path
+					// does. Skipping the sample here instead put a one-sample hole in the
+					// fade-in stream whenever the crossfade region crossed a cache-cluster
+					// boundary at a frame-aligned position — an occasional tiny click.
 					int32_t sampleL = *(int32_t*)&xfCluster->data[xfByteInCluster - 4 + kCacheByteDepth];
 
 					xfAmpStart += xfAmpInc;
