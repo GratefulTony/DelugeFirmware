@@ -235,7 +235,15 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 	// damping) and violent ones land at comparable loudness. Attack instant,
 	// release ~1.5s of ticks.
 	cache.agcPeak = std::max(peak, cache.agcPeak * 0.999f); // sqrt(0.998) per half-dt step
-	float scale = outGain * kPhiWeaveRefAmplitude / std::max(cache.agcPeak, 0.35f);
+	float scaleTarget = outGain * kPhiWeaveRefAmplitude / std::max(cache.agcPeak, 0.35f);
+	// Slew the scale: the instant-attack AGC made the output level step per
+	// sub-tick (sharp AM edges = broadband hash); ~15ms slew is still fast
+	// enough to catch swells before the table clamp does the hard limiting
+	if (cache.agcScale == 0.0f) {
+		cache.agcScale = scaleTarget;
+	}
+	cache.agcScale += 0.10f * (scaleTarget - cache.agcScale);
+	float scale = cache.agcScale;
 
 	// Ring rotation under the scan head (half-dt rate)
 	cache.travelPhase += travelRate * 0.5f;
@@ -282,6 +290,7 @@ void buildPhiWeaveTables(PhiWeaveCache& cache, float scale, q31_t* t0, q31_t* t1
 // Per audio buffer: two physics sub-ticks, building the mid and current table
 // sets; the render crossfades prev -> mid -> current across the buffer
 void tickPhiWeave(PhiWeaveCache& cache, float cf) {
+	cache.travelOffsetPrev = cache.travelOffset;
 	memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
 	memcpy(cache.nodeQMip1Prev, cache.nodeQMip1, sizeof(cache.nodeQMip1Prev));
 	memcpy(cache.nodeQMip2Prev, cache.nodeQMip2, sizeof(cache.nodeQMip2Prev));
@@ -360,7 +369,13 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 
 	uint32_t phase = *startPhase;
 	uint32_t phaseAtEnd = phase + phaseIncrement * static_cast<uint32_t>(numSamples);
-	const uint32_t scanOffset = retriggerPhase + cache.travelOffset;
+
+	// Ring travel advances CONTINUOUSLY across the buffer. Reading the
+	// rotation once per buffer made the scan phase JUMP at the tick rate -
+	// a hard waveform discontinuity every 2.9ms wherever a zone position has
+	// nonzero travel (broadband, pitch-independent hash at those settings).
+	uint32_t travelAcc = retriggerPhase + cache.travelOffsetPrev;
+	const uint32_t travelInc = (cache.travelOffset - cache.travelOffsetPrev) / static_cast<uint32_t>(numSamples);
 
 	// Match the triangle-oscillator amplitude convention (as PHI_MORPH does)
 	amplitude <<= 1;
@@ -409,7 +424,8 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 				phase += phaseIncrement;
 				amplitude += amplitudeIncrement;
 				tickFade += tickFadeInc;
-				uint32_t evalPhase = phase + scanOffset;
+				travelAcc += travelInc;
+				uint32_t evalPhase = phase + travelAcc;
 
 				if (evalPhase > phaseWidth) {
 					thisSample++;
@@ -428,7 +444,8 @@ void renderPhiWeave(PhiWeaveCache& cache, int32_t* bufferStart, int32_t* bufferE
 			for (int32_t n = segStart; n < segEnd; n++) {
 				phase += phaseIncrement;
 				tickFade += tickFadeInc;
-				uint32_t evalPhase = phase + scanOffset;
+				travelAcc += travelInc;
+				uint32_t evalPhase = phase + travelAcc;
 
 				if (evalPhase > phaseWidth) {
 					*thisSample = 0;

@@ -185,7 +185,10 @@ struct PhiWeaveCache {
 	q31_t smoothedCrossfade{INT32_MIN};
 
 	uint32_t lastTickTime{0xFFFFFFFF}; // AudioEngine::audioSampleTimer at last physics tick
-	uint32_t travelOffset{0};          // Scan phase offset from ring rotation
+	uint32_t travelOffset{0};
+	uint32_t travelOffsetPrev{0}; // Buffer-start rotation: render advances continuously between the two
+	float agcScale{0.0f}; // Slewed output scale (stepping it per tick was an AM hash source)          // Scan phase
+	                      // offset from ring rotation
 	float travelPhase{0.0f};
 	float bowPhase{0.0f};
 	float prevTickCf{-1.0f}; // For morph-bow (crossfade velocity)
