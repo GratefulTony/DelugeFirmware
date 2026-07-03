@@ -143,6 +143,7 @@ public:
 	static const Icon phiMorphIcon;
 	static const Icon phiWeaveIcon;
 	static const Icon phiVoxIcon;
+	static const Icon phiSwarmIcon;
 	static const Icon inputIcon;
 	static const Icon micIcon;
 	static const Icon folderIconBig;

@@ -4092,6 +4092,26 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			source->phiVoxTracking = reader.readTagOrAttributeValueInt();
 			reader.exitTag("phiVoxTracking");
 		}
+		else if (!strcmp(tagName, "phiSwarmZoneA")) {
+			source->phiSwarmZoneA = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiSwarmZoneA");
+		}
+		else if (!strcmp(tagName, "phiSwarmZoneB")) {
+			source->phiSwarmZoneB = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiSwarmZoneB");
+		}
+		else if (!strcmp(tagName, "phiSwarmPhaseA")) {
+			source->phiSwarmPhaseOffsetA = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiSwarmPhaseA");
+		}
+		else if (!strcmp(tagName, "phiSwarmPhaseB")) {
+			source->phiSwarmPhaseOffsetB = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiSwarmPhaseB");
+		}
+		else if (!strcmp(tagName, "phiSwarmGamma")) {
+			source->phiSwarmGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiSwarmGamma");
+		}
 		/*
 		else if (!strcmp(tagName, "sampleSync")) {
 		    source->sampleSync = stringToBool(reader.readTagContents());
@@ -4505,6 +4525,21 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 				}
 				if (source->phiVoxTracking != 0) {
 					writer.writeAttribute("phiVoxTracking", source->phiVoxTracking);
+				}
+			}
+
+			// PHI_SWARM: persist zone knobs, phase offsets, and gamma
+			if (source->oscType == OscType::PHI_SWARM) {
+				writer.writeAttribute("phiSwarmZoneA", source->phiSwarmZoneA);
+				writer.writeAttribute("phiSwarmZoneB", source->phiSwarmZoneB);
+				if (source->phiSwarmPhaseOffsetA != 0.0f) {
+					writer.writeAttribute("phiSwarmPhaseA", static_cast<int32_t>(source->phiSwarmPhaseOffsetA * 10.0f));
+				}
+				if (source->phiSwarmPhaseOffsetB != 0.0f) {
+					writer.writeAttribute("phiSwarmPhaseB", static_cast<int32_t>(source->phiSwarmPhaseOffsetB * 10.0f));
+				}
+				if (source->phiSwarmGamma != 0.0f) {
+					writer.writeAttribute("phiSwarmGamma", static_cast<int32_t>(source->phiSwarmGamma * 10.0f));
 				}
 			}
 justCloseTag:

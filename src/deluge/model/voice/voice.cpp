@@ -22,6 +22,7 @@
 #include "dsp/filter/filter_set.h"
 #include "dsp/oscillators/sine_osc.h"
 #include "dsp/phi_morph.hpp"
+#include "dsp/phi_swarm.hpp"
 #include "dsp/phi_vox.hpp"
 #include "dsp/phi_weave.hpp"
 #include "dsp/shaper_buffer.h"
@@ -1768,6 +1769,43 @@ cantBeDoingOscSyncForFirstOsc:
 						                  effectiveRetriggerPhase, 0, 0, false, crossfade, pulseWidth,
 						                  source.phiVoxTracking);
 					}
+					else if (oscType == OscType::PHI_SWARM) {
+						auto& source = sound.sources[s];
+						if (!source.phiSwarmCache) {
+							source.phiSwarmCache = new dsp::PhiSwarmCache{};
+						}
+						auto& cache = *source.phiSwarmCache;
+						float effOffA = source.phiSwarmPhaseOffsetA + source.phiSwarmGamma;
+						float effOffB = source.phiSwarmPhaseOffsetB + source.phiSwarmGamma;
+						if (cache.needsUpdate(source.phiSwarmZoneA, source.phiSwarmZoneB, effOffA, effOffB)) {
+							cache.bankA = dsp::buildPhiSwarmParams(source.phiSwarmZoneA, effOffA);
+							cache.bankB = dsp::buildPhiSwarmParams(source.phiSwarmZoneB, effOffB);
+							cache.prevZoneA = source.phiSwarmZoneA;
+							cache.prevZoneB = source.phiSwarmZoneB;
+							cache.prevPhaseOffsetA = effOffA;
+							cache.prevPhaseOffsetB = effOffB;
+							cache.prevCrossfade = INT32_MIN;
+						}
+						// IIR smooth crossfade (once per buffer via u == 0 guard)
+						if (u == 0) {
+							auto& smoothed = cache.smoothedCrossfade;
+							q31_t target = sourceWaveIndexesLastTime[s];
+							if (smoothed == INT32_MIN) {
+								smoothed = target;
+							}
+							else if (smoothed != target) {
+								q31_t diff = target - smoothed;
+								smoothed += (std::abs(diff) < 256) ? diff : (diff >> 2);
+							}
+						}
+						q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffsets[s];
+						memset(spareRenderingBuffer[s + 2], 0, numSamples * sizeof(int32_t));
+						dsp::renderPhiSwarm(cache, spareRenderingBuffer[s + 2],
+						                    spareRenderingBuffer[s + 2] + numSamples, numSamples, phaseIncrements[s],
+						                    &unisonParts[u].sources[s].oscPos,
+						                    &unisonParts[u].sources[s].prevPhaseScaler, effectiveRetriggerPhase, 0, 0,
+						                    false, crossfade, pulseWidth);
+					}
 					else {
 						dsp::Oscillator::renderOsc(
 						    oscType, 0, spareRenderingBuffer[s + 2], spareRenderingBuffer[s + 2] + numSamples,
@@ -2538,6 +2576,17 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
 	}
 	else if (sound.sources[s].oscType == OscType::PHI_VOX && sound.sources[s].phiVoxCache) {
 		auto& smoothed = sound.sources[s].phiVoxCache->smoothedCrossfade;
+		q31_t target = sourceWaveIndexesLastTime[s];
+		if (smoothed == INT32_MIN) {
+			smoothed = target;
+		}
+		else if (smoothed != target) {
+			q31_t diff = target - smoothed;
+			smoothed += (std::abs(diff) < 256) ? diff : (diff >> 2);
+		}
+	}
+	else if (sound.sources[s].oscType == OscType::PHI_SWARM && sound.sources[s].phiSwarmCache) {
+		auto& smoothed = sound.sources[s].phiSwarmCache->smoothedCrossfade;
 		q31_t target = sourceWaveIndexesLastTime[s];
 		if (smoothed == INT32_MIN) {
 			smoothed = target;
@@ -3355,6 +3404,53 @@ dontUseCache: {}
 			dsp::renderPhiVox(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
 			                  &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, effSourceAmplitude,
 			                  effAmplitudeIncrement, true, crossfade, pulseWidth, source.phiVoxTracking);
+
+			if (stereoUnison) {
+				for (int32_t i = 0; i < numSamples; i++) {
+					oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
+					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;
+				}
+			}
+		}
+		else if (sound.sources[s].oscType == OscType::PHI_SWARM) {
+			auto& source = sound.sources[s];
+			if (!source.phiSwarmCache) {
+				source.phiSwarmCache = new dsp::PhiSwarmCache{};
+			}
+			auto& cache = *source.phiSwarmCache;
+			float effOffA = source.phiSwarmPhaseOffsetA + source.phiSwarmGamma;
+			float effOffB = source.phiSwarmPhaseOffsetB + source.phiSwarmGamma;
+			if (cache.needsUpdate(source.phiSwarmZoneA, source.phiSwarmZoneB, effOffA, effOffB)) {
+				cache.bankA = dsp::buildPhiSwarmParams(source.phiSwarmZoneA, effOffA);
+				cache.bankB = dsp::buildPhiSwarmParams(source.phiSwarmZoneB, effOffB);
+				cache.prevZoneA = source.phiSwarmZoneA;
+				cache.prevZoneB = source.phiSwarmZoneB;
+				cache.prevPhaseOffsetA = effOffA;
+				cache.prevPhaseOffsetB = effOffB;
+				cache.prevCrossfade = INT32_MIN; // Force effective rebuild
+			}
+
+			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
+
+			int32_t* renderBuffer = oscBuffer;
+			if (stereoUnison) {
+				renderBuffer = spareRenderingBuffer[2];
+				memset(renderBuffer, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
+			}
+
+			int32_t* oscBufferEnd = renderBuffer + numSamples;
+
+			uint32_t pulseWidth = (uint32_t)lshiftAndSaturate<1>(paramFinalValues[params::LOCAL_OSC_A_PHASE_WIDTH + s]
+			                                                     + unisonPhaseWidthOffset);
+
+			uint32_t effectiveRetriggerPhase = sound.oscRetriggerPhase[s]
+			                                   + static_cast<uint32_t>(paramFinalValues[params::LOCAL_OSC_A_PHASE + s])
+			                                   + static_cast<uint32_t>(unisonPhaseOffset);
+			// Slave phases live in prevPhaseScaler (uint64, TRIANGLE_PW-only otherwise)
+			dsp::renderPhiSwarm(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
+			                    &unisonParts[u].sources[s].oscPos, &unisonParts[u].sources[s].prevPhaseScaler,
+			                    effectiveRetriggerPhase, effSourceAmplitude, effAmplitudeIncrement, true, crossfade,
+			                    pulseWidth);
 
 			if (stereoUnison) {
 				for (int32_t i = 0; i < numSamples; i++) {

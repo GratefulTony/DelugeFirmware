@@ -57,6 +57,8 @@ public:
 		                                           "Azure", "Ivory", "Slate", "Onyx"};
 		static const char* const kWeaveNames[8] = {"Silk", "Wool", "Reed", "Vine", "Bone", "Glass", "Steel", "Storm"};
 		static const char* const kVoxNames[8] = {"Breath", "Hum", "Round", "Open", "Bright", "Nasal", "Growl", "Rasp"};
+		static const char* const kSwarmNames[8] = {"Still", "Drift", "Pull", "Swarm",
+		                                           "Flock", "Surge", "Fray", "Chaos"};
 		if (zoneIndex < 0 || zoneIndex >= 8) {
 			return "?";
 		}
@@ -65,6 +67,8 @@ public:
 			return kWeaveNames[zoneIndex];
 		case OscType::PHI_VOX:
 			return kVoxNames[zoneIndex];
+		case OscType::PHI_SWARM:
+			return kSwarmNames[zoneIndex];
 		default:
 			return kMorphNames[zoneIndex];
 		}
@@ -110,7 +114,8 @@ public:
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		const auto sound = static_cast<Sound*>(modControllable);
 		OscType type = sound->sources[sourceId_].oscType;
-		return type == OscType::PHI_MORPH || type == OscType::PHI_WEAVE || type == OscType::PHI_VOX;
+		return type == OscType::PHI_MORPH || type == OscType::PHI_WEAVE || type == OscType::PHI_VOX
+		       || type == OscType::PHI_SWARM;
 	}
 
 protected:
@@ -139,6 +144,8 @@ private:
 			return (zoneId_ == 0) ? source.phiWeaveZoneA : source.phiWeaveZoneB;
 		case OscType::PHI_VOX:
 			return (zoneId_ == 0) ? source.phiVoxZoneA : source.phiVoxZoneB;
+		case OscType::PHI_SWARM:
+			return (zoneId_ == 0) ? source.phiSwarmZoneA : source.phiSwarmZoneB;
 		default:
 			return (zoneId_ == 0) ? source.phiMorphZoneA : source.phiMorphZoneB;
 		}
@@ -151,6 +158,8 @@ private:
 			return (zoneId_ == 0) ? source.phiWeavePhaseOffsetA : source.phiWeavePhaseOffsetB;
 		case OscType::PHI_VOX:
 			return (zoneId_ == 0) ? source.phiVoxPhaseOffsetA : source.phiVoxPhaseOffsetB;
+		case OscType::PHI_SWARM:
+			return (zoneId_ == 0) ? source.phiSwarmPhaseOffsetA : source.phiSwarmPhaseOffsetB;
 		default:
 			return (zoneId_ == 0) ? source.phiMorphPhaseOffsetA : source.phiMorphPhaseOffsetB;
 		}
@@ -165,6 +174,9 @@ private:
 			break;
 		case OscType::PHI_VOX:
 			gamma = source.phiVoxGamma;
+			break;
+		case OscType::PHI_SWARM:
+			gamma = source.phiSwarmGamma;
 			break;
 		default:
 			gamma = source.phiMorphGamma;
