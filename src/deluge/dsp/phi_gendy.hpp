@@ -169,6 +169,22 @@ struct PhiGendyCache {
 	float agcPeak{0.0f};
 	float agcRms{0.0f};
 	float agcScale{0.0f};
+
+	// Effective (crossfaded) walk laws, rebuilt only when the smoothed
+	// crossfade moves past an epsilon (parked wave = zero lerp cost)
+	float effStep[kPhiGendyNumNodes]{};
+	float effBHi[kPhiGendyNumNodes]{};
+	float effBLo[kPhiGendyNumNodes]{};
+	float effHome[kPhiGendyNumNodes]{};
+	float effVelCap{0.1f};
+	float effHomePull{0.05f};
+	float effCurve{0.0f};
+	float effBrite{0.0f};
+	float effWStep{0.001f};
+	float effWMin{0.02f};
+	float effWMax{0.12f};
+	float effJumpProb{0.01f};
+	float effCfCached{-2.0f};
 	uint32_t lastTickTime{0xFFFFFFFF};
 	float prevCf{-1.0f};
 	float startleEnv{0.0f};

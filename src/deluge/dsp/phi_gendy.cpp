@@ -175,6 +175,25 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 	float cf = std::clamp(static_cast<float>(crossfade) / 2147483648.0f + 0.5f, 0.0f, 1.0f);
 	float cfInv = 1.0f - cf;
 
+	// Effective-law cache (see PHI_WEAVE): parked wave costs no lerps
+	if (std::abs(cf - cache.effCfCached) > 0.0005f) {
+		cache.effCfCached = cf;
+		for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
+			cache.effStep[i] = cfInv * cache.bankA.step[i] + cf * cache.bankB.step[i];
+			cache.effBHi[i] = cfInv * cache.bankA.barrierHi[i] + cf * cache.bankB.barrierHi[i];
+			cache.effBLo[i] = cfInv * cache.bankA.barrierLo[i] + cf * cache.bankB.barrierLo[i];
+			cache.effHome[i] = cfInv * cache.bankA.home[i] + cf * cache.bankB.home[i];
+		}
+		cache.effVelCap = cfInv * cache.bankA.velCap + cf * cache.bankB.velCap;
+		cache.effHomePull = cfInv * cache.bankA.homePull + cf * cache.bankB.homePull;
+		cache.effCurve = cfInv * cache.bankA.curve + cf * cache.bankB.curve;
+		cache.effBrite = cfInv * cache.bankA.brite + cf * cache.bankB.brite;
+		cache.effWStep = cfInv * cache.bankA.widthStep + cf * cache.bankB.widthStep;
+		cache.effWMin = cfInv * cache.bankA.widthMin + cf * cache.bankB.widthMin;
+		cache.effWMax = cfInv * cache.bankA.widthMax + cf * cache.bankB.widthMax;
+		cache.effJumpProb = cfInv * cache.bankA.jumpProb + cf * cache.bankB.jumpProb;
+	}
+
 	// Startle: crossfade motion (and note-on) kicks velocity noise into the
 	// walkers - the morph gesture. Decays fast; it's an event, not a state.
 	if (cache.prevCf >= 0.0f) {
@@ -192,10 +211,10 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 	}
 	cache.prevCf = cf;
 
-	float velCap = cfInv * cache.bankA.velCap + cf * cache.bankB.velCap;
-	float homePull = cfInv * cache.bankA.homePull + cf * cache.bankB.homePull;
-	float curve = cfInv * cache.bankA.curve + cf * cache.bankB.curve;
-	float brite = cfInv * cache.bankA.brite + cf * cache.bankB.brite;
+	float velCap = cache.effVelCap;
+	float homePull = cache.effHomePull;
+	float curve = cache.effCurve;
+	float brite = cache.effBrite;
 
 	uint32_t noise = cache.noiseState;
 	float mean = 0.0f;
@@ -203,9 +222,9 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 	// Duration walk: widths take their own second-order step in elastic
 	// barriers, startled by the same morph kicks, then renormalize so the
 	// cycle length (pitch) stays exact
-	float wStep = cfInv * cache.bankA.widthStep + cf * cache.bankB.widthStep;
-	float wMin = cfInv * cache.bankA.widthMin + cf * cache.bankB.widthMin;
-	float wMax = cfInv * cache.bankA.widthMax + cf * cache.bankB.widthMax;
+	float wStep = cache.effWStep;
+	float wMin = cache.effWMin;
+	float wMax = cache.effWMax;
 	if (!cache.widthsInit) {
 		cache.widthsInit = true;
 		for (float& wi : cache.w) {
@@ -217,7 +236,7 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 	// per waveform cycle, not per second - consistent across the keyboard.
 	// (Shared walk: with a chord, the first-ticking voice sets the rate.)
 	float pitchScale = static_cast<float>(phaseIncrement) * (1.0f / 12742000.0f);
-	float jumpProb = cfInv * cache.bankA.jumpProb + cf * cache.bankB.jumpProb;
+	float jumpProb = cache.effJumpProb;
 	// Startle adds a MILD probability boost, and (below) startle-era jumps
 	// commit only partway: sustained knob motion was triggering hundreds of
 	// full teleports per second - audible as crackle on the wave knob
@@ -250,10 +269,10 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 
 	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
 		// Walk LAWS morph; walker STATE persists (click-free by construction)
-		float step = cfInv * cache.bankA.step[i] + cf * cache.bankB.step[i];
-		float bHi = cfInv * cache.bankA.barrierHi[i] + cf * cache.bankB.barrierHi[i];
-		float bLo = cfInv * cache.bankA.barrierLo[i] + cf * cache.bankB.barrierLo[i];
-		float home = cfInv * cache.bankA.home[i] + cf * cache.bankB.home[i];
+		float step = cache.effStep[i];
+		float bHi = cache.effBHi[i];
+		float bLo = cache.effBLo[i];
+		float home = cache.effHome[i];
 
 		noise = noise * 1664525u + 1013904223u;
 		uint32_t gateDraw = noise;

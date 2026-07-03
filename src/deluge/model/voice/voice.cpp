@@ -1714,6 +1714,7 @@ cantBeDoingOscSyncForFirstOsc:
 						if (cache.needsUpdate(source.phiWeaveZoneA, source.phiWeaveZoneB, effOffA, effOffB)) {
 							cache.bankA = dsp::buildPhiWeaveParams(source.phiWeaveZoneA, effOffA);
 							cache.bankB = dsp::buildPhiWeaveParams(source.phiWeaveZoneB, effOffB);
+							cache.effCfCached = -2.0f; // Invalidate the effective-law cache
 							cache.prevZoneA = source.phiWeaveZoneA;
 							cache.prevZoneB = source.phiWeaveZoneB;
 							cache.prevPhaseOffsetA = effOffA;
@@ -1822,6 +1823,7 @@ cantBeDoingOscSyncForFirstOsc:
 						if (cache.needsUpdate(source.phiGendyZoneA, source.phiGendyZoneB, effOffA, effOffB)) {
 							cache.bankA = dsp::buildPhiGendyParams(source.phiGendyZoneA, effOffA);
 							cache.bankB = dsp::buildPhiGendyParams(source.phiGendyZoneB, effOffB);
+							cache.effCfCached = -2.0f; // Invalidate the effective-law cache
 							cache.prevZoneA = source.phiGendyZoneA;
 							cache.prevZoneB = source.phiGendyZoneB;
 							cache.prevPhaseOffsetA = effOffA;
@@ -3385,6 +3387,7 @@ dontUseCache: {}
 			if (cache.needsUpdate(source.phiWeaveZoneA, source.phiWeaveZoneB, effOffA, effOffB)) {
 				cache.bankA = dsp::buildPhiWeaveParams(source.phiWeaveZoneA, effOffA);
 				cache.bankB = dsp::buildPhiWeaveParams(source.phiWeaveZoneB, effOffB);
+				cache.effCfCached = -2.0f; // Invalidate the effective-law cache
 				cache.prevZoneA = source.phiWeaveZoneA;
 				cache.prevZoneB = source.phiWeaveZoneB;
 				cache.prevPhaseOffsetA = effOffA;
@@ -3521,6 +3524,7 @@ dontUseCache: {}
 			if (cache.needsUpdate(source.phiGendyZoneA, source.phiGendyZoneB, effOffA, effOffB)) {
 				cache.bankA = dsp::buildPhiGendyParams(source.phiGendyZoneA, effOffA);
 				cache.bankB = dsp::buildPhiGendyParams(source.phiGendyZoneB, effOffB);
+				cache.effCfCached = -2.0f; // Invalidate the effective-law cache
 				cache.prevZoneA = source.phiGendyZoneA;
 				cache.prevZoneB = source.phiGendyZoneB;
 				cache.prevPhaseOffsetA = effOffA;

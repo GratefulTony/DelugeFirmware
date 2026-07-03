@@ -218,6 +218,21 @@ struct PhiWeaveCache {
 	float prevTickCf{-1.0f}; // For morph-bow (crossfade velocity)
 	float agcPeak{1.0f};     // Slow output normalization tracker
 	float agcRms{0.0f};      // RMS tracker for square-calibrated loudness
+
+	// Effective (crossfaded) walk laws, rebuilt only when the smoothed
+	// crossfade moves past an epsilon. With the wave knob parked this caches
+	// ~380 lerps and 64 cosf (the bow window) per buffer per Sound.
+	float effK[kPhiWeaveNumNodes]{};
+	float effC[kPhiWeaveNumNodes]{};
+	float effD[kPhiWeaveNumNodes]{};
+	float effHome[kPhiWeaveNumNodes]{};
+	float effBowWin[kPhiWeaveNumNodes]{}; // bowBalance * raised-cosine window, premultiplied
+	float effBowDepth{0.0f};
+	float effBowRate{0.0f};
+	float effTravelRate{0.0f};
+	float effOutGain{1.0f};
+	float effShimmer{0.2f};
+	float effCfCached{-2.0f};
 	uint32_t noiseState{0x2545F491u};
 	bool pluckPending{true};
 

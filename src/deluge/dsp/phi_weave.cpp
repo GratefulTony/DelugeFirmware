@@ -147,6 +147,36 @@ namespace {
 // frequencies and decay are unchanged - but its motion is sampled at ~688 Hz
 // instead of ~344 Hz, pushing tick-sampling images of fast modes up an octave
 // and halving their amplitude. Returns the AGC output scale.
+// Rebuild the crossfaded walk laws. Called only when the smoothed crossfade
+// actually moves (epsilon-guarded): a parked wave knob costs nothing here.
+void rebuildPhiWeaveEff(PhiWeaveCache& cache, float cf) {
+	const PhiWeaveParams& a = cache.bankA;
+	const PhiWeaveParams& b = cache.bankB;
+	float cfInv = 1.0f - cf;
+
+	cache.effBowDepth = cfInv * a.bowDepth + cf * b.bowDepth;
+	cache.effBowRate = cfInv * a.bowRate + cf * b.bowRate;
+	cache.effTravelRate = cfInv * a.travelRate + cf * b.travelRate;
+	cache.effOutGain = cfInv * a.outGain + cf * b.outGain;
+	cache.effShimmer = cfInv * a.shimmerAlpha + cf * b.shimmerAlpha;
+
+	float bowPos = cfInv * a.bowPos + cf * b.bowPos;
+	float bowSpread = cfInv * a.bowSpread + cf * b.bowSpread;
+	float invSpread = 1.0f / bowSpread;
+	for (int32_t i = 0; i < kPhiWeaveNumNodes; i++) {
+		float nf = static_cast<float>(i) / static_cast<float>(kPhiWeaveNumNodes);
+		cache.effK[i] = cfInv * a.stiffness[i] + cf * b.stiffness[i];
+		cache.effC[i] = cfInv * a.coupling[i] + cf * b.coupling[i];
+		cache.effD[i] = cfInv * a.damping[i] + cf * b.damping[i];
+		cache.effHome[i] = cfInv * a.home[i] + cf * b.home[i];
+		float bd = nf - bowPos;
+		bd -= static_cast<float>(static_cast<int32_t>(bd + 1.5f)) - 1.0f; // wrap to [-0.5, 0.5)
+		float bw = std::abs(bd) * invSpread;
+		float bowBal = cfInv * a.bowBalance[i] + cf * b.bowBalance[i];
+		cache.effBowWin[i] = (bw < 1.0f) ? bowBal * (0.5f + 0.5f * std::cos(3.14159265f * bw)) : 0.0f;
+	}
+}
+
 float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 	const PhiWeaveParams& a = cache.bankA;
 	const PhiWeaveParams& b = cache.bankB;
@@ -160,13 +190,10 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 	}
 	cache.prevTickCf = cf;
 
-	// Interpolated excitation scalars
-	float bowDepth = cfInv * a.bowDepth + cf * b.bowDepth;
-	float bowRate = cfInv * a.bowRate + cf * b.bowRate;
-	float bowPos = cfInv * a.bowPos + cf * b.bowPos;
-	float bowSpread = cfInv * a.bowSpread + cf * b.bowSpread;
-	float travelRate = cfInv * a.travelRate + cf * b.travelRate;
-	float outGain = cfInv * a.outGain + cf * b.outGain;
+	float bowDepth = cache.effBowDepth;
+	float bowRate = cache.effBowRate;
+	float travelRate = cache.effTravelRate;
+	float outGain = cache.effOutGain;
 
 	// Bow excitation: shared state advances once (half-dt rate); each bank's
 	// MODE shapes it, then the two forces crossfade (click-free mixed morphs)
@@ -209,7 +236,6 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 	float shapeA = bowShape(a.bowMode);
 	float shapeB = (b.bowMode == a.bowMode) ? shapeA : bowShape(b.bowMode);
 	float bowVal = (cfInv * shapeA + cf * shapeB) * bowDepth;
-	float invSpread = 1.0f / bowSpread;
 
 	float* x = cache.x;
 	float* v = cache.v;
@@ -235,22 +261,16 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 	}
 
 	for (int32_t i = 0; i < kPhiWeaveNumNodes; i++) {
-		float nf = static_cast<float>(i) / static_cast<float>(kPhiWeaveNumNodes);
-
-		float k = cfInv * a.stiffness[i] + cf * b.stiffness[i];
-		float c = cfInv * a.coupling[i] + cf * b.coupling[i];
-		float d = cfInv * a.damping[i] + cf * b.damping[i];
-		float home = cfInv * a.home[i] + cf * b.home[i];
+		float k = cache.effK[i];
+		float c = cache.effC[i];
+		float d = cache.effD[i];
+		float home = cache.effHome[i];
 
 		float xm1 = x[(i + kPhiWeaveNumNodes - 1) & (kPhiWeaveNumNodes - 1)];
 		float xp1 = x[(i + 1) & (kPhiWeaveNumNodes - 1)];
 
-		// Bow force: raised-cosine window around bowPos (ring distance)
-		float bd = nf - bowPos;
-		bd -= static_cast<float>(static_cast<int32_t>(bd + 1.5f)) - 1.0f; // wrap to [-0.5, 0.5)
-		float bw = std::abs(bd) * invSpread;
-		float bowBal = cfInv * a.bowBalance[i] + cf * b.bowBalance[i];
-		float bowForce = (bw < 1.0f) ? bowVal * bowBal * (0.5f + 0.5f * std::cos(3.14159265f * bw)) : 0.0f;
+		// Bow force: precomputed balance-weighted window (see rebuild)
+		float bowForce = bowVal * cache.effBowWin[i];
 
 		// Morph-bow: broadband agitation (cheap LCG noise)
 		cache.noiseState = cache.noiseState * 1664525u + 1013904223u;
@@ -264,7 +284,7 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 	}
 
 	// Position update after all accelerations (keeps neighbor reads consistent)
-	float shimmerAlpha = cfInv * a.shimmerAlpha + cf * b.shimmerAlpha;
+	float shimmerAlpha = cache.effShimmer;
 	float* xs1 = cache.xSmooth1;
 	float* xs = cache.xSmooth;
 	float sumSq = 0.0f;
@@ -348,6 +368,12 @@ void buildPhiWeaveTables(PhiWeaveCache& cache, float scale, q31_t* t0, q31_t* t1
 // Per audio buffer: two physics sub-ticks, building the mid and current table
 // sets; the render crossfades prev -> mid -> current across the buffer
 void tickPhiWeave(PhiWeaveCache& cache, float cf) {
+	// Effective-law cache: rebuild only when the crossfade moves meaningfully
+	// (epsilon ~0.0005 also cuts off the IIR smoother's asymptotic tail)
+	if (std::abs(cf - cache.effCfCached) > 0.0005f) {
+		rebuildPhiWeaveEff(cache, cf);
+		cache.effCfCached = cf;
+	}
 	cache.travelOffsetPrev = cache.travelOffset;
 	memcpy(cache.nodeQPrev, cache.nodeQ, sizeof(cache.nodeQPrev));
 	memcpy(cache.nodeQMip1Prev, cache.nodeQMip1, sizeof(cache.nodeQMip1Prev));
