@@ -1673,8 +1673,16 @@ readNonTimestretched:
 						renderAmplitude = ampAtStart;
 						renderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisNonTimestretchedRead;
 
-						// Activate crossfade-in from cache if cache has loop-start data
-						if (!crossfadeActive && cache && cache->writeBytePos > 0) {
+						// Activate crossfade-in from cache if cache has loop-start data. NOT
+						// for pingpong: a bounce reverses direction rather than jumping to the
+						// loop start, so the loop-start content is the wrong material to fade
+						// in - and a crossfadeActive left dangling here (nothing in the
+						// pingpong path consumes it) suppressed the bounce anti-click fade-ins
+						// via the !crossfadeActive gate above. Pingpong keeps the plain
+						// fade-out + bounce fade-in. (The cached-read trigger already excludes
+						// pingpong the same way.)
+						if (!crossfadeActive && cache && cache->writeBytePos > 0
+						    && !static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive) {
 							crossfadeActive = true;
 							crossfadeCacheBytePos = cacheLoopStartPointBytes;
 							loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
