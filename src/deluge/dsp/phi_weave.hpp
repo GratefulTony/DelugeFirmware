@@ -154,7 +154,12 @@ struct PhiWeaveCache {
 	// Morphing interpolates the laws, never the state, so it cannot click.
 	float x[kPhiWeaveNumNodes]{};
 	float v[kPhiWeaveNumNodes]{};
-	float xSmooth[kPhiWeaveNumNodes]{}; // What the scan head sees (haptic-rate lowpass of x)
+	// What the scan head sees: TWO-POLE haptic-rate lowpass of x. One pole
+	// (6 dB/oct) was too shallow - underdamped ~50 Hz modes (e.g. mid-Silk:
+	// deadzone-minimum damping + strong coupling) leaked through barely
+	// attenuated. Two poles give 12 dB/oct at the same cutoff.
+	float xSmooth1[kPhiWeaveNumNodes]{};
+	float xSmooth[kPhiWeaveNumNodes]{};
 
 	// Scan table rebuilt each tick ([32] duplicates [0] for wrap-free lerp)
 	// Scan tables, padded for the Catmull-Rom scan: [0] = node 31 (prelude),

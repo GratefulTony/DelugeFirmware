@@ -106,7 +106,9 @@ PhiWeaveParams buildPhiWeaveParams(uint16_t zone, float phaseOffset) {
 
 	float bowDepthT = phi::evalTriangle(phase, 1.0f, kPhiWeaveBowDepth);
 	p.bowDepth = 0.0015f + bowDepthT * bowDepthT * 0.030f;
-	p.bowRate = 0.002f + phi::evalTriangle(phase, 1.0f, kPhiWeaveBowRate) * 0.15f;
+	// Bow oscillation capped ~16 Hz: faster bowing stamped inharmonic
+	// sidebands on every partial (excitation must be haptic-rate too)
+	p.bowRate = 0.002f + phi::evalTriangle(phase, 1.0f, kPhiWeaveBowRate) * 0.045f;
 	p.bowPos = phi::evalTriangle(phase, 1.0f, kPhiWeaveBowPos);
 	p.bowSpread = 0.06f + phi::evalTriangle(phase, 1.0f, kPhiWeaveBowSpread) * 0.20f;
 
@@ -120,9 +122,9 @@ PhiWeaveParams buildPhiWeaveParams(uint16_t zone, float phaseOffset) {
 	p.morphBowGain = 0.5f + phi::evalTriangle(phase, 1.0f, kPhiWeaveMorphBow) * 4.0f;
 	p.outGain = 0.70f + phi::evalTriangle(phase, 1.0f, kPhiWeaveOutGain) * 0.55f;
 
-	// 0.09..0.55 exponential: scan-smoother cutoff ~10..60 Hz at the sub-tick rate
+	// 0.07..0.30 exponential: scan-smoother cutoff ~8..33 Hz at the sub-tick rate
 	float shimmerT = phi::evalTriangle(phase, 1.0f, kPhiWeaveShimmer);
-	p.shimmerAlpha = 0.09f * std::pow(6.1f, shimmerT);
+	p.shimmerAlpha = 0.07f * std::pow(4.3f, shimmerT);
 
 	return p;
 }
@@ -221,13 +223,17 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 
 	// Position update after all accelerations (keeps neighbor reads consistent)
 	float shimmerAlpha = cfInv * a.shimmerAlpha + cf * b.shimmerAlpha;
+	float* xs1 = cache.xSmooth1;
 	float* xs = cache.xSmooth;
 	for (int32_t i = 0; i < kPhiWeaveNumNodes; i++) {
 		x[i] += v[i];
 		x[i] = std::clamp(x[i], -kPhiWeaveMaxDisplacement, kPhiWeaveMaxDisplacement);
-		// Scan smoother: the physics can run hot, but the scan head follows
-		// at haptic rates - fast modes shape the energy, not the sidebands
-		xs[i] += shimmerAlpha * (x[i] - xs[i]);
+		// Scan smoother, two-pole (12 dB/oct): the physics can run hot, but
+		// the scan head follows at haptic rates - fast modes shape the
+		// energy, not the sidebands. One pole leaked underdamped ~50 Hz
+		// modes (mid-Silk: minimum damping + strong coupling) nearly intact.
+		xs1[i] += shimmerAlpha * (x[i] - xs1[i]);
+		xs[i] += shimmerAlpha * (xs1[i] - xs[i]);
 		peak = std::max(peak, std::abs(xs[i]));
 	}
 
