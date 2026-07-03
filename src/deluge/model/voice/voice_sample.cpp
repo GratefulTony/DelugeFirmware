@@ -1483,8 +1483,12 @@ readNonTimestretched:
 			int32_t renderAmplitude = amplitude;
 			int32_t renderAmplitudeIncrement = amplitudeIncrement;
 
-			// Fade-in envelope (after loop restart)
-			if (loopFadeInSamplesRemaining > 0) {
+			// Fade-in envelope (after loop restart). Must NOT run while a crossfade is
+			// active: the crossfade-in activation reuses loopFadeInSamplesRemaining as its
+			// own clock, and this branch would hijack the main (loop-end) stream with a
+			// RISING envelope while double-decrementing the counter - alternating broken
+			// envelope segments through the fade zone. Same priority as the cached path.
+			if (loopFadeInSamplesRemaining > 0 && !crossfadeActive) {
 				int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
 
 				// Fade scale at start/end of window (Q31: 0 = silent, 0x7FFFFFFF = full)
