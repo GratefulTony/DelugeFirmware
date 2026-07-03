@@ -1671,10 +1671,15 @@ readNonTimestretched:
 				}
 
 				loopFadeInSamplesRemaining -= numSamplesThisNonTimestretchedRead;
-				if (loopFadeInSamplesRemaining <= 0) {
+				if (loopFadeInSamplesRemaining < 0) {
 					loopFadeInSamplesRemaining = 0;
-					crossfadeActive = false;
 				}
+				// Do NOT clear crossfadeActive here: the fade completes exactly at the loop
+				// boundary, where the restart uses the flag to take over playback from the
+				// crossfade head. Clearing it made the restart jump back to the loop start
+				// and replay the chunk the fade-in had already played (an audible stutter on
+				// every cache-writing pass). Only the restart/takeover clears the flag, same
+				// as the cached-read path.
 			}
 
 			// Advance the voice amplitude envelope independently of crossfade scaling
