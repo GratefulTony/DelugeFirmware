@@ -38,6 +38,14 @@ namespace deluge::dsp {
 // what shape it relaxes toward, and how it's continuously bowed. The A/B
 // crossfade interpolates the physics under one shared, ever-continuous state,
 // and the crossfade's own motion bows the string (the morph is an excitation).
+//
+// Literature:
+//   Verplank, B., Mathews, M., Shaw, R., "Scanned Synthesis", Proc. ICMC 2000.
+//   Boulanger, R., Smaragdis, P., ffitch, J., "Scanned Synthesis: An
+//     Introduction and Demonstration...", Proc. ICMC 2000.
+//   Verlet, L., "Computer 'Experiments' on Classical Fluids. I.",
+//     Phys. Rev. 159(1), 1967 (the integration scheme).
+// Deep dive with figures: docs/dev/phi-weave-physics.md
 // ============================================================================
 
 inline constexpr int32_t kPhiWeaveNumNodes = 32;              // Power of two: scan index = phase >> 27

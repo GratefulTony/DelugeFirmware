@@ -56,6 +56,7 @@ Highly experimental and for most users, not a replacement for the main community
 |---------|-------------|
 | **Pulse Width Triangle** | New oscillator type (TrianglePW / TRPW). Triangle wave with dead-zone pulse width control — PW knob compresses the triangle into a narrower region with silence in the dead zone. Waveform visualization in pulse width menu. |
 | **Phi Morph Oscillator** | Procedural oscillator generating waveforms from phi-triangle banks. Two zone knobs (A/B) each produce a distinct 8-segment waveform shape. Crossfade (Wave Position) morphs between them with morph excitation effects (amplitude overshoot, curvature boost, phase distortion). Waveform shaping via sine blend, odd symmetry, windowing, and slope matching. Per-sample modifiers: phase jitter, amplitude-dependent noise, asymmetric gain for even harmonics. Supports pulse width modulation. |
+| **Phi Weave Oscillator** | Scanned-physics oscillator (Mathews/Verplank scanned synthesis, ICMC 2000): a closed ring of 32 masses on springs simulated at control rate and scanned as a seam-free wavetable at audio rate — pitch is the scan speed, timbre is the physics. Zone knobs (A/B) select the laws of motion via phi-triangle banks: per-node stiffness/damping/coupling landscapes, the home shape the ring relaxes toward, a continuous bow, note-on pluck shape, and slow ring rotation. One shared string state per Sound: the A/B crossfade interpolates physics under continuous state (click-free by construction), and the crossfade's own motion bows the string — sweeping Wave Position is a playing gesture. Cheaper per sample than PhiMorph. See [physics deep dive](docs/dev/phi-weave-physics.md) and [testing guide](docs/features/phi-weave-testing.md). |
 | **Unison Index Modulation Source** | New per-voice modulation source (`UNISON_INDEX`) that assigns a unique value to each unison voice. Patch it to any oscillator-level parameter (pitch, volume, phase width, wave index, phase, carrier/modulator feedback, start offset) for per-voice timbral variation from a single note. Three knobs in the Unison menu control the distribution: **Shape** (8 zones: Linear, Power, S-Curve, Step, Triangle, Sine, Random, Drift), **Mapping** (8 zones: Symmetric, Anti-sym, Pitch+, Pitch−, Center-out, Rotate, Pairs, Shuffle), and **Curve** (bipolar warp from center-heavy to edge-heavy). Drift shape provides per-block bounded random walk for evolving textures. All zone knobs have intra-zone meta parameters for fine control. |
 
 #### Sampling
@@ -90,6 +91,7 @@ Highly experimental and for most users, not a replacement for the main community
 
 **DSP Documentation:**
 - [Phi Triangle Parameter Evolution](docs/dev/phi-triangle.md) - Design pattern for multi-parameter control evolution using golden ratio frequencies
+- [Phi Weave Physics](docs/dev/phi-weave-physics.md) - Scanned-synthesis oscillator: model, stability analysis, and morph-bow energetics, with simulation figures and original literature
 
 This fork is open source under the same GPL-3.0 license as the community firmware. Feel free to:
 - Fork this repo for your own experiments
