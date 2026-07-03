@@ -80,10 +80,10 @@ PhiGendyParams buildPhiGendyParams(uint16_t zone, float phaseOffset) {
 	p.widthStep = 0.0008f * std::pow(40.0f, wStepT);
 	float wRangeT = phi::evalTriangle(phase, 1.0f, kPhiGendyWidthRange);
 	float range = 0.25f + wRangeT * 0.60f; // 0.25..0.85
-	// Jump probability: exponential 0.0005..0.5 per tick per breakpoint
-	// (calm = ~3 snaps/sec across the whole polygon; top = ~170/sec)
+	// Jump probability: exponential 0.0001..0.5 per tick per breakpoint
+	// (calm = a snap every ~2 seconds across the whole polygon; top = ~170/sec)
 	float jumpT = phi::evalTriangle(phase, 1.0f, kPhiGendyJumpProb);
-	p.jumpProb = 0.0005f * std::pow(1000.0f, jumpT);
+	p.jumpProb = 0.0001f * std::pow(5000.0f, jumpT);
 	p.widthMin = (1.0f - range) * (1.0f / 16.0f);
 	p.widthMax = (1.0f + 2.0f * range) * (1.0f / 16.0f);
 
