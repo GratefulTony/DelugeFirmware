@@ -169,51 +169,67 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		cache.prevCf = cf;
 		float heat = std::min(cache.annealEnv, 0.15f);
 		cache.effTempFP = cache.eff.tempFP + static_cast<uint32_t>(heat * 65536.0f);
+
+		// Snapshot morph-ramp endpoints once per buffer (shared across all
+		// unison voices - per-call snapshots seesawed between detuned voices)
+		if (cache.ratio1Last == 0) { // First buffer
+			cache.ratio1Last = cache.eff.ratio1FP;
+			cache.ratio2Last = cache.eff.ratio2FP;
+		}
+		if (cache.w1Last == INT32_MIN) {
+			cache.w1Last = cache.eff.w1;
+			cache.w2Last = cache.eff.w2;
+			cache.wRingLast = cache.eff.wRing;
+			cache.wBeatLast = cache.eff.wBeat;
+		}
+		// Big ratio jumps (zone change) snap instead of glide
+		if (std::abs(static_cast<int32_t>(cache.eff.ratio1FP - cache.ratio1Last))
+		    > static_cast<int32_t>(cache.eff.ratio1FP >> 3)) {
+			cache.ratio1Last = cache.eff.ratio1FP;
+		}
+		if (std::abs(static_cast<int32_t>(cache.eff.ratio2FP - cache.ratio2Last))
+		    > static_cast<int32_t>(cache.eff.ratio2FP >> 3)) {
+			cache.ratio2Last = cache.eff.ratio2FP;
+		}
+		cache.ratio1From = cache.ratio1Last;
+		cache.ratio2From = cache.ratio2Last;
+		cache.ratio1Last = cache.eff.ratio1FP;
+		cache.ratio2Last = cache.eff.ratio2FP;
+		cache.w1From = cache.w1Last;
+		cache.w2From = cache.w2Last;
+		cache.wRingFrom = cache.wRingLast;
+		cache.wBeatFrom = cache.wBeatLast;
+		cache.w1Last = cache.eff.w1;
+		cache.w2Last = cache.eff.w2;
+		cache.wRingLast = cache.eff.wRing;
+		cache.wBeatLast = cache.eff.wBeat;
 	}
 
 	// Per-buffer conversions: everything scales with the master increment so
-	// locking behavior is pitch-invariant
+	// locking behavior is pitch-invariant. Each voice derives its own ramp
+	// endpoints from ITS OWN pitch and the shared ratio snapshots, so unison
+	// detune stays exact while morph motion still glides.
+	uint32_t inc1 = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.ratio1From) >> 16);
+	uint32_t inc2 = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.ratio2From) >> 16);
 	uint32_t inc1Target = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.ratio1FP) >> 16);
 	uint32_t inc2Target = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.ratio2FP) >> 16);
-	// Ramp increments from last buffer's values (large jumps - new note,
-	// octave bend - snap instead of glide)
-	if (cache.prevInc1 == 0 || std::abs(static_cast<int32_t>(inc1Target - cache.prevInc1)) > (inc1Target >> 3)) {
-		cache.prevInc1 = inc1Target;
-	}
-	if (cache.prevInc2 == 0 || std::abs(static_cast<int32_t>(inc2Target - cache.prevInc2)) > (inc2Target >> 3)) {
-		cache.prevInc2 = inc2Target;
-	}
-	uint32_t inc1 = cache.prevInc1;
-	uint32_t inc2 = cache.prevInc2;
 	const int32_t inc1Step = static_cast<int32_t>(inc1Target - inc1) / numSamples;
 	const int32_t inc2Step = static_cast<int32_t>(inc2Target - inc2) / numSamples;
-	cache.prevInc1 = inc1Target;
-	cache.prevInc2 = inc2Target;
 	int32_t k1mPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.k1mFP) >> 16);
 	int32_t k2mPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.k2mFP) >> 16);
 	int32_t k12Phase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.k12FP) >> 16);
 	int32_t tempPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.effTempFP) >> 16);
 
-	// Output weights ramp from last buffer's values (AM stepped at 344 Hz
-	// under wave-index modulation otherwise)
-	if (cache.prevW1 == INT32_MIN) {
-		cache.prevW1 = cache.eff.w1;
-		cache.prevW2 = cache.eff.w2;
-		cache.prevWRing = cache.eff.wRing;
-		cache.prevWBeat = cache.eff.wBeat;
-	}
-	q31_t w1 = cache.prevW1;
-	q31_t w2 = cache.prevW2;
-	q31_t wRing = cache.prevWRing;
-	q31_t wBeat = cache.prevWBeat;
+	// Output weights ramp from the shared once-per-buffer snapshots (AM
+	// stepped at 344 Hz under wave-index modulation otherwise)
+	q31_t w1 = cache.w1From;
+	q31_t w2 = cache.w2From;
+	q31_t wRing = cache.wRingFrom;
+	q31_t wBeat = cache.wBeatFrom;
 	const q31_t w1Step = (cache.eff.w1 - w1) / numSamples;
 	const q31_t w2Step = (cache.eff.w2 - w2) / numSamples;
 	const q31_t wRingStep = (cache.eff.wRing - wRing) / numSamples;
 	const q31_t wBeatStep = (cache.eff.wBeat - wBeat) / numSamples;
-	cache.prevW1 = cache.eff.w1;
-	cache.prevW2 = cache.eff.w2;
-	cache.prevWRing = cache.eff.wRing;
-	cache.prevWBeat = cache.eff.wBeat;
 
 	// Phase-distortion factors: first-half and second-half slopes in Q28
 	// (two 64/32 divides per buffer; ~4 cycles per warp per sample)
