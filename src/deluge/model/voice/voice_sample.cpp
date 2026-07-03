@@ -29,16 +29,29 @@
 #include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
 #include "storage/multi_range/multisample_range.h"
+#include <cmath>
 
 extern "C" {}
 
 extern int32_t spareRenderingBuffer[][SSI_TX_BUFFER_NUM_SAMPLES];
 
-// Q31 fade scale: progress * (0x7FFFFFFF / total), clamped to full scale.
-// Replaces ((progress << 31) / total) so the division happens once when the
-// crossfade length is set (Cortex-A9 has no hardware divide).
+// Q31 equal-power fade scale: sqrt(progress * (0x7FFFFFFF / total)), clamped to full
+// scale. stepQ31 is precomputed when the crossfade length is set (Cortex-A9 has no
+// hardware divide). The sqrt makes complementary fades power-constant: the two streams
+// of a loop crossfade are generally uncorrelated, so linear (equal-gain) fades summed
+// to a ~3dB dip in loudness at the midpoint of every crossfade - audible as a volume
+// dip at each loop boundary even when the crossfade machinery works perfectly. Runs at
+// render-window rate (not per sample), so the float sqrt is a non-cost.
 static inline int32_t fadeScaleQ31(int32_t progress, int32_t stepQ31) {
-	return static_cast<int32_t>(std::min((int64_t)progress * stepQ31, (int64_t)0x7FFFFFFF));
+	int64_t linear = (int64_t)progress * stepQ31;
+	if (linear <= 0) {
+		return 0;
+	}
+	if (linear >= 0x7FFFFFFF) {
+		return 0x7FFFFFFF;
+	}
+	float p = (float)linear * (1.0f / 2147483648.0f);
+	return (int32_t)(sqrtf(p) * 2147483647.0f);
 }
 
 void VoiceSample::beenUnassigned(bool wontBeUsedAgain) {
@@ -873,9 +886,10 @@ readCachedWindow:
 			int32_t fadeInStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31);
 			int32_t fadeInEnd = fadeScaleQ31(fadeProgress + numSamplesThisCacheRead, loopFadeStepQ31);
 
-			// Main read fades OUT
-			int32_t fadeOutStart = 0x7FFFFFFF - fadeInStart;
-			int32_t fadeOutEnd = 0x7FFFFFFF - fadeInEnd;
+			// Main read fades OUT — sqrt of the REMAINING fraction (not 1 - fadeIn, which
+			// would break the equal-power pairing)
+			int32_t fadeOutStart = fadeScaleQ31(loopFadeInSamplesRemaining, loopFadeStepQ31);
+			int32_t fadeOutEnd = fadeScaleQ31(loopFadeInSamplesRemaining - numSamplesThisCacheRead, loopFadeStepQ31);
 
 			int32_t mainAmpStart = multiply_32x32_rshift32(amplitude, fadeOutStart) << 1;
 			int32_t mainAmpEnd =
