@@ -34,9 +34,8 @@ namespace deluge::dsp {
 namespace {
 
 constexpr float kGendyTwoPi = 6.283185307f;
-constexpr float kGendyOutGain = 0.85f;
-constexpr float kGendyRefAmplitude =
-    1804000000.0f; // ~0.84 * 2^31 (2^30 was -6 dB vs classic waveforms); brilliance overshoot rides the clamp
+constexpr float kGendyOutGain = 1.0f;               // RMS targeting handles loudness
+constexpr float kGendyRefAmplitude = 1073741824.0f; // 2^30 = square PEAK parity under the amplitude<<1 convention
 
 // Spatial landscape: a phi triangle evaluated around the polygon (same idiom
 // as PHI_WEAVE's ring landscapes)
@@ -293,11 +292,19 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade, uint32_t phaseIncrement
 	// the same loudness as wide ones (instant attack, ~1.5s release, slewed
 	// scale so level changes never step at tick rate)
 	float peak = 0.0f;
+	float sumSq = 0.0f;
 	for (int32_t i = 0; i < kPhiGendyNumNodes; i++) {
-		peak = std::max(peak, std::abs(cache.a[i] - mean));
+		float d = cache.a[i] - mean;
+		peak = std::max(peak, std::abs(d));
+		sumSq += d * d;
 	}
 	cache.agcPeak = std::max(peak, cache.agcPeak * 0.998f);
-	float scaleTarget = kGendyOutGain * kGendyRefAmplitude / std::max(cache.agcPeak, 0.30f);
+	// RMS-targeting loudness with a square-parity peak ceiling (see WEAVE)
+	float rms = std::sqrt(sumSq * (1.0f / static_cast<float>(kPhiGendyNumNodes)));
+	cache.agcRms = std::max(rms, cache.agcRms * 0.998f);
+	float scaleByRms = 0.55f * kGendyRefAmplitude / std::max(cache.agcRms, 0.15f);
+	float scaleByPeak = kGendyRefAmplitude / std::max(cache.agcPeak, 0.30f);
+	float scaleTarget = kGendyOutGain * std::min(scaleByRms, scaleByPeak);
 	if (cache.agcScale == 0.0f) {
 		cache.agcScale = scaleTarget;
 	}

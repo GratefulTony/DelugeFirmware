@@ -50,9 +50,11 @@ namespace deluge::dsp {
 
 inline constexpr int32_t kPhiWeaveNumNodes = 32;  // Power of two: scan index = phase >> 27
 inline constexpr int32_t kPhiWeaveNodeShift = 27; // 32 - 5
-inline constexpr float kPhiWeaveRefAmplitude =
-    1546188226.0f; // 0.72 * 2^31: max outGain (1.25) peaks at ~0.9 full scale (was 2^30 = -6 dB vs classic waveforms)
-                   // // ~0.5 x Q31, matches PHI_MORPH
+// Calibrated against the built-in square osc: the square renders +/-2^31
+// WITHOUT the amplitude<<1 shift this family uses, so a table peak of 2^30
+// is EXACT square peak parity (higher would risk integer wrap at full
+// envelope). Loudness is normalized by RMS up to that ceiling (see tick).
+inline constexpr float kPhiWeaveRefAmplitude = 1073741823.0f;
 
 // Physics safety rails. Leapfrog with dt=1 tick is stable while
 // (stiffness + 4*coupling) < 4; ranges below keep it under ~1.4.
@@ -215,6 +217,7 @@ struct PhiWeaveCache {
 	float bowWalk{0.0f};     // WALK bow: Brownian pressure state
 	float prevTickCf{-1.0f}; // For morph-bow (crossfade velocity)
 	float agcPeak{1.0f};     // Slow output normalization tracker
+	float agcRms{0.0f};      // RMS tracker for square-calibrated loudness
 	uint32_t noiseState{0x2545F491u};
 	bool pluckPending{true};
 

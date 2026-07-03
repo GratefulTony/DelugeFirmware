@@ -85,9 +85,7 @@ PhiVoxParams buildPhiVoxParams(uint16_t zone, float phaseOffset) {
 
 	// F1/F2 balance: 0 -> F1 only, 1 -> equal
 	float balance = 0.15f + phi::evalTriangle(phase, 1.0f, kPhiVoxBalance) * 0.85f;
-	// Raised from 0.62: the phi family was noticeably quieter than the
-	// classic waveforms (output sums saturate, worst case brief soft-clip)
-	float gains[kPhiVoxNumFormants] = {0.88f, 0.88f * balance};
+	float gains[kPhiVoxNumFormants] = {0.62f, 0.62f * balance};
 	float counts[kPhiVoxNumFormants] = {n1, n2};
 	float decays[kPhiVoxNumFormants] = {b1, b2};
 	float pols[kPhiVoxNumFormants] = {pol1, pol2};

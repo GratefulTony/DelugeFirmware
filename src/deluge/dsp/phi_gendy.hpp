@@ -167,6 +167,7 @@ struct PhiGendyCache {
 	// Slow AGC (as PHI_WEAVE): the elastic cages can be as narrow as ~0.075,
 	// and without normalization those zones were much quieter than siblings
 	float agcPeak{0.0f};
+	float agcRms{0.0f};
 	float agcScale{0.0f};
 	uint32_t lastTickTime{0xFFFFFFFF};
 	float prevCf{-1.0f};

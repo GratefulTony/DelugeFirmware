@@ -267,6 +267,7 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 	float shimmerAlpha = cfInv * a.shimmerAlpha + cf * b.shimmerAlpha;
 	float* xs1 = cache.xSmooth1;
 	float* xs = cache.xSmooth;
+	float sumSq = 0.0f;
 	for (int32_t i = 0; i < kPhiWeaveNumNodes; i++) {
 		x[i] += v[i];
 		x[i] = std::clamp(x[i], -kPhiWeaveMaxDisplacement, kPhiWeaveMaxDisplacement);
@@ -277,13 +278,22 @@ float stepPhiWeavePhysics(PhiWeaveCache& cache, float cf) {
 		xs1[i] += shimmerAlpha * (x[i] - xs1[i]);
 		xs[i] += shimmerAlpha * (xs1[i] - xs[i]);
 		peak = std::max(peak, std::abs(xs[i]));
+		sumSq += xs[i] * xs[i];
 	}
 
 	// Slow AGC: normalize output so quiet zones (soft home shapes, heavy
 	// damping) and violent ones land at comparable loudness. Attack instant,
 	// release ~1.5s of ticks.
 	cache.agcPeak = std::max(peak, cache.agcPeak * 0.999f); // sqrt(0.998) per half-dt step
-	float scaleTarget = outGain * kPhiWeaveRefAmplitude / std::max(cache.agcPeak, 0.35f);
+	// RMS-targeting loudness, square-calibrated: aim for saw-class energy
+	// (RMS ~0.55 of the peak ceiling) but never let the PEAK exceed square
+	// parity. Peak-only normalization left smooth shapes ~6-10 dB quieter
+	// than the classic waveforms at the same peak level.
+	float rms = std::sqrt(sumSq * (1.0f / static_cast<float>(kPhiWeaveNumNodes)));
+	cache.agcRms = std::max(rms, cache.agcRms * 0.999f);
+	float scaleByRms = 0.55f * kPhiWeaveRefAmplitude / std::max(cache.agcRms, 0.20f);
+	float scaleByPeak = kPhiWeaveRefAmplitude / std::max(cache.agcPeak, 0.35f);
+	float scaleTarget = outGain * std::min(scaleByRms, scaleByPeak);
 	// Slew the scale: the instant-attack AGC made the output level step per
 	// sub-tick (sharp AM edges = broadband hash); ~15ms slew is still fast
 	// enough to catch swells before the table clamp does the hard limiting
