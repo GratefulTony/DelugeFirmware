@@ -80,10 +80,10 @@ PhiGendyParams buildPhiGendyParams(uint16_t zone, float phaseOffset) {
 	p.widthStep = 0.0008f * std::pow(40.0f, wStepT);
 	float wRangeT = phi::evalTriangle(phase, 1.0f, kPhiGendyWidthRange);
 	float range = 0.25f + wRangeT * 0.60f; // 0.25..0.85
-	// Jump probability: exponential 0.004..0.5 per tick per breakpoint
-	// (calm = a snap every few seconds per node; top = ~170 jumps/sec)
+	// Jump probability: exponential 0.0005..0.5 per tick per breakpoint
+	// (calm = ~3 snaps/sec across the whole polygon; top = ~170/sec)
 	float jumpT = phi::evalTriangle(phase, 1.0f, kPhiGendyJumpProb);
-	p.jumpProb = 0.004f * std::pow(125.0f, jumpT);
+	p.jumpProb = 0.0005f * std::pow(1000.0f, jumpT);
 	p.widthMin = (1.0f - range) * (1.0f / 16.0f);
 	p.widthMax = (1.0f + 2.0f * range) * (1.0f / 16.0f);
 
@@ -187,7 +187,7 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade) {
 			cache.vw[i] = 0.0f;
 		}
 		else {
-			float vel = cache.vw[i] * 0.9f + wStep * r * 0.05f + homePull * ((1.0f / 16.0f) - wi);
+			float vel = cache.vw[i] * 0.9f + wStep * r * 0.015f + homePull * ((1.0f / 16.0f) - wi);
 			cache.vw[i] = std::clamp(vel, -0.02f, 0.02f);
 			wi += cache.vw[i];
 		}
@@ -221,9 +221,9 @@ void tickPhiGendy(PhiGendyCache& cache, q31_t crossfade) {
 			vel = 0.0f;
 		}
 		else {
-			// HOLD: spring toward home with faint drift - the shape stands
-			// still between events, so calm zones read as tonal, not vague
-			vel = vel * 0.9f + step * r * 0.08f;
+			// HOLD: spring toward home with barely-there drift - the shape
+			// stands still between events, so calm zones read as tonal
+			vel = vel * 0.9f + step * r * 0.02f;
 			vel = std::clamp(vel, -velCap, velCap);
 			amp += vel + homePull * (home - amp);
 		}
