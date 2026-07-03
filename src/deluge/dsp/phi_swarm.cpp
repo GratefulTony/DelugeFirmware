@@ -103,6 +103,12 @@ PhiSwarmParams buildPhiSwarmParams(uint16_t zone, float phaseOffset) {
 	p.w2 = static_cast<q31_t>(w2 * 2147483647.0f);
 	p.wRing = static_cast<q31_t>(ring * 2147483647.0f);
 
+	// Output skew: 0.5 +/- 0.42 of the cycle (clamped away from degenerate slopes)
+	float s1 = 0.5f + phi::evalTriangle(phase, 1.0f, kPhiSwarmSkew1) * 0.42f;
+	float s2 = 0.5f + phi::evalTriangle(phase, 1.0f, kPhiSwarmSkew2) * 0.42f;
+	p.skew1 = static_cast<uint32_t>(std::clamp(s1, 0.08f, 0.92f) * 4294967296.0f);
+	p.skew2 = static_cast<uint32_t>(std::clamp(s2, 0.08f, 0.92f) * 4294967296.0f);
+
 	float beat = lerpAnchor(kAnchorBeat, zf, zi) * (0.5f + phi::evalTriangle(phase, 1.0f, kPhiSwarmBeatWander));
 	p.wBeat = static_cast<q31_t>(std::clamp(beat, 0.0f, 0.45f) * 2147483647.0f);
 
@@ -145,6 +151,8 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		cache.eff.w2 = lerpQ(cache.bankA.w2, cache.bankB.w2);
 		cache.eff.wRing = lerpQ(cache.bankA.wRing, cache.bankB.wRing);
 		cache.eff.wBeat = lerpQ(cache.bankA.wBeat, cache.bankB.wBeat);
+		cache.eff.skew1 = lerpU(cache.bankA.skew1, cache.bankB.skew1);
+		cache.eff.skew2 = lerpU(cache.bankA.skew2, cache.bankB.skew2);
 		cache.prevCrossfade = crossfade;
 	}
 
@@ -177,6 +185,21 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 	const q31_t wRing = cache.eff.wRing;
 	const q31_t wBeat = cache.eff.wBeat;
 	const q31_t beatGainBase = 0x7FFFFFFF - wBeat;
+
+	// Phase-distortion factors: first-half and second-half slopes in Q28
+	// (two 64/32 divides per buffer; ~4 cycles per warp per sample)
+	const uint32_t skew1 = cache.eff.skew1;
+	const uint32_t skew2 = cache.eff.skew2;
+	const uint32_t rise1 = static_cast<uint32_t>((1ULL << 59) / skew1);
+	const uint32_t fall1 = static_cast<uint32_t>((1ULL << 59) / (4294967296ULL - skew1));
+	const uint32_t rise2 = static_cast<uint32_t>((1ULL << 59) / skew2);
+	const uint32_t fall2 = static_cast<uint32_t>((1ULL << 59) / (4294967296ULL - skew2));
+	auto warp = [](uint32_t ph, uint32_t skew, uint32_t rise, uint32_t fall) -> uint32_t {
+		if (ph < skew) {
+			return static_cast<uint32_t>((static_cast<uint64_t>(ph) * rise) >> 28);
+		}
+		return 0x80000000u + static_cast<uint32_t>((static_cast<uint64_t>(ph - skew) * fall) >> 28);
+	};
 
 	uint32_t phase = *startPhase;
 	uint32_t phaseAtEnd = phase + phaseIncrement * static_cast<uint32_t>(numSamples);
@@ -235,8 +258,8 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 			continue;
 		}
 
-		q31_t o1 = SineOsc::doFMNew(s1, 0);
-		q31_t o2 = SineOsc::doFMNew(s2, 0);
+		q31_t o1 = SineOsc::doFMNew(warp(s1, skew1, rise1, fall1), 0);
+		q31_t o2 = SineOsc::doFMNew(warp(s2, skew2, rise2, fall2), 0);
 
 		q31_t out = multiply_32x32_rshift32(o1, w1) << 1;
 		out = add_saturate(out, multiply_32x32_rshift32(o2, w2) << 1);

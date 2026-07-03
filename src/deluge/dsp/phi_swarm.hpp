@@ -90,6 +90,13 @@ inline constexpr phi::PhiTriConfig kPhiSwarmAnneal = {phi::kPhi250, 0.7f, 0.090f
 // Beat-AM depth wander: how audibly the slave-1 phase drift breathes the level
 inline constexpr phi::PhiTriConfig kPhiSwarmBeatWander = {phi::kPhi150, 0.6f, 0.520f, false};
 
+// Output skew: each slave's sine is phase-distorted through a two-slope map
+// (Casio CZ style) before the table lookup. Center = pure sine (previous
+// character, bit-exact); edges = bright saw-leaning curves. Zone-varied per
+// slave; the COUPLING phases stay undistorted so locking physics is untouched.
+inline constexpr phi::PhiTriConfig kPhiSwarmSkew1 = {phi::kPhi325, 0.7f, 0.050f, true};
+inline constexpr phi::PhiTriConfig kPhiSwarmSkew2 = {phi::kPhiN025, 0.6f, 0.430f, true};
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -103,8 +110,10 @@ struct PhiSwarmParams {
 	uint32_t tempFP; // Temperature (phase noise) as fraction of master increment, Q16.16
 	q31_t w1;        // Output weights
 	q31_t w2;
-	q31_t wRing; // sin(s1)*sin(s2) cross term (sum/difference partials)
-	q31_t wBeat; // Beat-AM: slave-1 phase drift breathes the output level
+	q31_t wRing;    // sin(s1)*sin(s2) cross term (sum/difference partials)
+	q31_t wBeat;    // Beat-AM: slave-1 phase drift breathes the output level
+	uint32_t skew1; // Two-slope phase-distortion split point per slave (0x80000000 = pure sine)
+	uint32_t skew2;
 	float annealGain;
 };
 
