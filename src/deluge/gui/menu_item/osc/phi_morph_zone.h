@@ -44,17 +44,24 @@ public:
 
 	void readCurrentValue() override {
 		auto& source = soundEditor.currentSound->sources[sourceId_];
-		this->setValue(static_cast<int32_t>((zoneId_ == 0) ? source.phiMorphZoneA : source.phiMorphZoneB));
+		uint16_t val;
+		if (isWeave()) {
+			val = (zoneId_ == 0) ? source.phiWeaveZoneA : source.phiWeaveZoneB;
+		}
+		else {
+			val = (zoneId_ == 0) ? source.phiMorphZoneA : source.phiMorphZoneB;
+		}
+		this->setValue(static_cast<int32_t>(val));
 	}
 
 	void writeCurrentValue() override {
 		auto& source = soundEditor.currentSound->sources[sourceId_];
 		uint16_t val = static_cast<uint16_t>(this->getValue());
-		if (zoneId_ == 0) {
-			source.phiMorphZoneA = val;
+		if (isWeave()) {
+			((zoneId_ == 0) ? source.phiWeaveZoneA : source.phiWeaveZoneB) = val;
 		}
 		else {
-			source.phiMorphZoneB = val;
+			((zoneId_ == 0) ? source.phiMorphZoneA : source.phiMorphZoneB) = val;
 		}
 	}
 
@@ -62,40 +69,27 @@ public:
 
 	[[nodiscard]] float getPhaseOffset() const override {
 		auto& source = soundEditor.currentSound->sources[sourceId_];
+		if (isWeave()) {
+			return (zoneId_ == 0) ? source.phiWeavePhaseOffsetA : source.phiWeavePhaseOffsetB;
+		}
 		return (zoneId_ == 0) ? source.phiMorphPhaseOffsetA : source.phiMorphPhaseOffsetB;
 	}
 
 	void setPhaseOffset(float offset) override {
 		auto& source = soundEditor.currentSound->sources[sourceId_];
-		if (zoneId_ == 0) {
-			source.phiMorphPhaseOffsetA = offset;
-		}
-		else {
-			source.phiMorphPhaseOffsetB = offset;
-		}
+		float& target = isWeave() ? ((zoneId_ == 0) ? source.phiWeavePhaseOffsetA : source.phiWeavePhaseOffsetB)
+		                          : ((zoneId_ == 0) ? source.phiMorphPhaseOffsetA : source.phiMorphPhaseOffsetB);
+		target = offset;
 	}
 
 	[[nodiscard]] const char* getZoneName(int32_t zoneIndex) const override {
-		switch (zoneIndex) {
-		case 0:
-			return "Ember";
-		case 1:
-			return "Coral";
-		case 2:
-			return "Prism";
-		case 3:
-			return "Jade";
-		case 4:
-			return "Azure";
-		case 5:
-			return "Ivory";
-		case 6:
-			return "Slate";
-		case 7:
-			return "Onyx";
-		default:
+		static const char* const kMorphNames[8] = {"Ember", "Coral", "Prism", "Jade",
+		                                           "Azure", "Ivory", "Slate", "Onyx"};
+		static const char* const kWeaveNames[8] = {"Silk", "Wool", "Reed", "Vine", "Bone", "Glass", "Steel", "Storm"};
+		if (zoneIndex < 0 || zoneIndex >= 8) {
 			return "?";
 		}
+		return isWeave() ? kWeaveNames[zoneIndex] : kMorphNames[zoneIndex];
 	}
 
 	void selectEncoderAction(int32_t offset) override {
@@ -103,7 +97,8 @@ public:
 			// Push+twist: manually adjust phi triangle phase offset
 			Buttons::selectButtonPressUsedUp = true;
 			auto& source = soundEditor.currentSound->sources[sourceId_];
-			float& phase = (zoneId_ == 0) ? source.phiMorphPhaseOffsetA : source.phiMorphPhaseOffsetB;
+			float& phase = isWeave() ? ((zoneId_ == 0) ? source.phiWeavePhaseOffsetA : source.phiWeavePhaseOffsetB)
+			                         : ((zoneId_ == 0) ? source.phiMorphPhaseOffsetA : source.phiMorphPhaseOffsetB);
 			phase = std::max(0.0f, phase + static_cast<float>(velocity_.getScaledOffset(offset)) * 1.0f);
 			char buffer[16];
 			snprintf(buffer, sizeof(buffer), "P:%d", static_cast<int32_t>(std::floor(effectivePhaseOffset())));
@@ -138,7 +133,8 @@ public:
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		const auto sound = static_cast<Sound*>(modControllable);
-		return sound->sources[sourceId_].oscType == OscType::PHI_MORPH;
+		OscType type = sound->sources[sourceId_].oscType;
+		return type == OscType::PHI_MORPH || type == OscType::PHI_WEAVE;
 	}
 
 protected:
@@ -158,10 +154,15 @@ private:
 	uint8_t zoneId_; // 0 = Zone A, 1 = Zone B
 	mutable bool suppressNotification_ = false;
 
+	[[nodiscard]] bool isWeave() const {
+		return soundEditor.currentSound->sources[sourceId_].oscType == OscType::PHI_WEAVE;
+	}
+
 	[[nodiscard]] float effectivePhaseOffset() const {
 		auto& source = soundEditor.currentSound->sources[sourceId_];
-		float knobOffset = (zoneId_ == 0) ? source.phiMorphPhaseOffsetA : source.phiMorphPhaseOffsetB;
-		return knobOffset + static_cast<float>(kPhiMorphZoneResolution) * source.phiMorphGamma;
+		float knobOffset = getPhaseOffset();
+		float gamma = isWeave() ? source.phiWeaveGamma : source.phiMorphGamma;
+		return knobOffset + static_cast<float>(kPhiMorphZoneResolution) * gamma;
 	}
 
 	static inline char coordBuffer_[12] = {};

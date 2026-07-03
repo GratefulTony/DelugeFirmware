@@ -4048,6 +4048,26 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			source->phiMorphGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
 			reader.exitTag("phiMorphGamma");
 		}
+		else if (!strcmp(tagName, "phiWeaveZoneA")) {
+			source->phiWeaveZoneA = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiWeaveZoneA");
+		}
+		else if (!strcmp(tagName, "phiWeaveZoneB")) {
+			source->phiWeaveZoneB = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiWeaveZoneB");
+		}
+		else if (!strcmp(tagName, "phiWeavePhaseA")) {
+			source->phiWeavePhaseOffsetA = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiWeavePhaseA");
+		}
+		else if (!strcmp(tagName, "phiWeavePhaseB")) {
+			source->phiWeavePhaseOffsetB = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiWeavePhaseB");
+		}
+		else if (!strcmp(tagName, "phiWeaveGamma")) {
+			source->phiWeaveGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiWeaveGamma");
+		}
 		/*
 		else if (!strcmp(tagName, "sampleSync")) {
 		    source->sampleSync = stringToBool(reader.readTagContents());
@@ -4428,6 +4448,21 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 				}
 				if (source->phiMorphGamma != 0.0f) {
 					writer.writeAttribute("phiMorphGamma", static_cast<int32_t>(source->phiMorphGamma * 10.0f));
+				}
+			}
+
+			// PHI_WEAVE: persist zone knobs, phase offsets, and gamma
+			if (source->oscType == OscType::PHI_WEAVE) {
+				writer.writeAttribute("phiWeaveZoneA", source->phiWeaveZoneA);
+				writer.writeAttribute("phiWeaveZoneB", source->phiWeaveZoneB);
+				if (source->phiWeavePhaseOffsetA != 0.0f) {
+					writer.writeAttribute("phiWeavePhaseA", static_cast<int32_t>(source->phiWeavePhaseOffsetA * 10.0f));
+				}
+				if (source->phiWeavePhaseOffsetB != 0.0f) {
+					writer.writeAttribute("phiWeavePhaseB", static_cast<int32_t>(source->phiWeavePhaseOffsetB * 10.0f));
+				}
+				if (source->phiWeaveGamma != 0.0f) {
+					writer.writeAttribute("phiWeaveGamma", static_cast<int32_t>(source->phiWeaveGamma * 10.0f));
 				}
 			}
 justCloseTag:

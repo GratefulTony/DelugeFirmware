@@ -397,6 +397,7 @@ enum class OscType : uint8_t {
 	ANALOG_SAW_2,
 	WAVETABLE,
 	PHI_MORPH,
+	PHI_WEAVE,
 	SAMPLE,
 	DX7,
 	INPUT_L,
@@ -404,7 +405,7 @@ enum class OscType : uint8_t {
 	INPUT_STEREO,
 };
 
-constexpr OscType kLastRingmoddableOscType = OscType::PHI_MORPH;
+constexpr OscType kLastRingmoddableOscType = OscType::PHI_WEAVE;
 constexpr int32_t kNumOscTypesRingModdable = util::to_underlying(kLastRingmoddableOscType) + 1;
 constexpr int32_t kNumOscTypes = util::to_underlying(OscType::INPUT_STEREO) + 1;
 

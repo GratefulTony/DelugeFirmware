@@ -20,6 +20,7 @@
 #include "dsp/dx/dx7note.h"
 #include "dsp/dx/engine.h"
 #include "dsp/phi_morph.hpp"
+#include "dsp/phi_weave.hpp"
 #include "gui/ui/browser/sample_browser.h"
 #include "gui/ui/sound_editor.h"
 #include "model/sample/sample.h"
@@ -51,6 +52,7 @@ Source::Source() {
 Source::~Source() {
 	destructAllMultiRanges();
 	delete phiMorphCache;
+	delete phiWeaveCache;
 }
 
 // Destructs the actual MultiRanges, but doesn't actually deallocate the memory, aka calling empty() on the Array - the
@@ -84,6 +86,16 @@ void Source::cloneFrom(Source* other) {
 	// phiMorphCache is lazy-allocated, don't clone it
 	delete phiMorphCache;
 	phiMorphCache = nullptr;
+
+	// PHI_WEAVE zone parameters
+	phiWeaveZoneA = other->phiWeaveZoneA;
+	phiWeaveZoneB = other->phiWeaveZoneB;
+	phiWeavePhaseOffsetA = other->phiWeavePhaseOffsetA;
+	phiWeavePhaseOffsetB = other->phiWeavePhaseOffsetB;
+	phiWeaveGamma = other->phiWeaveGamma;
+	// phiWeaveCache is lazy-allocated, don't clone it
+	delete phiWeaveCache;
+	phiWeaveCache = nullptr;
 
 	// Deep copy DxPatch
 	if (other->dxPatch) {

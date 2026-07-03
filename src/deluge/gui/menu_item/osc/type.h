@@ -63,6 +63,7 @@ public:
 		    // Haven't actually really determined if this needs to be here - maybe not?
 		    OscType::WAVETABLE,
 		    OscType::PHI_MORPH,
+		    OscType::PHI_WEAVE,
 		};
 
 		if (util::one_of(oldValue, needs_unassignment) || util::one_of(newValue, needs_unassignment)) {
@@ -91,6 +92,7 @@ public:
 		    l10n::getView(STRING_FOR_ANALOG_SAW),    //<
 		    l10n::getView(STRING_FOR_WAVETABLE),     //<
 		    l10n::getView(STRING_FOR_PHI_MORPH),     //<
+		    l10n::getView(STRING_FOR_PHI_WEAVE),     //<
 		};
 
 		if (soundEditor.currentSound->getSynthMode() == SynthMode::RINGMOD) {
@@ -162,6 +164,8 @@ public:
 				return OLED::wavetableIcon;
 			case OscType::PHI_MORPH:
 				return OLED::phiMorphIcon;
+			case OscType::PHI_WEAVE:
+				return OLED::phiWeaveIcon;
 			default:
 				return OLED::sineIcon;
 			}

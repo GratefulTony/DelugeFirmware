@@ -22,6 +22,7 @@
 #include "dsp/filter/filter_set.h"
 #include "dsp/oscillators/sine_osc.h"
 #include "dsp/phi_morph.hpp"
+#include "dsp/phi_weave.hpp"
 #include "dsp/shaper_buffer.h"
 #include "dsp/timestretch/time_stretcher.h"
 #include "dsp/util.hpp"
@@ -309,6 +310,13 @@ bool Voice::noteOn(ModelStackWithSoundFlags* modelStack, int32_t newNoteCodeBefo
 
 	ParamManagerForTimeline* paramManager = (ParamManagerForTimeline*)modelStack->paramManager;
 	Sound& sound = *static_cast<Sound*>(modelStack->modControllable);
+
+	// PHI_WEAVE: a new note plucks the (shared) string
+	for (int32_t s = 0; s < kNumSources; s++) {
+		if (sound.sources[s].oscType == OscType::PHI_WEAVE && sound.sources[s].phiWeaveCache) {
+			sound.sources[s].phiWeaveCache->pluckPending = true;
+		}
+	}
 
 	// Setup "half-baked" envelope output values. These need to exist before we do the initial patching below - and it's
 	// only after that that we can render the "actual" envelope output values, taking their own input patching into
@@ -1688,6 +1696,41 @@ cantBeDoingOscSyncForFirstOsc:
 						                    &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, 0, 0, false,
 						                    crossfade, pulseWidth);
 					}
+					else if (oscType == OscType::PHI_WEAVE) {
+						auto& source = sound.sources[s];
+						if (!source.phiWeaveCache) {
+							source.phiWeaveCache = new dsp::PhiWeaveCache{};
+						}
+						auto& cache = *source.phiWeaveCache;
+						float effOffA = source.phiWeavePhaseOffsetA + source.phiWeaveGamma;
+						float effOffB = source.phiWeavePhaseOffsetB + source.phiWeaveGamma;
+						if (cache.needsUpdate(source.phiWeaveZoneA, source.phiWeaveZoneB, effOffA, effOffB)) {
+							cache.bankA = dsp::buildPhiWeaveParams(source.phiWeaveZoneA, effOffA);
+							cache.bankB = dsp::buildPhiWeaveParams(source.phiWeaveZoneB, effOffB);
+							cache.prevZoneA = source.phiWeaveZoneA;
+							cache.prevZoneB = source.phiWeaveZoneB;
+							cache.prevPhaseOffsetA = effOffA;
+							cache.prevPhaseOffsetB = effOffB;
+						}
+						// IIR smooth crossfade (once per buffer via u == 0 guard)
+						if (u == 0) {
+							auto& smoothed = cache.smoothedCrossfade;
+							q31_t target = sourceWaveIndexesLastTime[s];
+							if (smoothed == INT32_MIN) {
+								smoothed = target;
+							}
+							else if (smoothed != target) {
+								q31_t diff = target - smoothed;
+								smoothed += (std::abs(diff) < 256) ? diff : (diff >> 2);
+							}
+						}
+						q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffsets[s];
+						memset(spareRenderingBuffer[s + 2], 0, numSamples * sizeof(int32_t));
+						dsp::renderPhiWeave(cache, spareRenderingBuffer[s + 2],
+						                    spareRenderingBuffer[s + 2] + numSamples, numSamples, phaseIncrements[s],
+						                    &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, 0, 0, false,
+						                    crossfade, pulseWidth);
+					}
 					else {
 						dsp::Oscillator::renderOsc(
 						    oscType, 0, spareRenderingBuffer[s + 2], spareRenderingBuffer[s + 2] + numSamples,
@@ -2433,9 +2476,20 @@ void Voice::renderBasicSource(Sound& sound, ParamManagerForTimeline* paramManage
 		sourceAmplitude += amplitudeIncrement * samplesToSkip;
 	}
 
-	// IIR smooth crossfade position for PHI_MORPH (once per buffer, before unison loop)
+	// IIR smooth crossfade position for PHI_MORPH / PHI_WEAVE (once per buffer, before unison loop)
 	if (sound.sources[s].oscType == OscType::PHI_MORPH && sound.sources[s].phiMorphCache) {
 		auto& smoothed = sound.sources[s].phiMorphCache->smoothedCrossfade;
+		q31_t target = sourceWaveIndexesLastTime[s];
+		if (smoothed == INT32_MIN) {
+			smoothed = target;
+		}
+		else if (smoothed != target) {
+			q31_t diff = target - smoothed;
+			smoothed += (std::abs(diff) < 256) ? diff : (diff >> 2);
+		}
+	}
+	else if (sound.sources[s].oscType == OscType::PHI_WEAVE && sound.sources[s].phiWeaveCache) {
+		auto& smoothed = sound.sources[s].phiWeaveCache->smoothedCrossfade;
 		q31_t target = sourceWaveIndexesLastTime[s];
 		if (smoothed == INT32_MIN) {
 			smoothed = target;
@@ -3162,6 +3216,50 @@ dontUseCache: {}
 			                                   + static_cast<uint32_t>(paramFinalValues[params::LOCAL_OSC_A_PHASE + s])
 			                                   + static_cast<uint32_t>(unisonPhaseOffset);
 			dsp::renderPhiMorph(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
+			                    &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, effSourceAmplitude,
+			                    effAmplitudeIncrement, true, crossfade, pulseWidth);
+
+			if (stereoUnison) {
+				for (int32_t i = 0; i < numSamples; i++) {
+					oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
+					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;
+				}
+			}
+		}
+		else if (sound.sources[s].oscType == OscType::PHI_WEAVE) {
+			auto& source = sound.sources[s];
+			if (!source.phiWeaveCache) {
+				source.phiWeaveCache = new dsp::PhiWeaveCache{};
+			}
+			auto& cache = *source.phiWeaveCache;
+			float effOffA = source.phiWeavePhaseOffsetA + source.phiWeaveGamma;
+			float effOffB = source.phiWeavePhaseOffsetB + source.phiWeaveGamma;
+			if (cache.needsUpdate(source.phiWeaveZoneA, source.phiWeaveZoneB, effOffA, effOffB)) {
+				cache.bankA = dsp::buildPhiWeaveParams(source.phiWeaveZoneA, effOffA);
+				cache.bankB = dsp::buildPhiWeaveParams(source.phiWeaveZoneB, effOffB);
+				cache.prevZoneA = source.phiWeaveZoneA;
+				cache.prevZoneB = source.phiWeaveZoneB;
+				cache.prevPhaseOffsetA = effOffA;
+				cache.prevPhaseOffsetB = effOffB;
+			}
+
+			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
+
+			int32_t* renderBuffer = oscBuffer;
+			if (stereoUnison) {
+				renderBuffer = spareRenderingBuffer[2];
+				memset(renderBuffer, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
+			}
+
+			int32_t* oscBufferEnd = renderBuffer + numSamples;
+
+			uint32_t pulseWidth = (uint32_t)lshiftAndSaturate<1>(paramFinalValues[params::LOCAL_OSC_A_PHASE_WIDTH + s]
+			                                                     + unisonPhaseWidthOffset);
+
+			uint32_t effectiveRetriggerPhase = sound.oscRetriggerPhase[s]
+			                                   + static_cast<uint32_t>(paramFinalValues[params::LOCAL_OSC_A_PHASE + s])
+			                                   + static_cast<uint32_t>(unisonPhaseOffset);
+			dsp::renderPhiWeave(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
 			                    &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, effSourceAmplitude,
 			                    effAmplitudeIncrement, true, crossfade, pulseWidth);
 

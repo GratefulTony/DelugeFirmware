@@ -37,18 +37,21 @@ public:
 		if (sound->getSynthMode() == SynthMode::FM) {
 			return false;
 		}
-		if (source.oscType == OscType::PHI_MORPH) {
+		if (source.oscType == OscType::PHI_MORPH || source.oscType == OscType::PHI_WEAVE) {
 			return true;
 		}
 		return source.oscType == OscType::WAVETABLE && source.hasAtLeastOneAudioFileLoaded();
 	}
 
 	void selectEncoderAction(int32_t offset) override {
-		// Push+twist: adjust gamma (shared phase multiplier) for PHI_MORPH
+		// Push+twist: adjust gamma (shared phase multiplier) for PHI_MORPH / PHI_WEAVE
+		OscType gammaOscType = soundEditor.currentSound->sources[source_id_].oscType;
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)
-		    && soundEditor.currentSound->sources[source_id_].oscType == OscType::PHI_MORPH) {
+		    && (gammaOscType == OscType::PHI_MORPH || gammaOscType == OscType::PHI_WEAVE)) {
 			Buttons::selectButtonPressUsedUp = true;
-			float& gamma = soundEditor.currentSound->sources[source_id_].phiMorphGamma;
+			float& gamma = (gammaOscType == OscType::PHI_WEAVE)
+			                   ? soundEditor.currentSound->sources[source_id_].phiWeaveGamma
+			                   : soundEditor.currentSound->sources[source_id_].phiMorphGamma;
 			gamma = std::max(0.0f, gamma + static_cast<float>(offset));
 			char buffer[16];
 			snprintf(buffer, sizeof(buffer), "G:%d", static_cast<int32_t>(gamma));

@@ -24,7 +24,8 @@
 
 namespace deluge::dsp {
 struct PhiMorphCache;
-}
+struct PhiWeaveCache;
+} // namespace deluge::dsp
 
 class Sound;
 class ParamManagerForTimeline;
@@ -59,6 +60,14 @@ public:
 	float phiMorphPhaseOffsetB{0.0f};
 	float phiMorphGamma{0.0f}; // Shared phase multiplier (push+twist on wave index)
 	deluge::dsp::PhiMorphCache* phiMorphCache{nullptr};
+
+	// PHI_WEAVE zone parameters (same interface family as PHI_MORPH)
+	uint16_t phiWeaveZoneA{0};
+	uint16_t phiWeaveZoneB{0};
+	float phiWeavePhaseOffsetA{0.0f};
+	float phiWeavePhaseOffsetB{0.0f};
+	float phiWeaveGamma{0.0f};
+	deluge::dsp::PhiWeaveCache* phiWeaveCache{nullptr};
 
 	int8_t timeStretchAmount;
 	bool offsetWraps{true}; // When true, start offset wraps playhead modularly; when false, clamps at boundary
