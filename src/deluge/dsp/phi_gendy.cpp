@@ -35,7 +35,8 @@ namespace {
 
 constexpr float kGendyTwoPi = 6.283185307f;
 constexpr float kGendyOutGain = 0.85f;
-constexpr float kGendyRefAmplitude = 1073741824.0f; // 2^30, matches sibling convention
+constexpr float kGendyRefAmplitude =
+    1804000000.0f; // ~0.84 * 2^31 (2^30 was -6 dB vs classic waveforms); brilliance overshoot rides the clamp
 
 // Spatial landscape: a phi triangle evaluated around the polygon (same idiom
 // as PHI_WEAVE's ring landscapes)

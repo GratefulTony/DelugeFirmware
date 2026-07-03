@@ -48,9 +48,11 @@ namespace deluge::dsp {
 // Deep dive with figures: docs/dev/phi-weave-physics.md
 // ============================================================================
 
-inline constexpr int32_t kPhiWeaveNumNodes = 32;              // Power of two: scan index = phase >> 27
-inline constexpr int32_t kPhiWeaveNodeShift = 27;             // 32 - 5
-inline constexpr float kPhiWeaveRefAmplitude = 1073741823.0f; // ~0.5 x Q31, matches PHI_MORPH
+inline constexpr int32_t kPhiWeaveNumNodes = 32;  // Power of two: scan index = phase >> 27
+inline constexpr int32_t kPhiWeaveNodeShift = 27; // 32 - 5
+inline constexpr float kPhiWeaveRefAmplitude =
+    1546188226.0f; // 0.72 * 2^31: max outGain (1.25) peaks at ~0.9 full scale (was 2^30 = -6 dB vs classic waveforms)
+                   // // ~0.5 x Q31, matches PHI_MORPH
 
 // Physics safety rails. Leapfrog with dt=1 tick is stable while
 // (stiffness + 4*coupling) < 4; ranges below keep it under ~1.4.
