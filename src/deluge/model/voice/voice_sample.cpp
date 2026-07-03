@@ -941,10 +941,19 @@ readCachedWindow:
 		}
 
 		int32_t samplesTilThisWindowEnd;
-		if constexpr (kCacheByteDepth == 3) {
+		if (cachePlayDirection != 1) {
+			// Backward: floor, not round-up. The frame nearest the cluster start is the
+			// last readable one in this window; rounding up made the read loop retreat
+			// one phantom frame past data[0] - garbage samples, heard as a crackle at
+			// every backward cluster crossing. (bytesTilThisWindowEnd already includes
+			// +frameSizeBytes, so floor gives the inclusive frame count.)
+			samplesTilThisWindowEnd =
+			    (int32_t)((uint32_t)bytesTilThisWindowEnd / (uint8_t)(sampleSourceNumChannels * kCacheByteDepth));
+		}
+		else if constexpr (kCacheByteDepth == 3) {
 			samplesTilThisWindowEnd =
 			    (uint32_t)(bytesTilThisWindowEnd - 1) / (uint8_t)(sampleSourceNumChannels * kCacheByteDepth)
-			    + 1; // Round up
+			    + 1; // Round up - the straddling frame extends into the cluster's padding
 		}
 		else {
 			samplesTilThisWindowEnd = bytesTilThisWindowEnd >> kCacheByteDepthMagnitude;
