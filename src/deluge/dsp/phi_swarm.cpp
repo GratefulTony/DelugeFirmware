@@ -137,9 +137,29 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 	FX_BENCH_START(bench_render);
 #endif
 
-	// Rebuild the crossfaded effective params when the smoothed crossfade moves
-	if (crossfade != cache.prevCrossfade) {
-		float cf = std::clamp(static_cast<float>(crossfade) / 2147483648.0f + 0.5f, 0.0f, 1.0f);
+	// PER-VOICE effective params, evaluated locally from the banks at this
+	// voice's own From/To crossfade values. The previous shared-eff cache +
+	// shared ramp snapshots seesawed under unison: each voice's crossfade
+	// includes a per-voice wave-index offset, so voices kept ramping toward
+	// each OTHER's parameters ("as if there is shared voice state" - there
+	// was). ~30 float lerps per call; parked voices get From == To (all
+	// ramp steps zero) and zone changes snap automatically because both
+	// endpoints evaluate on the freshly rebuilt banks.
+	if (AudioEngine::audioSampleTimer != cache.lastEnvTime) {
+		cache.lastEnvTime = AudioEngine::audioSampleTimer;
+		float cf = std::clamp(static_cast<float>(cache.smoothedCrossfade) / 2147483648.0f + 0.5f, 0.0f, 1.0f);
+		if (cache.prevCf >= 0.0f) {
+			float gain = (1.0f - cf) * cache.bankA.annealGain + cf * cache.bankB.annealGain;
+			cache.annealEnv = std::max(std::abs(cf - cache.prevCf) * gain * 40.0f, cache.annealEnv * 0.85f);
+		}
+		cache.prevCf = cf;
+		// Roll the shared morph history once per buffer
+		cache.smoothedPrevBuf = cache.smoothedLastBuf;
+		cache.smoothedLastBuf = cache.smoothedCrossfade;
+	}
+
+	auto evalEff = [&cache](q31_t cfQ, PhiSwarmParams& o) {
+		float cf = std::clamp(static_cast<float>(cfQ) / 2147483648.0f + 0.5f, 0.0f, 1.0f);
 		float cfInv = 1.0f - cf;
 		auto lerpU = [cf, cfInv](uint32_t a, uint32_t b) {
 			return static_cast<uint32_t>(cfInv * static_cast<float>(a) + cf * static_cast<float>(b));
@@ -147,115 +167,69 @@ void renderPhiSwarm(PhiSwarmCache& cache, int32_t* bufferStart, int32_t* bufferE
 		auto lerpQ = [cf, cfInv](q31_t a, q31_t b) {
 			return static_cast<q31_t>(cfInv * static_cast<float>(a) + cf * static_cast<float>(b));
 		};
-		cache.eff.ratio1FP = lerpU(cache.bankA.ratio1FP, cache.bankB.ratio1FP);
-		cache.eff.ratio2FP = lerpU(cache.bankA.ratio2FP, cache.bankB.ratio2FP);
-		cache.eff.k1mFP = lerpU(cache.bankA.k1mFP, cache.bankB.k1mFP);
-		cache.eff.k2mFP = lerpU(cache.bankA.k2mFP, cache.bankB.k2mFP);
-		cache.eff.k12FP = lerpU(cache.bankA.k12FP, cache.bankB.k12FP);
-		cache.eff.tempFP = lerpU(cache.bankA.tempFP, cache.bankB.tempFP);
-		cache.eff.w1 = lerpQ(cache.bankA.w1, cache.bankB.w1);
-		cache.eff.w2 = lerpQ(cache.bankA.w2, cache.bankB.w2);
-		cache.eff.wRing = lerpQ(cache.bankA.wRing, cache.bankB.wRing);
-		cache.eff.wBeat = lerpQ(cache.bankA.wBeat, cache.bankB.wBeat);
-		cache.eff.skew1 = lerpU(cache.bankA.skew1, cache.bankB.skew1);
-		cache.eff.skew2 = lerpU(cache.bankA.skew2, cache.bankB.skew2);
-		cache.prevCrossfade = crossfade;
-	}
+		o.ratio1FP = lerpU(cache.bankA.ratio1FP, cache.bankB.ratio1FP);
+		o.ratio2FP = lerpU(cache.bankA.ratio2FP, cache.bankB.ratio2FP);
+		o.k1mFP = lerpU(cache.bankA.k1mFP, cache.bankB.k1mFP);
+		o.k2mFP = lerpU(cache.bankA.k2mFP, cache.bankB.k2mFP);
+		o.k12FP = lerpU(cache.bankA.k12FP, cache.bankB.k12FP);
+		o.tempFP = lerpU(cache.bankA.tempFP, cache.bankB.tempFP);
+		o.w1 = lerpQ(cache.bankA.w1, cache.bankB.w1);
+		o.w2 = lerpQ(cache.bankA.w2, cache.bankB.w2);
+		o.wRing = lerpQ(cache.bankA.wRing, cache.bankB.wRing);
+		o.wBeat = lerpQ(cache.bankA.wBeat, cache.bankB.wBeat);
+		o.skew1 = lerpU(cache.bankA.skew1, cache.bankB.skew1);
+		o.skew2 = lerpU(cache.bankA.skew2, cache.bankB.skew2);
+	};
 
-	// Annealing: crossfade MOTION heats the network; parked, it cools (~0.85
-	// per buffer, so locks audibly re-form over a few hundred ms)
-	if (AudioEngine::audioSampleTimer != cache.lastEnvTime) {
-		cache.lastEnvTime = AudioEngine::audioSampleTimer;
-		float cf = std::clamp(static_cast<float>(crossfade) / 2147483648.0f + 0.5f, 0.0f, 1.0f);
-		if (cache.prevCf >= 0.0f) {
-			float cfInv = 1.0f - cf;
-			float gain = cfInv * cache.bankA.annealGain + cf * cache.bankB.annealGain;
-			cache.annealEnv = std::max(std::abs(cf - cache.prevCf) * gain * 40.0f, cache.annealEnv * 0.85f);
-		}
-		cache.prevCf = cf;
-		float heat = std::min(cache.annealEnv, 0.15f);
-		cache.effTempFP = cache.eff.tempFP + static_cast<uint32_t>(heat * 65536.0f);
+	// This voice's crossfade endpoints: shared smoothed history + OWN offset
+	const q31_t voiceOffset = crossfade - cache.smoothedCrossfade;
+	const q31_t cfFromQ = (cache.smoothedPrevBuf == INT32_MIN) ? crossfade : (cache.smoothedPrevBuf + voiceOffset);
+	PhiSwarmParams eF;
+	PhiSwarmParams eT;
+	evalEff(cfFromQ, eF);
+	evalEff(crossfade, eT);
 
-		// Snapshot morph-ramp endpoints once per buffer (shared across all
-		// unison voices - per-call snapshots seesawed between detuned voices)
-		if (cache.ratio1Last == 0) { // First buffer
-			cache.ratio1Last = cache.eff.ratio1FP;
-			cache.ratio2Last = cache.eff.ratio2FP;
-		}
-		if (cache.w1Last == INT32_MIN) {
-			cache.w1Last = cache.eff.w1;
-			cache.w2Last = cache.eff.w2;
-			cache.wRingLast = cache.eff.wRing;
-			cache.wBeatLast = cache.eff.wBeat;
-		}
-		// (No magnitude-based snap: ramps handle any CONTINUOUS morph speed -
-		// fast LFOs on the wave index were tripping the old >1/8 snap and
-		// clicking. Zone changes snap via the bank-rebuild reset instead.)
-		cache.ratio1From = cache.ratio1Last;
-		cache.ratio2From = cache.ratio2Last;
-		cache.ratio1Last = cache.eff.ratio1FP;
-		cache.ratio2Last = cache.eff.ratio2FP;
-		cache.w1From = cache.w1Last;
-		cache.w2From = cache.w2Last;
-		cache.wRingFrom = cache.wRingLast;
-		cache.wBeatFrom = cache.wBeatLast;
-		cache.w1Last = cache.eff.w1;
-		cache.w2Last = cache.eff.w2;
-		cache.wRingLast = cache.eff.wRing;
-		cache.wBeatLast = cache.eff.wBeat;
-		if (cache.skew1Last == 0) {
-			cache.skew1Last = cache.eff.skew1;
-			cache.skew2Last = cache.eff.skew2;
-		}
-		cache.skew1From = cache.skew1Last;
-		cache.skew2From = cache.skew2Last;
-		cache.skew1Last = cache.eff.skew1;
-		cache.skew2Last = cache.eff.skew2;
-	}
-
-	// Per-buffer conversions: everything scales with the master increment so
-	// locking behavior is pitch-invariant. Each voice derives its own ramp
-	// endpoints from ITS OWN pitch and the shared ratio snapshots, so unison
-	// detune stays exact while morph motion still glides.
-	uint32_t inc1 = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.ratio1From) >> 16);
-	uint32_t inc2 = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.ratio2From) >> 16);
-	uint32_t inc1Target = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.ratio1FP) >> 16);
-	uint32_t inc2Target = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.ratio2FP) >> 16);
+	// Per-voice conversions: everything scales with the master increment so
+	// locking behavior is pitch-invariant
+	uint32_t inc1 = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * eF.ratio1FP) >> 16);
+	uint32_t inc2 = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * eF.ratio2FP) >> 16);
+	uint32_t inc1Target = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * eT.ratio1FP) >> 16);
+	uint32_t inc2Target = static_cast<uint32_t>((static_cast<uint64_t>(phaseIncrement) * eT.ratio2FP) >> 16);
 	const int32_t inc1Step = static_cast<int32_t>(inc1Target - inc1) / numSamples;
 	const int32_t inc2Step = static_cast<int32_t>(inc2Target - inc2) / numSamples;
-	int32_t k1mPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.k1mFP) >> 16);
-	int32_t k2mPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.k2mFP) >> 16);
-	int32_t k12Phase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.eff.k12FP) >> 16);
-	int32_t tempPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * cache.effTempFP) >> 16);
+	int32_t k1mPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * eT.k1mFP) >> 16);
+	int32_t k2mPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * eT.k2mFP) >> 16);
+	int32_t k12Phase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * eT.k12FP) >> 16);
+	uint32_t heatFP = static_cast<uint32_t>(std::min(cache.annealEnv, 0.15f) * 65536.0f);
+	int32_t tempPhase = static_cast<int32_t>((static_cast<uint64_t>(phaseIncrement) * (eT.tempFP + heatFP)) >> 16);
 
-	// Output weights ramp from the shared once-per-buffer snapshots (AM
-	// stepped at 344 Hz under wave-index modulation otherwise)
-	q31_t w1 = cache.w1From;
-	q31_t w2 = cache.w2From;
-	q31_t wRing = cache.wRingFrom;
-	q31_t wBeat = cache.wBeatFrom;
-	const q31_t w1Step = (cache.eff.w1 - w1) / numSamples;
-	const q31_t w2Step = (cache.eff.w2 - w2) / numSamples;
-	const q31_t wRingStep = (cache.eff.wRing - wRing) / numSamples;
-	const q31_t wBeatStep = (cache.eff.wBeat - wBeat) / numSamples;
+	// Output weights ramp between this voice's own endpoints
+	q31_t w1 = eF.w1;
+	q31_t w2 = eF.w2;
+	q31_t wRing = eF.wRing;
+	q31_t wBeat = eF.wBeat;
+	const q31_t w1Step = (eT.w1 - w1) / numSamples;
+	const q31_t w2Step = (eT.w2 - w2) / numSamples;
+	const q31_t wRingStep = (eT.wRing - wRing) / numSamples;
+	const q31_t wBeatStep = (eT.wBeat - wBeat) / numSamples;
 
 	// Phase-distortion factors: first-half and second-half slopes in Q28.
 	// When the skew is MOVING (wave modulation), the warped phase lerps
 	// between the previous and current buffer's warps - un-ramped, the
 	// waveform shape stepped at 344 Hz (clicks under modulation)
-	const uint32_t skew1 = cache.eff.skew1;
-	const uint32_t skew2 = cache.eff.skew2;
+	const uint32_t skew1 = eT.skew1;
+	const uint32_t skew2 = eT.skew2;
 	const uint32_t rise1 = static_cast<uint32_t>((1ULL << 59) / skew1);
 	const uint32_t fall1 = static_cast<uint32_t>((1ULL << 59) / (4294967296ULL - skew1));
 	const uint32_t rise2 = static_cast<uint32_t>((1ULL << 59) / skew2);
 	const uint32_t fall2 = static_cast<uint32_t>((1ULL << 59) / (4294967296ULL - skew2));
-	const bool skewRamping = (cache.skew1From != skew1) || (cache.skew2From != skew2);
+	const bool skewRamping = (eF.skew1 != skew1) || (eF.skew2 != skew2);
 	uint32_t rise1F = rise1;
 	uint32_t fall1F = fall1;
 	uint32_t rise2F = rise2;
 	uint32_t fall2F = fall2;
-	const uint32_t skew1F = cache.skew1From;
-	const uint32_t skew2F = cache.skew2From;
+	const uint32_t skew1F = eF.skew1;
+	const uint32_t skew2F = eF.skew2;
 	q31_t skewRamp = 0;
 	q31_t skewRampInc = 0x7FFFFFFF / numSamples;
 	if (skewRamping) {

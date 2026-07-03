@@ -120,38 +120,18 @@ struct PhiSwarmParams {
 struct PhiSwarmCache {
 	PhiSwarmParams bankA{};
 	PhiSwarmParams bankB{};
-	PhiSwarmParams eff{}; // Crossfade-interpolated (rebuilt when smoothed crossfade moves)
-
-	q31_t prevCrossfade{INT32_MIN};
 	q31_t smoothedCrossfade{INT32_MIN};
+	// Shared morph history (rolled once per buffer): each voice evaluates its
+	// own From/To effective params from the banks at (history + own offset)
+	q31_t smoothedPrevBuf{INT32_MIN};
+	q31_t smoothedLastBuf{INT32_MIN};
 
 	// Previous buffer's slave increments: ramped to current across each
 	// buffer, because stepping them per buffer under wave-index modulation
 	// (env/LFO/unison on the morph) is 344 Hz FM buzz
-	// Morph-ramp snapshots, updated ONCE PER BUFFER (in the env block): the
-	// ramps must be over SHARED quantities (ratios/weights), because per-call
-	// increment snapshots seesaw between detuned unison voices. Each voice
-	// derives its own increment ramp from its own pitch and these ratios.
-	uint32_t ratio1From{0};
-	uint32_t ratio2From{0};
-	uint32_t ratio1Last{0};
-	uint32_t ratio2Last{0};
-	q31_t w1From{0};
-	q31_t w2From{0};
-	q31_t wRingFrom{0};
-	q31_t wBeatFrom{0};
-	uint32_t skew1From{0};
-	uint32_t skew2From{0};
-	uint32_t skew1Last{0};
-	uint32_t skew2Last{0};
-	q31_t w1Last{INT32_MIN};
-	q31_t w2Last{0};
-	q31_t wRingLast{0};
-	q31_t wBeatLast{0};
 	float annealEnv{0.0f}; // Heat injected by crossfade motion, decays per buffer
 	float prevCf{-1.0f};
 	uint32_t lastEnvTime{0xFFFFFFFF};
-	uint32_t effTempFP{0}; // eff.tempFP + anneal heat, updated per buffer
 	uint32_t noiseState{0x6A09E667u};
 
 	uint16_t prevZoneA{0xFFFF};

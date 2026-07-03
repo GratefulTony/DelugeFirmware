@@ -1754,7 +1754,6 @@ cantBeDoingOscSyncForFirstOsc:
 							cache.prevZoneB = source.phiVoxZoneB;
 							cache.prevPhaseOffsetA = effOffA;
 							cache.prevPhaseOffsetB = effOffB;
-							cache.prevCrossfade = INT32_MIN;
 						}
 						// IIR smooth crossfade (once per buffer via u == 0 guard)
 						if (u == 0) {
@@ -1786,13 +1785,10 @@ cantBeDoingOscSyncForFirstOsc:
 						if (cache.needsUpdate(source.phiSwarmZoneA, source.phiSwarmZoneB, effOffA, effOffB)) {
 							cache.bankA = dsp::buildPhiSwarmParams(source.phiSwarmZoneA, effOffA);
 							cache.bankB = dsp::buildPhiSwarmParams(source.phiSwarmZoneB, effOffB);
-							cache.ratio1Last = 0; // Zone change: snap the morph ramps
-							cache.skew1Last = 0;
 							cache.prevZoneA = source.phiSwarmZoneA;
 							cache.prevZoneB = source.phiSwarmZoneB;
 							cache.prevPhaseOffsetA = effOffA;
 							cache.prevPhaseOffsetB = effOffB;
-							cache.prevCrossfade = INT32_MIN;
 						}
 						// IIR smooth crossfade (once per buffer via u == 0 guard)
 						if (u == 0) {
@@ -3480,13 +3476,10 @@ dontUseCache: {}
 			if (cache.needsUpdate(source.phiSwarmZoneA, source.phiSwarmZoneB, effOffA, effOffB)) {
 				cache.bankA = dsp::buildPhiSwarmParams(source.phiSwarmZoneA, effOffA);
 				cache.bankB = dsp::buildPhiSwarmParams(source.phiSwarmZoneB, effOffB);
-				cache.ratio1Last = 0; // Zone change: snap the morph ramps
-				cache.skew1Last = 0;
 				cache.prevZoneA = source.phiSwarmZoneA;
 				cache.prevZoneB = source.phiSwarmZoneB;
 				cache.prevPhaseOffsetA = effOffA;
 				cache.prevPhaseOffsetB = effOffB;
-				cache.prevCrossfade = INT32_MIN; // Force effective rebuild
 			}
 
 			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
