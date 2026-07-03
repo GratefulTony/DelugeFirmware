@@ -67,6 +67,14 @@ for i in range(2):
             available_when="Oscillator type must be PhiMorph, PhiWeave, or PhiVox (the zone selects a waveform for PhiMorph, physics for PhiWeave, or a voice character for PhiVox)",
         ),
         Menu(
+            "osc::PhiVoxTracking",
+            f"osc{i}VoxTrackingMenu",
+            ["{name}", f"{i}"],
+            "oscillator/phi_vox_tracking.md",
+            name="STRING_FOR_FORMANT_TRACKING",
+            available_when="Oscillator type must be PhiVox",
+        ),
+        Menu(
             "sample::Transpose",
             f"source{i}TransposeMenu",
             ["{name}", "{title}", "params::LOCAL_OSC_A_PITCH_ADJUST", f"{i}"],

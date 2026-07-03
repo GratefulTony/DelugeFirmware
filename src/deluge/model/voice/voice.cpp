@@ -1765,7 +1765,8 @@ cantBeDoingOscSyncForFirstOsc:
 						memset(spareRenderingBuffer[s + 2], 0, numSamples * sizeof(int32_t));
 						dsp::renderPhiVox(cache, spareRenderingBuffer[s + 2], spareRenderingBuffer[s + 2] + numSamples,
 						                  numSamples, phaseIncrements[s], &unisonParts[u].sources[s].oscPos,
-						                  effectiveRetriggerPhase, 0, 0, false, crossfade, pulseWidth);
+						                  effectiveRetriggerPhase, 0, 0, false, crossfade, pulseWidth,
+						                  source.phiVoxTracking);
 					}
 					else {
 						dsp::Oscillator::renderOsc(
@@ -3353,7 +3354,7 @@ dontUseCache: {}
 			                                   + static_cast<uint32_t>(unisonPhaseOffset);
 			dsp::renderPhiVox(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
 			                  &unisonParts[u].sources[s].oscPos, effectiveRetriggerPhase, effSourceAmplitude,
-			                  effAmplitudeIncrement, true, crossfade, pulseWidth);
+			                  effAmplitudeIncrement, true, crossfade, pulseWidth, source.phiVoxTracking);
 
 			if (stereoUnison) {
 				for (int32_t i = 0; i < numSamples; i++) {

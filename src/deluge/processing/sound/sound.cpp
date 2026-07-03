@@ -4088,6 +4088,10 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			source->phiVoxGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
 			reader.exitTag("phiVoxGamma");
 		}
+		else if (!strcmp(tagName, "phiVoxTracking")) {
+			source->phiVoxTracking = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiVoxTracking");
+		}
 		/*
 		else if (!strcmp(tagName, "sampleSync")) {
 		    source->sampleSync = stringToBool(reader.readTagContents());
@@ -4498,6 +4502,9 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 				}
 				if (source->phiVoxGamma != 0.0f) {
 					writer.writeAttribute("phiVoxGamma", static_cast<int32_t>(source->phiVoxGamma * 10.0f));
+				}
+				if (source->phiVoxTracking != 0) {
+					writer.writeAttribute("phiVoxTracking", source->phiVoxTracking);
 				}
 			}
 justCloseTag:

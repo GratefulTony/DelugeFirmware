@@ -76,6 +76,7 @@ public:
 	float phiVoxPhaseOffsetA{0.0f};
 	float phiVoxPhaseOffsetB{0.0f};
 	float phiVoxGamma{0.0f};
+	uint8_t phiVoxTracking{0}; // 0..50: formant frequencies fixed in Hz (0) -> note-relative (50)
 	deluge::dsp::PhiVoxCache* phiVoxCache{nullptr};
 
 	int8_t timeStretchAmount;

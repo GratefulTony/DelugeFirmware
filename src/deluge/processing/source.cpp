@@ -105,6 +105,7 @@ void Source::cloneFrom(Source* other) {
 	phiVoxPhaseOffsetA = other->phiVoxPhaseOffsetA;
 	phiVoxPhaseOffsetB = other->phiVoxPhaseOffsetB;
 	phiVoxGamma = other->phiVoxGamma;
+	phiVoxTracking = other->phiVoxTracking;
 	// phiVoxCache is lazy-allocated, don't clone it
 	delete phiVoxCache;
 	phiVoxCache = nullptr;

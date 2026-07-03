@@ -67,9 +67,17 @@ PhiVoxParams buildPhiVoxParams(uint16_t zone, float phaseOffset) {
 	float f2 = f2Anchor * std::exp2(phi::evalTriangle(phase, 1.0f, kPhiVoxF2Wander) * 0.8f);
 	p.formant[0].phaseIncrement = hzToPhaseInc(f1);
 	p.formant[1].phaseIncrement = hzToPhaseInc(f2);
+	// Note-relative ratios for formant tracking (reference note: C3 = 130.81 Hz,
+	// so 0% and 100% tracking sound identical when playing C3)
+	constexpr float kReferenceHz = 130.81f;
+	p.formant[0].noteRatio = std::clamp(f1, 60.0f, 8000.0f) / kReferenceHz;
+	p.formant[1].noteRatio = std::clamp(f2, 60.0f, 8000.0f) / kReferenceHz;
 
-	int32_t n1 = 1 + static_cast<int32_t>(phi::evalTriangle(phase, 1.0f, kPhiVoxN1) * 11.0f);
-	int32_t n2 = 1 + static_cast<int32_t>(phi::evalTriangle(phase, 1.0f, kPhiVoxN2) * 11.0f);
+	// FRACTIONAL pulse counts: the last pulse fades in continuously, so sweeping
+	// through phi space never pops a whole pulse in/out of the burst (that
+	// integer step was an audible discontinuity at specific zone positions)
+	float n1 = 1.0f + phi::evalTriangle(phase, 1.0f, kPhiVoxN1) * 11.0f;
+	float n2 = 1.0f + phi::evalTriangle(phase, 1.0f, kPhiVoxN2) * 11.0f;
 	float b1 = 0.30f + phi::evalTriangle(phase, 1.0f, kPhiVoxDecay1) * 0.88f;
 	float b2 = 0.30f + phi::evalTriangle(phase, 1.0f, kPhiVoxDecay2) * 0.88f;
 	float pol1 = phi::evalTriangle(phase, 1.0f, kPhiVoxPolarity1);
@@ -78,23 +86,26 @@ PhiVoxParams buildPhiVoxParams(uint16_t zone, float phaseOffset) {
 	// F1/F2 balance: 0 -> F1 only, 1 -> equal
 	float balance = 0.15f + phi::evalTriangle(phase, 1.0f, kPhiVoxBalance) * 0.85f;
 	float gains[kPhiVoxNumFormants] = {0.62f, 0.62f * balance};
-	int32_t counts[kPhiVoxNumFormants] = {n1, n2};
+	float counts[kPhiVoxNumFormants] = {n1, n2};
 	float decays[kPhiVoxNumFormants] = {b1, b2};
 	float pols[kPhiVoxNumFormants] = {pol1, pol2};
 
 	for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
-		int32_t n = std::min(counts[f], kPhiVoxMaxPulses);
+		float count = std::min(counts[f], static_cast<float>(kPhiVoxMaxPulses));
+		int32_t nFull = static_cast<int32_t>(count);
+		float partial = count - static_cast<float>(nFull);
 		float mag = 1.0f;
 		float peak = 0.0f;
-		for (int32_t k = 0; k < n; k++) {
+		for (int32_t k = 0; k < nFull + (partial > 0.0f ? 1 : 0) && k < kPhiVoxMaxPulses; k++) {
 			float sign = 1.0f - 2.0f * static_cast<float>(k & 1) * pols[f];
-			p.formant[f].pulseGain[k] = mag * sign;
-			peak = std::max(peak, std::abs(mag));
+			float frac = (k < nFull) ? 1.0f : partial;
+			p.formant[f].pulseGain[k] = mag * sign * frac;
+			peak = std::max(peak, std::abs(mag) * frac);
 			mag *= decays[f];
 		}
 		// Peak-normalize the burst (decay > 1 makes the LAST pulse loudest)
 		float norm = (peak > 0.0001f) ? gains[f] / peak : 0.0f;
-		for (int32_t k = 0; k < n; k++) {
+		for (int32_t k = 0; k < kPhiVoxMaxPulses; k++) {
 			p.formant[f].pulseGain[k] *= norm;
 		}
 		// Remaining entries stay zero: the silent gap until the cycle wraps
@@ -113,7 +124,8 @@ PhiVoxParams buildPhiVoxParams(uint16_t zone, float phaseOffset) {
 
 void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
                   uint32_t phaseIncrement, uint32_t* startPhase, uint32_t retriggerPhase, int32_t amplitude,
-                  int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth) {
+                  int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth,
+                  int32_t trackingAmount) {
 
 #if ENABLE_FX_BENCHMARK
 	FX_BENCH_DECLARE(bench_render, "phi_vox", "render");
@@ -129,6 +141,7 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 			float incA = static_cast<float>(cache.bankA.formant[f].phaseIncrement);
 			float incB = static_cast<float>(cache.bankB.formant[f].phaseIncrement);
 			cache.effFormantInc[f] = static_cast<uint32_t>(cfInv * incA + cf * incB);
+			cache.effNoteRatio[f] = cfInv * cache.bankA.formant[f].noteRatio + cf * cache.bankB.formant[f].noteRatio;
 			float gainSum = 0.0f;
 			for (int32_t k = 0; k < kPhiVoxMaxPulses; k++) {
 				float g = cfInv * cache.bankA.formant[f].pulseGain[k] + cf * cache.bankB.formant[f].pulseGain[k];
@@ -158,10 +171,21 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 		cache.effVoicedNoise = static_cast<q31_t>(noiseAmt * 2147483647.0f);
 	}
 
+	// Formant tracking: blend each formant's increment from fixed Hz (vocal)
+	// toward a note-relative ratio (harmonic-locked overtone behavior)
+	float track = static_cast<float>(trackingAmount) * (1.0f / 50.0f);
+	uint32_t finalInc[kPhiVoxNumFormants];
+	for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
+		float incAbs = static_cast<float>(cache.effFormantInc[f]);
+		float incTracked = cache.effNoteRatio[f] * static_cast<float>(phaseIncrement);
+		float inc = incAbs + (incTracked - incAbs) * track;
+		finalInc[f] = static_cast<uint32_t>(std::clamp(inc, 60.0f * 97391.5f, 8000.0f * 97391.5f));
+	}
+
 	// DC compensation for this buffer's pitch: mean = comp * (noteInc / formantInc)
 	q31_t dcComp = 0;
 	for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
-		float ratio = static_cast<float>(phaseIncrement) / static_cast<float>(cache.effFormantInc[f]);
+		float ratio = static_cast<float>(phaseIncrement) / static_cast<float>(finalInc[f]);
 		dcComp += static_cast<q31_t>(cache.effMeanComp[f] * std::min(ratio, 1.0f) * 2147483647.0f);
 	}
 
@@ -182,7 +206,7 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 	uint32_t fPhase[kPhiVoxNumFormants];
 	int32_t pulseIdx[kPhiVoxNumFormants];
 	for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
-		uint64_t elapsed = static_cast<uint64_t>(samplesIntoCycle) * cache.effFormantInc[f];
+		uint64_t elapsed = static_cast<uint64_t>(samplesIntoCycle) * finalInc[f];
 		pulseIdx[f] = std::min(static_cast<int32_t>(elapsed >> 32), kPhiVoxMaxPulses - 1);
 		fPhase[f] = static_cast<uint32_t>(elapsed);
 	}
@@ -223,7 +247,7 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 		q31_t envelope = 0; // Strongest pulse envelope, gates the noise
 
 		for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
-			uint32_t newPhase = fPhase[f] + cache.effFormantInc[f];
+			uint32_t newPhase = fPhase[f] + finalInc[f];
 			if (newPhase < fPhase[f] && pulseIdx[f] < kPhiVoxMaxPulses - 1) {
 				pulseIdx[f]++; // Formant period completed: next pulse
 			}

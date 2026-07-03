@@ -95,6 +95,7 @@ inline constexpr phi::PhiTriConfig kPhiVoxArticulation = {phi::kPhi300, 0.7f, 0.
 
 struct PhiVoxFormant {
 	uint32_t phaseIncrement;           // Formant frequency as phase/sample at 44.1kHz
+	float noteRatio;                   // Formant frequency as a ratio to the reference note (C3)
 	float pulseGain[kPhiVoxMaxPulses]; // Signed; includes decay, polarity, balance; zero-padded
 };
 
@@ -110,6 +111,7 @@ struct PhiVoxCache {
 
 	// Crossfaded effective tables (rebuilt when the smoothed crossfade moves)
 	uint32_t effFormantInc[kPhiVoxNumFormants]{};
+	float effNoteRatio[kPhiVoxNumFormants]{};
 	q31_t effPulseGain[kPhiVoxNumFormants][kPhiVoxMaxPulses]{};
 	q31_t effVoicedNoise{};                  // breath + articulation burst, Q31, gated by pulse envelope in render
 	float effMeanComp[kPhiVoxNumFormants]{}; // DC compensation numerators (× noteInc/formantInc at render)
@@ -142,8 +144,11 @@ PhiVoxParams buildPhiVoxParams(uint16_t zone, float phaseOffset = 0.0f);
 /// Render PHI_VOX for one buffer. Stateless per voice: pulse index and formant
 /// phase are derived from the cycle phase at buffer start and advanced
 /// incrementally (adds and carries only) within it.
+/// trackingAmount 0..50: blends formant frequencies from fixed Hz (0, vocal
+/// behavior) to note-relative ratios (50, harmonic-locked overtone behavior)
 void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
                   uint32_t phaseIncrement, uint32_t* startPhase, uint32_t retriggerPhase, int32_t amplitude,
-                  int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth);
+                  int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade, uint32_t pulseWidth,
+                  int32_t trackingAmount);
 
 } // namespace deluge::dsp

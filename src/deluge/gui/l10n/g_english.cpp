@@ -264,6 +264,7 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_PHI_MORPH, "PhiMorph"},
         {STRING_FOR_PHI_WEAVE, "PhiWeave"},
         {STRING_FOR_PHI_VOX, "PhiVox"},
+        {STRING_FOR_FORMANT_TRACKING, "Formant Track"},
         {STRING_FOR_SQUARE, "Square"},
         {STRING_FOR_SAW, "Saw"},
         {STRING_FOR_SAMPLE_AND_HOLD, "S&H"},
