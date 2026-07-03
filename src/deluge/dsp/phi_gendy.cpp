@@ -130,9 +130,16 @@ PhiGendyParams buildPhiGendyParams(uint16_t zone, float phaseOffset) {
 			h = (wq < 1.0f) ? (0.5f + 0.5f * std::cos(3.14159265f * wq)) * 2.0f - 0.5f : -0.5f;
 			break;
 		}
-		case 4: { // STAIRS: quantized partial-sum (organ/8-bit)
+		case 4: { // STAIRS: quantized partial-sum, zone-varied level count
+			// (2..8) and warped level spacing (steps are NOT uniform: warp<1
+			// compresses levels near the rails, warp>1 near zero)
 			float raw = p1 * std::sin(kGendyTwoPi * nf) + p2 * std::sin(kGendyTwoPi * 2.0f * nf + 1.7f);
-			h = std::round(raw * 3.0f) * (1.0f / 3.0f);
+			float stairLevels = 2.0f + std::abs(p3) * (6.0f / 0.45f);
+			float stairWarp = 0.55f + std::abs(p2);
+			float mag = std::min(std::abs(raw), 1.0f);
+			float warped = std::pow(mag, stairWarp);
+			float quant = std::round(warped * stairLevels) / stairLevels;
+			h = std::copysign(std::pow(quant, 1.0f / stairWarp), raw);
 			break;
 		}
 		case 5: { // FROZEN NOISE: fixed random polygon per zone position (glassy)
