@@ -62,9 +62,11 @@ PhiVoxParams buildPhiVoxParams(uint16_t zone, float phaseOffset) {
 	float f1Anchor = kAnchorF1[zi] + (kAnchorF1[zi + 1] - kAnchorF1[zi]) * zf;
 	float f2Anchor = kAnchorF2[zi] + (kAnchorF2[zi + 1] - kAnchorF2[zi]) * zf;
 
-	// Phi wander in octaves around the anchors
-	float f1 = f1Anchor * std::exp2(phi::evalTriangle(phase, 1.0f, kPhiVoxF1Wander) * 0.6f);
-	float f2 = f2Anchor * std::exp2(phi::evalTriangle(phase, 1.0f, kPhiVoxF2Wander) * 0.8f);
+	// Phi wander in octaves around the anchors, plus a slow COHERENT shift
+	// of both formants together (the "same vowel, moved" dimension)
+	float shiftMul = std::exp2(phi::evalTriangle(phase, 1.0f, kPhiVoxShift) * 0.6f);
+	float f1 = f1Anchor * std::exp2(phi::evalTriangle(phase, 1.0f, kPhiVoxF1Wander) * 0.6f) * shiftMul;
+	float f2 = f2Anchor * std::exp2(phi::evalTriangle(phase, 1.0f, kPhiVoxF2Wander) * 0.8f) * shiftMul;
 	p.formant[0].phaseIncrement = hzToPhaseInc(f1);
 	p.formant[1].phaseIncrement = hzToPhaseInc(f2);
 	// Note-relative ratios for formant tracking (reference note: C3 = 130.81 Hz,

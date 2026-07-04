@@ -82,6 +82,13 @@ inline constexpr phi::PhiTriConfig kPhiVoxBalance = {phi::kPhi075, 0.9f, 0.780f,
 inline constexpr phi::PhiTriConfig kPhiVoxPolarity1 = {phi::kPhi325, 0.45f, 0.870f, false};
 inline constexpr phi::PhiTriConfig kPhiVoxPolarity2 = {phi::kPhiN025, 0.5f, 0.930f, false};
 
+// Overall formant shift: multiplies BOTH formants coherently (+/-0.6 oct) on
+// top of their independent wanders. Deliberately a LOW phi power so it varies
+// slowly across the map: zone neighborhoods contain the same vowel sliding
+// up/down as a region, making relative-shifted voicings findable in param
+// space (the independent F1/F2 wanders alone almost never align that way)
+inline constexpr phi::PhiTriConfig kPhiVoxShift = {phi::kPhiN100, 0.8f, 0.470f, true};
+
 // Breath: noise mixed into the pulse envelope (voiced-gated aspiration)
 inline constexpr phi::PhiTriConfig kPhiVoxBreath = {phi::kPhi175, 0.5f, 0.060f, false};
 
