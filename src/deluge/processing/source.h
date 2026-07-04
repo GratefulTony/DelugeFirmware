@@ -24,7 +24,12 @@
 
 namespace deluge::dsp {
 struct PhiMorphCache;
-}
+struct PhiWeaveCache;
+struct PhiVoxCache;
+struct PhiSwarmCache;
+struct PhiGendyCache;
+struct PhiStairCache;
+} // namespace deluge::dsp
 
 class Sound;
 class ParamManagerForTimeline;
@@ -59,6 +64,61 @@ public:
 	float phiMorphPhaseOffsetB{0.0f};
 	float phiMorphGamma{0.0f}; // Shared phase multiplier (push+twist on wave index)
 	deluge::dsp::PhiMorphCache* phiMorphCache{nullptr};
+
+	// PHI_WEAVE zone parameters (same interface family as PHI_MORPH)
+	uint16_t phiWeaveZoneA{0};
+	uint16_t phiWeaveZoneB{0};
+	float phiWeavePhaseOffsetA{0.0f};
+	float phiWeavePhaseOffsetB{0.0f};
+	float phiWeaveGamma{0.0f};
+	deluge::dsp::PhiWeaveCache* phiWeaveCache{nullptr};
+
+	// PHI_VOX zone parameters (same interface family)
+	uint16_t phiVoxZoneA{0};
+	uint16_t phiVoxZoneB{0};
+	float phiVoxPhaseOffsetA{0.0f};
+	float phiVoxPhaseOffsetB{0.0f};
+	float phiVoxGamma{0.0f};
+	uint8_t phiVoxTracking{0}; // 0..50: formant frequencies fixed in Hz (0) -> note-relative (50)
+	deluge::dsp::PhiVoxCache* phiVoxCache{nullptr};
+
+	// PHI_SWARM zone parameters (same interface family)
+	uint16_t phiSwarmZoneA{0};
+	uint16_t phiSwarmZoneB{0};
+	float phiSwarmPhaseOffsetA{0.0f};
+	float phiSwarmPhaseOffsetB{0.0f};
+	float phiSwarmGamma{0.0f};
+	deluge::dsp::PhiSwarmCache* phiSwarmCache{nullptr};
+
+	// PHI_GENDY zone parameters (same interface family)
+	uint16_t phiGendyZoneA{0};
+	uint16_t phiGendyZoneB{0};
+	float phiGendyPhaseOffsetA{0.0f};
+	float phiGendyPhaseOffsetB{0.0f};
+	float phiGendyGamma{0.0f};
+	deluge::dsp::PhiGendyCache* phiGendyCache{nullptr};
+
+	// PHI_STAIR zone parameters (same interface family)
+	uint16_t phiStairZoneA{0};
+	uint16_t phiStairZoneB{0};
+	float phiStairPhaseOffsetA{0.0f};
+	float phiStairPhaseOffsetB{0.0f};
+	float phiStairGamma{0.0f};
+	deluge::dsp::PhiStairCache* phiStairCache{nullptr};
+
+	// Zone-style stereo knob, shared by the phi family: position WITHIN each
+	// 128-wide zone = stereo amount (every zone starts mono; knob 0 = mono),
+	// zone index = stereo character (per-algorithm phi params)
+	uint16_t phiStereoZone{0};
+
+	[[nodiscard]] bool isPhiFamily() const {
+		return oscType == OscType::PHI_MORPH || oscType == OscType::PHI_STAIR || oscType == OscType::PHI_WEAVE
+		       || oscType == OscType::PHI_VOX || oscType == OscType::PHI_SWARM || oscType == OscType::PHI_GENDY;
+	}
+	// VOX excluded: formant-separation stereo was dropped (and it already
+	// fills all eight horizontal-menu slots with Formant Track)
+	[[nodiscard]] bool phiStereoCapable() const { return isPhiFamily() && oscType != OscType::PHI_VOX; }
+	[[nodiscard]] bool phiStereoActive() const { return phiStereoCapable() && (phiStereoZone & 127u) != 0; }
 
 	int8_t timeStretchAmount;
 	bool offsetWraps{true}; // When true, start offset wraps playhead modularly; when false, clamps at boundary

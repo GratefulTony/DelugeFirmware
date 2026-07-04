@@ -23,6 +23,7 @@
 #include "timers_interrupts/timers_interrupts.h"
 
 extern uint32_t spareRenderingBuffer[][SSI_TX_BUFFER_NUM_SAMPLES];
+extern "C" void v7_dma_flush_range(uint32_t start, uint32_t end);
 
 void chainload_from_buf(uint8_t* buffer, int buf_size) {
 	uint32_t user_code_start = *(uint32_t*)(buffer + OFF_USER_CODE_START);
@@ -44,6 +45,17 @@ void chainload_from_buf(uint8_t* buffer, int buf_size) {
 	disableTimer(TIMER_SYSTEM_FAST);
 	disableTimer(TIMER_SYSTEM_SUPERFAST);
 	uint8_t* funcbuf = reinterpret_cast<uint8_t*>(spareRenderingBuffer);
+
+	// The chainloader below runs with the MMU and caches disabled, storing straight to
+	// physical RAM - but its per-word DCCMVAU maintenance writes back any line still dirty
+	// in the (disabled, not emptied) data cache, clobbering words it just stored. All RAM
+	// here is mapped write-back, so clean & invalidate everything the chainloader touches
+	// while the MMU is still on: the new image, the copy destination, and funcbuf - which
+	// is an audio rendering buffer, so it is full of dirty lines whenever audio has been
+	// rendered since boot (chainloading used to hang precisely then).
+	v7_dma_flush_range((uint32_t)buffer, (uint32_t)buffer + (uint32_t)buf_size);
+	v7_dma_flush_range(user_code_start, user_code_start + (uint32_t)code_size + 4);
+	v7_dma_flush_range((uint32_t)funcbuf, (uint32_t)funcbuf + 1024);
 
 #if defined(__arm__)
 	// Jump to the chainloader

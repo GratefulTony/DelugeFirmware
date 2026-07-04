@@ -63,6 +63,11 @@ public:
 		    // Haven't actually really determined if this needs to be here - maybe not?
 		    OscType::WAVETABLE,
 		    OscType::PHI_MORPH,
+		    OscType::PHI_STAIR,
+		    OscType::PHI_WEAVE,
+		    OscType::PHI_VOX,
+		    OscType::PHI_SWARM,
+		    OscType::PHI_GENDY,
 		};
 
 		if (util::one_of(oldValue, needs_unassignment) || util::one_of(newValue, needs_unassignment)) {
@@ -91,6 +96,11 @@ public:
 		    l10n::getView(STRING_FOR_ANALOG_SAW),    //<
 		    l10n::getView(STRING_FOR_WAVETABLE),     //<
 		    l10n::getView(STRING_FOR_PHI_MORPH),     //<
+		    l10n::getView(STRING_FOR_PHI_STAIR),     //<
+		    l10n::getView(STRING_FOR_PHI_WEAVE),     //<
+		    l10n::getView(STRING_FOR_PHI_VOX),       //<
+		    l10n::getView(STRING_FOR_PHI_SWARM),     //<
+		    l10n::getView(STRING_FOR_PHI_GENDY),     //<
 		};
 
 		if (soundEditor.currentSound->getSynthMode() == SynthMode::RINGMOD) {
@@ -162,6 +172,16 @@ public:
 				return OLED::wavetableIcon;
 			case OscType::PHI_MORPH:
 				return OLED::phiMorphIcon;
+			case OscType::PHI_WEAVE:
+				return OLED::phiWeaveIcon;
+			case OscType::PHI_VOX:
+				return OLED::phiVoxIcon;
+			case OscType::PHI_SWARM:
+				return OLED::phiSwarmIcon;
+			case OscType::PHI_GENDY:
+				return OLED::phiGendyIcon;
+			case OscType::PHI_STAIR:
+				return OLED::phiStairIcon;
 			default:
 				return OLED::sineIcon;
 			}

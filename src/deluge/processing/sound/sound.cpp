@@ -4048,6 +4048,114 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			source->phiMorphGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
 			reader.exitTag("phiMorphGamma");
 		}
+		else if (!strcmp(tagName, "phiWeaveZoneA")) {
+			source->phiWeaveZoneA = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiWeaveZoneA");
+		}
+		else if (!strcmp(tagName, "phiWeaveZoneB")) {
+			source->phiWeaveZoneB = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiWeaveZoneB");
+		}
+		else if (!strcmp(tagName, "phiWeavePhaseA")) {
+			source->phiWeavePhaseOffsetA = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiWeavePhaseA");
+		}
+		else if (!strcmp(tagName, "phiWeavePhaseB")) {
+			source->phiWeavePhaseOffsetB = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiWeavePhaseB");
+		}
+		else if (!strcmp(tagName, "phiWeaveGamma")) {
+			source->phiWeaveGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiWeaveGamma");
+		}
+		else if (!strcmp(tagName, "phiVoxZoneA")) {
+			source->phiVoxZoneA = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiVoxZoneA");
+		}
+		else if (!strcmp(tagName, "phiVoxZoneB")) {
+			source->phiVoxZoneB = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiVoxZoneB");
+		}
+		else if (!strcmp(tagName, "phiVoxPhaseA")) {
+			source->phiVoxPhaseOffsetA = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiVoxPhaseA");
+		}
+		else if (!strcmp(tagName, "phiVoxPhaseB")) {
+			source->phiVoxPhaseOffsetB = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiVoxPhaseB");
+		}
+		else if (!strcmp(tagName, "phiVoxGamma")) {
+			source->phiVoxGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiVoxGamma");
+		}
+		else if (!strcmp(tagName, "phiVoxTracking")) {
+			source->phiVoxTracking = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiVoxTracking");
+		}
+		else if (!strcmp(tagName, "phiSwarmZoneA")) {
+			source->phiSwarmZoneA = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiSwarmZoneA");
+		}
+		else if (!strcmp(tagName, "phiSwarmZoneB")) {
+			source->phiSwarmZoneB = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiSwarmZoneB");
+		}
+		else if (!strcmp(tagName, "phiSwarmPhaseA")) {
+			source->phiSwarmPhaseOffsetA = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiSwarmPhaseA");
+		}
+		else if (!strcmp(tagName, "phiSwarmPhaseB")) {
+			source->phiSwarmPhaseOffsetB = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiSwarmPhaseB");
+		}
+		else if (!strcmp(tagName, "phiSwarmGamma")) {
+			source->phiSwarmGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiSwarmGamma");
+		}
+		else if (!strcmp(tagName, "phiGendyZoneA")) {
+			source->phiGendyZoneA = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiGendyZoneA");
+		}
+		else if (!strcmp(tagName, "phiGendyZoneB")) {
+			source->phiGendyZoneB = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiGendyZoneB");
+		}
+		else if (!strcmp(tagName, "phiGendyPhaseA")) {
+			source->phiGendyPhaseOffsetA = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiGendyPhaseA");
+		}
+		else if (!strcmp(tagName, "phiGendyPhaseB")) {
+			source->phiGendyPhaseOffsetB = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiGendyPhaseB");
+		}
+		else if (!strcmp(tagName, "phiGendyGamma")) {
+			source->phiGendyGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiGendyGamma");
+		}
+		else if (!strcmp(tagName, "phiStairZoneA")) {
+			source->phiStairZoneA = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiStairZoneA");
+		}
+		else if (!strcmp(tagName, "phiStairZoneB")) {
+			source->phiStairZoneB = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiStairZoneB");
+		}
+		else if (!strcmp(tagName, "phiStairPhaseA")) {
+			source->phiStairPhaseOffsetA = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiStairPhaseA");
+		}
+		else if (!strcmp(tagName, "phiStairPhaseB")) {
+			source->phiStairPhaseOffsetB = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiStairPhaseB");
+		}
+		else if (!strcmp(tagName, "phiStairGamma")) {
+			source->phiStairGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiStairGamma");
+		}
+		else if (!strcmp(tagName, "phiStereoZone")) {
+			source->phiStereoZone = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiStereoZone");
+		}
 		/*
 		else if (!strcmp(tagName, "sampleSync")) {
 		    source->sampleSync = stringToBool(reader.readTagContents());
@@ -4428,6 +4536,89 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 				}
 				if (source->phiMorphGamma != 0.0f) {
 					writer.writeAttribute("phiMorphGamma", static_cast<int32_t>(source->phiMorphGamma * 10.0f));
+				}
+			}
+
+			// PHI_WEAVE: persist zone knobs, phase offsets, and gamma
+			if (source->oscType == OscType::PHI_WEAVE) {
+				writer.writeAttribute("phiWeaveZoneA", source->phiWeaveZoneA);
+				writer.writeAttribute("phiWeaveZoneB", source->phiWeaveZoneB);
+				if (source->phiWeavePhaseOffsetA != 0.0f) {
+					writer.writeAttribute("phiWeavePhaseA", static_cast<int32_t>(source->phiWeavePhaseOffsetA * 10.0f));
+				}
+				if (source->phiWeavePhaseOffsetB != 0.0f) {
+					writer.writeAttribute("phiWeavePhaseB", static_cast<int32_t>(source->phiWeavePhaseOffsetB * 10.0f));
+				}
+				if (source->phiWeaveGamma != 0.0f) {
+					writer.writeAttribute("phiWeaveGamma", static_cast<int32_t>(source->phiWeaveGamma * 10.0f));
+				}
+			}
+
+			// PHI_VOX: persist zone knobs, phase offsets, and gamma
+			if (source->oscType == OscType::PHI_VOX) {
+				writer.writeAttribute("phiVoxZoneA", source->phiVoxZoneA);
+				writer.writeAttribute("phiVoxZoneB", source->phiVoxZoneB);
+				if (source->phiVoxPhaseOffsetA != 0.0f) {
+					writer.writeAttribute("phiVoxPhaseA", static_cast<int32_t>(source->phiVoxPhaseOffsetA * 10.0f));
+				}
+				if (source->phiVoxPhaseOffsetB != 0.0f) {
+					writer.writeAttribute("phiVoxPhaseB", static_cast<int32_t>(source->phiVoxPhaseOffsetB * 10.0f));
+				}
+				if (source->phiVoxGamma != 0.0f) {
+					writer.writeAttribute("phiVoxGamma", static_cast<int32_t>(source->phiVoxGamma * 10.0f));
+				}
+				if (source->phiVoxTracking != 0) {
+					writer.writeAttribute("phiVoxTracking", source->phiVoxTracking);
+				}
+			}
+
+			// PHI_SWARM: persist zone knobs, phase offsets, and gamma
+			if (source->oscType == OscType::PHI_SWARM) {
+				writer.writeAttribute("phiSwarmZoneA", source->phiSwarmZoneA);
+				writer.writeAttribute("phiSwarmZoneB", source->phiSwarmZoneB);
+				if (source->phiSwarmPhaseOffsetA != 0.0f) {
+					writer.writeAttribute("phiSwarmPhaseA", static_cast<int32_t>(source->phiSwarmPhaseOffsetA * 10.0f));
+				}
+				if (source->phiSwarmPhaseOffsetB != 0.0f) {
+					writer.writeAttribute("phiSwarmPhaseB", static_cast<int32_t>(source->phiSwarmPhaseOffsetB * 10.0f));
+				}
+				if (source->phiSwarmGamma != 0.0f) {
+					writer.writeAttribute("phiSwarmGamma", static_cast<int32_t>(source->phiSwarmGamma * 10.0f));
+				}
+			}
+
+			// PHI_STAIR: persist zone knobs, phase offsets, and gamma
+			if (source->oscType == OscType::PHI_STAIR) {
+				writer.writeAttribute("phiStairZoneA", source->phiStairZoneA);
+				writer.writeAttribute("phiStairZoneB", source->phiStairZoneB);
+				if (source->phiStairPhaseOffsetA != 0.0f) {
+					writer.writeAttribute("phiStairPhaseA", static_cast<int32_t>(source->phiStairPhaseOffsetA * 10.0f));
+				}
+				if (source->phiStairPhaseOffsetB != 0.0f) {
+					writer.writeAttribute("phiStairPhaseB", static_cast<int32_t>(source->phiStairPhaseOffsetB * 10.0f));
+				}
+				if (source->phiStairGamma != 0.0f) {
+					writer.writeAttribute("phiStairGamma", static_cast<int32_t>(source->phiStairGamma * 10.0f));
+				}
+			}
+
+			// Shared phi-family stereo zone
+			if (source->isPhiFamily() && source->phiStereoZone != 0) {
+				writer.writeAttribute("phiStereoZone", source->phiStereoZone);
+			}
+
+			// PHI_GENDY: persist zone knobs, phase offsets, and gamma
+			if (source->oscType == OscType::PHI_GENDY) {
+				writer.writeAttribute("phiGendyZoneA", source->phiGendyZoneA);
+				writer.writeAttribute("phiGendyZoneB", source->phiGendyZoneB);
+				if (source->phiGendyPhaseOffsetA != 0.0f) {
+					writer.writeAttribute("phiGendyPhaseA", static_cast<int32_t>(source->phiGendyPhaseOffsetA * 10.0f));
+				}
+				if (source->phiGendyPhaseOffsetB != 0.0f) {
+					writer.writeAttribute("phiGendyPhaseB", static_cast<int32_t>(source->phiGendyPhaseOffsetB * 10.0f));
+				}
+				if (source->phiGendyGamma != 0.0f) {
+					writer.writeAttribute("phiGendyGamma", static_cast<int32_t>(source->phiGendyGamma * 10.0f));
 				}
 			}
 justCloseTag:
@@ -5633,6 +5824,10 @@ bool Sound::renderingVoicesInStereo(ModelStackWithSoundFlags* modelStack) {
 	}
 
 	if (unisonStereoSpread && numUnison > 1) {
+		return true;
+	}
+
+	if (sources[0].phiStereoActive() || sources[1].phiStereoActive()) {
 		return true;
 	}
 

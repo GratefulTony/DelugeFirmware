@@ -29,10 +29,52 @@
 #include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
 #include "storage/multi_range/multisample_range.h"
+#include <cmath>
 
 extern "C" {}
 
 extern int32_t spareRenderingBuffer[][SSI_TX_BUFFER_NUM_SAMPLES];
+
+// Q31 fade scale with an adaptive curve: blends linear (equal-gain) and sqrt
+// (equal-power) shapes. stepQ31 is precomputed when the crossfade length is set
+// (Cortex-A9 has no hardware divide). Which shape keeps a crossfade's loudness constant
+// depends on how correlated the two streams are: correlated material sums coherently
+// (linear fades stay flat, sqrt fades hump +3dB), uncorrelated material sums in power
+// (sqrt fades stay flat, linear fades dip -3dB). sqrtBlendQ31 comes from measuring the
+// actual correlation of the cached loop-start and loop-end regions - see
+// measureCrossfadeCurve(). Runs at render-window rate (not per sample), so the float
+// math is a non-cost.
+static inline int32_t fadeScaleQ31(int32_t progress, int32_t stepQ31, int32_t sqrtBlendQ31) {
+	int64_t linear = (int64_t)progress * stepQ31;
+	if (linear <= 0) {
+		return 0;
+	}
+	if (linear >= 0x7FFFFFFF) {
+		return 0x7FFFFFFF;
+	}
+	float p = (float)linear * (1.0f / 2147483648.0f);
+	float b = (float)sqrtBlendQ31 * (1.0f / 2147483648.0f);
+	float g = b * sqrtf(p) + (1.0f - b) * p;
+	return (int32_t)(g * 2147483647.0f);
+}
+
+// How far past the raw loop end the first pingpong pass may keep playing while
+// waiting for a waveform extremum to reverse on (~11ms at 44.1kHz)
+constexpr int32_t kPingpongApexSeekMaxFrames = 512;
+
+// Read one frame's L-channel sample from the cache by byte position (24-bit value in
+// the high bytes, same offset pattern as the cached render path)
+static int32_t readCacheFrameL(SampleCache* cache, int32_t bytePos, Cluster** cluster, int32_t* prevClusterIdx) {
+	int32_t idx = bytePos >> Cluster::size_magnitude;
+	if (idx != *prevClusterIdx) {
+		*cluster = cache->getCluster(idx);
+		*prevClusterIdx = idx;
+	}
+	if (!*cluster) {
+		return 0;
+	}
+	return (*(int32_t*)&(*cluster)->data[(bytePos & (Cluster::size - 1)) - 4 + kCacheByteDepth]) >> 8;
+}
 
 void VoiceSample::beenUnassigned(bool wontBeUsedAgain) {
 	unassignAllReasons(wontBeUsedAgain);
@@ -55,6 +97,11 @@ void VoiceSample::noteOn(SamplePlaybackGuide* guide, uint32_t samplesLate, int32
 	loopFadeInSamplesRemaining = 0;
 	crossfadeActive = false;
 	crossfadeCacheBytePos = 0;
+	crossfadeCurveBlendQ31 = 0x40000000; // 50/50 compromise until measured
+	crossfadeCurveMeasured = false;
+	pingpongBouncePointsSnapped = false;
+	pingpongSeekTargetBytes = -1;
+	cacheHandoffPending = false;
 	justLoopedBack = false;
 	pingpongPlayDirection = guide->playDirection;
 }
@@ -65,6 +112,7 @@ bool VoiceSample::noteOffWhenLoopEndPointExists(Voice* voice, VoiceSamplePlaybac
 	// If crossfade is active when note releases, reset it
 	crossfadeActive = false;
 	crossfadeCacheBytePos = 0;
+	pingpongSeekTargetBytes = -1; // Cancel any bounce-apex seek - we're no longer looping
 
 	if (cache) {
 		cacheLoopEndPointBytes = 2147483647;
@@ -173,6 +221,184 @@ void VoiceSample::setupCacheLoopPoints(SamplePlaybackGuide* guide, Sample* sampl
 		    (loopEndPointSamplesBig + (combinedIncrement >> 1)) / combinedIncrement; // Rounds
 		cacheLoopEndPointBytes = loopEndPointCombinedIncrements * kCacheByteDepth * sample->numChannels;
 	}
+}
+
+// Snap the pingpong loop START onto a waveform extremum, preferring positions BELOW
+// the marker (continuing outward, mirroring the "wait for an extremum" behavior at the
+// loop end) where cached data exists, falling back to an inward search above it.
+void VoiceSample::snapPingpongLoopStart(int32_t frameSizeBytes) {
+	constexpr int32_t kSearchFrames = kPingpongApexSeekMaxFrames;
+
+	Cluster* cluster = nullptr;
+	int32_t prevIdx = -1;
+	int32_t prevSample = readCacheFrameL(cache, cacheLoopStartPointBytes, &cluster, &prevIdx);
+	int32_t prevDiff = 0;
+
+	// Outward: below the loop start (the attack region, cached during the first pass)
+	for (int32_t k = 1; k <= kSearchFrames; k++) {
+		int32_t pos = cacheLoopStartPointBytes - k * frameSizeBytes;
+		if (pos < 0) {
+			break;
+		}
+		int32_t s = readCacheFrameL(cache, pos, &cluster, &prevIdx);
+		int32_t diff = prevSample - s; // slope toward the loop start
+		if (k >= 2 && (diff == 0 || (prevDiff != 0 && ((diff ^ prevDiff) < 0)))) {
+			cacheLoopStartPointBytes -= (k - 1) * frameSizeBytes;
+			return;
+		}
+		prevDiff = diff;
+		prevSample = s;
+	}
+
+	// Inward fallback: above the loop start
+	cluster = nullptr;
+	prevIdx = -1;
+	prevSample = readCacheFrameL(cache, cacheLoopStartPointBytes, &cluster, &prevIdx);
+	prevDiff = 0;
+	for (int32_t k = 1; k <= kSearchFrames; k++) {
+		int32_t pos = cacheLoopStartPointBytes + k * frameSizeBytes;
+		if (pos >= cacheLoopEndPointBytes) {
+			break;
+		}
+		int32_t s = readCacheFrameL(cache, pos, &cluster, &prevIdx);
+		int32_t diff = s - prevSample; // slope away from the loop start
+		if (k >= 2 && (diff == 0 || (prevDiff != 0 && ((diff ^ prevDiff) < 0)))) {
+			cacheLoopStartPointBytes += (k - 1) * frameSizeBytes;
+			return;
+		}
+		prevDiff = diff;
+		prevSample = s;
+	}
+}
+
+// Nudge the cached pingpong bounce points onto nearby waveform extrema. A reversal
+// flips the waveform's derivative, which is an audible corner in general - but at a
+// local peak/trough the mirror is smooth. Search inward only (where cache data exists),
+// capped small enough to be timing-neutral (<3ms of loop-length change per end).
+void VoiceSample::snapPingpongBouncePoints(int32_t frameSizeBytes) {
+	pingpongBouncePointsSnapped = true;
+
+	constexpr int32_t kSearchFrames = 128;
+
+	// Loop end: find the last extremum before the end point; the apex frame becomes the
+	// final frame the forward leg plays
+	{
+		Cluster* cluster = nullptr;
+		int32_t prevIdx = -1;
+		int32_t prevSample = readCacheFrameL(cache, cacheLoopEndPointBytes - frameSizeBytes, &cluster, &prevIdx);
+		int32_t prevDiff = 0;
+		for (int32_t k = 2; k <= kSearchFrames; k++) {
+			int32_t pos = cacheLoopEndPointBytes - k * frameSizeBytes;
+			if (pos <= cacheLoopStartPointBytes) {
+				break;
+			}
+			int32_t s = readCacheFrameL(cache, pos, &cluster, &prevIdx);
+			int32_t diff = prevSample - s; // slope toward the loop end
+			if (diff == 0 || (prevDiff != 0 && ((diff ^ prevDiff) < 0))) {
+				// Extremum (or plateau) at the previous frame: make it the bounce apex,
+				// i.e. the final frame the forward leg plays (apex = end - one frame)
+				cacheLoopEndPointBytes -= (k - 2) * frameSizeBytes;
+				break;
+			}
+			prevDiff = diff;
+			prevSample = s;
+		}
+	}
+
+	// Loop start: find the first extremum after the start point; the apex frame becomes
+	// the final frame the backward leg plays
+	{
+		Cluster* cluster = nullptr;
+		int32_t prevIdx = -1;
+		int32_t prevSample = readCacheFrameL(cache, cacheLoopStartPointBytes, &cluster, &prevIdx);
+		int32_t prevDiff = 0;
+		for (int32_t k = 1; k <= kSearchFrames; k++) {
+			int32_t pos = cacheLoopStartPointBytes + k * frameSizeBytes;
+			if (pos >= cacheLoopEndPointBytes) {
+				break;
+			}
+			int32_t s = readCacheFrameL(cache, pos, &cluster, &prevIdx);
+			int32_t diff = s - prevSample; // slope away from the loop start
+			if (k >= 2 && (diff == 0 || (prevDiff != 0 && ((diff ^ prevDiff) < 0)))) {
+				// Extremum (or plateau) at the previous frame - snap the start there
+				cacheLoopStartPointBytes += (k - 1) * frameSizeBytes;
+				break;
+			}
+			prevDiff = diff;
+			prevSample = s;
+		}
+	}
+
+	cacheLoopLengthBytes = (uint32_t)(cacheLoopEndPointBytes - cacheLoopStartPointBytes);
+}
+
+// Measure the zero-lag correlation between the cached loop-start and loop-end regions -
+// the two streams of the loop crossfade - and derive the fade curve blend from it.
+// Correlated material (e.g. a phase-aligned tonal loop) sums coherently and needs
+// equal-gain (linear) fades to hold constant loudness; uncorrelated material sums in
+// power and needs equal-power (sqrt) fades. The blend covers everything in between.
+// Both regions must be fully written to the cache before calling. Strided to <=512
+// points, so this is a few thousand cycles, once per note.
+void VoiceSample::measureCrossfadeCurve(int32_t crossfadeLengthCacheBytes, int32_t frameSizeBytes) {
+	crossfadeCurveMeasured = true;
+
+	int32_t numFadeFrames = (int32_t)((uint32_t)crossfadeLengthCacheBytes / (uint8_t)frameSizeBytes);
+	if (numFadeFrames <= 0) {
+		return;
+	}
+	int32_t strideFrames = (numFadeFrames >> 9) + 1;
+
+	int32_t posA = cacheLoopStartPointBytes;
+	int32_t posB = cacheLoopEndPointBytes - crossfadeLengthCacheBytes;
+	int32_t prevClusterA = -1;
+	int32_t prevClusterB = -1;
+	Cluster* clusterA = nullptr;
+	Cluster* clusterB = nullptr;
+	int64_t sumAA = 0;
+	int64_t sumBB = 0;
+	int64_t sumAB = 0;
+
+	for (int32_t i = 0; i < numFadeFrames; i += strideFrames) {
+		int32_t pA = posA + i * frameSizeBytes;
+		int32_t pB = posB + i * frameSizeBytes;
+		int32_t idxA = pA >> Cluster::size_magnitude;
+		int32_t idxB = pB >> Cluster::size_magnitude;
+		if (idxA != prevClusterA) {
+			clusterA = cache->getCluster(idxA);
+			prevClusterA = idxA;
+			if (!clusterA) {
+				return; // Keep the compromise curve
+			}
+		}
+		if (idxB != prevClusterB) {
+			clusterB = cache->getCluster(idxB);
+			prevClusterB = idxB;
+			if (!clusterB) {
+				return;
+			}
+		}
+		// Same offset-read pattern as the cached render path (L channel; the stray LSB
+		// byte is noise-floor and irrelevant to a correlation estimate)
+		int32_t a = (*(int32_t*)&clusterA->data[(pA & (Cluster::size - 1)) - 4 + kCacheByteDepth]) >> 8;
+		int32_t b = (*(int32_t*)&clusterB->data[(pB & (Cluster::size - 1)) - 4 + kCacheByteDepth]) >> 8;
+		sumAA += (int64_t)a * a;
+		sumBB += (int64_t)b * b;
+		sumAB += (int64_t)a * b;
+	}
+
+	if (sumAA == 0 || sumBB == 0) {
+		return; // Silence - the curve won't matter; keep the compromise
+	}
+
+	float rho = (float)sumAB / sqrtf((float)sumAA * (float)sumBB);
+	float blend = 1.0f - rho; // rho >= 1 -> pure linear; rho <= 0 -> pure sqrt
+	if (blend < 0.0f) {
+		blend = 0.0f;
+	}
+	if (blend > 1.0f) {
+		blend = 1.0f;
+	}
+	crossfadeCurveBlendQ31 = (int32_t)(blend * 2147483647.0f);
 }
 
 // Returns a status such as LateStartAttemptStatus::WAIT
@@ -673,6 +899,11 @@ readCachedWindow:
 			// Enter crossfade region when approaching loop end (forward only, non-pingpong)
 			if (!crossfadeActive && !pingpongCacheMode && crossfadeLengthCacheBytes > 0 && bytesTilLoopEndPoint > 0
 			    && bytesTilLoopEndPoint <= crossfadeLengthCacheBytes) {
+				// First cached crossfade with both loop regions written: measure their
+				// correlation once and adapt the fade curve to the material
+				if (!crossfadeCurveMeasured && cache->writeBytePos >= cacheLoopEndPointBytes) {
+					measureCrossfadeCurve(crossfadeLengthCacheBytes, frameSizeBytes);
+				}
 				crossfadeActive = true;
 				crossfadeCacheBytePos = cacheLoopStartPointBytes;
 				loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
@@ -681,9 +912,26 @@ readCachedWindow:
 			if (bytesTilLoopEndPoint <= 0) {
 				D_PRINTLN("Loop endpoint reached, reading cache");
 				if (pingpongCacheMode) {
-					// Pingpong: bounce backward from loop end
+					// Snap bounce apexes onto waveform extrema once the loop is cached
+					bool justSnapped = false;
+					if (!pingpongBouncePointsSnapped && cache->writeBytePos >= cacheLoopEndPointBytes) {
+						snapPingpongBouncePoints(frameSizeBytes);
+						justSnapped = true;
+					}
+					// Pingpong: bounce backward from loop end. Skip the endpoint frame -
+					// the forward leg just played it (playing it twice smears the mirror).
 					cachePlayDirection = -1;
-					cacheBytePos = cacheLoopEndPointBytes - frameSizeBytes;
+					if (justSnapped) {
+						// Playback already ran to the ORIGINAL end point, so jumping back to
+						// the freshly snapped apex would replay a few ms with a phase jump
+						// (audible on high-pitched material). Reverse from the current
+						// position instead - continuous by construction; the snapped apexes
+						// apply from the next cycle.
+						cacheBytePos -= 2 * frameSizeBytes;
+					}
+					else {
+						cacheBytePos = cacheLoopEndPointBytes - 2 * frameSizeBytes;
+					}
 				}
 				else {
 					// Normal loop: if crossfade was active, take over from crossfade head
@@ -696,9 +944,6 @@ readCachedWindow:
 						cacheBytePos -= cacheLoopLengthBytes;
 					}
 				}
-				if (pingpongCacheMode && loopFadeInSamplesTotal > 0) {
-					loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
-				}
 				goto readCachedWindow;
 			}
 		}
@@ -706,11 +951,9 @@ readCachedWindow:
 			// Backward (pingpong): check loop start point
 			if (cacheBytePos <= cacheLoopStartPointBytes) {
 				D_PRINTLN("Loop start reached (pingpong), reading cache");
+				// Skip the start frame - the backward leg just played it
 				cachePlayDirection = 1;
-				cacheBytePos = cacheLoopStartPointBytes;
-				if (loopFadeInSamplesTotal > 0) {
-					loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
-				}
+				cacheBytePos = cacheLoopStartPointBytes + frameSizeBytes;
 				goto readCachedWindow;
 			}
 			// For crossfade fade-out: distance to loop start boundary when going backward
@@ -822,6 +1065,15 @@ readCachedWindow:
 				int32_t bytesTilXfClusterEnd = Cluster::size - xfBytePosWithinCluster;
 				bytesTilThisWindowEnd = std::min(bytesTilThisWindowEnd, bytesTilXfClusterEnd);
 			}
+			// Or if the crossfade zone starts within this window, end the window exactly
+			// there, so the fade begins with its full length. Triggering mid-window made
+			// the fade run up to a window short, ending in an audible step at the loop
+			// boundary (the still-fading-out stream got cut off part-way).
+			else if (!pingpongCacheMode && crossfadeLengthCacheBytes > 0
+			         && bytesTilLoopEndPoint > crossfadeLengthCacheBytes) {
+				bytesTilThisWindowEnd =
+				    std::min(bytesTilThisWindowEnd, bytesTilLoopEndPoint - crossfadeLengthCacheBytes);
+			}
 		}
 		else {
 			// Backward: limited by cluster start and loop start
@@ -831,10 +1083,19 @@ readCachedWindow:
 		}
 
 		int32_t samplesTilThisWindowEnd;
-		if constexpr (kCacheByteDepth == 3) {
+		if (cachePlayDirection != 1) {
+			// Backward: floor, not round-up. The frame nearest the cluster start is the
+			// last readable one in this window; rounding up made the read loop retreat
+			// one phantom frame past data[0] - garbage samples, heard as a crackle at
+			// every backward cluster crossing. (bytesTilThisWindowEnd already includes
+			// +frameSizeBytes, so floor gives the inclusive frame count.)
+			samplesTilThisWindowEnd =
+			    (int32_t)((uint32_t)bytesTilThisWindowEnd / (uint8_t)(sampleSourceNumChannels * kCacheByteDepth));
+		}
+		else if constexpr (kCacheByteDepth == 3) {
 			samplesTilThisWindowEnd =
 			    (uint32_t)(bytesTilThisWindowEnd - 1) / (uint8_t)(sampleSourceNumChannels * kCacheByteDepth)
-			    + 1; // Round up
+			    + 1; // Round up - the straddling frame extends into the cluster's padding
 		}
 		else {
 			samplesTilThisWindowEnd = bytesTilThisWindowEnd >> kCacheByteDepthMagnitude;
@@ -862,15 +1123,15 @@ readCachedWindow:
 			// True crossfade: main fades out, crossfade read fades in
 			int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
 
-			int32_t fadeInStart = static_cast<int32_t>(
-			    std::min(((int64_t)fadeProgress << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
-			int32_t fadeInEnd = static_cast<int32_t>(
-			    std::min(((int64_t)(fadeProgress + numSamplesThisCacheRead) << 31) / loopFadeInSamplesTotal,
-			             (int64_t)0x7FFFFFFF));
+			int32_t fadeInStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31, crossfadeCurveBlendQ31);
+			int32_t fadeInEnd =
+			    fadeScaleQ31(fadeProgress + numSamplesThisCacheRead, loopFadeStepQ31, crossfadeCurveBlendQ31);
 
-			// Main read fades OUT
-			int32_t fadeOutStart = 0x7FFFFFFF - fadeInStart;
-			int32_t fadeOutEnd = 0x7FFFFFFF - fadeInEnd;
+			// Main read fades OUT — sqrt of the REMAINING fraction (not 1 - fadeIn, which
+			// would break the equal-power pairing)
+			int32_t fadeOutStart = fadeScaleQ31(loopFadeInSamplesRemaining, loopFadeStepQ31, crossfadeCurveBlendQ31);
+			int32_t fadeOutEnd = fadeScaleQ31(loopFadeInSamplesRemaining - numSamplesThisCacheRead, loopFadeStepQ31,
+			                                  crossfadeCurveBlendQ31);
 
 			int32_t mainAmpStart = multiply_32x32_rshift32(amplitude, fadeOutStart) << 1;
 			int32_t mainAmpEnd =
@@ -893,13 +1154,11 @@ readCachedWindow:
 			}
 		}
 		else if (loopFadeInSamplesRemaining > 0) {
-			// Non-crossfade fade-in (pingpong or other cases)
+			// Non-crossfade fade-in (restart cases)
 			int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
-			int32_t fadeStart = static_cast<int32_t>(
-			    std::min(((int64_t)fadeProgress << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
-			int32_t fadeEnd = static_cast<int32_t>(
-			    std::min(((int64_t)(fadeProgress + numSamplesThisCacheRead) << 31) / loopFadeInSamplesTotal,
-			             (int64_t)0x7FFFFFFF));
+			int32_t fadeStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31, crossfadeCurveBlendQ31);
+			int32_t fadeEnd =
+			    fadeScaleQ31(fadeProgress + numSamplesThisCacheRead, loopFadeStepQ31, crossfadeCurveBlendQ31);
 			int32_t ampAtStart = multiply_32x32_rshift32(amplitude, fadeStart) << 1;
 			int32_t ampAtEnd =
 			    multiply_32x32_rshift32(amplitude + amplitudeIncrement * numSamplesThisCacheRead, fadeEnd) << 1;
@@ -987,14 +1246,12 @@ readCachedWindow:
 					// Apply simple fade-out using distance to loop end
 					int32_t distSamples = bytesTilLoopEndPoint / frameSizeBytes;
 					if (distSamples > 0 && distSamples < loopFadeInSamplesTotal) {
-						int32_t scaleStart = static_cast<int32_t>(
-						    std::min(((int64_t)distSamples << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+						int32_t scaleStart = fadeScaleQ31(distSamples, loopFadeStepQ31, crossfadeCurveBlendQ31);
 						int32_t distAfter = distSamples - numSamplesThisCacheRead;
 						if (distAfter < 0) {
 							distAfter = 0;
 						}
-						int32_t scaleEnd = static_cast<int32_t>(
-						    std::min(((int64_t)distAfter << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+						int32_t scaleEnd = fadeScaleQ31(distAfter, loopFadeStepQ31, crossfadeCurveBlendQ31);
 						cacheRenderAmplitude = multiply_32x32_rshift32(amplitude, scaleStart) << 1;
 						int32_t ampEnd =
 						    multiply_32x32_rshift32(amplitude + amplitudeIncrement * numSamplesThisCacheRead, scaleEnd)
@@ -1195,12 +1452,51 @@ uncachedPlayback:
 		// If there's a cache, prepare to write to it
 		if (cache) {
 
+			// Pingpong "wait for an extremum": rather than reversing at the raw loop-end
+			// marker (an arbitrary phase - the reversal corner is loudest there), keep
+			// playing and writing a little further and reverse on the next waveform
+			// extremum. The apex found becomes the loop end for all later cycles.
+			if (loopingType == LoopType::LOW_LEVEL && !pingpongBouncePointsSnapped && pingpongSeekTargetBytes < 0
+			    && static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive) {
+				int32_t frameBytesPP = kCacheByteDepth * sampleSourceNumChannels;
+				if (cacheLoopEndPointBytes - cache->writeBytePos <= 2 * SSI_TX_BUFFER_NUM_SAMPLES * frameBytesPP) {
+					int32_t cap = cacheLoopEndPointBytes + kPingpongApexSeekMaxFrames * frameBytesPP;
+					int32_t waveLimit = cacheEndPointBytes - frameBytesPP;
+					int32_t target = std::min(cap, waveLimit);
+					if (target > cacheLoopEndPointBytes) {
+						pingpongSeekTargetBytes = target;
+						pingpongSeekScannedToBytes = cacheLoopEndPointBytes;
+						pingpongSeekFlip1Bytes = -1;
+						pingpongSeekFlip2Bytes = -1;
+						pingpongSeekPrevSample = INT32_MIN; // sentinel: no previous sample yet
+						pingpongSeekPrevDiff = 0;
+					}
+					else {
+						// Loop ends at the waveform end - no room; bounce raw
+						pingpongBouncePointsSnapped = true;
+					}
+				}
+			}
+
 			// If reached loop end, switch to playing the cached loop back
-			int32_t cachingBytesTilLoopEnd = cacheLoopEndPointBytes - cache->writeBytePos;
+			int32_t effectiveLoopEndBytes =
+			    (pingpongSeekTargetBytes >= 0) ? pingpongSeekTargetBytes : cacheLoopEndPointBytes;
+			int32_t cachingBytesTilLoopEnd = effectiveLoopEndBytes - cache->writeBytePos;
 			if (cachingBytesTilLoopEnd
 			    <= 0) { // Might be less than 0 if it was just changed... although the code that does that is suppose to
 				        // also detect that we're past it and restart the loop...
 				D_PRINTLN("Loop endpoint reached, writing cache");
+				if (pingpongSeekTargetBytes >= 0) {
+					// Seek concluded: the reached target (the predicted extremum, or the
+					// cap when none was found) becomes the loop end from now on. Snap the
+					// loop start too - its outward data was cached during this pass.
+					int32_t frameBytesPP = kCacheByteDepth * sampleSourceNumChannels;
+					cacheLoopEndPointBytes = pingpongSeekTargetBytes;
+					pingpongSeekTargetBytes = -1;
+					snapPingpongLoopStart(frameBytesPP);
+					pingpongBouncePointsSnapped = true;
+					cacheLoopLengthBytes = (uint32_t)(cacheLoopEndPointBytes - cacheLoopStartPointBytes);
+				}
 				switchToReadingCacheFromWriting();
 				// Clear uncached fade — cached crossfade handles subsequent loops
 				loopFadeInSamplesRemaining = 0;
@@ -1413,6 +1709,44 @@ readNonTimestretched:
 				jumpAmount = sample->byteDepth * sampleSourceNumChannels * playDirection;
 			}
 
+			// Cache handoff: the asymmetric first pass (start offset ahead of the loop
+			// start) couldn't attach a cache at note-on. Playback has now looped back, so
+			// attach a cache keyed at the loop start — subsequent passes get cached.
+			if (cacheHandoffPending && justLoopedBack && !cache && !timeStretcher && timeStretchRatio == kMaxSampleValue
+			    && phaseIncrement != kMaxSampleValue && loopingType == LoopType::LOW_LEVEL
+			    && !static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive) {
+				// Only attach if the restart actually landed at the loop start (within a
+				// sub-window overshoot) — a wrap-around restart lands elsewhere; in that
+				// case stay armed for the next restart.
+				int32_t loopStartByte = (int32_t)guide->getLoopStartPlaybackAtByte();
+				int32_t currentByte = getPlayByteLowLevel(sample, guide);
+				int32_t overshootBytes = (currentByte - loopStartByte) * guide->playDirection;
+				if (overshootBytes >= 0 && overshootBytes < (bytesPerSample << 6)) {
+					// Only disarm on success: a failed attach (transient CPU direness, cache
+					// RAM unavailable) retries at the next loop restart instead of condemning
+					// the whole note to uncached fade-dip loops.
+					if (attachCacheAtLoopStart(guide, sample, phaseIncrement, timeStretchRatio, interpolationBufferSize,
+					                           loopingType, priorityRating)) {
+						cacheHandoffPending = false;
+						// numSamples was already decremented for this whole uncached read; the
+						// un-rendered remainder is in numSamplesThisUncachedRead. Both goto
+						// targets re-derive their chunk from numSamples, so hand it back
+						// (otherwise they'd see 0 → E155).
+						numSamples += numSamplesThisUncachedRead;
+						if (!writingToCache) {
+							// Reading an existing cache from the loop start
+							if (loopFadeInSamplesTotal > 0) {
+								loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
+							}
+							justLoopedBack = false;
+							goto readCachedWindow;
+						}
+						// Writing a fresh cache — re-enter the cache-writing path
+						goto uncachedPlayback;
+					}
+				}
+			}
+
 			// Loop crossfade: detect loop restart and start fade-in
 			if (justLoopedBack && loopFadeInSamplesTotal > 0) {
 				loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
@@ -1422,18 +1756,18 @@ readNonTimestretched:
 			int32_t renderAmplitude = amplitude;
 			int32_t renderAmplitudeIncrement = amplitudeIncrement;
 
-			// Fade-in envelope (after loop restart)
-			if (loopFadeInSamplesRemaining > 0) {
+			// Fade-in envelope (after loop restart). Must NOT run while a crossfade is
+			// active: the crossfade-in activation reuses loopFadeInSamplesRemaining as its
+			// own clock, and this branch would hijack the main (loop-end) stream with a
+			// RISING envelope while double-decrementing the counter - alternating broken
+			// envelope segments through the fade zone. Same priority as the cached path.
+			if (loopFadeInSamplesRemaining > 0 && !crossfadeActive) {
 				int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
 
 				// Fade scale at start/end of window (Q31: 0 = silent, 0x7FFFFFFF = full)
-				// Compute in int64 and clamp to avoid overflow when fadeProgress + numSamples >= total
-				// (x << 31 == 0x80000000 when x == total, which wraps negative in int32_t)
-				int32_t fadeStart = static_cast<int32_t>(
-				    std::min(((int64_t)fadeProgress << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
-				int32_t fadeEnd = static_cast<int32_t>(std::min(
-				    ((int64_t)(fadeProgress + numSamplesThisNonTimestretchedRead) << 31) / loopFadeInSamplesTotal,
-				    (int64_t)0x7FFFFFFF));
+				int32_t fadeStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31, crossfadeCurveBlendQ31);
+				int32_t fadeEnd = fadeScaleQ31(fadeProgress + numSamplesThisNonTimestretchedRead, loopFadeStepQ31,
+				                               crossfadeCurveBlendQ31);
 
 				int32_t ampAtStart = multiply_32x32_rshift32(amplitude, fadeStart) << 1;
 				int32_t ampAtEnd = multiply_32x32_rshift32(
@@ -1448,35 +1782,78 @@ readNonTimestretched:
 					loopFadeInSamplesRemaining = 0;
 				}
 			}
-			// Fade-out envelope (approaching loop boundary)
-			else if (loopFadeInSamplesTotal > 0 && loopingType != LoopType::NONE) {
-				int32_t endByte = guide->getBytePosToEndOrLoopPlayback();
-				if (endByte != 0) {
-					int32_t currentByte = getPlayByteLowLevel(sample, guide);
-					int32_t bytesPerSamp = sample->numChannels * sample->byteDepth;
-					int32_t distBytes = (endByte - currentByte) * guide->playDirection;
-					int32_t distSourceSamples = distBytes / bytesPerSamp;
-
-					int32_t distOutputSamples;
-					if (phaseIncrement == kMaxSampleValue) {
-						distOutputSamples = distSourceSamples;
+			// Fade-out envelope (approaching loop boundary). Not for pingpong: bounces
+			// don't crossfade, and their masking is handled by apex snapping instead.
+			else if (loopFadeInSamplesTotal > 0 && loopingType != LoopType::NONE
+			         && !static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive) {
+				// While writing a cache, the write->read switchover fires on the CACHE byte
+				// clock, so derive the fade distance from that same clock - the
+				// source-derived estimate below rounds differently and leaves the fade a
+				// sample or two adrift of the switchover (a tiny click at the boundary).
+				int32_t distOutputSamples = -1;
+				if (cache) {
+					int32_t xfFrameBytes = kCacheByteDepth * sampleSourceNumChannels;
+					int32_t distCacheBytes = cacheLoopEndPointBytes - cacheBytePos;
+					// Cheap gate: only divide when near the fade zone
+					if (distCacheBytes <= (loopFadeInSamplesTotal + SSI_TX_BUFFER_NUM_SAMPLES + 1) * xfFrameBytes) {
+						distOutputSamples = (int32_t)((uint32_t)distCacheBytes / (uint8_t)xfFrameBytes);
 					}
-					else {
-						distOutputSamples = ((int64_t)distSourceSamples << 24) / phaseIncrement;
+				}
+				else {
+					int32_t endByte = guide->getBytePosToEndOrLoopPlayback();
+					if (endByte != 0) {
+						int32_t currentByte = getPlayByteLowLevel(sample, guide);
+						int32_t bytesPerSamp = sample->numChannels * sample->byteDepth;
+						int32_t distBytes = (endByte - currentByte) * guide->playDirection;
+
+						// Cheap proximity gate: skip the division-heavy exact computation while
+						// far from the boundary. Threshold is a conservative over-estimate of the
+						// fade zone (plus one max render window), recomputed only on pitch change.
+						if (phaseIncrement != fadeZoneLastPhaseIncrement
+						    || loopFadeInSamplesTotal != fadeZoneLastTotal) {
+							fadeZoneLastPhaseIncrement = phaseIncrement;
+							fadeZoneLastTotal = loopFadeInSamplesTotal;
+							int64_t zoneOutputSamples = (int64_t)loopFadeInSamplesTotal + SSI_TX_BUFFER_NUM_SAMPLES;
+							int64_t zoneSourceSamples =
+							    (phaseIncrement == kMaxSampleValue)
+							        ? zoneOutputSamples
+							        : ((zoneOutputSamples * (uint32_t)phaseIncrement) >> 24) + 1;
+							fadeZoneThresholdBytes =
+							    (int32_t)std::min(zoneSourceSamples * bytesPerSamp, (int64_t)INT32_MAX);
+						}
+
+						if (distBytes <= fadeZoneThresholdBytes) {
+							int32_t distSourceSamples = distBytes / bytesPerSamp;
+
+							if (phaseIncrement == kMaxSampleValue) {
+								distOutputSamples = distSourceSamples;
+							}
+							else {
+								distOutputSamples = ((int64_t)distSourceSamples << 24) / phaseIncrement;
+							}
+						}
+					}
+				}
+
+				{
+					// If the crossfade zone starts within this window, end the window
+					// exactly there, so the fade begins with its full length (starting
+					// it mid-window leaves it incomplete at the loop restart - an
+					// audible step every pass)
+					if (distOutputSamples > loopFadeInSamplesTotal
+					    && distOutputSamples - loopFadeInSamplesTotal < numSamplesThisNonTimestretchedRead) {
+						numSamplesThisNonTimestretchedRead = distOutputSamples - loopFadeInSamplesTotal;
 					}
 
-					if (distOutputSamples >= 0 && distOutputSamples < loopFadeInSamplesTotal) {
+					if (distOutputSamples >= 0 && distOutputSamples <= loopFadeInSamplesTotal) {
 						// Compute fade-out for main (uncached) read
-						int32_t clampedDist = distOutputSamples;
-						int32_t scaleAtStart = static_cast<int32_t>(
-						    std::min(((int64_t)clampedDist << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+						int32_t scaleAtStart = fadeScaleQ31(distOutputSamples, loopFadeStepQ31, crossfadeCurveBlendQ31);
 
 						int32_t distAfterRead = distOutputSamples - numSamplesThisNonTimestretchedRead;
 						if (distAfterRead < 0) {
 							distAfterRead = 0;
 						}
-						int32_t scaleAtEnd = static_cast<int32_t>(
-						    std::min(((int64_t)distAfterRead << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
+						int32_t scaleAtEnd = fadeScaleQ31(distAfterRead, loopFadeStepQ31, crossfadeCurveBlendQ31);
 
 						int32_t ampAtStart = multiply_32x32_rshift32(renderAmplitude, scaleAtStart) << 1;
 						int32_t ampAtEnd =
@@ -1488,8 +1865,16 @@ readNonTimestretched:
 						renderAmplitude = ampAtStart;
 						renderAmplitudeIncrement = (ampAtEnd - ampAtStart) / numSamplesThisNonTimestretchedRead;
 
-						// Activate crossfade-in from cache if cache has loop-start data
-						if (!crossfadeActive && cache && cache->writeBytePos > 0) {
+						// Activate crossfade-in from cache if cache has loop-start data. NOT
+						// for pingpong: a bounce reverses direction rather than jumping to the
+						// loop start, so the loop-start content is the wrong material to fade
+						// in - and a crossfadeActive left dangling here (nothing in the
+						// pingpong path consumes it) suppressed the bounce anti-click fade-ins
+						// via the !crossfadeActive gate above. Pingpong keeps the plain
+						// fade-out + bounce fade-in. (The cached-read trigger already excludes
+						// pingpong the same way.)
+						if (!crossfadeActive && cache && cache->writeBytePos > 0
+						    && !static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive) {
 							crossfadeActive = true;
 							crossfadeCacheBytePos = cacheLoopStartPointBytes;
 							loopFadeInSamplesRemaining = loopFadeInSamplesTotal;
@@ -1531,11 +1916,9 @@ readNonTimestretched:
 			// The uncached render above applied fade-out. Now add fade-in from cache loop start.
 			if (crossfadeActive && cache && loopFadeInSamplesRemaining > 0) {
 				int32_t fadeProgress = loopFadeInSamplesTotal - loopFadeInSamplesRemaining;
-				int32_t fadeInStart = static_cast<int32_t>(
-				    std::min(((int64_t)fadeProgress << 31) / loopFadeInSamplesTotal, (int64_t)0x7FFFFFFF));
-				int32_t fadeInEnd = static_cast<int32_t>(std::min(
-				    ((int64_t)(fadeProgress + numSamplesThisNonTimestretchedRead) << 31) / loopFadeInSamplesTotal,
-				    (int64_t)0x7FFFFFFF));
+				int32_t fadeInStart = fadeScaleQ31(fadeProgress, loopFadeStepQ31, crossfadeCurveBlendQ31);
+				int32_t fadeInEnd = fadeScaleQ31(fadeProgress + numSamplesThisNonTimestretchedRead, loopFadeStepQ31,
+				                                 crossfadeCurveBlendQ31);
 
 				int32_t xfAmpStart = multiply_32x32_rshift32(amplitude, fadeInStart) << 1;
 				int32_t xfAmpEnd = multiply_32x32_rshift32(
@@ -1565,15 +1948,12 @@ readNonTimestretched:
 						}
 					}
 
-					// Need at least kCacheByteDepth bytes from start for safe read
-					if (xfByteInCluster < 4 - kCacheByteDepth) {
-						crossfadeCacheBytePos += frameSizeBytes;
-						xfAmpStart += xfAmpInc;
-						xfWritePos += numChannelsInOutputBuffer;
-						continue;
-					}
-
-					// Read L channel — same offset pattern as cached render path
+					// Read L channel — same offset pattern as the cached render path. At
+					// xfByteInCluster == 0 this reads one byte before data[] (a Cluster
+					// header byte lands in the inaudible LSB), exactly like the cached path
+					// does. Skipping the sample here instead put a one-sample hole in the
+					// fade-in stream whenever the crossfade region crossed a cache-cluster
+					// boundary at a frame-aligned position — an occasional tiny click.
 					int32_t sampleL = *(int32_t*)&xfCluster->data[xfByteInCluster - 4 + kCacheByteDepth];
 
 					xfAmpStart += xfAmpInc;
@@ -1595,10 +1975,15 @@ readNonTimestretched:
 				}
 
 				loopFadeInSamplesRemaining -= numSamplesThisNonTimestretchedRead;
-				if (loopFadeInSamplesRemaining <= 0) {
+				if (loopFadeInSamplesRemaining < 0) {
 					loopFadeInSamplesRemaining = 0;
-					crossfadeActive = false;
 				}
+				// Do NOT clear crossfadeActive here: the fade completes exactly at the loop
+				// boundary, where the restart uses the flag to take over playback from the
+				// crossfade head. Clearing it made the restart jump back to the loop start
+				// and replay the chunk the fade-in had already played (an audible stutter on
+				// every cache-writing pass). Only the restart/takeover clears the flag, same
+				// as the cached-read path.
 			}
 
 			// Advance the voice amplitude envelope independently of crossfade scaling
@@ -1607,6 +1992,52 @@ readNonTimestretched:
 			if (cache) {
 				cacheBytePos += numSamplesThisNonTimestretchedRead * kCacheByteDepth * sampleSourceNumChannels;
 				cache->writeBytePos = cacheBytePos; // These two were and are now still the same
+
+				// Pingpong apex seek: scan newly written frames for waveform extrema
+				// (slope sign flips). After two, the half-period is known, and the NEXT
+				// predicted extremum - safely ahead of playback - becomes the bounce
+				// target, so the reversal lands on it exactly.
+				if (pingpongSeekTargetBytes >= 0 && pingpongSeekFlip2Bytes < 0) {
+					int32_t frameBytesPP = kCacheByteDepth * sampleSourceNumChannels;
+					Cluster* scanCluster = nullptr;
+					int32_t scanPrevIdx = -1;
+					while (pingpongSeekScannedToBytes + frameBytesPP <= cache->writeBytePos) {
+						int32_t s = readCacheFrameL(cache, pingpongSeekScannedToBytes, &scanCluster, &scanPrevIdx);
+						if (pingpongSeekPrevSample == INT32_MIN) {
+							pingpongSeekPrevSample = s;
+							pingpongSeekScannedToBytes += frameBytesPP;
+							continue;
+						}
+						int32_t diff = s - pingpongSeekPrevSample;
+						if (diff == 0 || (pingpongSeekPrevDiff != 0 && ((diff ^ pingpongSeekPrevDiff) < 0))) {
+							int32_t apex = pingpongSeekScannedToBytes - frameBytesPP;
+							if (pingpongSeekFlip1Bytes < 0) {
+								pingpongSeekFlip1Bytes = apex;
+							}
+							else if (apex > pingpongSeekFlip1Bytes) {
+								pingpongSeekFlip2Bytes = apex;
+								// Predict the next extremum at/after the current write pos
+								int32_t hp = pingpongSeekFlip2Bytes - pingpongSeekFlip1Bytes;
+								int32_t minApex = cache->writeBytePos + frameBytesPP;
+								int32_t k = (minApex - pingpongSeekFlip2Bytes + hp - 1) / hp;
+								if (k < 1) {
+									k = 1;
+								}
+								int64_t predictedApex = (int64_t)pingpongSeekFlip2Bytes + (int64_t)k * hp;
+								int64_t newTarget = predictedApex + frameBytesPP;
+								if (newTarget < pingpongSeekTargetBytes) {
+									pingpongSeekTargetBytes = (int32_t)newTarget;
+								}
+								break;
+							}
+						}
+						if (diff != 0) {
+							pingpongSeekPrevDiff = diff;
+						}
+						pingpongSeekPrevSample = s;
+						pingpongSeekScannedToBytes += frameBytesPP;
+					}
+				}
 			}
 
 			numSamplesThisUncachedRead -= numSamplesThisNonTimestretchedRead;
@@ -2414,6 +2845,15 @@ bool VoiceSample::possiblySetUpCache(SampleControls* sampleControls, SamplePlayb
 		cachePlayDirection = 1; // Cache always starts reading forward (written forward)
 
 		setupCacheLoopPoints(guide, (Sample*)guide->audioFileHolder->audioFile, loopingType);
+
+		// Repeat note with the loop already fully cached: snap the pingpong bounce
+		// apexes onto waveform extrema right away, so even the FIRST bounce is smooth.
+		// (On the first note at a pitch this can only happen at the first bounce -
+		// the data doesn't exist earlier.)
+		if (static_cast<VoiceSamplePlaybackGuide*>(guide)->pingpongActive && !writingToCache
+		    && cacheLoopEndPointBytes != 2147483647 && cache->writeBytePos >= cacheLoopEndPointBytes) {
+			snapPingpongBouncePoints(kCacheByteDepth * cacheSetupSample->numChannels);
+		}
 		bool result = reassessReassessmentLocation(guide, (Sample*)guide->audioFileHolder->audioFile, priorityRating);
 		// Probably no need to check we haven't shot past the new reassessmentLocation, since surely that's going to be
 		// further into the future now we're not obeying loop points at low level?
@@ -2422,5 +2862,123 @@ bool VoiceSample::possiblySetUpCache(SampleControls* sampleControls, SamplePlayb
 		}
 	}
 
+	return true;
+}
+
+// Cache setup for a looping note whose start offset made the first pass asymmetric
+// (play start != loop start). A cache keyed at the offset position can't represent the
+// loop restart (it would map to a negative cache position), so instead use a cache keyed
+// at the LOOP START: if one already exists with enough written (e.g. built by a previous
+// note), attach mid-cache at the mapped offset position; otherwise defer cache creation
+// to the first loop restart (cacheHandoffPending), where playback lands at the loop start
+// and normal contiguous cache writing can begin.
+// Returns false only on hard failure (instantUnassign), like possiblySetUpCache.
+bool VoiceSample::possiblySetUpOffsetLoopCache(SampleControls* sampleControls, SamplePlaybackGuide* guide,
+                                               int32_t phaseIncrement, int32_t timeStretchRatio, LoopType loopingType,
+                                               int32_t priorityRating) {
+
+	// Native rate excluded entirely: readSamplesNative doesn't write caches, so neither
+	// the read-attach (whose end-of-written path assumes pitched) nor the handoff may run
+	if (phaseIncrement == kMaxSampleValue) {
+		return true;
+	}
+	if (guide->sequenceSyncLengthTicks && (playbackHandler.isExternalClockActive())) {
+		return true; // No syncing to external clock
+	}
+	if (sampleControls->interpolationMode != InterpolationMode::SMOOTH) {
+		return true;
+	}
+
+	Sample* sample = (Sample*)(guide->audioFileHolder->audioFile);
+	int32_t bytesPerSample = sample->numChannels * sample->byteDepth;
+
+	int32_t loopStartByte = (int32_t)guide->getLoopStartPlaybackAtByte();
+	int32_t skipSamplesAtStart;
+	int32_t startSamplesFromLoopStart;
+	if (guide->playDirection == 1) {
+		skipSamplesAtStart = (loopStartByte - sample->audioDataStartPosBytes) / bytesPerSample;
+		startSamplesFromLoopStart = ((int32_t)guide->startPlaybackAtByte - loopStartByte) / bytesPerSample;
+	}
+	else {
+		skipSamplesAtStart =
+		    (sample->audioDataStartPosBytes + sample->audioDataLengthBytes - loopStartByte - 1) / bytesPerSample;
+		startSamplesFromLoopStart = (loopStartByte - (int32_t)guide->startPlaybackAtByte) / bytesPerSample;
+	}
+
+	// Start behind the loop start isn't representable in this cache either — no caching
+	if (startSamplesFromLoopStart < 0 || skipSamplesAtStart < 0) {
+		return true;
+	}
+
+	// Only reuse an existing cache here — a fresh one couldn't be written, since writing
+	// must be contiguous from cache byte 0 (the loop start) but playback begins at the offset
+	bool created;
+	SampleCache* candidate =
+	    sample->getOrCreateCache((SampleHolder*)guide->audioFileHolder, phaseIncrement, timeStretchRatio,
+	                             guide->playDirection == -1, false, &created, skipSamplesAtStart);
+	if (candidate) {
+		// Map the offset start position into cache space (same rounding as setupCacheLoopPoints)
+		uint64_t combinedIncrement = ((uint64_t)(uint32_t)phaseIncrement * (uint32_t)timeStretchRatio) >> 24;
+		uint64_t startSamplesBig = (uint64_t)startSamplesFromLoopStart << 24;
+		uint32_t startCombinedIncrements = (startSamplesBig + (combinedIncrement >> 1)) / combinedIncrement;
+		int32_t mappedStartBytes = startCombinedIncrements * kCacheByteDepth * sample->numChannels;
+
+		if (candidate->writeBytePos > mappedStartBytes) {
+			cache = candidate;
+			writingToCache = false;
+			cacheBytePos = mappedStartBytes;
+			cachePlayDirection = 1;
+			setupCacheLoopPoints(guide, sample, loopingType);
+			return reassessReassessmentLocation(guide, sample, priorityRating);
+		}
+	}
+
+	cacheHandoffPending = true;
+	return true;
+}
+
+// Called from render() at a loop restart when cacheHandoffPending — playback is now at
+// (a sub-sample step past) the loop start, so a cache keyed there can be written from
+// byte 0, or read from byte 0 if it already exists. Returns true if a cache was attached.
+bool VoiceSample::attachCacheAtLoopStart(SamplePlaybackGuide* guide, Sample* sample, int32_t phaseIncrement,
+                                         int32_t timeStretchRatio, int32_t interpolationBufferSize,
+                                         LoopType loopingType, int32_t priorityRating) {
+
+	if (guide->sequenceSyncLengthTicks && (playbackHandler.isExternalClockActive())) {
+		return false;
+	}
+
+	int32_t bytesPerSample = sample->numChannels * sample->byteDepth;
+	int32_t loopStartByte = (int32_t)guide->getLoopStartPlaybackAtByte();
+	int32_t skipSamplesAtStart;
+	if (guide->playDirection == 1) {
+		skipSamplesAtStart = (loopStartByte - sample->audioDataStartPosBytes) / bytesPerSample;
+	}
+	else {
+		skipSamplesAtStart =
+		    (sample->audioDataStartPosBytes + sample->audioDataLengthBytes - loopStartByte - 1) / bytesPerSample;
+	}
+	if (skipSamplesAtStart < 0) {
+		return false;
+	}
+
+	// Like possiblySetUpCache: transient CPU direness downgrades interpolation quality,
+	// which mustn't be baked into a cache - but reading an existing one is still fine.
+	bool mayCreate = (interpolationBufferSize == kInterpolationMaxNumSamples);
+
+	cache = sample->getOrCreateCache((SampleHolder*)guide->audioFileHolder, phaseIncrement, timeStretchRatio,
+	                                 guide->playDirection == -1, mayCreate, &writingToCache, skipSamplesAtStart);
+	if (!cache) {
+		return false;
+	}
+
+	cacheBytePos = 0;
+	cachePlayDirection = 1;
+	setupCacheLoopPoints(guide, sample, loopingType);
+	if (!reassessReassessmentLocation(guide, sample, priorityRating)) {
+		cache = nullptr;
+		writingToCache = false;
+		return false;
+	}
 	return true;
 }

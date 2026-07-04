@@ -146,6 +146,8 @@
 #include "gui/menu_item/note_row/probability.h"
 #include "gui/menu_item/osc/audio_recorder.h"
 #include "gui/menu_item/osc/phi_morph_zone.h"
+#include "gui/menu_item/osc/phi_stereo_zone.h"
+#include "gui/menu_item/osc/phi_vox_tracking.h"
 #include "gui/menu_item/osc/pulse_width.h"
 #include "gui/menu_item/osc/retrigger_phase.h"
 #include "gui/menu_item/osc/source/feedback.h"

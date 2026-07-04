@@ -811,6 +811,21 @@ char const* oscTypeToString(OscType oscType) {
 	case OscType::PHI_MORPH:
 		return "phiMorph";
 
+	case OscType::PHI_STAIR:
+		return "phiStair";
+
+	case OscType::PHI_WEAVE:
+		return "phiWeave";
+
+	case OscType::PHI_VOX:
+		return "phiVox";
+
+	case OscType::PHI_SWARM:
+		return "phiSwarm";
+
+	case OscType::PHI_GENDY:
+		return "phiGendy";
+
 	case OscType::INPUT_L:
 		return "inLeft";
 
@@ -856,6 +871,21 @@ OscType stringToOscType(char const* string) {
 	}
 	else if (!strcmp(string, "phiMorph")) {
 		return OscType::PHI_MORPH;
+	}
+	else if (!strcmp(string, "phiWeave")) {
+		return OscType::PHI_WEAVE;
+	}
+	else if (!strcmp(string, "phiVox")) {
+		return OscType::PHI_VOX;
+	}
+	else if (!strcmp(string, "phiSwarm")) {
+		return OscType::PHI_SWARM;
+	}
+	else if (!strcmp(string, "phiGendy")) {
+		return OscType::PHI_GENDY;
+	}
+	else if (!strcmp(string, "phiStair")) {
+		return OscType::PHI_STAIR;
 	}
 	else if (!strcmp(string, "inLeft")) {
 		return OscType::INPUT_L;

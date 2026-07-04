@@ -72,6 +72,9 @@ public:
 	                       LoopType loopingType, int32_t priorityRating, bool forAudioClip = false);
 	int32_t getPlaySample(Sample* sample, SamplePlaybackGuide* guide);
 	bool stopUsingCache(SamplePlaybackGuide* guide, Sample* sample, int32_t priorityRating, bool loopingAtLowLevel);
+	bool possiblySetUpOffsetLoopCache(SampleControls* sampleControls, SamplePlaybackGuide* guide,
+	                                  int32_t phaseIncrement, int32_t timeStretchRatio, LoopType loopingType,
+	                                  int32_t priorityRating);
 	bool possiblySetUpCache(SampleControls* sampleControls, SamplePlaybackGuide* guide, int32_t phaseIncrement,
 	                        int32_t timeStretchRatio, int32_t priorityRating, LoopType loopingType);
 	bool fudgeTimeStretchingToAvoidClick(Sample* sample, SamplePlaybackGuide* guide, int32_t phaseIncrement,
@@ -89,8 +92,27 @@ public:
 	int8_t pingpongPlayDirection{1}; // Per-reader direction for pingpong mode (1=forward, -1=backward)
 	int32_t loopFadeInSamplesRemaining{0};
 	int32_t loopFadeInSamplesTotal{0};
+	int32_t loopFadeStepQ31{0}; // 0x7FFFFFFF / loopFadeInSamplesTotal, kept in sync by Voice
+	// Adaptive crossfade curve: blend between linear (0, equal-gain, for correlated
+	// material) and sqrt (0x7FFFFFFF, equal-power, for uncorrelated material) fade
+	// shapes. Starts at the 50/50 compromise; measured from the cached loop regions at
+	// the first cached-crossfade trigger (measureCrossfadeCurve).
+	int32_t crossfadeCurveBlendQ31{0x40000000};
+	bool crossfadeCurveMeasured{false};
+	bool pingpongBouncePointsSnapped{false};
+	// Pingpong bounce-apex seek ("wait for an extremum"): while >= 0, the first pass
+	// keeps writing past the raw loop end toward this target, which gets refined onto
+	// the next predicted waveform extremum as slope flips are observed
+	int32_t pingpongSeekTargetBytes{-1};
+	int32_t pingpongSeekScannedToBytes{0};
+	int32_t pingpongSeekFlip1Bytes{-1};
+	int32_t pingpongSeekFlip2Bytes{-1};
+	int32_t pingpongSeekPrevSample{0};
+	int32_t pingpongSeekPrevDiff{0};
 	int32_t crossfadeCacheBytePos{0};
 	bool crossfadeActive{false};
+	bool cacheHandoffPending{false}; // Attach a loop-start-keyed cache at the first loop restart (start offset
+	                                 // made the first pass asymmetric, so caching couldn't begin at note-on)
 
 private:
 	bool weShouldBeTimeStretchingNow(Sample* sample, SamplePlaybackGuide* guide, int32_t numSamples,
@@ -98,9 +120,22 @@ private:
 	                                 int32_t priorityRating, LoopType loopingType);
 	void switchToReadingCacheFromWriting();
 	bool stopReadingFromCache();
+	bool attachCacheAtLoopStart(SamplePlaybackGuide* guide, Sample* sample, int32_t phaseIncrement,
+	                            int32_t timeStretchRatio, int32_t interpolationBufferSize, LoopType loopingType,
+	                            int32_t priorityRating);
+	void measureCrossfadeCurve(int32_t crossfadeLengthCacheBytes, int32_t frameSizeBytes);
+	void snapPingpongBouncePoints(int32_t frameSizeBytes);
+	void snapPingpongLoopStart(int32_t frameSizeBytes);
 
 	int32_t cacheBytePos = 0;
 	int8_t cachePlayDirection{1}; // Direction for reading cache in pingpong mode (1=forward, -1=backward)
+
+	// Cached fade-out proximity threshold: skips the exact (division-heavy) distance
+	// computation while the play position is far from the loop boundary
+	int32_t fadeZoneThresholdBytes{0};
+	int32_t fadeZoneLastPhaseIncrement{0};
+	int32_t fadeZoneLastTotal{-1};
+
 	uint32_t cacheLoopLengthBytes = 0;
 	int32_t cacheLoopStartPointBytes{0}; // Cache byte position of loop start (for pingpong backward boundary)
 	int32_t cacheLoopEndPointBytes = 0;  // 2147483647 means no looping. Will be set to sample end-point if looping

@@ -19,7 +19,12 @@
 #include "definitions_cxx.hpp"
 #include "dsp/dx/dx7note.h"
 #include "dsp/dx/engine.h"
+#include "dsp/phi_gendy.hpp"
 #include "dsp/phi_morph.hpp"
+#include "dsp/phi_stair.hpp"
+#include "dsp/phi_swarm.hpp"
+#include "dsp/phi_vox.hpp"
+#include "dsp/phi_weave.hpp"
 #include "gui/ui/browser/sample_browser.h"
 #include "gui/ui/sound_editor.h"
 #include "model/sample/sample.h"
@@ -51,6 +56,11 @@ Source::Source() {
 Source::~Source() {
 	destructAllMultiRanges();
 	delete phiMorphCache;
+	delete phiWeaveCache;
+	delete phiVoxCache;
+	delete phiSwarmCache;
+	delete phiGendyCache;
+	delete phiStairCache;
 }
 
 // Destructs the actual MultiRanges, but doesn't actually deallocate the memory, aka calling empty() on the Array - the
@@ -84,6 +94,55 @@ void Source::cloneFrom(Source* other) {
 	// phiMorphCache is lazy-allocated, don't clone it
 	delete phiMorphCache;
 	phiMorphCache = nullptr;
+
+	// PHI_WEAVE zone parameters
+	phiWeaveZoneA = other->phiWeaveZoneA;
+	phiWeaveZoneB = other->phiWeaveZoneB;
+	phiWeavePhaseOffsetA = other->phiWeavePhaseOffsetA;
+	phiWeavePhaseOffsetB = other->phiWeavePhaseOffsetB;
+	phiWeaveGamma = other->phiWeaveGamma;
+	// phiWeaveCache is lazy-allocated, don't clone it
+	delete phiWeaveCache;
+	phiWeaveCache = nullptr;
+
+	// PHI_VOX zone parameters
+	phiVoxZoneA = other->phiVoxZoneA;
+	phiVoxZoneB = other->phiVoxZoneB;
+	phiVoxPhaseOffsetA = other->phiVoxPhaseOffsetA;
+	phiVoxPhaseOffsetB = other->phiVoxPhaseOffsetB;
+	phiVoxGamma = other->phiVoxGamma;
+	phiVoxTracking = other->phiVoxTracking;
+	// phiVoxCache is lazy-allocated, don't clone it
+	delete phiVoxCache;
+	phiVoxCache = nullptr;
+
+	// PHI_SWARM zone parameters
+	phiSwarmZoneA = other->phiSwarmZoneA;
+	phiSwarmZoneB = other->phiSwarmZoneB;
+	phiSwarmPhaseOffsetA = other->phiSwarmPhaseOffsetA;
+	phiSwarmPhaseOffsetB = other->phiSwarmPhaseOffsetB;
+	phiSwarmGamma = other->phiSwarmGamma;
+	// phiSwarmCache is lazy-allocated, don't clone it
+	delete phiSwarmCache;
+	phiSwarmCache = nullptr;
+
+	// PHI_GENDY zone parameters
+	phiGendyZoneA = other->phiGendyZoneA;
+	phiGendyZoneB = other->phiGendyZoneB;
+	phiGendyPhaseOffsetA = other->phiGendyPhaseOffsetA;
+	phiGendyPhaseOffsetB = other->phiGendyPhaseOffsetB;
+	phiGendyGamma = other->phiGendyGamma;
+	phiStairZoneA = other->phiStairZoneA;
+	phiStairZoneB = other->phiStairZoneB;
+	phiStairPhaseOffsetA = other->phiStairPhaseOffsetA;
+	phiStairPhaseOffsetB = other->phiStairPhaseOffsetB;
+	phiStairGamma = other->phiStairGamma;
+	delete phiStairCache;
+	phiStairCache = nullptr;
+	phiStereoZone = other->phiStereoZone;
+	// phiGendyCache is lazy-allocated, don't clone it
+	delete phiGendyCache;
+	phiGendyCache = nullptr;
 
 	// Deep copy DxPatch
 	if (other->dxPatch) {
@@ -173,6 +232,10 @@ bool Source::renderInStereo(Sound* s, SampleHolder* sampleHolder) {
 	}
 
 	if (s->unisonStereoSpread && s->numUnison > 1) {
+		return true;
+	}
+
+	if (phiStereoActive()) {
 		return true;
 	}
 
