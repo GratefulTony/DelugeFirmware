@@ -140,6 +140,7 @@ PLACE_SDRAM_DATA Language seven_segment{
         {STRING_FOR_PHI_SWARM, "SWRM"},
         {STRING_FOR_PHI_GENDY, "GNDY"},
         {STRING_FOR_PHI_STEREO, "STER"},
+        {STRING_FOR_PHI_STAIR, "STAI"},
         {STRING_FOR_SQUARE, "SQUA"},
         {STRING_FOR_SAW, "SAW"},
         {STRING_FOR_SAMPLE_AND_HOLD, "S/H"},

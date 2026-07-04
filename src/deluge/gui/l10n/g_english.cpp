@@ -268,6 +268,7 @@ PLACE_SDRAM_DATA Language english{
         {STRING_FOR_PHI_SWARM, "PhiSwarm"},
         {STRING_FOR_PHI_GENDY, "PhiGendy"},
         {STRING_FOR_PHI_STEREO, "Stereo"},
+        {STRING_FOR_PHI_STAIR, "PhiStair"},
         {STRING_FOR_OSC_PHI_STEREO_MENU_TITLE, "Osc* stereo"},
         {STRING_FOR_SQUARE, "Square"},
         {STRING_FOR_SAW, "Saw"},

@@ -397,6 +397,7 @@ enum class OscType : uint8_t {
 	ANALOG_SAW_2,
 	WAVETABLE,
 	PHI_MORPH,
+	PHI_STAIR,
 	PHI_WEAVE,
 	PHI_VOX,
 	PHI_SWARM,

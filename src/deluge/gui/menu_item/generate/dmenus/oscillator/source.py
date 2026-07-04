@@ -46,7 +46,7 @@ for i in range(2):
             "oscillator/phi_morph_zone.md",
             name="STRING_FOR_PHI_ZONE_A",
             title="STRING_FOR_OSC_PHI_ZONE_A_MENU_TITLE",
-            available_when="Oscillator type must be PhiMorph, PhiWeave, PhiVox, PhiSwarm, or PhiGendy (the zone selects a waveform, physics terrain, voice character, synchronization regime, or stochastic terrain respectively)",
+            available_when="Oscillator type must be a phi-family oscillator (the zone selects a waveform, staircase architecture, physics terrain, voice character, synchronization regime, or stochastic terrain)",
         ),
         Menu(
             "osc::source::WaveIndex",
@@ -64,7 +64,7 @@ for i in range(2):
             "oscillator/phi_morph_zone.md",
             name="STRING_FOR_PHI_ZONE_B",
             title="STRING_FOR_OSC_PHI_ZONE_B_MENU_TITLE",
-            available_when="Oscillator type must be PhiMorph, PhiWeave, PhiVox, PhiSwarm, or PhiGendy (the zone selects a waveform, physics terrain, voice character, synchronization regime, or stochastic terrain respectively)",
+            available_when="Oscillator type must be a phi-family oscillator (the zone selects a waveform, staircase architecture, physics terrain, voice character, synchronization regime, or stochastic terrain)",
         ),
         Menu(
             "osc::PhiVoxTracking",
@@ -81,7 +81,7 @@ for i in range(2):
             "oscillator/phi_stereo_zone.md",
             name="STRING_FOR_PHI_STEREO",
             title="STRING_FOR_OSC_PHI_STEREO_MENU_TITLE",
-            available_when="Oscillator type must be a phi-family oscillator (PhiMorph/PhiWeave/PhiVox/PhiSwarm/PhiGendy)",
+            available_when="Oscillator type must be a phi-family oscillator (PhiMorph/PhiStair/PhiWeave/PhiVox/PhiSwarm/PhiGendy)",
         ),
         Menu(
             "sample::Transpose",

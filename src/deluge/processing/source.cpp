@@ -21,6 +21,7 @@
 #include "dsp/dx/engine.h"
 #include "dsp/phi_gendy.hpp"
 #include "dsp/phi_morph.hpp"
+#include "dsp/phi_stair.hpp"
 #include "dsp/phi_swarm.hpp"
 #include "dsp/phi_vox.hpp"
 #include "dsp/phi_weave.hpp"
@@ -59,6 +60,7 @@ Source::~Source() {
 	delete phiVoxCache;
 	delete phiSwarmCache;
 	delete phiGendyCache;
+	delete phiStairCache;
 }
 
 // Destructs the actual MultiRanges, but doesn't actually deallocate the memory, aka calling empty() on the Array - the
@@ -130,6 +132,13 @@ void Source::cloneFrom(Source* other) {
 	phiGendyPhaseOffsetA = other->phiGendyPhaseOffsetA;
 	phiGendyPhaseOffsetB = other->phiGendyPhaseOffsetB;
 	phiGendyGamma = other->phiGendyGamma;
+	phiStairZoneA = other->phiStairZoneA;
+	phiStairZoneB = other->phiStairZoneB;
+	phiStairPhaseOffsetA = other->phiStairPhaseOffsetA;
+	phiStairPhaseOffsetB = other->phiStairPhaseOffsetB;
+	phiStairGamma = other->phiStairGamma;
+	delete phiStairCache;
+	phiStairCache = nullptr;
 	phiStereoZone = other->phiStereoZone;
 	// phiGendyCache is lazy-allocated, don't clone it
 	delete phiGendyCache;

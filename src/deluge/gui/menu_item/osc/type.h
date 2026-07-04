@@ -63,6 +63,7 @@ public:
 		    // Haven't actually really determined if this needs to be here - maybe not?
 		    OscType::WAVETABLE,
 		    OscType::PHI_MORPH,
+		    OscType::PHI_STAIR,
 		    OscType::PHI_WEAVE,
 		    OscType::PHI_VOX,
 		    OscType::PHI_SWARM,
@@ -95,6 +96,7 @@ public:
 		    l10n::getView(STRING_FOR_ANALOG_SAW),    //<
 		    l10n::getView(STRING_FOR_WAVETABLE),     //<
 		    l10n::getView(STRING_FOR_PHI_MORPH),     //<
+		    l10n::getView(STRING_FOR_PHI_STAIR),     //<
 		    l10n::getView(STRING_FOR_PHI_WEAVE),     //<
 		    l10n::getView(STRING_FOR_PHI_VOX),       //<
 		    l10n::getView(STRING_FOR_PHI_SWARM),     //<
@@ -178,6 +180,8 @@ public:
 				return OLED::phiSwarmIcon;
 			case OscType::PHI_GENDY:
 				return OLED::phiGendyIcon;
+			case OscType::PHI_STAIR:
+				return OLED::phiStairIcon;
 			default:
 				return OLED::sineIcon;
 			}

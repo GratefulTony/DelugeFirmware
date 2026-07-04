@@ -37,9 +37,7 @@ public:
 		if (sound->getSynthMode() == SynthMode::FM) {
 			return false;
 		}
-		if (source.oscType == OscType::PHI_MORPH || source.oscType == OscType::PHI_WEAVE
-		    || source.oscType == OscType::PHI_VOX || source.oscType == OscType::PHI_SWARM
-		    || source.oscType == OscType::PHI_GENDY) {
+		if (source.isPhiFamily()) {
 			return true;
 		}
 		return source.oscType == OscType::WAVETABLE && source.hasAtLeastOneAudioFileLoaded();
@@ -49,15 +47,14 @@ public:
 		// Push+twist: adjust gamma (shared phase multiplier) for PHI_MORPH / PHI_WEAVE
 		OscType gammaOscType = soundEditor.currentSound->sources[source_id_].oscType;
 		if (Buttons::isButtonPressed(hid::button::SELECT_ENC)
-		    && (gammaOscType == OscType::PHI_MORPH || gammaOscType == OscType::PHI_WEAVE
-		        || gammaOscType == OscType::PHI_VOX || gammaOscType == OscType::PHI_SWARM
-		        || gammaOscType == OscType::PHI_GENDY)) {
+		    && soundEditor.currentSound->sources[source_id_].isPhiFamily()) {
 			Buttons::selectButtonPressUsedUp = true;
 			float& gamma =
 			    (gammaOscType == OscType::PHI_WEAVE)   ? soundEditor.currentSound->sources[source_id_].phiWeaveGamma
 			    : (gammaOscType == OscType::PHI_VOX)   ? soundEditor.currentSound->sources[source_id_].phiVoxGamma
 			    : (gammaOscType == OscType::PHI_SWARM) ? soundEditor.currentSound->sources[source_id_].phiSwarmGamma
 			    : (gammaOscType == OscType::PHI_GENDY) ? soundEditor.currentSound->sources[source_id_].phiGendyGamma
+			    : (gammaOscType == OscType::PHI_STAIR) ? soundEditor.currentSound->sources[source_id_].phiStairGamma
 			                                           : soundEditor.currentSound->sources[source_id_].phiMorphGamma;
 			gamma = std::max(0.0f, gamma + static_cast<float>(offset));
 			char buffer[16];

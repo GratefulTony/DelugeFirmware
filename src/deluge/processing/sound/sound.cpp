@@ -4132,6 +4132,26 @@ Error Sound::readSourceFromFile(Deserializer& reader, int32_t s, ParamManagerFor
 			source->phiGendyGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
 			reader.exitTag("phiGendyGamma");
 		}
+		else if (!strcmp(tagName, "phiStairZoneA")) {
+			source->phiStairZoneA = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiStairZoneA");
+		}
+		else if (!strcmp(tagName, "phiStairZoneB")) {
+			source->phiStairZoneB = reader.readTagOrAttributeValueInt();
+			reader.exitTag("phiStairZoneB");
+		}
+		else if (!strcmp(tagName, "phiStairPhaseA")) {
+			source->phiStairPhaseOffsetA = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiStairPhaseA");
+		}
+		else if (!strcmp(tagName, "phiStairPhaseB")) {
+			source->phiStairPhaseOffsetB = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiStairPhaseB");
+		}
+		else if (!strcmp(tagName, "phiStairGamma")) {
+			source->phiStairGamma = static_cast<float>(reader.readTagOrAttributeValueInt()) / 10.0f;
+			reader.exitTag("phiStairGamma");
+		}
 		else if (!strcmp(tagName, "phiStereoZone")) {
 			source->phiStereoZone = reader.readTagOrAttributeValueInt();
 			reader.exitTag("phiStereoZone");
@@ -4564,6 +4584,21 @@ void Sound::writeSourceToFile(Serializer& writer, int32_t s, char const* tagName
 				}
 				if (source->phiSwarmGamma != 0.0f) {
 					writer.writeAttribute("phiSwarmGamma", static_cast<int32_t>(source->phiSwarmGamma * 10.0f));
+				}
+			}
+
+			// PHI_STAIR: persist zone knobs, phase offsets, and gamma
+			if (source->oscType == OscType::PHI_STAIR) {
+				writer.writeAttribute("phiStairZoneA", source->phiStairZoneA);
+				writer.writeAttribute("phiStairZoneB", source->phiStairZoneB);
+				if (source->phiStairPhaseOffsetA != 0.0f) {
+					writer.writeAttribute("phiStairPhaseA", static_cast<int32_t>(source->phiStairPhaseOffsetA * 10.0f));
+				}
+				if (source->phiStairPhaseOffsetB != 0.0f) {
+					writer.writeAttribute("phiStairPhaseB", static_cast<int32_t>(source->phiStairPhaseOffsetB * 10.0f));
+				}
+				if (source->phiStairGamma != 0.0f) {
+					writer.writeAttribute("phiStairGamma", static_cast<int32_t>(source->phiStairGamma * 10.0f));
 				}
 			}
 

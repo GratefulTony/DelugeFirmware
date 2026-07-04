@@ -811,6 +811,9 @@ char const* oscTypeToString(OscType oscType) {
 	case OscType::PHI_MORPH:
 		return "phiMorph";
 
+	case OscType::PHI_STAIR:
+		return "phiStair";
+
 	case OscType::PHI_WEAVE:
 		return "phiWeave";
 
@@ -880,6 +883,9 @@ OscType stringToOscType(char const* string) {
 	}
 	else if (!strcmp(string, "phiGendy")) {
 		return OscType::PHI_GENDY;
+	}
+	else if (!strcmp(string, "phiStair")) {
+		return OscType::PHI_STAIR;
 	}
 	else if (!strcmp(string, "inLeft")) {
 		return OscType::INPUT_L;

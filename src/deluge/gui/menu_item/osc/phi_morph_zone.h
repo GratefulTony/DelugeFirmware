@@ -61,6 +61,8 @@ public:
 		                                           "Flock", "Surge", "Fray", "Chaos"};
 		static const char* const kGendyNames[8] = {"Haze", "Murmur", "Wander", "Ripple",
 		                                           "Boil", "Writhe", "Snarl",  "Frenzy"};
+		static const char* const kStairNames[8] = {"Brick", "Terrace", "Ramp",  "Mesa",
+		                                           "Pylon", "Glyph",   "Shard", "Teeth"};
 		if (zoneIndex < 0 || zoneIndex >= 8) {
 			return "?";
 		}
@@ -73,6 +75,8 @@ public:
 			return kSwarmNames[zoneIndex];
 		case OscType::PHI_GENDY:
 			return kGendyNames[zoneIndex];
+		case OscType::PHI_STAIR:
+			return kStairNames[zoneIndex];
 		default:
 			return kMorphNames[zoneIndex];
 		}
@@ -117,9 +121,7 @@ public:
 
 	bool isRelevant(ModControllableAudio* modControllable, int32_t whichThing) override {
 		const auto sound = static_cast<Sound*>(modControllable);
-		OscType type = sound->sources[sourceId_].oscType;
-		return type == OscType::PHI_MORPH || type == OscType::PHI_WEAVE || type == OscType::PHI_VOX
-		       || type == OscType::PHI_SWARM || type == OscType::PHI_GENDY;
+		return sound->sources[sourceId_].isPhiFamily();
 	}
 
 protected:
@@ -152,6 +154,8 @@ private:
 			return (zoneId_ == 0) ? source.phiSwarmZoneA : source.phiSwarmZoneB;
 		case OscType::PHI_GENDY:
 			return (zoneId_ == 0) ? source.phiGendyZoneA : source.phiGendyZoneB;
+		case OscType::PHI_STAIR:
+			return (zoneId_ == 0) ? source.phiStairZoneA : source.phiStairZoneB;
 		default:
 			return (zoneId_ == 0) ? source.phiMorphZoneA : source.phiMorphZoneB;
 		}
@@ -168,6 +172,8 @@ private:
 			return (zoneId_ == 0) ? source.phiSwarmPhaseOffsetA : source.phiSwarmPhaseOffsetB;
 		case OscType::PHI_GENDY:
 			return (zoneId_ == 0) ? source.phiGendyPhaseOffsetA : source.phiGendyPhaseOffsetB;
+		case OscType::PHI_STAIR:
+			return (zoneId_ == 0) ? source.phiStairPhaseOffsetA : source.phiStairPhaseOffsetB;
 		default:
 			return (zoneId_ == 0) ? source.phiMorphPhaseOffsetA : source.phiMorphPhaseOffsetB;
 		}
@@ -188,6 +194,9 @@ private:
 			break;
 		case OscType::PHI_GENDY:
 			gamma = source.phiGendyGamma;
+			break;
+		case OscType::PHI_STAIR:
+			gamma = source.phiStairGamma;
 			break;
 		default:
 			gamma = source.phiMorphGamma;

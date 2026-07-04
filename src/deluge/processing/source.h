@@ -28,6 +28,7 @@ struct PhiWeaveCache;
 struct PhiVoxCache;
 struct PhiSwarmCache;
 struct PhiGendyCache;
+struct PhiStairCache;
 } // namespace deluge::dsp
 
 class Sound;
@@ -97,14 +98,22 @@ public:
 	float phiGendyGamma{0.0f};
 	deluge::dsp::PhiGendyCache* phiGendyCache{nullptr};
 
+	// PHI_STAIR zone parameters (same interface family)
+	uint16_t phiStairZoneA{0};
+	uint16_t phiStairZoneB{0};
+	float phiStairPhaseOffsetA{0.0f};
+	float phiStairPhaseOffsetB{0.0f};
+	float phiStairGamma{0.0f};
+	deluge::dsp::PhiStairCache* phiStairCache{nullptr};
+
 	// Zone-style stereo knob, shared by the phi family: position WITHIN each
 	// 128-wide zone = stereo amount (every zone starts mono; knob 0 = mono),
 	// zone index = stereo character (per-algorithm phi params)
 	uint16_t phiStereoZone{0};
 
 	[[nodiscard]] bool isPhiFamily() const {
-		return oscType == OscType::PHI_MORPH || oscType == OscType::PHI_WEAVE || oscType == OscType::PHI_VOX
-		       || oscType == OscType::PHI_SWARM || oscType == OscType::PHI_GENDY;
+		return oscType == OscType::PHI_MORPH || oscType == OscType::PHI_STAIR || oscType == OscType::PHI_WEAVE
+		       || oscType == OscType::PHI_VOX || oscType == OscType::PHI_SWARM || oscType == OscType::PHI_GENDY;
 	}
 	// VOX excluded: formant-separation stereo was dropped (and it already
 	// fills all eight horizontal-menu slots with Formant Track)
