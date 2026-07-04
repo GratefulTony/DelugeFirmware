@@ -106,7 +106,10 @@ public:
 		return oscType == OscType::PHI_MORPH || oscType == OscType::PHI_WEAVE || oscType == OscType::PHI_VOX
 		       || oscType == OscType::PHI_SWARM || oscType == OscType::PHI_GENDY;
 	}
-	[[nodiscard]] bool phiStereoActive() const { return isPhiFamily() && (phiStereoZone & 127u) != 0; }
+	// VOX excluded: formant-separation stereo was dropped (and it already
+	// fills all eight horizontal-menu slots with Formant Track)
+	[[nodiscard]] bool phiStereoCapable() const { return isPhiFamily() && oscType != OscType::PHI_VOX; }
+	[[nodiscard]] bool phiStereoActive() const { return phiStereoCapable() && (phiStereoZone & 127u) != 0; }
 
 	int8_t timeStretchAmount;
 	bool offsetWraps{true}; // When true, start offset wraps playhead modularly; when false, clamps at boundary

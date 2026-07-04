@@ -3448,15 +3448,9 @@ dontUseCache: {}
 			q31_t crossfade = cache.smoothedCrossfade + unisonWaveIndexOffset;
 
 			int32_t* renderBuffer = oscBuffer;
-			int32_t* renderBufferR = nullptr;
-			bool phiStereo = stereoBuffer && source.phiStereoActive();
 			if (stereoBuffer) {
 				renderBuffer = spareRenderingBuffer[2];
 				memset(renderBuffer, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
-				if (phiStereo) {
-					renderBufferR = spareRenderingBuffer[3];
-					memset(renderBufferR, 0, SSI_TX_BUFFER_NUM_SAMPLES * sizeof(int32_t));
-				}
 			}
 
 			int32_t* oscBufferEnd = renderBuffer + numSamples;
@@ -3470,13 +3464,12 @@ dontUseCache: {}
 			dsp::renderPhiVox(cache, renderBuffer, oscBufferEnd, numSamples, phaseIncrement,
 			                  &unisonParts[u].sources[s].oscPos, &unisonParts[u].sources[s].prevPhaseScaler,
 			                  effectiveRetriggerPhase, effSourceAmplitude, effAmplitudeIncrement, true, crossfade,
-			                  pulseWidth, source.phiVoxTracking, renderBufferR, source.phiStereoZone);
+			                  pulseWidth, source.phiVoxTracking);
 
 			if (stereoBuffer) {
-				const int32_t* rightSrc = phiStereo ? renderBufferR : renderBuffer;
 				for (int32_t i = 0; i < numSamples; i++) {
 					oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
-					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(rightSrc[i], amplitudeR) << 2;
+					oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;
 				}
 			}
 		}

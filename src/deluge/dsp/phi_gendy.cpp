@@ -474,14 +474,16 @@ void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferE
 			continue;
 		}
 
-		// Linear scan between scan-grid slots of both polygons, then tick lerp
+		// Linear scan between scan-grid slots of both polygons, then tick
+		// lerp. Halved differences: jumps flip breakpoint signs near full
+		// scale, and the raw q31 difference wraps int32 (a spike per jump)
 		uint32_t idx = evalPhase >> kPhiGendyNodeShift;
 		q31_t frac31 = static_cast<q31_t>((evalPhase & 0x03FFFFFF) << 5);
 		q31_t baseP = cache.nodeQPrev[idx];
-		q31_t wPrev = baseP + (multiply_32x32_rshift32(cache.nodeQPrev[idx + 1] - baseP, frac31) << 1);
+		q31_t wPrev = baseP + (multiply_32x32_rshift32((cache.nodeQPrev[idx + 1] >> 1) - (baseP >> 1), frac31) << 2);
 		q31_t baseC = cache.nodeQ[idx];
-		q31_t wCur = baseC + (multiply_32x32_rshift32(cache.nodeQ[idx + 1] - baseC, frac31) << 1);
-		q31_t out = wPrev + (multiply_32x32_rshift32(wCur - wPrev, tickFade) << 1);
+		q31_t wCur = baseC + (multiply_32x32_rshift32((cache.nodeQ[idx + 1] >> 1) - (baseC >> 1), frac31) << 2);
+		q31_t out = wPrev + (multiply_32x32_rshift32((wCur >> 1) - (wPrev >> 1), tickFade) << 2);
 
 		if (applyAmplitude) {
 			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, out, amplitude);
@@ -496,15 +498,15 @@ void renderPhiGendy(PhiGendyCache& cache, int32_t* bufferStart, int32_t* bufferE
 			uint32_t idxR = evalR >> kPhiGendyNodeShift;
 			q31_t fracR = static_cast<q31_t>((evalR & 0x03FFFFFF) << 5);
 			q31_t bP = cache.nodeQPrev[idxR];
-			q31_t wP = bP + (multiply_32x32_rshift32(cache.nodeQPrev[idxR + 1] - bP, fracR) << 1);
+			q31_t wP = bP + (multiply_32x32_rshift32((cache.nodeQPrev[idxR + 1] >> 1) - (bP >> 1), fracR) << 2);
 			q31_t outR;
 			if (sc.lag) { // Previous tick's polygon only: ~3ms micro-slap
 				outR = wP;
 			}
 			else {
 				q31_t bC = cache.nodeQ[idxR];
-				q31_t wC = bC + (multiply_32x32_rshift32(cache.nodeQ[idxR + 1] - bC, fracR) << 1);
-				outR = wP + (multiply_32x32_rshift32(wC - wP, tickFade) << 1);
+				q31_t wC = bC + (multiply_32x32_rshift32((cache.nodeQ[idxR + 1] >> 1) - (bC >> 1), fracR) << 2);
+				outR = wP + (multiply_32x32_rshift32((wC >> 1) - (wP >> 1), tickFade) << 2);
 			}
 			if (applyAmplitude) {
 				*thisSampleR = multiply_accumulate_32x32_rshift32_rounded(*thisSampleR, outR, amplitude);

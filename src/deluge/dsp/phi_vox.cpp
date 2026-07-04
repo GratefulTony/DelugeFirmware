@@ -122,15 +122,10 @@ PhiVoxParams buildPhiVoxParams(uint16_t zone, float phaseOffset) {
 // Main render
 // ============================================================================
 
-namespace {
-// Stereo-zone formant separation per character (F1 <- left, F2 -> right)
-constexpr float kVoxStereoSep[8] = {0.20f, 0.35f, 0.50f, 0.55f, 0.70f, 0.75f, 0.90f, 1.00f};
-} // namespace
-
 void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, int32_t numSamples,
                   uint32_t phaseIncrement, uint32_t* startPhase, uint64_t* formantState, uint32_t retriggerPhase,
                   int32_t amplitude, int32_t amplitudeIncrement, bool applyAmplitude, q31_t crossfade,
-                  uint32_t pulseWidth, int32_t trackingAmount, int32_t* bufferRStart, uint16_t stereoZone) {
+                  uint32_t pulseWidth, int32_t trackingAmount) {
 
 #if ENABLE_FX_BENCHMARK
 	FX_BENCH_DECLARE(bench_render, "phi_vox", "render");
@@ -220,7 +215,7 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 		dcComp += static_cast<q31_t>(cache.effMeanCompFrom[f] * std::min(ratioF, 1.0f) * 2147483647.0f);
 		dcCompTo += static_cast<q31_t>(cache.effMeanComp[f] * std::min(ratioT, 1.0f) * 2147483647.0f);
 	}
-	const q31_t dcStep = (dcCompTo - dcComp) / numSamples;
+	const q31_t dcStep = static_cast<q31_t>((static_cast<int64_t>(dcCompTo) - dcComp) / numSamples);
 
 	uint32_t phase = *startPhase;
 	uint32_t phaseAtEnd = phase + phaseIncrement * static_cast<uint32_t>(numSamples);
@@ -266,9 +261,6 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 	q31_t morphRampQ = 0;
 	const q31_t morphRampInc = 0x7FFFFFFF / numSamples;
 	int32_t* thisSample = bufferStart;
-	int32_t* thisSampleR = bufferRStart;
-	const q31_t voxSepQ = static_cast<q31_t>(static_cast<float>(stereoZone & 127u) * (1.0f / 127.0f)
-	                                         * kVoxStereoSep[(stereoZone >> 7) & 7] * 2147483647.0f);
 
 	for (int32_t n = 0; n < numSamples; n++) {
 		phase += phaseIncrement;
@@ -290,15 +282,9 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 		if (evalPhase > phaseWidth) {
 			if (applyAmplitude) {
 				thisSample++;
-				if (thisSampleR != nullptr) {
-					thisSampleR++;
-				}
 			}
 			else {
 				*thisSample++ = 0;
-				if (thisSampleR != nullptr) {
-					*thisSampleR++ = 0;
-				}
 			}
 			continue;
 		}
@@ -306,7 +292,6 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 		dcComp += dcStep;
 		morphRampQ += morphRampInc;
 		q31_t out = 0;
-		q31_t sideAcc = 0;  // F1 - F2 contribution difference, for formant separation
 		q31_t envelope = 0; // Strongest pulse envelope, gates the noise
 
 		for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
@@ -323,15 +308,15 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 
 			q31_t gain = cache.effPulseGain[f][pulseIdx[f]];
 			q31_t gainAbs = cache.effPulseGainAbs[f][pulseIdx[f]];
-			if (morphing) { // Lerp gains from last buffer's tables while the wave moves
+			if (morphing) { // Lerp gains from last buffer's tables while the wave moves.
+				// Halved-difference lerp: the raw difference wraps int32 when a
+				// pulse's SIGN flips at high gain across a zone change
 				q31_t gF = cache.effPulseGainFrom[f][pulseIdx[f]];
-				gain = gF + (multiply_32x32_rshift32(gain - gF, morphRampQ) << 1);
+				gain = gF + (multiply_32x32_rshift32((gain >> 1) - (gF >> 1), morphRampQ) << 2);
 				q31_t gaF = cache.effPulseGainAbsFrom[f][pulseIdx[f]];
-				gainAbs = gaF + (multiply_32x32_rshift32(gainAbs - gaF, morphRampQ) << 1);
+				gainAbs = gaF + (multiply_32x32_rshift32((gainAbs >> 1) - (gaF >> 1), morphRampQ) << 2);
 			}
-			q31_t contrib = multiply_32x32_rshift32(rc, gain) << 1;
-			out = add_saturate(out, contrib);
-			sideAcc = (f == 0) ? contrib : (sideAcc - contrib);
+			out = add_saturate(out, multiply_32x32_rshift32(rc, gain) << 1);
 			// Envelope follows the GAINED pulse so noise stays inside the burst
 			// (silent gap stays silent - no hiss between glottal pulses)
 			envelope = std::max(envelope, multiply_32x32_rshift32(rc, gainAbs) << 1);
@@ -353,35 +338,16 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 		// truncation land at zero. Sim-verified: worst-case step 0.55 -> 0.05.
 		uint32_t toWrap = ~evalPhase;
 		if (toWrap < (1u << 27)) {
-			q31_t fade = static_cast<q31_t>(toWrap << 4);
-			out = multiply_32x32_rshift32(out, fade) << 1;
-			sideAcc = multiply_32x32_rshift32(sideAcc, fade) << 1;
+			out = multiply_32x32_rshift32(out, static_cast<q31_t>(toWrap << 4)) << 1;
 		}
+		out -= dcComp;
 
-		if (thisSampleR != nullptr) { // Formant separation: F1 left, F2 right
-			q31_t side = multiply_32x32_rshift32(sideAcc, voxSepQ) << 1;
-			q31_t outL = add_saturate(out, side) - dcComp;
-			q31_t outR = add_saturate(out, -side) - dcComp;
-			if (applyAmplitude) {
-				*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, outL, amplitude);
-				thisSample++;
-				*thisSampleR = multiply_accumulate_32x32_rshift32_rounded(*thisSampleR, outR, amplitude);
-				thisSampleR++;
-			}
-			else {
-				*thisSample++ = outL;
-				*thisSampleR++ = outR;
-			}
+		if (applyAmplitude) {
+			*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, out, amplitude);
+			thisSample++;
 		}
 		else {
-			out -= dcComp;
-			if (applyAmplitude) {
-				*thisSample = multiply_accumulate_32x32_rshift32_rounded(*thisSample, out, amplitude);
-				thisSample++;
-			}
-			else {
-				*thisSample++ = out;
-			}
+			*thisSample++ = out;
 		}
 	}
 

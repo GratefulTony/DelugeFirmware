@@ -414,11 +414,13 @@ namespace {
 
 [[gnu::always_inline]] inline q31_t scanString(const q31_t* nodes, const q31_t* nodesPrev, uint32_t idx, q31_t frac31,
                                                q31_t tickFade) {
+	// Halved-difference lerps: raw q31 differences wrap int32 when adjacent
+	// values sign-flip near full scale (zone changes swap tables wholesale)
 	q31_t pvA = nodesPrev[idx + 1];
-	q31_t a = pvA + (multiply_32x32_rshift32(nodes[idx + 1] - pvA, tickFade) << 1);
+	q31_t a = pvA + (multiply_32x32_rshift32((nodes[idx + 1] >> 1) - (pvA >> 1), tickFade) << 2);
 	q31_t pvB = nodesPrev[idx + 2];
-	q31_t b = pvB + (multiply_32x32_rshift32(nodes[idx + 2] - pvB, tickFade) << 1);
-	return a + (multiply_32x32_rshift32(b - a, frac31) << 1);
+	q31_t b = pvB + (multiply_32x32_rshift32((nodes[idx + 2] >> 1) - (pvB >> 1), tickFade) << 2);
+	return a + (multiply_32x32_rshift32((b >> 1) - (a >> 1), frac31) << 2);
 }
 
 } // namespace
