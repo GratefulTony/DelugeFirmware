@@ -167,9 +167,24 @@ void buildPhiStairTables(PhiStairCache& cache, float cf) {
 	}
 	mean *= 1.0f / static_cast<float>(kPhiStairSlots);
 
+	// Static loudness normalization (the family's square-calibrated rule,
+	// computed once per rebuild since the waveform is fixed): target saw-
+	// class RMS (0.55 of the ceiling) with a hard peak cap at square parity.
+	// Peak-normalized heights alone left sparse patterns (Glyph's quantized
+	// levels, Pylon's lone tall step) much quieter than dense ones, and
+	// mean-subtraction shrank DC-heavy patterns further.
+	float peak = 0.0001f;
+	float sumSq = 0.0f;
 	for (int32_t j = 0; j < kPhiStairSlots; j++) {
-		float s = (slots[j] - mean) * 1073741823.0f * 0.95f; // Square peak parity, slight trim
-		cache.nodeQ[j] = static_cast<q31_t>(std::clamp(s, -2147483000.0f, 2147483000.0f));
+		float d = slots[j] - mean;
+		peak = std::max(peak, std::abs(d));
+		sumSq += d * d;
+	}
+	float rms = std::sqrt(sumSq * (1.0f / static_cast<float>(kPhiStairSlots)));
+	float scale = std::min(0.55f / std::max(rms, 0.05f), 0.95f / peak) * 1073741823.0f;
+
+	for (int32_t j = 0; j < kPhiStairSlots; j++) {
+		cache.nodeQ[j] = static_cast<q31_t>(std::clamp((slots[j] - mean) * scale, -2147483000.0f, 2147483000.0f));
 	}
 	cache.nodeQ[kPhiStairSlots] = cache.nodeQ[0];
 
