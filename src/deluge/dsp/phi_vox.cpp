@@ -178,6 +178,21 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 		float noiseAmt = std::min(breath + cache.artEnv, 0.9f);
 		cache.effVoicedNoise = static_cast<q31_t>(noiseAmt * 2147483647.0f);
 
+		// Formant-frequency slew: glide toward the effective targets
+		if (!cache.slewInit) {
+			cache.slewInit = true;
+			for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
+				cache.incSlew[f] = static_cast<float>(cache.effFormantInc[f]);
+				cache.ratioSlew[f] = cache.effNoteRatio[f];
+			}
+		}
+		for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
+			cache.incSlewFrom[f] = cache.incSlew[f];
+			cache.ratioSlewFrom[f] = cache.ratioSlew[f];
+			cache.incSlew[f] += 0.15f * (static_cast<float>(cache.effFormantInc[f]) - cache.incSlew[f]);
+			cache.ratioSlew[f] += 0.15f * (cache.effNoteRatio[f] - cache.ratioSlew[f]);
+		}
+
 		// Morph-ramp snapshots (once per buffer, shared across voices)
 		cache.morphRamping = (cache.effVersion != cache.effVersionSeen);
 		if (cache.morphRamping) {
@@ -202,10 +217,12 @@ void renderPhiVox(PhiVoxCache& cache, int32_t* bufferStart, int32_t* bufferEnd, 
 	q31_t dcComp = 0;
 	q31_t dcCompTo = 0;
 	for (int32_t f = 0; f < kPhiVoxNumFormants; f++) {
-		float incAbsF = static_cast<float>(cache.effFormantIncFrom[f]);
-		float incFrom = incAbsF + (cache.effNoteRatioFrom[f] * static_cast<float>(phaseIncrement) - incAbsF) * track;
-		float incAbsT = static_cast<float>(cache.effFormantInc[f]);
-		float incTo = incAbsT + (cache.effNoteRatio[f] * static_cast<float>(phaseIncrement) - incAbsT) * track;
+		// Slewed frequencies: the ramp endpoints are the previous and current
+		// slew values, so every buffer glides (portamento) instead of stepping
+		float incAbsF = cache.incSlewFrom[f];
+		float incFrom = incAbsF + (cache.ratioSlewFrom[f] * static_cast<float>(phaseIncrement) - incAbsF) * track;
+		float incAbsT = cache.incSlew[f];
+		float incTo = incAbsT + (cache.ratioSlew[f] * static_cast<float>(phaseIncrement) - incAbsT) * track;
 		uint32_t from = static_cast<uint32_t>(std::clamp(incFrom, 60.0f * 97391.5f, 8000.0f * 97391.5f));
 		uint32_t to = static_cast<uint32_t>(std::clamp(incTo, 60.0f * 97391.5f, 8000.0f * 97391.5f));
 		finalInc[f] = from;

@@ -127,6 +127,15 @@ struct PhiVoxCache {
 	bool morphRamping{false};
 	uint32_t effVersion{0};
 	uint32_t effVersionSeen{0};
+	// Formant-frequency slew (~20ms exponential): zone detents step F1/F2,
+	// and at high F2 with long bursts one detent reshuffles the burst tail
+	// (pulse k shifts by k * dF2) - audible as banded steppiness when
+	// sweeping. Frequencies are pitch-like; they get portamento.
+	float incSlew[kPhiVoxNumFormants]{};
+	float ratioSlew[kPhiVoxNumFormants]{};
+	float incSlewFrom[kPhiVoxNumFormants]{};
+	float ratioSlewFrom[kPhiVoxNumFormants]{};
+	bool slewInit{false};
 	float effMeanComp[kPhiVoxNumFormants]{}; // DC compensation numerators (× noteInc/formantInc at render)
 
 	q31_t prevCrossfade{INT32_MIN};
