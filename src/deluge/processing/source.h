@@ -138,6 +138,7 @@ public:
 	bool hasAtLeastOneAudioFileLoaded();
 	void doneReadingFromFile(Sound* sound);
 	bool hasAnyLoopEndPoint();
+	OscType getOscType();
 	void setOscType(OscType newType);
 
 	DxPatch* ensureDxPatch();

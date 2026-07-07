@@ -631,8 +631,8 @@ bool memIsNumericChars(char const* mem, int32_t size) {
 	return true;
 }
 
-bool stringIsNumericChars(char const* str) {
-	return memIsNumericChars(str, strlen(str));
+bool stringIsNumericChars(std::string_view str) {
+	return memIsNumericChars(str.data(), str.size());
 }
 
 char const* getThingName(OutputType outputType) {
@@ -2196,7 +2196,7 @@ int32_t getHowManyCharsAreTheSame(char const* a, char const* b) {
 
 bool shouldAbortLoading() {
 	return (currentUIMode == UI_MODE_LOADING_BUT_ABORT_IF_SELECT_ENCODER_TURNED
-	        && (encoders::getEncoder(encoders::EncoderName::SELECT).detentPos || QwertyUI::predictionInterrupted));
+	        && (encoders::select.pending() || QwertyUI::predictionInterrupted));
 }
 
 int32_t getNoteMagnitudeFfromNoteLength(uint32_t noteLength, int32_t tickMagnitude) {
@@ -2283,11 +2283,6 @@ void getNoteLengthNameFromMagnitude(StringBuf& noteLengthBuf, int32_t magnitude,
 char const* getFileNameFromEndOfPath(char const* filePathChars) {
 	char const* slashPos = strrchr(filePathChars, '/');
 	return slashPos ? (slashPos + 1) : filePathChars;
-}
-
-char const* getPathFromFullPath(const char* fullPath) {
-	const char* slashPos = strrchr(fullPath, '/');
-	return slashPos ? std::string(fullPath, slashPos).c_str() : "";
 }
 
 bool doesFilenameFitPrefixFormat(char const* fileName, char const* filePrefix, int32_t prefixLength) {

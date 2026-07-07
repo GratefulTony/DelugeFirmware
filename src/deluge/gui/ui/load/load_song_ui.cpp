@@ -58,6 +58,7 @@ void routineForSD(void);
 extern void setupBlankSong();
 
 using namespace deluge::gui;
+namespace encoders = deluge::hid::encoders;
 
 LoadSongUI::LoadSongUI() {
 	qwertyAlwaysVisible = false;
@@ -110,11 +111,6 @@ gotError:
 	if (error != Error::NONE) {
 		goto gotError;
 	}
-
-#if SD_TEST_MODE_ENABLED_LOAD_SONGS
-	currentSlot = (currentSlot + 1) % 19;
-	currentSubSlot = (currentSlot == 0) ? 0 : -1;
-#endif
 
 	focusRegained();
 
@@ -234,7 +230,6 @@ ActionResult LoadSongUI::buttonAction(deluge::hid::Button b, bool on, bool inCar
 		indicator_leds::setLedState(IndicatorLED::KEYBOARD, qwertyAlwaysVisible);
 		qwertyVisible = qwertyAlwaysVisible;
 		if (qwertyVisible) {
-			favouritesVisible = true;
 			drawKeys();
 			qwertyCurrentlyDrawnOnscreen = true;
 		}
@@ -369,76 +364,29 @@ someError:
 		display->displayError(error);
 		activeDeserializer->closeWriter();
 fail:
-		// If we already deleted the old song, make a new blank one. This will take us back to InstrumentClipView.
-		if (!currentSong) {
-			// If we're here, it's most likely because of a file error. On paper, a RAM error could be possible too.
-			setupBlankSong();
-			audioFileManager.deleteAnyTempRecordedSamplesFromMemory();
-		}
-
-		// Otherwise, stay here in this UI
-
-		preLoadedSong = new (songMemory) Song();
-		error = preLoadedSong->paramManager.setupUnpatched();
-		if (error != Error::NONE) {
-
+		// We couldn't load the requested song. Recover to a usable state and stop.
+		//
+		// The original code reconstructed a Song into `songMemory` here and loaded it (without ever swapping it in),
+		// which is broken under memory pressure: songMemory is null if its initial allocation failed, or already freed
+		// if we arrived via block B's error cleanup (gotErrorAfterCreatingSong) - and setupBlankSong() below can
+		// reallocate that very freed block as the new currentSong, so reconstructing into (and later freeing)
+		// songMemory left currentSong dangling, crashing the next load.
+		if (preLoadedSong && preLoadedSong != currentSong) {
+			// A half-loaded song may still occupy songMemory (e.g. we arrived from a closeWriter failure) - free it.
 			void* toDealloc = dynamic_cast<void*>(preLoadedSong);
 			preLoadedSong->~Song(); // Will also delete paramManager
 			delugeDealloc(toDealloc);
 			preLoadedSong = nullptr;
-			goto someError;
 		}
 
-		GlobalEffectable::initParams(&preLoadedSong->paramManager);
-
-		AudioEngine::logAction("c");
-
-		// Will return false if we ran out of RAM. This isn't currently detected for while loading ParamNodes, but
-		// chances are, after failing on one of those, it'd try to load something else and that would fail.
-
-		error = preLoadedSong->readFromFile(*activeDeserializer);
-
-		if (error != Error::NONE) {
-			goto gotErrorAfterCreatingSong;
-		}
-		AudioEngine::logAction("d");
-
-		FRESULT success = activeDeserializer->closeWriter();
-		if (success != FR_OK) {
-			display->displayPopup(deluge::l10n::get(deluge::l10n::String::STRING_FOR_ERROR_LOADING_SONG));
-			goto fail;
+		// If we already deleted the old song, make a new blank one. This will take us back to InstrumentClipView.
+		if (!currentSong) {
+			setupBlankSong();
+			audioFileManager.deleteAnyTempRecordedSamplesFromMemory();
 		}
 
-		preLoadedSong->dirPath.set(&currentDir);
-
-		String currentFilenameWithoutExtension;
-		error = currentFileItem->getFilenameWithoutExtension(&currentFilenameWithoutExtension);
-		if (error != Error::NONE) {
-			goto gotErrorAfterCreatingSong;
-		}
-
-		error = audioFileManager.setupAlternateAudioFileDir(audioFileManager.alternateAudioFileLoadPath,
-		                                                    currentDir.get(), currentFilenameWithoutExtension);
-		if (error != Error::NONE) {
-			goto gotErrorAfterCreatingSong;
-		}
-		audioFileManager.thingBeginningLoading(ThingType::SONG);
-
-		// Search existing RAM for all samples, to lay a claim to any which will be needed for this new Song.
-		// Do this before loading any new Samples from file, in case we were in danger of discarding any from RAM that
-		// we might actually want
-		preLoadedSong->loadAllSamples(false);
-
-		// Load samples from files, just for currently playing Sounds (or if not playing, then all Sounds)
-		if (playbackHandler.isEitherClockActive()) {
-			preLoadedSong->loadCrucialSamplesOnly();
-		}
-
-		else {
-			displayText(false);
-		}
-		currentUIMode = UI_MODE_NONE;
 		display->removeWorkingAnimation();
+		currentUIMode = UI_MODE_NONE;
 		performingLoad = false;
 		return;
 	}
@@ -481,7 +429,7 @@ gotErrorAfterCreatingSong:
 	}
 
 	error = audioFileManager.setupAlternateAudioFileDir(audioFileManager.alternateAudioFileLoadPath, currentDir.get(),
-	                                                    currentFilenameWithoutExtension);
+	                                                    currentFilenameWithoutExtension.get());
 	if (error != Error::NONE) {
 		goto gotErrorAfterCreatingSong;
 	}
@@ -751,7 +699,6 @@ void LoadSongUI::currentFileChanged(int32_t movementDirection) {
 
 	if (movementDirection && !qwertyAlwaysVisible) {
 		qwertyVisible = false;
-		favouritesVisible = false;
 		qwertyCurrentlyDrawnOnscreen = false;
 
 		// Start horizontal scrolling
@@ -824,9 +771,9 @@ goAgain:
 			displayText(false);
 
 			// If user turned knob while finding file, get out so the new action can be done
-			if (Encoders::encoders[ENCODER_THIS_CPU_SELECT].detentPos) {
+			if (encoders::select.pending()) {
 			    currentUIMode = UI_MODE_HORIZONTAL_SCROLL; // It might have been set to waitingForNextFileToLoad
-			    offset = Encoders::encoders[ENCODER_THIS_CPU_SELECT].getLimitedDetentPosAndReset();
+			    offset = encoders::select.take();
 			    goto goAgain;
 			}
 
@@ -977,7 +924,6 @@ ActionResult LoadSongUI::padAction(int32_t x, int32_t y, int32_t on) {
 				return ActionResult::REMIND_ME_OUTSIDE_CARD_ROUTINE;
 			}
 			qwertyVisible = true;
-			favouritesVisible = true;
 			displayText(false); // This will also draw the QWERTY keys
 
 			// Process first press only if its not a favourite row press to prevent blind keypresses

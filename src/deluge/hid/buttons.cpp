@@ -30,7 +30,6 @@
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/flash_storage.h"
-#include "testing/hardware_testing.h"
 #include <map>
 #include <string>
 
@@ -81,13 +80,6 @@ ActionResult buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {
 	auto xy = deluge::hid::button::toXY(b);
 	buttonStates[xy.x][xy.y] = on;
 
-#if ALLOW_SPAM_MODE
-	if (b == X_ENC) {
-		spamMode();
-		return;
-	}
-#endif
-
 // This is a debug feature that allows us to output SYSEX debug logging button presses
 // See contributing.md for more information
 #if ENABLE_MATRIX_DEBUG
@@ -109,12 +101,6 @@ ActionResult buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {
 
 		if (xy.x == modButtonX[i] && xy.y == modButtonY[i]) {
 
-			if (i < 3) {
-				if (buttonStates[modButtonX[0]][modButtonY[0]] && buttonStates[modButtonX[1]][modButtonY[1]]
-				    && buttonStates[modButtonX[2]][modButtonY[2]]) {
-					ramTestLED(true);
-				}
-			}
 			getCurrentUI()->modButtonAction(i, on);
 			goto dealtWith;
 		}
@@ -188,46 +174,7 @@ ActionResult buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {
 	}
 	// Shift button
 	else if (b == SHIFT) {
-		if (on) {
-			timeShiftButtonPressed = AudioEngine::audioSampleTimer;
-
-			// Shift should always be active when the button is physically pressed.
-			shiftCurrentlyPressed = true;
-			// The next release has a chance of activating sticky keys
-			considerShiftReleaseForSticky = true;
-			// Shift has changed, make sure we notify.
-			shiftHasChangedSinceLastCheck = true;
-		}
-		else {
-			uint32_t releaseTime = AudioEngine::audioSampleTimer;
-			if (runtimeFeatureSettings.get(RuntimeFeatureSettingType::ShiftIsSticky) == RuntimeFeatureStateToggle::On) {
-				uint32_t delta = releaseTime - timeShiftButtonPressed;
-				if (delta > std::numeric_limits<uint32_t>::max() / 2) {
-					// the audio sample timer has overflowed, the actual delta is time from the button down being
-					// recorded -> overflow point + 0 -> current time.
-					//
-					// This logic technically breaks if the counter overflows more than once between shift down and up
-					// but that would require the user to hold down shift for 2**32 / 44100 = 97391 seconds or about
-					// 1.13 days. I think it's OK if we don't handle that.
-					delta = std::numeric_limits<uint32_t>::max() - timeShiftButtonPressed;
-					delta += releaseTime;
-				}
-				// We got a short press, maybe enable sticky keys
-				// 5th of a second
-				if (delta < FlashStorage::holdTime) {
-					// unstick shift if another button was pressed while shift was held, or we were already stuck and
-					// this short press is to get us unstuck.
-					shiftCurrentlyStuck = considerShiftReleaseForSticky && !shiftCurrentlyStuck;
-				}
-			}
-
-			// As long as shift isn't currently stuck (i.e. we just had a short press that enabled sticky keys), clear
-			// the shift pressed flag on release.
-			if (!shiftCurrentlyStuck) {
-				shiftCurrentlyPressed = false;
-				shiftHasChangedSinceLastCheck = true;
-			}
-		}
+		commandToggleShift(on);
 	}
 	// Record button
 	else if (b == RECORD) {
@@ -283,13 +230,6 @@ ActionResult buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {
 		}
 	}
 
-#if ALLOW_SPAM_MODE
-	else if (b == SELECT_ENC)
-		     && isButtonPressed(shiftButtonCoord.x, shiftButtonCoord.y)) {
-			     spamMode();
-		     }
-#endif
-
 	// Mod encoder buttons
 	else if (b == MOD_ENCODER_0) {
 		getCurrentUI()->modEncoderButtonAction(0, on);
@@ -300,6 +240,49 @@ ActionResult buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {
 dealtWith:
 
 	return ActionResult::DEALT_WITH;
+}
+
+void commandToggleShift(bool on) {
+	if (on) {
+		timeShiftButtonPressed = AudioEngine::audioSampleTimer;
+
+		// Shift should always be active when the button is physically pressed.
+		shiftCurrentlyPressed = true;
+		// The next release has a chance of activating sticky keys
+		considerShiftReleaseForSticky = true;
+		// Shift has changed, make sure we notify.
+		shiftHasChangedSinceLastCheck = true;
+	}
+	else {
+		uint32_t releaseTime = AudioEngine::audioSampleTimer;
+		if (runtimeFeatureSettings.get(RuntimeFeatureSettingType::ShiftIsSticky) == RuntimeFeatureStateToggle::On) {
+			uint32_t delta = releaseTime - timeShiftButtonPressed;
+			if (delta > std::numeric_limits<uint32_t>::max() / 2) {
+				// the audio sample timer has overflowed, the actual delta is time from the button down being
+				// recorded -> overflow point + 0 -> current time.
+				//
+				// This logic technically breaks if the counter overflows more than once between shift down and up
+				// but that would require the user to hold down shift for 2**32 / 44100 = 97391 seconds or about
+				// 1.13 days. I think it's OK if we don't handle that.
+				delta = std::numeric_limits<uint32_t>::max() - timeShiftButtonPressed;
+				delta += releaseTime;
+			}
+			// We got a short press, maybe enable sticky keys
+			// 5th of a second
+			if (delta < FlashStorage::holdTime) {
+				// unstick shift if another button was pressed while shift was held, or we were already stuck and
+				// this short press is to get us unstuck.
+				shiftCurrentlyStuck = considerShiftReleaseForSticky && !shiftCurrentlyStuck;
+			}
+		}
+
+		// As long as shift isn't currently stuck (i.e. we just had a short press that enabled sticky keys), clear
+		// the shift pressed flag on release.
+		if (!shiftCurrentlyStuck) {
+			shiftCurrentlyPressed = false;
+			shiftHasChangedSinceLastCheck = true;
+		}
+	}
 }
 
 bool isButtonPressed(deluge::hid::Button b) {

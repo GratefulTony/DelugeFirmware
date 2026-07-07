@@ -19,7 +19,6 @@
 #define DELUGE_TIMERS_INTERRUPTS_H
 
 #include "RZA1/system/r_typedefs.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,7 +29,14 @@ extern "C" {
 // ref http://www.rdrop.com/users/paulmck/scalability/paper/whymb.2010.07.23a.pdf
 // in future if we start using user mode this won't work from there
 
-/// disable all interrupts - must be in system mode
+/// enter critical section - must be in system mode, and must be paired with EXIT_CRITICAL_SECTION()
+/// these can be nested, but you must exit the same number of times as you enter
+/// use the RAII CriticalSectionGuard from C++ code instead to avoid manual management
+void ENTER_CRITICAL_SECTION();
+
+/// exit critical section - ensure it's paired with ENTER_CRITICAL_SECTION()
+void EXIT_CRITICAL_SECTION();
+
 static inline __attribute__((no_instrument_function)) void DISABLE_ALL_INTERRUPTS() {
 	// memory creates a memory barrier in GCC to avoid reordering
 	// http://www.ibiblio.org/gferg/ldp/GCC-Inline-Assembly-HOWTO.html#ss5.3
@@ -39,13 +45,18 @@ static inline __attribute__((no_instrument_function)) void DISABLE_ALL_INTERRUPT
 	__asm volatile("ISB");
 }
 
-/// enable all interrupts - must be in system mode
-static inline __attribute__((no_instrument_function)) void ENABLE_INTERRUPTS() {
+static inline __attribute__((no_instrument_function)) void ENABLE_ALL_INTERRUPTS() {
 	__asm volatile("CPSIE i" ::: "memory");
 	__asm volatile("DSB");
 	__asm volatile("ISB");
 }
+
 void clearIRQInterrupt(int irqNumber);
+
+/// Configure external interrupt `irqNumber` (0–7) for both-edge detection.
+/// Read-modify-write of `INTC.ICR1` so the other channels are preserved
+/// (e.g. the trigger-clock channel programmed in main()).
+void setIRQInterruptBothEdges(int irqNumber);
 
 /// sets up a timer with an interrupt and handler but does not enable the timer
 /// Valid scale values are 1, 4, 16, 64 for all timers 0-4. Timer 1, 3, 4 support 256. Timer 2, 3, 4 support 1024.
@@ -60,6 +71,11 @@ void setupTimerWithInterruptHandler(int timerNo, int scale, void (*handler)(uint
 void setupRunningClock(int timer, int preScale);
 void setupAndEnableInterrupt(void (*handler)(uint32_t), uint16_t interruptID, uint8_t priority);
 #ifdef __cplusplus
+
+struct CriticalSectionGuard {
+	CriticalSectionGuard() { ENTER_CRITICAL_SECTION(); }
+	~CriticalSectionGuard() { EXIT_CRITICAL_SECTION(); }
+};
 }
 #endif
 

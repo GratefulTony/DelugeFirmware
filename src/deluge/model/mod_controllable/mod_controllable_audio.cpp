@@ -1673,8 +1673,8 @@ bool ModControllableAudio::offerReceivedCCToLearnedParamsForClip(MIDICable& cabl
 					newValue = static_cast<int32_t>(std::clamp(nv, int64_t{0}, int64_t{2147483647}));
 				}
 				else {
-					newKnobPos =
-					    MidiTakeover::calculateKnobPos(knobPos, value, &knob, false, CC_NUMBER_NONE, isStepEditing);
+					newKnobPos = MidiTakeover::calculateKnobPos(cable, knobPos, value, &knob, false, CC_NUMBER_NONE,
+					                                            isStepEditing);
 					if (newKnobPos == knobPos) {
 						continue;
 					}
@@ -1793,8 +1793,8 @@ bool ModControllableAudio::offerReceivedCCToLearnedParamsForSong(
 					newValue = static_cast<int32_t>(std::clamp(nv, int64_t{0}, int64_t{2147483647}));
 				}
 				else {
-					newKnobPos =
-					    MidiTakeover::calculateKnobPos(knobPos, value, &knob, false, CC_NUMBER_NONE, isStepEditing);
+					newKnobPos = MidiTakeover::calculateKnobPos(cable, knobPos, value, &knob, false, CC_NUMBER_NONE,
+					                                            isStepEditing);
 					if (newKnobPos == knobPos) {
 						continue;
 					}
@@ -2538,6 +2538,8 @@ bool ModControllableAudio::enableGrain() {
 	return false;
 }
 void ModControllableAudio::disableGrain() {
+	// grainFX is lazily allocated (null until GRAIN mod-FX is first used), but this is called whenever
+	// mod-FX is *not* grain — so null is the common case. Guard it like every other grainFX access.
 	if (grainFX) {
 		grainFX->startSkippingRendering();
 	}

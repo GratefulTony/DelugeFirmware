@@ -820,8 +820,11 @@ void Voice::noteOff(ModelStackWithSoundFlags* modelStack, bool allowReleaseStage
 		else {
 			envelopes[0].noteOff(0, &sound, paramManager);
 
-			// Only start releasing envelope 2 if release wasn't at max value
-			if (sound.paramFinalValues[params::LOCAL_ENV_1_RELEASE] >= 9) {
+			// Only start releasing envelope 2 if release wasn't at max value.
+			// (This must read the Voice's local-param array: LOCAL_ENV_1_RELEASE is a local
+			// param, and Sound::paramFinalValues holds only the 10 global params — indexing
+			// it with 42 read out of bounds into unrelated Sound members.)
+			if (paramFinalValues[params::LOCAL_ENV_1_RELEASE] >= 9) {
 				envelopes[1].noteOff(1, &sound, paramManager);
 			}
 		}
@@ -1519,12 +1522,21 @@ skipAutoRelease: {}
 				memset(&oscBuffer[numSamples], 0, numSamples * sizeof(int32_t));
 			}
 
-			// Render each source that's stereo
+			// Render each source that's stereo. Osc sync must still be applied here: with stereo unison spread, both
+			// sources get deferred into this path (see Source::renderInStereo()), so we have to capture osc A's phase
+			// increments and sync osc B to them just like the mono path above does.
 			for (int32_t s = 0; s < kNumSources; s++) {
 				if (sourcesToRenderInStereo & (1 << s)) {
+
+					uint32_t* getPhaseIncrements = ((s == 0) && doingOscSync) ? oscSyncPhaseIncrement : nullptr;
+					bool getOutAfterGettingPhaseIncrements =
+					    getPhaseIncrements && !sound.isSourceActiveCurrently(s, paramManager);
+
 					renderBasicSource(sound, paramManager, s, oscBuffer, numSamples, true, sourceAmplitudesNow[s],
-					                  &unisonPartBecameInactive, overallPitchAdjust, false, nullptr, nullptr,
-					                  sourceAmplitudeIncrements[s], nullptr, false, sourceWaveIndexIncrements[s]);
+					                  &unisonPartBecameInactive, overallPitchAdjust, (s == 1) && doingOscSync,
+					                  oscSyncPos, oscSyncPhaseIncrement, sourceAmplitudeIncrements[s],
+					                  getPhaseIncrements, getOutAfterGettingPhaseIncrements,
+					                  sourceWaveIndexIncrements[s]);
 				}
 			}
 
@@ -1883,15 +1895,19 @@ cantBeDoingOscSyncForFirstOsc:
 						                    crossfade, pulseWidth);
 					}
 					else {
+						// Upstream fix: non-wavetable sources have no audioFileHolder; renderOsc
+						// only reads the WaveTable for OscType::WAVETABLE, and the unconditional
+						// dereference was a null-pointer read
+						WaveTable* waveTable = (oscType == OscType::WAVETABLE)
+						                           ? static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile)
+						                           : nullptr;
 						dsp::Oscillator::renderOsc(
 						    oscType, 0, spareRenderingBuffer[s + 2], spareRenderingBuffer[s + 2] + numSamples,
 						    numSamples, phaseIncrements[s], pulseWidth, &unisonParts[u].sources[s].oscPos, false, 0,
 						    doingOscSyncThisOscillator, oscSyncPos[u], phaseIncrements[0], effectiveRetriggerPhase,
 						    sourceWaveIndexIncrements[s], sourceWaveIndexesLastTime[s] + unisonWaveIndexOffsets[s],
-						    static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile),
-						    &unisonParts[u].sources[s].prevPhaseScaler);
+						    waveTable, &unisonParts[u].sources[s].prevPhaseScaler);
 					}
-
 					// Sine and triangle waves come out bigger in fixed-amplitude rendering (for arbitrary reasons), so
 					// we need to compensate
 					if (oscType == OscType::SAW || oscType == OscType::ANALOG_SAW_2) {
@@ -3256,8 +3272,26 @@ dontUseCache: {}
 				int32_t interpolationBufferSize =
 				    sound.sources[s].sampleControls.getInterpolationBufferSize(phaseIncrement);
 
-				source->livePitchShifter->render(oscBuffer, numSamples, phaseIncrement, effSourceAmplitude,
-				                                 effAmplitudeIncrement, interpolationBufferSize);
+				// Upstream fix (#4538) adapted to our stereo semantics: when the osc
+				// buffer is interleaved stereo, a mono input must render to a temp
+				// mono buffer and pan across it (our stereoBuffer flag covers both
+				// unison spread and phi stereo on the other source)
+				if (stereoBuffer && source->livePitchShifter->numChannels == 1) {
+					int32_t* renderBuffer = spareRenderingBuffer[2];
+					memset(renderBuffer, 0, numSamples * sizeof(int32_t));
+
+					source->livePitchShifter->render(renderBuffer, numSamples, phaseIncrement, effSourceAmplitude,
+					                                 effAmplitudeIncrement, interpolationBufferSize);
+
+					for (int32_t i = 0; i < numSamples; i++) {
+						oscBuffer[(i << 1)] += multiply_32x32_rshift32(renderBuffer[i], amplitudeL) << 2;
+						oscBuffer[(i << 1) + 1] += multiply_32x32_rshift32(renderBuffer[i], amplitudeR) << 2;
+					}
+				}
+				else {
+					source->livePitchShifter->render(oscBuffer, numSamples, phaseIncrement, effSourceAmplitude,
+					                                 effAmplitudeIncrement, interpolationBufferSize);
+				}
 			}
 
 			// No pitch shifting
@@ -3272,8 +3306,6 @@ dontUseCache: {}
 				if (sound.sources[s].oscType != OscType::INPUT_STEREO
 				    || (!AudioEngine::lineInPluggedIn && !AudioEngine::micPluggedIn)) {
 
-					int32_t const* const oscBufferEnd = oscBuffer + numSamples;
-
 					int32_t channelOffset;
 					// If right, but not internal mic
 					if (sound.sources[s].oscType == OscType::INPUT_R
@@ -3287,18 +3319,40 @@ dontUseCache: {}
 					}
 
 					int32_t sourceAmplitudeNow = sourceAmplitudeThisUnison;
-					do {
-						sourceAmplitudeNow += amplitudeIncrementThisUnison;
 
-						// Mono / left channel (or stereo condensed to mono)
-						*(oscBufferPos++) += multiply_32x32_rshift32(inputReadPos[channelOffset], sourceAmplitudeNow)
-						                     << 4;
+					// Upstream fix adapted: when the osc buffer is interleaved stereo
+					// (unison spread or phi stereo), pan the mono input across it
+					if (stereoBuffer) {
+						int32_t const* const oscBufferEnd = oscBuffer + numSamples * 2;
+						do {
+							sourceAmplitudeNow += amplitudeIncrementThisUnison;
 
-						inputReadPos += NUM_MONO_INPUT_CHANNELS;
-						if (inputReadPos >= getRxBufferEnd()) {
-							inputReadPos -= SSI_RX_BUFFER_NUM_SAMPLES * NUM_MONO_INPUT_CHANNELS;
-						}
-					} while (oscBufferPos != oscBufferEnd);
+							int32_t sample = multiply_32x32_rshift32(inputReadPos[channelOffset], sourceAmplitudeNow)
+							                 << 4;
+							*(oscBufferPos++) += multiply_32x32_rshift32(sample, amplitudeL) << 2;
+							*(oscBufferPos++) += multiply_32x32_rshift32(sample, amplitudeR) << 2;
+
+							inputReadPos += NUM_MONO_INPUT_CHANNELS;
+							if (inputReadPos >= getRxBufferEnd()) {
+								inputReadPos -= SSI_RX_BUFFER_NUM_SAMPLES * NUM_MONO_INPUT_CHANNELS;
+							}
+						} while (oscBufferPos != oscBufferEnd);
+					}
+					else {
+						int32_t const* const oscBufferEnd = oscBuffer + numSamples;
+						do {
+							sourceAmplitudeNow += amplitudeIncrementThisUnison;
+
+							// Mono / left channel (or stereo condensed to mono)
+							*(oscBufferPos++) +=
+							    multiply_32x32_rshift32(inputReadPos[channelOffset], sourceAmplitudeNow) << 4;
+
+							inputReadPos += NUM_MONO_INPUT_CHANNELS;
+							if (inputReadPos >= getRxBufferEnd()) {
+								inputReadPos -= SSI_RX_BUFFER_NUM_SAMPLES * NUM_MONO_INPUT_CHANNELS;
+							}
+						} while (oscBufferPos != oscBufferEnd);
+					}
 				}
 
 				// Stereo
@@ -3712,12 +3766,17 @@ dontUseCache: {}
 			uint32_t pulseWidth = (uint32_t)lshiftAndSaturate<1>(paramFinalValues[params::LOCAL_OSC_A_PHASE_WIDTH + s]
 			                                                     + unisonPhaseWidthOffset);
 
+			// Upstream fix: the wave table is only consumed by renderOsc when
+			// oscType == WAVETABLE; basic oscillators have no audio file, so
+			// audioFileHolder is null - don't dereference it unconditionally
+			WaveTable* waveTable = guides[s].audioFileHolder != nullptr
+			                           ? static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile)
+			                           : nullptr;
 			dsp::Oscillator::renderOsc(sound.sources[s].oscType, effSourceAmplitude, renderBuffer, oscBufferEnd,
 			                           numSamples, phaseIncrement, pulseWidth, &unisonParts[u].sources[s].oscPos, true,
 			                           effAmplitudeIncrement, doOscSync, oscSyncPosThisUnison,
 			                           oscSyncPhaseIncrementsThisUnison, oscRetriggerPhase, waveIndexIncrement,
-			                           sourceWaveIndexesLastTime[s] + unisonWaveIndexOffset,
-			                           static_cast<WaveTable*>(guides[s].audioFileHolder->audioFile),
+			                           sourceWaveIndexesLastTime[s] + unisonWaveIndexOffset, waveTable,
 			                           &unisonParts[u].sources[s].prevPhaseScaler);
 
 			if (stereoBuffer) {

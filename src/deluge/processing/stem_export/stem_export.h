@@ -114,6 +114,7 @@ public:
 	// the WAV — a single overall reverb send on the new AudioClip can't approximate per-drum
 	// variation.
 	bool bakeReverbOnly = false;
+	bool renderingOffline() { return processStarted && renderOffline; }
 };
 
 extern StemExport stemExport;

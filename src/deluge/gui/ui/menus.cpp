@@ -31,6 +31,7 @@
 #include "gui/menu_item/audio_compressor/compressor_values.h"
 #include "gui/menu_item/audio_compressor/multiband.h"
 #include "gui/menu_item/audio_interpolation.h"
+#include "gui/menu_item/battery/level.h"
 #include "gui/menu_item/bend_range/main.h"
 #include "gui/menu_item/bend_range/per_finger.h"
 #include "gui/menu_item/clone_sound.h"
@@ -105,6 +106,7 @@
 #include "gui/menu_item/midi/device.h"
 #include "gui/menu_item/midi/device_definition/linked.h"
 #include "gui/menu_item/midi/device_definition/submenu.h"
+#include "gui/menu_item/midi/device_is_relative.h"
 #include "gui/menu_item/midi/device_receive_clock.h"
 #include "gui/menu_item/midi/device_send_clock.h"
 #include "gui/menu_item/midi/devices.h"
@@ -117,6 +119,8 @@
 #include "gui/menu_item/midi/mpe_to_mono.h"
 #include "gui/menu_item/midi/pgm.h"
 #include "gui/menu_item/midi/program.h"
+#include "gui/menu_item/midi/receive_clock.h"
+#include "gui/menu_item/midi/send_clock.h"
 #include "gui/menu_item/midi/sound/channel.h"
 #include "gui/menu_item/midi/sound/note_for_drum.h"
 #include "gui/menu_item/midi/sub.h"
@@ -1149,13 +1153,13 @@ PLACE_SDRAM_DATA const MenuItem* midiOrCVParamShortcuts[kDisplayHeight] = {
     nullptr,
 };
 
-PLACE_SDRAM_DATA const MenuItem* gateDrumParamShortcuts[8] = {
+PLACE_SDRAM_DATA const MenuItem* gateDrumParamShortcuts[kDisplayHeight] = {
     &arpRateMenuMIDIOrCV,
     &arpSyncMenu,
     &arpGateMenuMIDIOrCV,
     &arpRhythmMenuMIDIOrCV,
     &arpModeMenu,
-    nullptr,
+    &nameEditMenu,
     nullptr,
     nullptr,
 };
@@ -1238,6 +1242,8 @@ flash::Status flashStatusMenu{STRING_FOR_PLAY_CURSOR};
 
 firmware::Version firmwareVersionMenu{STRING_FOR_FIRMWARE_VERSION, STRING_FOR_FIRMWARE_VER_MENU_TITLE};
 
+battery::Level batteryLevelMenu{STRING_FOR_BATTERY_LEVEL, STRING_FOR_BATTERY_LEVEL_MENU_TITLE};
+
 runtime_feature::Settings runtimeFeatureSettingsMenu{STRING_FOR_COMMUNITY_FTS, STRING_FOR_COMMUNITY_FTS_MENU_TITLE};
 
 // CV menu
@@ -1256,6 +1262,38 @@ midi::FollowChannel midiFollowChannelBMenu{STRING_FOR_FOLLOW_CHANNEL_B, STRING_F
                                            MIDIFollowChannelType::B};
 midi::FollowChannel midiFollowChannelCMenu{STRING_FOR_FOLLOW_CHANNEL_C, STRING_FOR_FOLLOW_CHANNEL_C,
                                            MIDIFollowChannelType::C};
+midi::FollowChannelTrack midiFollowChannelTrack1Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                     MIDIFollowChannelType::Track1, 1};
+midi::FollowChannelTrack midiFollowChannelTrack2Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                     MIDIFollowChannelType::Track2, 2};
+midi::FollowChannelTrack midiFollowChannelTrack3Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                     MIDIFollowChannelType::Track3, 3};
+midi::FollowChannelTrack midiFollowChannelTrack4Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                     MIDIFollowChannelType::Track4, 4};
+midi::FollowChannelTrack midiFollowChannelTrack5Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                     MIDIFollowChannelType::Track5, 5};
+midi::FollowChannelTrack midiFollowChannelTrack6Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                     MIDIFollowChannelType::Track6, 6};
+midi::FollowChannelTrack midiFollowChannelTrack7Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                     MIDIFollowChannelType::Track7, 7};
+midi::FollowChannelTrack midiFollowChannelTrack8Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                     MIDIFollowChannelType::Track8, 8};
+midi::FollowChannelTrack midiFollowChannelTrack9Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                     MIDIFollowChannelType::Track9, 9};
+midi::FollowChannelTrack midiFollowChannelTrack10Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                      MIDIFollowChannelType::Track10, 10};
+midi::FollowChannelTrack midiFollowChannelTrack11Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                      MIDIFollowChannelType::Track11, 11};
+midi::FollowChannelTrack midiFollowChannelTrack12Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                      MIDIFollowChannelType::Track12, 12};
+midi::FollowChannelTrack midiFollowChannelTrack13Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                      MIDIFollowChannelType::Track13, 13};
+midi::FollowChannelTrack midiFollowChannelTrack14Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                      MIDIFollowChannelType::Track14, 14};
+midi::FollowChannelTrack midiFollowChannelTrack15Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                      MIDIFollowChannelType::Track15, 15};
+midi::FollowChannelTrack midiFollowChannelTrack16Menu{STRING_FOR_FOLLOW_CHANNEL_TRACK, STRING_FOR_FOLLOW_CHANNEL_TRACK,
+                                                      MIDIFollowChannelType::Track16, 16};
 midi::FollowKitRootNote midiFollowKitRootNoteMenu{STRING_FOR_FOLLOW_KIT_ROOT_NOTE};
 midi::FollowModKnobCC midiFollowModKnobCCMenu{STRING_FOR_FOLLOW_MOD_KNOB_CC};
 midi::FollowCCPreset midiFollowCCPresetMenu{STRING_FOR_FOLLOW_CC_PRESET};
@@ -1270,9 +1308,13 @@ Submenu midiFollowChannelSubmenu{
     STRING_FOR_CHANNEL,
     STRING_FOR_CHANNEL,
     {
-        &midiFollowChannelAMenu,
-        &midiFollowChannelBMenu,
-        &midiFollowChannelCMenu,
+        &midiFollowChannelAMenu,       &midiFollowChannelBMenu,       &midiFollowChannelCMenu,
+        &midiFollowChannelTrack1Menu,  &midiFollowChannelTrack2Menu,  &midiFollowChannelTrack3Menu,
+        &midiFollowChannelTrack4Menu,  &midiFollowChannelTrack5Menu,  &midiFollowChannelTrack6Menu,
+        &midiFollowChannelTrack7Menu,  &midiFollowChannelTrack8Menu,  &midiFollowChannelTrack9Menu,
+        &midiFollowChannelTrack10Menu, &midiFollowChannelTrack11Menu, &midiFollowChannelTrack12Menu,
+        &midiFollowChannelTrack13Menu, &midiFollowChannelTrack14Menu, &midiFollowChannelTrack15Menu,
+        &midiFollowChannelTrack16Menu,
     },
 };
 
@@ -1326,27 +1368,30 @@ midi::Command loopContinuousLayeringMidiCommand{STRING_FOR_LAYERING_LOOP, Global
 midi::Command fillMidiCommand{STRING_FOR_FILL, GlobalMIDICommand::FILL};
 midi::Command transposeMidiCommand{STRING_FOR_TRANSPOSE, GlobalMIDICommand::TRANSPOSE};
 midi::Command nextSongMidiCommand{STRING_FOR_SONG_LOAD_NEXT, GlobalMIDICommand::NEXT_SONG};
+midi::Command shiftMidiCommand{STRING_FOR_SHIFT, GlobalMIDICommand::SHIFT};
 
 Submenu midiCommandsMenu{
     STRING_FOR_COMMANDS,
     STRING_FOR_MIDI_COMMANDS,
     {&playMidiCommand, &playbackRestartMidiCommand, &recordMidiCommand, &tapMidiCommand, &undoMidiCommand,
      &redoMidiCommand, &loopMidiCommand, &loopContinuousLayeringMidiCommand, &fillMidiCommand, &transposeMidiCommand,
-     &nextSongMidiCommand},
+     &nextSongMidiCommand, &shiftMidiCommand},
 };
 
 // MIDI device submenu - for after we've selected which device we want it for
 
 midi::DefaultVelocityToLevel defaultVelocityToLevelMenu{STRING_FOR_VELOCITY};
-midi::SendClock sendClockMenu{STRING_FOR_CLOCK_OUT};
-midi::ReceiveClock receiveClockMenu{STRING_FOR_CLOCK_IN};
+midi::DeviceSendClock device_send_clock_menu{STRING_FOR_CLOCK_OUT};
+midi::DeviceReceiveClock device_receive_clock_menu{STRING_FOR_CLOCK_IN};
+midi::DeviceIsRelative device_is_relative_menu{STRING_FOR_IS_RELATIVE};
 midi::Device midiDeviceMenu{
     EMPTY_STRING,
     {
         &mpe::directionSelectorMenu,
         &defaultVelocityToLevelMenu,
-        &sendClockMenu,
-        &receiveClockMenu,
+        &device_send_clock_menu,
+        &device_receive_clock_menu,
+        &device_is_relative_menu,
     },
 };
 
@@ -1355,8 +1400,8 @@ ToggleBool midiInputDifferentiationMenu{STRING_FOR_DIFFERENTIATE_INPUTS, STRING_
                                         MIDIDeviceManager::differentiatingInputsByDevice};
 
 // MIDI clock menu
-ToggleBool midiClockOutStatusMenu{STRING_FOR_OUTPUT, STRING_FOR_MIDI_CLOCK_OUT, playbackHandler.midiOutClockEnabled};
-ToggleBool midiClockInStatusMenu{STRING_FOR_INPUT, STRING_FOR_MIDI_CLOCK_IN, playbackHandler.midiInClockEnabled};
+midi::SendClock send_clock_menu{STRING_FOR_OUTPUT, STRING_FOR_MIDI_CLOCK_OUT, playbackHandler.midiOutClockEnabled};
+midi::ReceiveClock receive_clock_menu{STRING_FOR_INPUT, STRING_FOR_MIDI_CLOCK_IN, playbackHandler.midiInClockEnabled};
 ToggleBool tempoMagnitudeMatchingMenu{STRING_FOR_TEMPO_MAGNITUDE_MATCHING, STRING_FOR_TEMPO_MAGNITUDE_MATCHING,
                                       playbackHandler.tempoMagnitudeMatchingEnabled};
 
@@ -1369,8 +1414,8 @@ Submenu midiClockMenu{
     STRING_FOR_CLOCK,
     STRING_FOR_MIDI_CLOCK,
     {
-        &midiClockInStatusMenu,
-        &midiClockOutStatusMenu,
+        &send_clock_menu,
+        &receive_clock_menu,
         &tempoMagnitudeMatchingMenu,
     },
 };
@@ -1958,6 +2003,7 @@ Submenu settingsRootMenu{
         &flashStatusMenu,
         &recordSubmenu,
         &runtimeFeatureSettingsMenu,
+        &batteryLevelMenu,
         &firmwareVersionMenu,
     },
 };

@@ -1232,14 +1232,14 @@ void Session::armClipToStopAction(Clip* clip) {
 	scheduleLaunchTiming(wantToStopAtTime, 1, clip->loopLength);
 }
 
-void Session::soloClipAction(Clip* clip, int32_t buttonPressLatency) {
+void Session::soloClipAction(Clip* clip, bool doInstant, int32_t buttonPressLatency) {
 	lastSectionArmed = REALLY_OUT_OF_RANGE;
 
 	bool anyClipsDeleted = false;
 
 	// If it was already soloed...
 	if (clip->soloingInSessionMode) {
-		userWantsToUnsoloClip(clip, Buttons::isShiftButtonPressed(), buttonPressLatency);
+		userWantsToUnsoloClip(clip, doInstant, buttonPressLatency);
 	}
 
 	// Or if it wasn't...
@@ -1267,7 +1267,7 @@ void Session::soloClipAction(Clip* clip, int32_t buttonPressLatency) {
 		}
 
 		else {
-			userWantsToArmClipsToStartOrSolo(0, clip, false, Buttons::isShiftButtonPressed(), true, 1, true,
+			userWantsToArmClipsToStartOrSolo(0, clip, false, doInstant, true, 1, true,
 			                                 ArmState::ON_TO_SOLO); // Force "late start" if user holding shift button
 		}
 	}

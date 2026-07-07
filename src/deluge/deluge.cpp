@@ -40,6 +40,7 @@
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
 #include "hid/display/seven_segment.h"
+#include "hid/encoder_input.h"
 #include "hid/encoders.h"
 #include "hid/led/indicator_leds.h"
 #include "hid/led/pad_leds.h"
@@ -70,9 +71,7 @@
 #include "util/pack.h"
 #include <stdlib.h>
 
-#if AUTOMATED_TESTER_ENABLED
-#include "testing/automated_tester.h"
-#endif
+#include "RZA1/cache/cache.h"
 
 extern "C" {
 #include "RZA1/gpio/gpio.h"
@@ -140,10 +139,8 @@ void inputRoutine() {
 		renderUIsForOled();
 	}
 
-	if (!ALLOW_SPAM_MODE) {
-		bool speakerOn = (!AudioEngine::headphonesPluggedIn && !outputPluggedInL && !outputPluggedInR);
-		setOutputState(SPEAKER_ENABLE.port, SPEAKER_ENABLE.pin, speakerOn);
-	}
+	bool speakerOn = (!AudioEngine::headphonesPluggedIn && !outputPluggedInR && !outputPluggedInL);
+	setOutputState(SPEAKER_ENABLE.port, SPEAKER_ENABLE.pin, speakerOn);
 
 	AudioEngine::renderInStereo =
 	    (AudioEngine::headphonesPluggedIn || outputPluggedInR || AudioEngine::isAnyInternalRecordingHappening());
@@ -261,36 +258,6 @@ bool readButtonsAndPads() {
 		waitingForSDRoutineToEnd = false;
 	}
 
-#if SD_TEST_MODE_ENABLED_SAVE_SONGS
-	if (!inSDRoutine && playbackHandler.playbackState && getCurrentUI() == &instrumentClipView) {
-		openUI(&saveSongUI);
-
-		QwertyUI::enteredText.set("T001");
-
-		saveSongUI.performSave(true);
-	}
-#endif
-
-#if RECORDING_TEST_ENABLED
-	if (!inSDRoutine && (int32_t)(AudioEngine::audioSampleTimer - timeNextSDTestAction) >= 0) {
-		if (playbackHandler.playbackState) {
-
-			D_PRINTLN("");
-			D_PRINTLN("undoing");
-			Buttons::buttonAction(deluge::hid::button::BACK, true, sdRoutineLock);
-		}
-		else {
-			D_PRINTLN("");
-			D_PRINTLN("beginning playback");
-			Buttons::buttonAction(deluge::hid::button::PLAY, true, sdRoutineLock);
-		}
-
-		int32_t random = getRandom255();
-
-		timeNextSDTestAction = AudioEngine::audioSampleTimer + ((random) << 9);
-	}
-#endif
-
 	PIC::Response value{0};
 	bool anything = uartGetChar(UART_ITEM_PIC, (char*)&value);
 	if (anything) {
@@ -345,60 +312,6 @@ bool readButtonsAndPads() {
 		indicator_leds::setLedState(indicator_leds::LED::SHIFT, Buttons::isShiftButtonPressed());
 	}
 
-#if SD_TEST_MODE_ENABLED_LOAD_SONGS
-
-	if (playbackHandler.currentlyPlaying) {
-		if (getCurrentUI()->isViewScreen()) {
-			Buttons::buttonAction(deluge::hid::button::LOAD, true);
-			Buttons::buttonAction(deluge::hid::button::LOAD, false);
-			alreadyDoneScroll = false;
-		}
-		else if (getCurrentUI() == &loadSongUI && currentUIMode == noSubMode) {
-			if (!alreadyDoneScroll) {
-				getCurrentUI()->selectEncoderAction(1);
-				alreadyDoneScroll = true;
-			}
-			else {
-				Buttons::buttonAction(deluge::hid::button::LOAD, true);
-				Buttons::buttonAction(deluge::hid::button::LOAD, false);
-			}
-		}
-	}
-#endif
-
-#if UNDO_REDO_TEST_ENABLED
-	if (playbackHandler.currentlyPlaying && (int32_t)(AudioEngine::audioSampleTimer - timeNextSDTestAction) >= 0) {
-
-		int32_t random0 = getRandom255();
-		preLoadedSong = NULL;
-
-		if (random0 < 64 && getCurrentUI() == &instrumentClipView) {
-			Buttons::buttonAction(deluge::hid::button::song, true);
-		}
-
-		else if (random0 < 120)
-			actionLogger.revert(BEFORE);
-		else
-			actionLogger.revert(AFTER);
-
-		int32_t random = getRandom255();
-		timeNextSDTestAction = AudioEngine::audioSampleTimer + ((random) << 4); // * 44 / 13;
-		anything = true;
-	}
-#endif
-
-#if LAUNCH_CLIP_TEST_ENABLED
-	if (playbackHandler.playbackState && (int32_t)(audioDriver.audioSampleTimer - timeNextSDTestAction) >= 0) {
-		Buttons::buttonAction(SHIFT, true, false);
-		matrixDriver.padAction(kDisplayWidth, getRandom255() & 7, true, inSDRoutine);
-		Buttons::buttonAction(SHIFT, false, false);
-		int32_t random = getRandom255();
-		timeNextSDTestAction = audioDriver.audioSampleTimer + ((random) << 4); // * 44 / 13;
-		anything = true;
-	}
-
-#endif
-
 	return anything;
 }
 void readButtonsAndPadsOnce() {
@@ -447,7 +360,13 @@ void setUIForLoadedSong(Song* song) {
 }
 
 void setupBlankSong() {
-	void* songMemory = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(Song)); // TODO: error checking
+	void* songMemory = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(Song));
+	if (songMemory == nullptr) {
+		// No RAM for even a blank Song. This is the last-resort fallback (we get here when we have no song at all), so
+		// there's nothing left to do but fail loudly with a code rather than placement-new a Song into a null pointer.
+		FREEZE_WITH_ERROR("E454");
+		return;
+	}
 	preLoadedSong = new (songMemory) Song();
 
 	preLoadedSong->paramManager.setupUnpatched(); // TODO: error checking
@@ -613,8 +532,10 @@ void registerTasks() {
 	AudioEngine::routine_task_id = addRepeatingTask(&(AudioEngine::routine_task), p++, 8 / 44100., 64 / 44100.,
 	                                                128 / 44100., "audio  routine", RESOURCE_NONE);
 	addRepeatingTask(MidiEngine::check_incoming_usb, p++, 0.0005, 0.0005, 0.001, "check usb midi", RESOURCE_USB);
-	// this one runs quickly and frequently to check for encoder changes
-	addRepeatingTask([]() { encoders::readEncoders(); }, p++, 0.0002, 0.0004, 0.0005, "read encoders", RESOURCE_NONE);
+
+	// this will block itself unless an encoder is actually moved so can have a fast rate
+	encoders::EncoderTaskID = addRepeatingTask(&(encoders::interpretEncodersTask), p++, 0.001, 0.001, 0.002,
+	                                           "interpret encoders fast", RESOURCE_NONE);
 	// formerly part of audio routine, updates midi and clock
 	addRepeatingTask([]() { playbackHandler.routine(); }, p++, 0.0005, 0.001, 0.002, "playback routine", RESOURCE_NONE);
 	midiEngine.routine_task_id = addRepeatingTask([]() { playbackHandler.midiRoutine(); }, p++, 0.0005, 0.001, 0.002,
@@ -628,13 +549,9 @@ void registerTasks() {
 
 	// 11-19: Medium priority (20 for dyn tasks)
 	p = 11;
-	addRepeatingTask([]() { encoders::interpretEncoders(true); }, p++, 0.002, 0.003, 0.006, "interpret encoders fast",
-	                 RESOURCE_NONE);
+
 	// 30 Hz update desired?
 	addRepeatingTask(&doAnyPendingUIRendering, p++, 0.01, 0.01, 0.03, "pending UI", RESOURCE_NONE);
-	// this one actually actions them
-	addRepeatingTask([]() { encoders::interpretEncoders(false); }, p++, 0.005, 0.005, 0.01, "interpret encoders slow",
-	                 RESOURCE_SD_ROUTINE);
 
 	// Check for and handle queued SysEx traffic
 	addRepeatingTask([]() { smSysex::handleNextSysEx(); }, p++, 0.0002, 0.0002, 0.01, "Handle pending SysEx traffic.",
@@ -684,7 +601,6 @@ void mainLoop() {
 			count++;
 		}
 
-		encoders::readEncoders();
 		bool anything = encoders::interpretEncoders();
 		if (anything) {
 			AudioEngine::routineWithClusterLoading(true);
@@ -700,10 +616,6 @@ void mainLoop() {
 		AudioEngine::slowRoutine();
 
 		audioRecorder.slowRoutine();
-
-#if AUTOPILOT_TEST_ENABLED
-		autoPilotStuff();
-#endif
 	}
 }
 extern "C" int32_t deluge_main(void) {
@@ -726,10 +638,6 @@ extern "C" int32_t deluge_main(void) {
 	PIC::flush();
 
 	functionsInit();
-
-#if AUTOMATED_TESTER_ENABLED
-	AutomatedTester::init();
-#endif
 
 	currentPlaybackMode = &session;
 
@@ -813,10 +721,6 @@ extern "C" int32_t deluge_main(void) {
 	setOutputState(CODEC.port, CODEC.pin, 1); // Enable codec
 
 	AudioEngine::init();
-
-#if HARDWARE_TEST_MODE
-	ramTestLED();
-#endif
 
 	audioFileManager.init();
 
@@ -984,6 +888,7 @@ extern "C" int32_t deluge_main(void) {
 	uiTimerManager.setTimer(TimerName::GRAPHICS_ROUTINE, 50);
 
 	D_PRINTLN("going into main loop");
+	L2CacheUnlockData();
 	sdRoutineLock = false; // Allow SD routine to start happening
 
 #ifdef USE_TASK_MANAGER
@@ -994,8 +899,6 @@ extern "C" int32_t deluge_main(void) {
 #endif
 	return 0;
 }
-
-bool inSpamMode = false;
 
 extern "C" void logAudioAction(char const* string) {
 	AudioEngine::logAction(string);
@@ -1069,7 +972,6 @@ extern "C" void routineForSD(void) {
 		step = UIStage::readEnc;
 		break;
 	case UIStage::readEnc:
-		encoders::readEncoders();
 		encoders::interpretEncoders(true);
 		step = UIStage::readButtons;
 		break;
@@ -1122,317 +1024,3 @@ void deleteOldSongBeforeLoadingNew() {
 	toDelete->~Song();
 	delugeDealloc(toDelete);
 }
-
-#if ALLOW_SPAM_MODE
-
-#define NUM_SPAM_THINGS 9
-
-#define SPAM_RAM 0
-#define SPAM_SD 1
-#define SPAM_PIC 2
-#define SPAM_USB 3
-#define SPAM_MIDI 4
-#define SPAM_AUDIO 5
-#define SPAM_CV 6
-#define SPAM_GATE 7
-#define SPAM_CLOCK 8
-
-bool spamStates[NUM_SPAM_THINGS];
-int32_t currentSpamThing = 0;
-
-void redrawSpamDisplay() {
-	char* thingName;
-	switch (currentSpamThing) {
-	case SPAM_RAM:
-		thingName = "RAM";
-		break;
-
-	case SPAM_SD:
-		thingName = "SD";
-		break;
-
-	case SPAM_PIC:
-		thingName = "PIC";
-		break;
-
-	case SPAM_USB:
-		thingName = "USB";
-		break;
-
-	case SPAM_MIDI:
-		thingName = "MIDI";
-		break;
-
-	case SPAM_AUDIO:
-		thingName = "AUDIO";
-		break;
-
-	case SPAM_CV:
-		thingName = "CV";
-		break;
-
-	case SPAM_GATE:
-		thingName = "GATE";
-		break;
-
-	case SPAM_CLOCK:
-		thingName = "CLOCK";
-		break;
-	}
-
-	display->setText(thingName, false, spamStates[currentSpamThing] ? 3 : 255);
-}
-
-void spamMode() {
-	inSpamMode = true;
-	memset(spamStates, 1, sizeof(spamStates));
-
-	uint32_t* ramReadAddress = (uint32_t*)0x0C000000;
-	uint32_t* ramWriteAddress = (uint32_t*)0x0E000000;
-
-	int32_t cvChannel = 0;
-
-	bool sdReading = false;
-	bool sdFileCurrentlyOpen = false;
-	int32_t sdTotalBytesWritten = 0;
-
-	uint16_t timeLastCV = 0;
-	uint16_t timeLastPIC = 0;
-	uint16_t timeLastMIDI = 0;
-	uint16_t timeLastUSB = 0;
-	int32_t lastCol = 0;
-
-	FIL fil; // File object
-	FATFS fs;
-	DIR dp;
-	FRESULT result; //	 FatFs return code
-
-	redrawSpamDisplay();
-
-	setOutputState(SPEAKER_ENABLE_1, SPEAKER_ENABLE_2, 1); // Speaker on
-
-	uint32_t thisPicTime = 0;
-
-	while (true) {
-
-		AudioEngine::routine();
-
-		if (spamStates[SPAM_RAM]) {
-			*ramWriteAddress = ~(uint32_t)ramWriteAddress - (*ramReadAddress >> 16);
-			if (++ramReadAddress == (uint32_t*)0x10000000)
-				ramReadAddress = (uint32_t*)0x0C000000;
-			if (++ramWriteAddress == (uint32_t*)0x10000000)
-				ramWriteAddress = (uint32_t*)0x0C000000;
-		}
-
-		if (spamStates[SPAM_USB]) {
-			uint16_t timeSince = (uint16_t)MTU2.TCNT_0 - timeLastUSB;
-			if (timeSince >= 4010) {
-				timeLastUSB = MTU2.TCNT_0;
-
-				midiEngine.sendUsbMidi(0x09, 5, getRandom255(), getRandom255());
-				midiEngine.flushMIDI();
-			}
-		}
-
-		if (spamStates[SPAM_MIDI]) {
-			uint16_t timeSince = (uint16_t)MTU2.TCNT_0 - timeLastMIDI;
-			if (timeSince >= 2994) {
-				timeLastMIDI = MTU2.TCNT_0;
-
-				midiEngine.sendSerialMidi(0x09, 5, getRandom255(), getRandom255());
-				midiEngine.flushMIDI();
-			}
-		}
-
-		if (spamStates[SPAM_CV]) {
-
-			uint16_t timeSince = (uint16_t)MTU2.TCNT_0 - timeLastCV;
-			if (timeSince >= 9001) {
-				timeLastCV = MTU2.TCNT_0;
-
-				uint16_t voltage = getRandom255();
-				voltage <<= 8;
-				voltage |= getRandom255();
-
-				cvEngine.sendVoltageOut(cvChannel, voltage);
-				cvChannel = (cvChannel + 1) % 2;
-			}
-		}
-
-		if (spamStates[SPAM_SD]) {
-
-			// Writing
-			if (!sdReading) {
-				// Open file for first time
-				if (!sdFileCurrentlyOpen) {
-					result = f_open(&fil, "written.txt", FA_CREATE_ALWAYS | FA_WRITE);
-					if (result) {
-						// D_PRINTLN("couldn't create");
-					}
-					else {
-						if (spamStates[SPAM_MIDI])
-							D_PRINTLN("writing");
-						sdFileCurrentlyOpen = true;
-					}
-				}
-
-				// Write to open file
-				else {
-					UINT bytesWritten = 0;
-					char thisByte = getRandom255();
-					result = f_write(&fil, &thisByte, 1, &bytesWritten);
-					// if (result) D_PRINTLN("couldn't write");
-
-					sdTotalBytesWritten++;
-
-					if (sdTotalBytesWritten > 1000 * 5) {
-						f_close(&fil);
-						// D_PRINTLN("finished writing");
-						sdReading = true;
-						sdFileCurrentlyOpen = false;
-					}
-				}
-			}
-
-			// Reading
-			else {
-
-				// Open file for first time
-				if (!sdFileCurrentlyOpen) {
-
-					result = f_open(&fil, "written.txt", FA_READ);
-					if (result) {
-						// D_PRINTLN("file not found");
-					}
-
-					else {
-						if (spamStates[SPAM_MIDI])
-							D_PRINTLN("reading");
-						sdFileCurrentlyOpen = true;
-					}
-				}
-
-				// Read open file
-				else {
-					UINT bytesRead;
-
-					char thisByte;
-					result = f_read(&fil, &thisByte, 1, &bytesRead);
-
-					if (bytesRead <= 0) {
-						f_close(&fil);
-						// D_PRINTLN("finished file");
-						sdReading = false;
-						sdFileCurrentlyOpen = false;
-						sdTotalBytesWritten = 0;
-					}
-				}
-			}
-		}
-
-		if (spamStates[SPAM_PIC]) {
-
-			uint16_t timeSince = (uint16_t)(MTU2.TCNT_0 - timeLastPIC);
-			if (timeSince >= 5000) {
-				timeLastPIC = MTU2.TCNT_0;
-
-				Debug::putChar(UART_CHANNEL_PIC, lastCol + 1);
-				for (int32_t i = 0; i < 16; i++) {
-					int32_t whichColour = getRandom255() % 3;
-					for (int32_t colour = 0; colour < 3; colour++) {
-						if (colour == whichColour && (getRandom255() % 3) == 0)
-							Debug::putChar(UART_CHANNEL_PIC, getRandom255());
-						else
-							Debug::putChar(UART_CHANNEL_PIC, 0);
-					}
-				}
-
-				lastCol = (lastCol + 1) % 9;
-			}
-		}
-
-		// Selector
-		readEncoders();
-
-		// Select encoder
-		int32_t limitedDetentPos = encoders[ENCODER_SELECT].detentPos;
-		encoders[ENCODER_SELECT].detentPos = 0; // Reset. Crucial that this happens before we call selectEncoderAction()
-
-		if (limitedDetentPos != 0) {
-			currentSpamThing += limitedDetentPos;
-			if (currentSpamThing == NUM_SPAM_THINGS)
-				currentSpamThing = 0;
-			else if (currentSpamThing == -1)
-				currentSpamThing = NUM_SPAM_THINGS - 1;
-
-			redrawSpamDisplay();
-		}
-
-		// Vertical encoder
-		limitedDetentPos = encoders[ENCODER_SCROLL_Y].detentPos;
-		encoders[ENCODER_SCROLL_Y].detentPos =
-		    0; // Reset. Crucial that this happens before we call selectEncoderAction()
-		if (limitedDetentPos != 0) {
-			spamStates[currentSpamThing] = !spamStates[currentSpamThing];
-			redrawSpamDisplay();
-
-			// Audio
-			if (currentSpamThing == SPAM_AUDIO) {
-
-				// Disable
-				if (!spamStates[currentSpamThing]) {
-					setPinAsInput(7, 11);
-					setPinAsInput(6, 9);
-					setPinAsInput(6, 10);
-					setPinAsInput(6, 8);
-					setPinAsInput(6, 11);
-
-					setOutputState(6, 12, 0); // Switch codec off
-
-					setOutputState(SPEAKER_ENABLE_1, SPEAKER_ENABLE_2, 0); // Speaker off
-				}
-
-				// Enable
-				else {
-					setPinMux(7, 11, 6);      // AUDIO_XOUT
-					setPinMux(6, 9, 3);       // SSI0 word select
-					setPinMux(6, 10, 3);      // SSI0 tx
-					setPinMux(6, 8, 3);       // SSI0 serial clock
-					setPinMux(6, 11, 3);      // SSI0 rx
-					setOutputState(6, 12, 1); // Switch codec on
-
-					setOutputState(SPEAKER_ENABLE_1, SPEAKER_ENABLE_2, 1); // Speaker on
-				}
-			}
-
-			// PIC
-			else if (currentSpamThing == SPAM_PIC) {
-
-				// Disable
-				if (!spamStates[currentSpamThing]) {
-					Debug::putChar(UART_CHANNEL_PIC, 227);
-				}
-
-				// Enable
-				else {}
-			}
-
-			// Clock
-			else if (currentSpamThing == SPAM_CLOCK) {
-
-				// Disable
-				if (!spamStates[currentSpamThing]) {
-					CPG.FRQCR |= 0b0011000000000000;
-				}
-
-				// Enable
-				else {
-					CPG.FRQCR &= ~0b0011000000000000;
-				}
-			}
-		}
-	}
-}
-
-#endif

@@ -2723,8 +2723,9 @@ void Sound::render(ModelStackWithThreeMainThings* modelStack, std::span<StereoSa
 		}
 
 		if (!voice_rendered_in_stereo) {
-			// Clear the non-overlapping portion of the stereo buffer (yes this is janky)
-			memset(&sound_mono[sound_mono.size()], 0, sound_stereo.size_bytes() - sound_mono.size_bytes());
+			// Clear the non-overlapping portion of the stereo buffer (yes this is janky).
+			// (data() + size(), not &operator[](size()): indexing one-past-end is UB.)
+			memset(sound_mono.data() + sound_mono.size(), 0, sound_stereo.size_bytes() - sound_mono.size_bytes());
 		}
 	}
 
@@ -2924,7 +2925,7 @@ void Sound::startSkippingRendering(ModelStackWithSoundFlags* modelStack) {
 
 	setSkippingRendering(true);
 	gateOpen = true;
-	if (grainFX) {
+	if (grainFX) { // grainFX is null unless GRAIN mod-FX has been used — guard like every other access
 		grainFX->startSkippingRendering();
 	}
 	stopParamLPF(modelStack);
@@ -3762,8 +3763,11 @@ void Sound::setNumUnison(int32_t newNum, ModelStackWithSoundFlags* modelStack) {
 							VoiceSample& newVoiceSample = *newPart->voiceSample;
 							VoiceSample& oldVoiceSample = *oldPart->voiceSample;
 
-							// Just clones the SampleLowLevelReader stuff
-							newVoiceSample = SampleLowLevelReader(oldVoiceSample);
+							// Just clones the SampleLowLevelReader stuff - assign through the base subobject so this
+							// can't slice via the implicit VoiceSample(SampleLowLevelReader&&) conversion and clobber
+							// the derived members (timeStretcher/cache). See the matching guard in
+							// TimeStretcher::hopEnd.
+							static_cast<SampleLowLevelReader&>(newVoiceSample) = SampleLowLevelReader(oldVoiceSample);
 							newVoiceSample.pendingSamplesLate = oldVoiceSample.pendingSamplesLate;
 							newVoiceSample.pingpongPlayDirection = oldVoiceSample.pingpongPlayDirection;
 							newVoiceSample.doneFirstRenderYet = true;
@@ -5958,7 +5962,12 @@ void Sound::killAllVoices() {
 }
 
 const Sound::ActiveVoice& Sound::getLowestPriorityVoice() const {
-	return *std::ranges::max_element(voices_);
+	// Compare by Voice priority (Voice::operator<=> on getPriorityRating()), NOT by the unique_ptr's
+	// pointer value. `voices_` holds ActiveVoice == std::unique_ptr<Voice>, whose default ordering is by
+	// address — so a bare max_element(voices_) selects the highest-addressed voice, which is both
+	// semantically wrong (culls an arbitrary voice, not the lowest-priority one) and heap-layout-dependent
+	// (it made the offline golden render depend on allocation addresses — see docs/dev/overread_hunt.md).
+	return *std::ranges::max_element(voices_, [](const auto& a, const auto& b) { return *a < *b; });
 }
 
 const Sound::ActiveVoice& Sound::stealOneActiveVoice() {

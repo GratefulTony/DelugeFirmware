@@ -32,6 +32,7 @@
 #include "gui/ui_timer_manager.h"
 #include "gui/views/view.h"
 #include "hid/display/display.h"
+#include "hid/encoder_input.h"
 #include "hid/encoders.h"
 #include "hid/led/indicator_leds.h"
 #include "io/debug/fx_benchmark.h"
@@ -77,10 +78,6 @@ extern "C" void routineForSD(void);
 
 namespace params = deluge::modulation::params;
 
-#if AUTOMATED_TESTER_ENABLED
-#include "testing/automated_tester.h"
-#endif
-
 extern "C" {
 #include "RZA1/mtu/mtu.h"
 #include "drivers/ssi/ssi.h"
@@ -102,8 +99,6 @@ uint32_t disableInterrupts[] = {INTC_ID_SPRI0,
 
 using namespace deluge;
 
-extern bool inSpamMode;
-extern bool anythingProbablyPressed;
 extern int32_t spareRenderingBuffer[][SSI_TX_BUFFER_NUM_SAMPLES];
 
 // #define REPORT_CPU_USAGE 1
@@ -283,6 +278,9 @@ bool definitelyLog = false;
 
 uint16_t audioLogTimes[AUDIO_LOG_SIZE];
 char audioLogStrings[AUDIO_LOG_SIZE][64];
+const char* audioLogFiles[AUDIO_LOG_SIZE];
+int audioLogLines[AUDIO_LOG_SIZE];
+
 int32_t numAudioLogItems = 0;
 #endif
 
@@ -293,7 +291,10 @@ void killOneVoice(size_t num_samples) {
 	auto lowest_priority_voices = sounds //<
 	                              | std::views::filter(&Sound::hasActiveVoices)
 	                              | std::views::transform(&Sound::getLowestPriorityVoice);
-	auto it = std::ranges::max_element(lowest_priority_voices);
+	// Compare by Voice priority, not by the ActiveVoice (unique_ptr) pointer value — a bare max_element
+	// orders by address, picking a heap-layout-dependent (and semantically arbitrary) voice to cull. See
+	// Sound::getLowestPriorityVoice and docs/dev/overread_hunt.md.
+	auto it = std::ranges::max_element(lowest_priority_voices, [](const auto& a, const auto& b) { return *a < *b; });
 	if (it == lowest_priority_voices.end()) {
 		return;
 	}
@@ -463,8 +464,6 @@ void cullVoices(size_t numSamples, int32_t numAudio, int32_t numVoice) {
 			forceReleaseOneVoice(numSamples);
 
 #if ALPHA_OR_BETA_VERSION
-
-			definitelyLog = true;
 			logAction("hard cull");
 
 #endif
@@ -530,9 +529,6 @@ inline void setDireness(size_t numSamples) { // Consider direness and culling - 
 
 			int32_t num_samples_over_limit = (int32_t)numSamples - numSamplesLimit;
 			if (num_samples_over_limit >= 0) {
-#if DO_AUDIO_LOG
-				definitelyLog = true;
-#endif
 				D_PRINTLN("numSamples %d, numVoice %d, numAudio %d", numSamples, numVoice, numAudio);
 				logAction("skipped cull");
 			}
@@ -560,7 +556,7 @@ void setMonitoringMode();
 void renderSongFX(size_t numSamples);
 void renderSamplePreview(size_t numSamples);
 void renderReverb(size_t numSamples);
-void tickSongFinalizeWindows(size_t& numSamples, int32_t& timeWithinWindowAtWhichMIDIOrGateOccurs);
+int32_t tickSongFinalizeWindows(size_t& numSamples);
 void flushMIDIGateBuffers();
 void renderAudio(size_t numSamples);
 void renderAudioForStemExport(size_t numSamples);
@@ -594,9 +590,6 @@ bool calledFromScheduler = false;
 		}
 		return;
 	}
-#if AUTOMATED_TESTER_ENABLED
-	AutomatedTester::possiblyDoSomething();
-#endif
 	flushMIDIGateBuffers();
 	setDireness(numSamples);
 
@@ -611,9 +604,9 @@ bool calledFromScheduler = false;
 		if (samplesOverThreshold > 0) {
 			samplesOverThreshold = samplesOverThreshold << 1;
 			numSamples = sampleThreshold + samplesOverThreshold;
-			numSamples = std::min(numSamples, maxAdjustedNumSamples);
 		}
 	}
+	numSamples = std::min(numSamples, maxAdjustedNumSamples);
 
 	// Want to round to be doing a multiple of 4 samples, so the NEON functions can be utilized most efficiently.
 	// Note - this can take numSamples up as high as SSI_TX_BUFFER_NUM_SAMPLES (currently 128).
@@ -622,8 +615,7 @@ bool calledFromScheduler = false;
 	}
 	voices_started_this_render = 0;
 
-	int32_t timeWithinWindowAtWhichMIDIOrGateOccurs;
-	tickSongFinalizeWindows(numSamples, timeWithinWindowAtWhichMIDIOrGateOccurs);
+	int32_t timeWithinWindowAtWhichMIDIOrGateOccurs = tickSongFinalizeWindows(numSamples);
 
 	numSamplesLastTime = numSamples;
 
@@ -732,6 +724,7 @@ void flushMIDIGateBuffers() { // Flush everything out of the MIDI buffer now. At
 	                          // live user-triggered
 	// output and MIDI THRU in it. We want any messages like "start" to go out before we send any clocks below, and
 	// also want to give them a head-start being sent and out of the way so the clock messages can be sent on-time
+	CriticalSectionGuard guard;
 	bool anythingInMidiOutputBufferNow = midiEngine.anythingInOutputBuffer();
 	bool anythingInGateOutputBufferNow = cvEngine.isAnythingButRunPending();
 	if (anythingInMidiOutputBufferNow || anythingInGateOutputBufferNow) {
@@ -750,8 +743,9 @@ void flushMIDIGateBuffers() { // Flush everything out of the MIDI buffer now. At
 		}
 	}
 }
-void tickSongFinalizeWindows(size_t& numSamples, int32_t& timeWithinWindowAtWhichMIDIOrGateOccurs) {
-	timeWithinWindowAtWhichMIDIOrGateOccurs = -1; // -1 means none
+
+int32_t tickSongFinalizeWindows(size_t& numSamples) {
+	int32_t timeWithinWindowAtWhichMIDIOrGateOccurs = -1; // -1 means none
 
 	// If a timer-tick is due during or directly after this window of audio samples...
 	if (playbackHandler.isEitherClockActive()) {
@@ -801,32 +795,45 @@ startAgain:
 
 		// And now we know how long the window's definitely going to be, see if we want to do any trigger clock or
 		// MIDI clock out ticks during it
-		if (!stemExport.processStarted || (stemExport.processStarted && !stemExport.renderOffline)) {
-			if (playbackHandler.triggerClockOutTickScheduled) {
-				int32_t timeTilTriggerClockOutTick = playbackHandler.timeNextTriggerClockOutTick - audioSampleTimer;
-				if (timeTilTriggerClockOutTick < numSamples) {
-					playbackHandler.doTriggerClockOutTick();
-					playbackHandler.scheduleTriggerClockOutTick(); // Schedules another one
+		if (!stemExport.renderingOffline()) {
+			// only send trigger clock out if you've enabled it
+			if (cvEngine.isTriggerClockOutputEnabled()) {
+				if (playbackHandler.triggerClockOutTickScheduled) {
+					int32_t timeTilTriggerClockOutTick = playbackHandler.timeNextTriggerClockOutTick - audioSampleTimer;
+					if (std::cmp_less(timeTilTriggerClockOutTick, numSamples)) {
+						playbackHandler.doTriggerClockOutTick();
+						playbackHandler.scheduleTriggerClockOutTick(); // Schedules another one
 
-					if (timeWithinWindowAtWhichMIDIOrGateOccurs == -1) {
-						timeWithinWindowAtWhichMIDIOrGateOccurs = timeTilTriggerClockOutTick;
+						if (timeWithinWindowAtWhichMIDIOrGateOccurs == -1) {
+							timeWithinWindowAtWhichMIDIOrGateOccurs = timeTilTriggerClockOutTick;
+						}
 					}
+				}
+				else {
+					playbackHandler.scheduleTriggerClockOutTick();
 				}
 			}
 
-			if (playbackHandler.midiClockOutTickScheduled) {
-				int32_t timeTilMIDIClockOutTick = playbackHandler.timeNextMIDIClockOutTick - audioSampleTimer;
-				if (timeTilMIDIClockOutTick < numSamples) {
-					playbackHandler.doMIDIClockOutTick();
-					playbackHandler.scheduleMIDIClockOutTick(); // Schedules another one
+			// only send midi clock out if you've enabled it
+			if (playbackHandler.currentlySendingMIDIOutputClocks()) {
+				if (playbackHandler.midiClockOutTickScheduled) {
+					int32_t timeTilMIDIClockOutTick = playbackHandler.timeNextMIDIClockOutTick - audioSampleTimer;
+					if (std::cmp_less(timeTilMIDIClockOutTick, numSamples)) {
+						playbackHandler.doMIDIClockOutTick();
+						playbackHandler.scheduleMIDIClockOutTick(); // Schedules another one
 
-					if (timeWithinWindowAtWhichMIDIOrGateOccurs == -1) {
-						timeWithinWindowAtWhichMIDIOrGateOccurs = timeTilMIDIClockOutTick;
+						if (timeWithinWindowAtWhichMIDIOrGateOccurs == -1) {
+							timeWithinWindowAtWhichMIDIOrGateOccurs = timeTilMIDIClockOutTick;
+						}
 					}
+				}
+				else {
+					playbackHandler.scheduleMIDIClockOutTick();
 				}
 			}
 		}
 	}
+	return timeWithinWindowAtWhichMIDIOrGateOccurs;
 }
 
 void feedReverbBackdoorForGrain(int index, q31_t value) {
@@ -1030,6 +1037,8 @@ void scheduleMidiGateOutISR(uint32_t saddrPosAtStart, int32_t unadjustedNumSampl
                             int32_t timeWithinWindowAtWhichMIDIOrGateOccurs) {
 	bool anyGateOutputPending = cvEngine.isAnythingPending();
 
+	CriticalSectionGuard guard;
+	// guard against timer firing mid check
 	if ((midiEngine.anythingInOutputBuffer() || anyGateOutputPending) && !isTimerEnabled(TIMER_MIDI_GATE_OUTPUT)) {
 
 		// I don't think this actually could still get left at -1, but just in case...
@@ -1121,11 +1130,11 @@ void routine() {
 			auto timeNow = getSystemTime();
 			while (getSystemTime() < timeNow + 32 / 44100.) {
 				size_t numSamples = 32;
-				int32_t timeWithinWindowAtWhichMIDIOrGateOccurs;
-				tickSongFinalizeWindows(numSamples, timeWithinWindowAtWhichMIDIOrGateOccurs);
+				tickSongFinalizeWindows(numSamples);
 
 				numSamplesLastTime = numSamples;
 				renderAudioForStemExport(numSamples);
+				sideChainHitPending = 0;
 				audioSampleTimer += numSamples;
 				doSomeOutputting();
 				// gross and hacky way to make sure the audio recorder writes all of its data so it can't be stolen
@@ -1226,25 +1235,6 @@ bool doSomeOutputting() {
 			}
 		}
 
-#if HARDWARE_TEST_MODE
-		// Send a square wave if anything pressed
-		if (anythingProbablyPressed) {
-			int32_t outputSample = 1 << 29;
-			if ((audioSampleTimer >> 6) & 1) {
-				outputSample = -outputSample;
-			}
-
-			i2sTXBufferPos->l = outputSample;
-			i2sTXBufferPos->r = outputSample;
-		}
-
-		// Otherwise, echo input
-		else {
-			i2sTXBufferPos->l = i2sRXBufferPos->l;
-			i2sTXBufferPos->r = i2sRXBufferPos->r;
-		}
-
-#else
 		outputBufferForResampling[numSamplesOutputted].l = lshiftAndSaturate<AUDIO_OUTPUT_GAIN_DOUBLINGS>(lAdjusted);
 		outputBufferForResampling[numSamplesOutputted].r = lshiftAndSaturate<AUDIO_OUTPUT_GAIN_DOUBLINGS>(rAdjusted);
 		if (saveRampValue == 0) {
@@ -1261,14 +1251,6 @@ bool doSomeOutputting() {
 			i2sTXBufferPosNow[0] = numSamplesOutputted % 2;
 			i2sTXBufferPosNow[1] = numSamplesOutputted % 2;
 		}
-#endif
-
-#if ALLOW_SPAM_MODE
-		if (inSpamMode) {
-			i2sTXBufferPosNow[0] = getNoise() >> 4;
-			i2sTXBufferPosNow[1] = getNoise() >> 4;
-		}
-#endif
 
 		i2sTXBufferPosNow += NUM_MONO_OUTPUT_CHANNELS;
 		if (i2sTXBufferPosNow == getTxBufferEnd()) {
@@ -1361,21 +1343,15 @@ bool doSomeOutputting() {
 	return (renderingBufferOutputPos == renderingBufferOutputEnd);
 }
 
-void logAction(char const* string) {
+void logAudioAction(char const* string, const char* file, int line) {
 #if DO_AUDIO_LOG
 	if (numAudioLogItems >= AUDIO_LOG_SIZE)
 		return;
 	audioLogTimes[numAudioLogItems] = *TCNT[TIMER_SYSTEM_FAST];
 	strcpy(audioLogStrings[numAudioLogItems], string);
+	audioLogFiles[numAudioLogItems] = file;
+	audioLogLines[numAudioLogItems] = line;
 	numAudioLogItems++;
-#endif
-}
-
-void logAction(int32_t number) {
-#if DO_AUDIO_LOG
-	char buffer[12];
-	intToString(number, buffer);
-	logAction(buffer);
 #endif
 }
 
@@ -1384,18 +1360,18 @@ void dumpAudioLog() {
 	uint16_t currentTime = *TCNT[TIMER_SYSTEM_FAST];
 	uint16_t timePassedA = (uint16_t)currentTime - lastRoutineTime;
 	uint32_t timePassedUSA = fastTimerCountToUS(timePassedA);
-	if (definitelyLog || timePassedUSA > (1000)) {
+	if (timePassedUSA > (2500)) {
 
-		D_PRINTLN("");
+		D_PRINTLN("Audio log dump");
 		for (int32_t i = 0; i < numAudioLogItems; i++) {
 			uint16_t timePassed = (uint16_t)audioLogTimes[i] - lastRoutineTime;
 			uint32_t timePassedUS = fastTimerCountToUS(timePassed);
-			D_PRINTLN("%d:  %s", timePassedUS, audioLogStrings[i]);
+			logDebug(kDebugPrintModeNewlined, audioLogFiles[i], audioLogLines[i], 256, "\t %d us:  %s", timePassedUS,
+			         audioLogStrings[i]);
 		}
 
 		D_PRINTLN("%d: end", timePassedUSA);
 	}
-	definitelyLog = false;
 	lastRoutineTime = *TCNT[TIMER_SYSTEM_FAST];
 	numAudioLogItems = 0;
 #endif

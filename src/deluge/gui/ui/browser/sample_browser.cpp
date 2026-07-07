@@ -156,7 +156,7 @@ sdError:
 			currentDir.clear();
 		}
 		else {
-			int32_t slashPos = (uint32_t)slashAddress - (uint32_t)currentPathChars;
+			int32_t slashPos = (uintptr_t)slashAddress - (uintptr_t)currentPathChars;
 			searchFilename = &currentPathChars[slashPos + 1];
 
 			currentDir.set(currentPathChars);
@@ -242,7 +242,6 @@ void SampleBrowser::currentFileChanged(int32_t movementDirection) {
 	// Can start scrolling right now, while next preview loads
 	if (movementDirection && (currentlyShowingSamplePreview || qwertyVisible) && !qwertyAlwaysVisible) {
 		qwertyVisible = false;
-		favouritesVisible = false;
 
 		uiTimerManager.unsetTimer(TimerName::SHORTCUT_BLINK);
 
@@ -490,7 +489,6 @@ ActionResult SampleBrowser::buttonAction(deluge::hid::Button b, bool on, bool in
 		indicator_leds::setLedState(IndicatorLED::KEYBOARD, qwertyAlwaysVisible);
 		qwertyVisible = qwertyAlwaysVisible;
 		if (qwertyVisible) {
-			favouritesVisible = true;
 			qwertyCurrentlyDrawnOnscreen = true;
 			drawKeys();
 		}
@@ -548,7 +546,7 @@ void SampleBrowser::previewIfPossible(int32_t movementDirection) {
 
 	/*
 	// Was this in case they've already turned the knob further?
-	if (movementDirection && movementDirection * Encoders::encoders[ENCODER_THIS_CPU_SELECT].detentPos > 0 &&
+	if (movementDirection && movementDirection * Encoders::encoders[ENCODER_THIS_CPU_SELECT].pos > 0 &&
 	numFilesFoundInRightDirection > 1) { D_PRINTLN("returned 1"); return;
 	}
 	*/
@@ -596,7 +594,7 @@ void SampleBrowser::previewIfPossible(int32_t movementDirection) {
 		}
 
 		/*
-		if (movementDirection && movementDirection * Encoders::encoders[ENCODER_THIS_CPU_SELECT].detentPos > 0 &&
+		if (movementDirection && movementDirection * Encoders::encoders[ENCODER_THIS_CPU_SELECT].pos > 0 &&
 		numFilesFoundInRightDirection > 1) { D_PRINTLN("returned 2"); return;
 		}
 		*/
@@ -714,7 +712,6 @@ possiblyExit:
 				}
 
 				qwertyVisible = true;
-				favouritesVisible = true;
 
 				uiTimerManager.unsetTimer(TimerName::SHORTCUT_BLINK);
 				PadLEDs::reassessGreyout(true);
@@ -861,6 +858,8 @@ doLoadAsWaveTable:
 			    goto doLoadAsSample;
 			}
 			*/
+			OscType current_osc_type = soundEditor.currentSource->getOscType();
+
 			soundEditor.currentSource->setOscType(OscType::WAVETABLE);
 
 			error = claimAudioFileForInstrument(makeWaveTableWorkAtAllCosts);
@@ -890,21 +889,24 @@ doLoadAsWaveTable:
 
 			// Alright, if we're still here, it was successfully loaded as a WaveTable!
 
-			if (soundEditor.currentSourceIndex == 0) { // Osc 1
-				soundEditor.currentSound->modKnobs[7][1].paramDescriptor.setToHaveParamOnly(
-				    params::LOCAL_OSC_A_WAVE_INDEX);
+			// if oscillator wasn't already a wavetable, update custom knob assignments, otherwise leave as is
+			if (current_osc_type != OscType::WAVETABLE) {
+				if (soundEditor.currentSourceIndex == 0) { // Osc 1
+					soundEditor.currentSound->modKnobs[7][1].paramDescriptor.setToHaveParamOnly(
+					    params::LOCAL_OSC_A_WAVE_INDEX);
 
-				if (!soundEditor.currentSound->modKnobs[7][0].paramDescriptor.isSetToParamWithNoSource(
-				        params::LOCAL_OSC_B_WAVE_INDEX)) {
-					soundEditor.currentSound->modKnobs[7][0].paramDescriptor.setToHaveParamAndSource(
-					    params::LOCAL_OSC_A_WAVE_INDEX, PatchSource::LFO_LOCAL_1);
+					if (!soundEditor.currentSound->modKnobs[7][0].paramDescriptor.isSetToParamWithNoSource(
+					        params::LOCAL_OSC_B_WAVE_INDEX)) {
+						soundEditor.currentSound->modKnobs[7][0].paramDescriptor.setToHaveParamAndSource(
+						    params::LOCAL_OSC_A_WAVE_INDEX, PatchSource::LFO_LOCAL_1);
+					}
 				}
+				else { // Osc 2
+					soundEditor.currentSound->modKnobs[7][0].paramDescriptor.setToHaveParamOnly(
+					    params::LOCAL_OSC_B_WAVE_INDEX);
+				}
+				getCurrentOutput()->modKnobMode = 7;
 			}
-			else { // Osc 2
-				soundEditor.currentSound->modKnobs[7][0].paramDescriptor.setToHaveParamOnly(
-				    params::LOCAL_OSC_B_WAVE_INDEX);
-			}
-			getCurrentOutput()->modKnobMode = 7;
 			view.setKnobIndicatorLevels(); // Visually update.
 			view.setModLedStates();
 		}
@@ -999,7 +1001,7 @@ doLoadAsSample:
 				autoDetectSideChainSending(drum, soundEditor.currentSource, enteredText.get());
 
 				// Give Drum no name, momentarily. We don't want it to show up when we're searching for duplicates
-				drum->name.clear();
+				drum->drumName.clear();
 
 				String newName;
 				if (!numCharsInPrefix || display->haveOLED()) {
@@ -1023,7 +1025,7 @@ doLoadAsSample:
 					}
 				}
 
-				drum->name.set(&newName);
+				drum->drumName = newName.get();
 			}
 
 			// If a synth...
@@ -1998,7 +2000,7 @@ getOut:
 				char const* newNameChars = newName.get();
 				char const* dotAddress = strrchr(newNameChars, '.');
 				if (dotAddress) {
-					int32_t dotPos = (uint32_t)dotAddress - (uint32_t)newNameChars;
+					int32_t dotPos = (uintptr_t)dotAddress - (uintptr_t)newNameChars;
 					newName.shorten(dotPos);
 				}
 
@@ -2009,7 +2011,7 @@ getOut:
 					}
 				}
 
-				drum->name.set(&newName);
+				drum->drumName = newName.get();
 			}
 skipNameStuff:
 
@@ -2075,7 +2077,6 @@ ActionResult SampleBrowser::horizontalEncoderAction(int32_t offset) {
 	}
 	else {
 		qwertyVisible = true;
-		favouritesVisible = true;
 
 		uiTimerManager.unsetTimer(TimerName::SHORTCUT_BLINK);
 		PadLEDs::reassessGreyout(true);

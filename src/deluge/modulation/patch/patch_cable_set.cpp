@@ -335,7 +335,7 @@ goAgainWithoutIncrement:
 		if (patchCables[c].param.isAutomated()) {
 			flagCable(modelStack->summary->whichParamsAreAutomated, c);
 
-			if (patchCables[c].param.valueIncrementPerHalfTick) {
+			if (patchCables[c].param.hasInterpolationIncrement()) {
 				flagCable(modelStack->summary->whichParamsAreInterpolating, c);
 			}
 		}
@@ -482,6 +482,16 @@ bool PatchCableSet::patchCableIsUsable(uint8_t c, ModelStackWithThreeMainThings 
 		return false; // When would this ever be the case?
 	}
 
+	// An unresolved range placeholder: readPatchCablesFromFile() rewrites these into
+	// (param, source) form when it can identify the range-adjusted cable; a leftover
+	// bare PLACEHOLDER_RANGE (e.g. from old-firmware files whose "range" cables can't
+	// be resolved) must never reach the patcher — PLACEHOLDER_RANGE (89) classifies as
+	// a "global param" and the patcher would index paramFinalValues[89 - FIRST_GLOBAL],
+	// 34 entries out of bounds (a silent memory-corrupting write on hardware).
+	if (ourDescriptor->isSetToParamWithNoSource(params::PLACEHOLDER_RANGE)) {
+		return false;
+	}
+
 	int32_t p = ourDescriptor->getJustTheParam();
 
 	// If a range-adjusting cable, we'll go by whether the cable that it adjusts is allowed. This is nearly perfect and
@@ -593,7 +603,7 @@ void PatchCableSet::playbackHasEnded(ModelStackWithParamCollection* modelStack) 
 
 	FOR_EACH_FLAGGED_PARAM(modelStack->summary->whichParamsAreInterpolating)
 
-	patchCables[c].param.valueIncrementPerHalfTick = 0;
+	patchCables[c].param.resetInterpolationIncrement();
 
 	FOR_EACH_PARAM_END
 
@@ -660,7 +670,7 @@ void PatchCableSet::trimToLength(uint32_t newLength, ModelStackWithParamCollecti
 	ModelStackWithAutoParam* modelStackWithAutoParam = modelStack->addAutoParam(paramId, param);
 	param->trimToLength(newLength, action, modelStackWithAutoParam);
 
-	if (!param->valueIncrementPerHalfTick) {
+	if (!param->hasInterpolationIncrement()) {
 		unflagCable(modelStack->summary->whichParamsAreInterpolating, c);
 
 		bool stillAutomated = param->isAutomated();
@@ -726,7 +736,7 @@ void PatchCableSet::processCurrentPos(ModelStackWithParamCollection* modelStack,
 		int32_t ticksTilNextEventThisCable = param->processCurrentPos(modelStackWithAutoParam, reversed, didPingpong);
 		ticksTilNextEvent = std::min(ticksTilNextEvent, ticksTilNextEventThisCable);
 
-		if (param->valueIncrementPerHalfTick) {
+		if (param->hasInterpolationIncrement()) {
 			flagCable(modelStack->summary->whichParamsAreInterpolating, c);
 		}
 		FOR_EACH_PARAM_END
@@ -1129,7 +1139,7 @@ void PatchCableSet::nudgeNonInterpolatingNodesAtPos(int32_t pos, int32_t offset,
 
 	param->nudgeNonInterpolatingNodesAtPos(pos, offset, lengthBeforeLoop, action, modelStackWithParam);
 
-	if (!param->valueIncrementPerHalfTick) {
+	if (!param->hasInterpolationIncrement()) {
 		unflagCable(modelStack->summary->whichParamsAreInterpolating, c);
 
 		bool stillAutomated = param->isAutomated();

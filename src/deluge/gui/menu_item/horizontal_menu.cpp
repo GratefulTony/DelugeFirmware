@@ -38,7 +38,19 @@ namespace deluge::gui::menu_item {
 using namespace hid::display;
 
 void HorizontalMenu::beginSession(MenuItem* navigatedBackwardFrom) {
+	::MultiRange* selected_range = soundEditor.currentMultiRange;
+	int16_t selected_range_index = soundEditor.currentMultiRangeIndex;
+	const bool current_child_is_range_dependent = current_item_ != items.end() && (*current_item_)->isRangeDependent();
+	const bool should_preserve_range =
+	    current_child_is_range_dependent
+	    || (navigatedBackwardFrom != nullptr && navigatedBackwardFrom->isRangeDependent());
+
 	Submenu::beginSession(navigatedBackwardFrom);
+
+	if (should_preserve_range) {
+		soundEditor.currentMultiRange = selected_range;
+		soundEditor.currentMultiRangeIndex = selected_range_index;
+	}
 
 	for (const auto it : items) {
 		it->parent = this;
@@ -123,7 +135,7 @@ void HorizontalMenu::renderOLED() {
 }
 
 void HorizontalMenu::renderTitle(const Paging& paging) const {
-	std::string_view title = getTitle();
+	std::string title{getTitle()};
 
 	// Check if we need to shorten the title
 	if (paging.totalPages > 1) {
@@ -305,6 +317,12 @@ void HorizontalMenu::selectEncoderAction(int32_t offset) {
 		return;
 	}
 
+	// check if you're permitted to edit this horizontal menu item
+	if (!child->selectEncoderActionIsPermitted()) {
+		// No action if select encoder action is not permitted
+		return;
+	}
+
 	child->selectEncoderAction(offset * calcNextKnobSpeed(offset));
 	focusChild(child);
 	displayNotification(child);
@@ -403,7 +421,17 @@ void HorizontalMenu::handleInstrumentButtonPress(std::span<MenuItem*> visible_pa
 			}
 
 			// Update the currently selected item
-			initializeItem(*current_item_);
+			const MenuPermission permission = initializeItem(*current_item_);
+
+			// Enter note range menu if we're selecting multi range item (e.g. sample transpose)
+			if (permission == MenuPermission::MUST_SELECT_RANGE
+			    && !(*current_item_)->allowToBeginSessionFromHorizontalMenu()) {
+				soundEditor.currentMultiRange = nullptr;
+				multiRangeMenu.menuItemHeadingTo = *current_item_;
+				soundEditor.enterSubmenu(&multiRangeMenu);
+				return;
+			}
+
 			updateDisplay();
 			updatePadLights();
 			return displayNotification(*current_item_);
@@ -641,10 +669,9 @@ void HorizontalMenu::handleItemAction(MenuItem* menuItem) {
 		return displayNotification(menuItem);
 	}
 
-	const auto result = menuItem->checkPermissionToBeginSession(
-	    soundEditor.currentModControllable, soundEditor.currentSourceIndex, &soundEditor.currentMultiRange);
+	const auto permission = initializeItem(menuItem);
 
-	if (result == MenuPermission::MUST_SELECT_RANGE) {
+	if (permission == MenuPermission::MUST_SELECT_RANGE) {
 		soundEditor.currentMultiRange = nullptr;
 		multiRangeMenu.menuItemHeadingTo = menuItem;
 		menuItem = &multiRangeMenu;
@@ -657,10 +684,10 @@ bool HorizontalMenu::hasItem(const MenuItem* item) {
 	return std::ranges::contains(items, item);
 }
 
-void HorizontalMenu::initializeItem(MenuItem* menuItem) {
+MenuPermission HorizontalMenu::initializeItem(MenuItem* menuItem) {
 	// if case the item is of type PatchCableStrength, we need to call this to properly set up a patch cable
-	menuItem->checkPermissionToBeginSession(soundEditor.currentModControllable, soundEditor.currentSourceIndex,
-	                                        &soundEditor.currentMultiRange);
+	return menuItem->checkPermissionToBeginSession(soundEditor.currentModControllable, soundEditor.currentSourceIndex,
+	                                               &soundEditor.currentMultiRange);
 }
 
 } // namespace deluge::gui::menu_item

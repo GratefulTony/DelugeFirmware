@@ -192,6 +192,12 @@ Time TaskManager::getAverageRunTimeForCurrentTask() const {
 }
 
 Time TaskManager::getAverageRunTimeForTask(TaskID id) const {
+	// id is unset (-1) until the task is registered — callers such as setDireness query it during
+	// early boot before the audio task is scheduled. Guard the index (cf. unblockTask): no measured
+	// runtime yet → 0. (On hardware list[-1] silently read adjacent memory; host assertions catch it.)
+	if (id < 0 || id >= kMaxTasks) [[unlikely]] {
+		return Time{0};
+	}
 	auto task = &list[id];
 	return task->durationStats.average;
 }
@@ -199,6 +205,24 @@ Time TaskManager::getAverageRunTimeForTask(TaskID id) const {
 void TaskManager::setNextRunTimeforCurrentTask(Time seconds) {
 	auto currentTask = &list[currentID];
 	currentTask->schedule.maxInterval = seconds;
+}
+
+void TaskManager::unblockTask(TaskID id) {
+	if (id > 0 && id < kMaxTasks) [[likely]] {
+		auto* current_task = &list[id];
+		if (current_task->state == State::BLOCKED) {
+			current_task->state = State::READY;
+		}
+	}
+}
+
+void TaskManager::blockTask(TaskID id) {
+	if (id > 0 && id < kMaxTasks) [[likely]] {
+		auto* current_task = &list[id];
+		if (current_task->state == State::READY) {
+			current_task->state = State::BLOCKED;
+		}
+	}
 }
 
 void TaskManager::runTask(TaskID id) {
@@ -269,7 +293,8 @@ bool TaskManager::yield(RunCondition until, Time timeout, bool returnOnIdle) {
 	Time start_time = yielding_task->lastCallTime;
 	// for now we first end this as if the task finished - might be advantageous to replace with a context switch later
 	if (yielding_task->removeAfterUse) {
-		yielding_task->state = State::BLOCKED; // mark it as blocked so it won't be run again
+		yielding_task->state =
+		    State::WAITING_TO_END; // mark it as waiting so it won't be run again (block triggers recheck of condition)
 	}
 	if (countThisTask) {
 		if (runtime > Time(0.003)) {

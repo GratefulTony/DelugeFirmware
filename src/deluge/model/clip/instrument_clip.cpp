@@ -704,12 +704,10 @@ void InstrumentClip::processCurrentPos(ModelStackWithTimelineCounter* modelStack
 		// Ok, time to do some ticks
 
 		// We need to at least come back when the Clip wraps
-#if HAVE_SEQUENCE_STEP_CONTROL
 		if (lastProcessedPos && currentlyPlayingReversed) {
 			ticksTilNextNoteRowEvent = lastProcessedPos;
 		}
 		else {
-#endif
 			ticksTilNextNoteRowEvent = loopLength - lastProcessedPos;
 		}
 
@@ -1059,7 +1057,7 @@ ModelStackWithNoteRow* InstrumentClip::getNoteRowForDrumName(ModelStackWithTimel
 		    && thisNoteRow->drum->type == DrumType::SOUND) {
 			SoundDrum* thisDrum = (SoundDrum*)thisNoteRow->drum;
 
-			if (thisDrum->name.equalsCaseIrrespective(name)) {
+			if (deluge::string::caselessEquals(thisDrum->drumName, name)) {
 				goto foundIt;
 			}
 		}
@@ -1720,8 +1718,12 @@ Error InstrumentClip::changeInstrument(ModelStackWithTimelineCounter* modelStack
 
 		SoundInstrument* synth = (SoundInstrument*)newInstrument;
 
-		paramManager.getPatchCableSet()->grabVelocityToLevelFromMIDIInput(
-		    &synth->midiInput); // Should happen before we call setupPatching().
+		// Guard against a null PatchCableSet. Can occur when converting a duplicated MIDI clip to
+		// Synth (#4014) — the paramManager ends up without patch cables in that path.
+		PatchCableSet* pcs = paramManager.getPatchCableSetAllowJibberish();
+		if (pcs != nullptr) {
+			pcs->grabVelocityToLevelFromMIDIInput(&synth->midiInput); // Should happen before setupPatching().
+		}
 
 		// Set up patching now. If a Kit, we do the drums individually below.
 		synth->setupPatching(modelStack);
@@ -1763,7 +1765,7 @@ Error InstrumentClip::changeInstrument(ModelStackWithTimelineCounter* modelStack
 			for (DrumName* oldDrumName = thisNoteRow->firstOldDrumName; oldDrumName; oldDrumName = oldDrumName->next) {
 
 				// See if a Drum (which hasn't been assigned yet) has this name
-				SoundDrum* thisDrum = kit->getDrumFromName(oldDrumName->name.get(), true);
+				Drum* thisDrum = kit->getDrumFromName(oldDrumName->name.get(), true);
 
 				// If so, and if it's not already assigned to another NoteRow...
 				if (thisDrum) {
@@ -1949,7 +1951,7 @@ bool InstrumentClip::possiblyDeleteEmptyNoteRow(NoteRow* noteRow, bool onlyIfNoD
 			return false;
 		}
 
-		if (onlyIfNonNumeric && drum->type == DrumType::SOUND && stringIsNumericChars(((SoundDrum*)drum)->name.get())) {
+		if (onlyIfNonNumeric && drum->type == DrumType::SOUND && stringIsNumericChars(drum->drumName.c_str())) {
 			return false;
 		}
 
@@ -2306,7 +2308,7 @@ void InstrumentClip::writeDataToFile(Serializer& writer, Song* song) {
 	if (onAutomationClipView) {
 		writer.writeAttribute("onAutomationInstrumentClipView", 1);
 	}
-	if (lastSelectedParamID != kNoSelection) {
+	if (lastSelectedParamID != params::kNoParamID) {
 		writer.writeAttribute("lastSelectedParamID", lastSelectedParamID);
 		writer.writeAttribute("lastSelectedParamKind", util::to_underlying(lastSelectedParamKind));
 		writer.writeAttribute("lastSelectedParamShortcutX", lastSelectedParamShortcutX);
@@ -4628,7 +4630,7 @@ doHomogenize:
 		// These manual sets are in case we quantized forwards and the region we just created actually begins after
 		// "now"-time.
 		param->currentValue = value;
-		param->valueIncrementPerHalfTick = 0;
+		param->resetInterpolationIncrement();
 		// TODO: and to make it perfect, we'd also want to ignore any further nodes between now and the start of the
 		// region. Or, could probably get away with just deleting them.
 	}

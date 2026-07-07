@@ -331,6 +331,10 @@ void RuntimeFeatureSettings::init() {
 	// Disperser High CPU mode (allows >8 stages, up to 32)
 	SetupOnOffSetting(settings[RuntimeFeatureSettingType::DisperserHiCPU],
 	                  STRING_FOR_COMMUNITY_FEATURE_DISPERSER_HI_CPU, "disperserHiCpu", RuntimeFeatureStateToggle::Off);
+	// Show Battery Level
+	SetupOnOffSetting(settings[RuntimeFeatureSettingType::ShowBatteryLevel],
+	                  STRING_FOR_COMMUNITY_FEATURE_SHOW_BATTERY_LEVEL, "showBatteryLevel",
+	                  RuntimeFeatureStateToggle::On);
 }
 
 void RuntimeFeatureSettings::readSettingsFromFile() {

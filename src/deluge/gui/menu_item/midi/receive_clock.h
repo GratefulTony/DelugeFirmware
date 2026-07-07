@@ -1,5 +1,5 @@
 /*
- * Copyright © 2015-2023 Synthstrom Audible Limited
+ * Copyright (c) 2014-2023 Synthstrom Audible Limited
  *
  * This file is part of The Synthstrom Audible Deluge Firmware.
  *
@@ -14,9 +14,14 @@
  * You should have received a copy of the GNU General Public License along with this program.
  * If not, see <https://www.gnu.org/licenses/>.
  */
-
 #pragma once
+#include "gui/menu_item/toggle.h"
+#include "playback/playback_handler.h"
 
-void ramTestUart();
-void ramTestLED(bool stuffAlreadySetUp = false);
-void autoPilotStuff();
+namespace deluge::gui::menu_item::midi {
+class ReceiveClock final : public ToggleBool {
+public:
+	using ToggleBool::ToggleBool;
+	void writeCurrentValue() override { playbackHandler.setMidiInClockEnabled(getValue()); }
+};
+} // namespace deluge::gui::menu_item::midi

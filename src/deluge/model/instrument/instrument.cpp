@@ -113,7 +113,8 @@ bool Instrument::readTagFromFile(Deserializer& reader, char const* tagName) {
 		name.set(&slotChars);
 	}
 
-	else if (!strcmp(tagName, subSlotXMLTag)) {
+	// getSubSlotXMLTag() returns null for instruments without a sub-slot concept (e.g. CV) - don't strcmp against null.
+	else if (subSlotXMLTag && !strcmp(tagName, subSlotXMLTag)) {
 		int32_t subSlotHere = reader.readTagOrAttributeValueInt();
 		if (subSlotHere >= 0 && subSlotHere < 26) {
 			char buffer[2];
@@ -185,8 +186,8 @@ Clip* Instrument::createNewClipForArrangementRecording(ModelStack* modelStack) {
 
 Error Instrument::setupDefaultAudioFileDir() {
 	char const* dirPathChars = dirPath.get();
-	auto result =
-	    audioFileManager.setupAlternateAudioFileDir(audioFileManager.alternateAudioFileLoadPath, dirPathChars, name);
+	auto result = audioFileManager.setupAlternateAudioFileDir(audioFileManager.alternateAudioFileLoadPath, dirPathChars,
+	                                                          name.get());
 	if (result != Error::NONE) {
 		return result;
 	}

@@ -99,8 +99,10 @@ class UnpatchedParamSet final : public ParamSet {
 public:
 	UnpatchedParamSet(ParamCollectionSummary* summary);
 	void beenCloned(bool copyAutomation, int32_t reverseDirectionWithLength) override;
+	bool shouldInterpolateWithFloat(ModelStackWithParamId const* modelStack) override;
 	bool shouldParamIndicateMiddleValue(ModelStackWithParamId const* modelStack) override;
 	bool doesParamIdAllowAutomation(ModelStackWithParamId const* modelStack) override;
+	bool shouldRecordUnautomatedParamChange(ModelStackWithParamId const* modelStack) override;
 	int32_t paramValueToKnobPos(int32_t paramValue, ModelStackWithAutoParam* modelStack) override;
 	int32_t knobPosToParamValue(int32_t knobPos, ModelStackWithAutoParam* modelStack) override;
 	deluge::modulation::params::Kind getParamKind() override { return kind; }
