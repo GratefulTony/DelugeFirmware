@@ -90,6 +90,7 @@ enum RuntimeFeatureSettingType : uint32_t {
 	RetrospectiveSamplerNormalize,
 	ModFXPostDOTT,
 	DisperserHiCPU,
+	ShowBatteryLevel,
 	MaxElement // Keep as boundary
 };
 

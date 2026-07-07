@@ -64,7 +64,7 @@ Clip::Clip(ClipType newType) : type(newType) {
 
 	// initialize automation clip view variables
 	onAutomationClipView = false;
-	lastSelectedParamID = kNoSelection;
+	lastSelectedParamID = params::kNoParamID;
 	lastSelectedParamKind = params::Kind::NONE;
 	lastSelectedParamShortcutX = kNoSelection;
 	lastSelectedParamShortcutY = kNoSelection;
@@ -73,13 +73,13 @@ Clip::Clip(ClipType newType) : type(newType) {
 	lastSelectedPatchSource = PatchSource::NONE;
 	// end initialize of automation clip view variables
 
-#if HAVE_SEQUENCE_STEP_CONTROL
 	sequenceDirectionMode = SequenceDirection::FORWARD;
-#endif
 }
 
 Clip::~Clip() {
-	if (getCurrentClip() == this) {
+	// currentSong is null while the old song is being torn down in deleteOldSongBeforeLoadingNew() (it's nulled before
+	// the delete), so guard against it - getCurrentClip() dereferences currentSong.
+	if (currentSong && getCurrentClip() == this) {
 		currentSong->setCurrentClip(nullptr);
 	}
 }
@@ -177,11 +177,10 @@ uint32_t Clip::getActualCurrentPosAsIfPlayingInForwardDirection() {
 
 	int32_t numSwungTicksInSinceLastActioned = playbackHandler.getNumSwungTicksInSinceLastActionedSwungTick();
 
-#if HAVE_SEQUENCE_STEP_CONTROL
 	if (currentlyPlayingReversed) {
 		actualPos = loopLength - actualPos;
 	}
-#endif
+
 	actualPos += numSwungTicksInSinceLastActioned;
 
 	return actualPos;
@@ -190,11 +189,10 @@ uint32_t Clip::getActualCurrentPosAsIfPlayingInForwardDirection() {
 int32_t Clip::getCurrentPosAsIfPlayingInForwardDirection() {
 	int32_t posToReturn = lastProcessedPos;
 
-#if HAVE_SEQUENCE_STEP_CONTROL
 	if (currentlyPlayingReversed) {
 		posToReturn = loopLength - posToReturn;
 	}
-#endif
+
 	return posToReturn;
 }
 

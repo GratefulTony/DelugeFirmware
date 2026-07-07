@@ -1,5 +1,5 @@
 /*
- * Copyright © 2021-2023 Synthstrom Audible Limited
+ * Copyright (c) 2014-2023 Synthstrom Audible Limited
  *
  * This file is part of The Synthstrom Audible Deluge Firmware.
  *
@@ -14,14 +14,14 @@
  * You should have received a copy of the GNU General Public License along with this program.
  * If not, see <https://www.gnu.org/licenses/>.
  */
-
 #pragma once
-#include <cstdint>
+#include "gui/menu_item/toggle.h"
+#include "playback/playback_handler.h"
 
-namespace AutomatedTester {
-void init();
-void turnSelectEncoder(int32_t offset);
-void doMomentaryButtonPress(int32_t x, int32_t y);
-void possiblyDoSomething();
-
-} // namespace AutomatedTester
+namespace deluge::gui::menu_item::midi {
+class SendClock final : public ToggleBool {
+public:
+	using ToggleBool::ToggleBool;
+	void writeCurrentValue() override { playbackHandler.setMidiOutClockMode(getValue()); }
+};
+} // namespace deluge::gui::menu_item::midi

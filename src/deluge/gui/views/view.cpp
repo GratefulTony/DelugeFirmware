@@ -42,6 +42,7 @@
 #include "hid/buttons.h"
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
+#include "hid/encoder_input.h"
 #include "hid/encoders.h"
 #include "hid/led/indicator_leds.h"
 #include "hid/led/pad_leds.h"
@@ -345,7 +346,27 @@ doEndMidiLearnPressSession:
 		}
 		else if ((runtimeFeatureSettings.get(RuntimeFeatureSettingType::SyncScalingAction)
 		          == RuntimeFeatureStateSyncScalingAction::Fill)) {
-			currentSong->changeFillMode(on);
+			// If currently in the sound editor note editor / note row editor, keep this button as the global
+			// fill mode toggle rather than changing note fill values.
+			if (getCurrentUI() == &soundEditor && (soundEditor.inNoteEditor() || soundEditor.inNoteRowEditor())) {
+				currentSong->changeFillMode(on);
+				return ActionResult::DEALT_WITH;
+			}
+
+			// If note(s) pressed, adjust note fill
+			if (on && (currentUIMode == UI_MODE_NOTES_PRESSED || instrumentClipView.numEditPadPresses > 0)) {
+				instrumentClipView.adjustNoteFillWithOffset(1);
+				return ActionResult::DEALT_WITH;
+			}
+			// If audition pad pressed, adjust note row fill
+			else if (on && (currentUIMode == UI_MODE_AUDITIONING)) {
+				instrumentClipView.setNoteRowFillWithOffset(1);
+				return ActionResult::DEALT_WITH;
+			}
+			// Otherwise toggle fill mode
+			else {
+				currentSong->changeFillMode(on);
+			}
 		}
 		else if (on && currentUIMode == UI_MODE_NONE) {
 
@@ -1007,6 +1028,26 @@ void View::modEncoderAction_existentParam(int32_t whichModEncoder, int32_t offse
 	if ((getCurrentUI() == &soundEditor) && (getRootUI() == &automationView)) {
 		automationView.possiblyRefreshAutomationEditorGrid(getCurrentClip(), kind, modelStackWithParam->paramId);
 	}
+}
+
+int32_t View::calculateKnobPosForModEncoderTurn(params::Kind kind, int32_t knobPos, int32_t offset) {
+	int32_t lowerLimit;
+	int32_t upperLimit = 64_i32;
+
+	if (kind == params::Kind::PATCH_CABLE) {
+		lowerLimit = std::min(-192_i32, knobPos);
+	}
+	else {
+		lowerLimit = std::min(-64_i32, knobPos);
+
+		if (kind == params::Kind::MIDI) {
+			upperLimit = 63;
+		}
+	}
+	int32_t newKnobPos = knobPos + offset;
+	newKnobPos = std::clamp(newKnobPos, lowerLimit, upperLimit);
+
+	return newKnobPos;
 }
 
 // get's modelStackWithParam for use with Gold Knobs and ModEncoderAction above
@@ -1744,10 +1785,9 @@ void View::notifyParamAutomationOccurred(ParamManager* paramManager, bool update
 }
 
 void View::sendMidiFollowFeedback(ModelStackWithAutoParam* modelStackWithParam, int32_t knobPos, bool isAutomation) {
-	if (midiEngine.midiFollowFeedbackChannelType != MIDIFollowChannelType::NONE) {
-		int32_t channel =
-		    midiEngine.midiFollowChannelType[util::to_underlying(midiEngine.midiFollowFeedbackChannelType)]
-		        .channelOrZone;
+	MIDIFollowChannelType feedbackChannelType = midiFollow.getChannelTypeForFeedback();
+	if (feedbackChannelType != MIDIFollowChannelType::NONE) {
+		int32_t channel = midiEngine.midiFollowChannelType[util::to_underlying(feedbackChannelType)].channelOrZone;
 		if (channel != MIDI_CHANNEL_NONE) {
 			// check if we're dealing with a clip context param (don't send feedback for song params)
 			if (isClipContext()) {
@@ -2396,12 +2436,14 @@ void View::navigateThroughPresetsForInstrumentClip(int32_t offset, ModelStackWit
 			}
 
 			while (true) {
-				newChannelSuffix += offset;
+				// Use ±1 step regardless of encoder acceleration so channel-wrap logic stays correct.
+				int32_t step = (offset > 0) ? 1 : -1;
+				newChannelSuffix += step;
 
 				// Turned left
-				if (offset == -1) {
+				if (offset < 0) {
 					if (newChannelSuffix < -1) {
-						newChannel = (newChannel + offset);
+						newChannel = (newChannel + step);
 						if (newChannel < 0) {
 							newChannel = IS_A_DEST + NUM_INTERNAL_DESTS;
 						}
@@ -2417,7 +2459,7 @@ void View::navigateThroughPresetsForInstrumentClip(int32_t offset, ModelStackWit
 
 					if (newChannelSuffix >= 26
 					    || newChannelSuffix > modelStack->song->getMaxMIDIChannelSuffix(newChannel)) {
-						newChannel = (newChannel + offset);
+						newChannel = (newChannel + step);
 						if (newChannel > MIDI_CHANNEL_MPE_UPPER_ZONE && newChannel <= IS_A_DEST) {
 							newChannel = IS_A_DEST + 1;
 						}
@@ -2804,8 +2846,6 @@ ActionResult View::clipStatusPadAction(Clip* clip, bool on, int32_t yDisplayIfIn
 			                             // what if we're in a Clip view?
 			break;
 		}
-		// No break
-	case UI_MODE_CLIP_PRESSED_IN_SONG_VIEW:
 
 	case UI_MODE_HOLDING_STATUS_PAD:
 		if (on) {
@@ -2819,6 +2859,9 @@ ActionResult View::clipStatusPadAction(Clip* clip, bool on, int32_t yDisplayIfIn
 		}
 		break;
 
+	// No break
+	case UI_MODE_CLIP_PRESSED_IN_SONG_VIEW:
+	[[fallthrough]] // fall through into UI_MODE_STUTTERING so you can toggle clip status while holding a clip
 	case UI_MODE_STUTTERING:
 		// this code is needed to allow users to launch clips while stuttering
 		// without it the deluge becomes unresponsive if you try to launch a clip while stuttering
@@ -2836,7 +2879,7 @@ ActionResult View::clipStatusPadAction(Clip* clip, bool on, int32_t yDisplayIfIn
 #endif
 		if (on) {
 			sessionView.performActionOnPadRelease = false; // Even though there's a chance we're not in session view
-			session.soloClipAction(clip, kInternalButtonPressLatency);
+			session.soloClipAction(clip, Buttons::isShiftButtonPressed(), kInternalButtonPressLatency);
 		}
 		break;
 	}
@@ -2920,6 +2963,11 @@ bool View::renderMacros(int32_t column, uint32_t y, int32_t selectedMacro, RGB i
 	if (occupancyMask) {
 		occupancyMask[y][column] = true;
 	}
+
+	// Dim macros at rest so that pressing one visibly brightens it to its full colour, giving
+	// feedback that the press registered (issue #3244).
+	bool held_macro = matrixDriver.isPadPressed(column, y);
+	image[y][column] = image[y][column].adjust(255, (held_macro ? 1 : 8));
 
 	return armed;
 }

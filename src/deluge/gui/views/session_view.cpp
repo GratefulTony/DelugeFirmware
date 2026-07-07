@@ -1363,7 +1363,7 @@ void SessionView::commandChangeCurrentSectionRepeats(int8_t offset) {
 		if (session.launchEventAtSwungTickCount) {
 			editNumRepeatsTilLaunch(offset);
 		}
-		else if (offset == 1) {
+		else if (offset > 0) {
 			session.userWantsToArmNextSection(1);
 		}
 	}
@@ -1641,7 +1641,12 @@ Error setPresetOrNextUnlaunchedOne(InstrumentClip* clip, OutputType outputType, 
 	if (copyDrumsFromClip) {
 		error = clip->setAudioInstrument(newInstrument, currentSong, true, nullptr); // Does a setupPatching()
 		if (error != Error::NONE) {
-			// TODO: needs more thought - we'd want to deallocate the Instrument...
+			// setAudioInstrument failed (most likely INSUFFICIENT_RAM while loading the kit's samples). Release the
+			// Instrument we just brought in so it doesn't leak - delete it, or return it to the hibernation list if
+			// it's been edited. One that was already an active Output in the song is left untouched.
+			if (!*instrumentAlreadyInSong) {
+				currentSong->deleteOrAddToHibernationListOutput(newInstrument);
+			}
 			return error;
 		}
 
@@ -3996,7 +4001,7 @@ void SessionView::copyClipName(Clip* source, Clip* target, Output* targetOutput)
 	// Keep trying until we have a name that's unique on the output.
 	String newNameString;
 	newNameString.set(newName.data());
-	while (targetOutput->getClipFromName(&newNameString) != nullptr) {
+	while (targetOutput->getClipFromName(newNameString.get()) != nullptr) {
 		newName.truncate(end);
 		newName.appendInt(counter++);
 		newNameString.set(newName.data());
@@ -4520,8 +4525,6 @@ ActionResult SessionView::clipCreationButtonPressed(hid::Button i, bool on, bool
 	return ActionResult::NOT_DEALT_WITH;
 }
 void SessionView::exitTrackCreation() {
-	display->setNextTransitionDirection(-1);
-	getCurrentUI()->close();
 	indicator_leds::setLedState(IndicatorLED::SYNTH, false, false);
 	indicator_leds::setLedState(IndicatorLED::MIDI, false, false);
 	indicator_leds::setLedState(IndicatorLED::KIT, false, false);
@@ -4555,7 +4558,36 @@ ActionResult SessionView::gridHandlePadsLaunch(int32_t x, int32_t y, int32_t on,
 
 		if (on) {
 			// Immediate launch if shift pressed
-			gridStartSection(section, Buttons::isShiftButtonPressed());
+			if (Buttons::isShiftButtonPressed()) {
+				gridStartSection(section, true);
+			}
+			// With green selection enabled, holding the section pad allows changing repeats (like blue mode),
+			// while a short press still arms the section on release
+			else if (FlashStorage::gridAllowGreenSelection) {
+				enterUIMode(UI_MODE_HOLDING_SECTION_PAD);
+				performActionOnSectionPadRelease = true;
+				sectionPressed = section;
+				uiTimerManager.setTimer(TimerName::UI_SPECIFIC, 300);
+			}
+			else {
+				gridStartSection(section, false);
+			}
+		}
+		else {
+			if (isUIModeActive(UI_MODE_HOLDING_SECTION_PAD)) {
+				// A short press (timer not yet fired) arms the section; a hold just edits repeats
+				if (performActionOnSectionPadRelease) {
+					session.armSection(sectionPressed, kInternalButtonPressLatency);
+				}
+				exitUIMode(UI_MODE_HOLDING_SECTION_PAD);
+				if (display->haveOLED()) {
+					deluge::hid::display::OLED::removePopup();
+				}
+				else {
+					redrawNumericDisplay();
+				}
+				uiTimerManager.unsetTimer(TimerName::UI_SPECIFIC);
+			}
 		}
 
 		return ActionResult::ACTIONED_AND_CAUSED_CHANGE;
@@ -4725,7 +4757,7 @@ ActionResult SessionView::gridHandlePadsLaunchWithSelection(int32_t x, int32_t y
 void SessionView::gridHandlePadsLaunchToggleArming(Clip* clip, bool immediate) {
 	if (immediate) {
 		if (horizontalEncoderPressed) {
-			session.soloClipAction(clip, kInternalButtonPressLatency);
+			session.soloClipAction(clip, immediate, kInternalButtonPressLatency);
 		}
 		else {
 			gridToggleClipPlay(clip, true);
@@ -4733,7 +4765,7 @@ void SessionView::gridHandlePadsLaunchToggleArming(Clip* clip, bool immediate) {
 	}
 	else {
 		if (horizontalEncoderPressed) {
-			session.soloClipAction(clip, kInternalButtonPressLatency);
+			session.soloClipAction(clip, immediate, kInternalButtonPressLatency);
 		}
 		else if (viewingRecordArmingActive) {
 			// Here I removed the overdubbing settings

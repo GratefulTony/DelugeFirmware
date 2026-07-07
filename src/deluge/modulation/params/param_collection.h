@@ -76,8 +76,10 @@ public:
 	                                     // (wait why again?). May return NULL
 
 	virtual bool mayParamInterpolate(int32_t paramId);
+	virtual bool shouldInterpolateWithFloat(ModelStackWithParamId const* modelStack) { return false; }
 	virtual bool shouldParamIndicateMiddleValue(ModelStackWithParamId const* modelStack) { return false; }
 	virtual bool doesParamIdAllowAutomation(ModelStackWithParamId const* modelStack) { return true; }
+	virtual bool shouldRecordUnautomatedParamChange(ModelStackWithParamId const* modelStack) { return true; }
 	virtual int32_t paramValueToKnobPos(int32_t paramValue, ModelStackWithAutoParam* modelStack);
 	virtual int32_t knobPosToParamValue(int32_t knobPos, ModelStackWithAutoParam* modelStack);
 	virtual void notifyPingpongOccurred(ModelStackWithParamCollection* modelStack);

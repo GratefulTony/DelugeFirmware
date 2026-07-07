@@ -881,15 +881,6 @@ void AutomationView::renderAutomationOverview(ModelStackWithTimelineCounter* mod
 		else {
 			pixel = colours::black; // erase pad
 		}
-
-		if (!onArrangerView && !(outputType == OutputType::KIT && getAffectEntire())
-		    && clip->type == ClipType::INSTRUMENT) {
-			// highlight velocity pad
-			if (xDisplay == kVelocityShortcutX && yDisplay == kVelocityShortcutY) {
-				pixel = colours::grey;
-				occupancyMask[yDisplay][xDisplay] = 64;
-			}
-		}
 	}
 }
 
@@ -972,7 +963,7 @@ void AutomationView::renderDisplay(int32_t knobPosLeft, int32_t knobPosRight, bo
 	// if you're not in a MIDI instrument clip, convert the knobPos to the same range as the menu (0-50)
 	if (inAutomationEditor() && (onArrangerView || outputType != OutputType::MIDI_OUT)) {
 		params::Kind lastSelectedParamKind = params::Kind::NONE;
-		int32_t lastSelectedParamID = kNoSelection;
+		int32_t lastSelectedParamID = params::kNoParamID;
 		if (onArrangerView) {
 			lastSelectedParamKind = currentSong->lastSelectedParamKind;
 			lastSelectedParamID = currentSong->lastSelectedParamID;
@@ -1773,6 +1764,30 @@ ActionResult AutomationView::handleEditPadAction(ModelStackWithAutoParam* modelS
 		return ActionResult::DEALT_WITH;
 	}
 
+	// potentially enter or refresh note velocity editor if you're in an instrument clip, holding audition pad and
+	// pressing PatchSource::Velocity shortcut
+	if (!onArrangerView && clip->type == ClipType::INSTRUMENT && isUIModeActive(UI_MODE_AUDITIONING)
+	    && isNoteVelocityEditorShortcut(x, y)) {
+		// don't enter if we're in a kit with affect entire enabled
+		if (!(outputType == OutputType::KIT && getAffectEntire())) {
+			if (outputType == OutputType::KIT) {
+				potentiallyVerticalScrollToSelectedDrum((InstrumentClip*)clip, output);
+			}
+			initParameterSelection(false);
+			automationParamType = AutomationParamType::NOTE_VELOCITY;
+			clip->lastSelectedParamShortcutX = x;
+			clip->lastSelectedParamShortcutY = y;
+			blinkShortcuts();
+			renderDisplay();
+			uiNeedsRendering(&automationView);
+			// if you're in note editor, turn led on
+			if (((InstrumentClip*)clip)->wrapEditing) {
+				indicator_leds::setLedState(IndicatorLED::CROSS_SCREEN_EDIT, true);
+			}
+		}
+		return ActionResult::DEALT_WITH;
+	}
+
 	int32_t xScroll = currentSong->xScroll[navSysId];
 	int32_t xZoom = currentSong->xZoom[navSysId];
 
@@ -1799,6 +1814,10 @@ ActionResult AutomationView::handleEditPadAction(ModelStackWithAutoParam* modelS
 		}
 	}
 	return ActionResult::DEALT_WITH;
+}
+
+bool AutomationView::isNoteVelocityEditorShortcut(int32_t x, int32_t y) {
+	return (x == kVelocityShortcutX && y == kVelocityShortcutY);
 }
 
 /// handles shortcut pad actions, including:
@@ -1830,7 +1849,7 @@ bool AutomationView::shortcutPadAction(ModelStackWithAutoParam* modelStackWithPa
 
 			shortcutPress = true;
 		}
-		// this means you are selecting a parameter
+		// this means you are selecting a parameter / entering or refreshing note editor
 		if (shortcutPress || onAutomationOverview()) {
 			// don't change parameters this way if we're in the menu
 			if (getCurrentUI() == &automationView) {
@@ -1859,38 +1878,14 @@ bool AutomationView::shortcutPadAction(ModelStackWithAutoParam* modelStackWithPa
 // overview or by using a grid shortcut combo
 void AutomationView::handleParameterSelection(Clip* clip, Output* output, OutputType outputType, int32_t xDisplay,
                                               int32_t yDisplay) {
-	// PatchSource::Velocity shortcut
-	// Enter Velocity Note Editor
-	if (xDisplay == kVelocityShortcutX && yDisplay == kVelocityShortcutY) {
-		if (clip->type == ClipType::INSTRUMENT) {
-			// don't enter if we're in a kit with affect entire enabled
-			if (!(outputType == OutputType::KIT && getAffectEntire())) {
-				if (outputType == OutputType::KIT) {
-					potentiallyVerticalScrollToSelectedDrum((InstrumentClip*)clip, output);
-				}
-				initParameterSelection(false);
-				automationParamType = AutomationParamType::NOTE_VELOCITY;
-				clip->lastSelectedParamShortcutX = xDisplay;
-				clip->lastSelectedParamShortcutY = yDisplay;
-				blinkShortcuts();
-				renderDisplay();
-				uiNeedsRendering(&automationView);
-				// if you're in note editor, turn led on
-				if (((InstrumentClip*)clip)->wrapEditing) {
-					indicator_leds::setLedState(IndicatorLED::CROSS_SCREEN_EDIT, true);
-				}
-			}
-			return;
-		}
-	}
 	// potentially select a regular automatable parameter
-	else if (!onArrangerView
-	         && (outputType == OutputType::SYNTH
-	             || (outputType == OutputType::KIT && !getAffectEntire() && ((Kit*)output)->selectedDrum
-	                 && ((Kit*)output)->selectedDrum->type == DrumType::SOUND))
-	         && ((patchedParamShortcuts[xDisplay][yDisplay] != kNoParamID)
-	             || (unpatchedNonGlobalParamShortcuts[xDisplay][yDisplay] != kNoParamID)
-	             || params::isPatchCableShortcut(xDisplay, yDisplay))) {
+	if (!onArrangerView
+	    && (outputType == OutputType::SYNTH
+	        || (outputType == OutputType::KIT && !getAffectEntire() && ((Kit*)output)->selectedDrum
+	            && ((Kit*)output)->selectedDrum->type == DrumType::SOUND))
+	    && ((patchedParamShortcuts[xDisplay][yDisplay] != kNoParamID)
+	        || (unpatchedNonGlobalParamShortcuts[xDisplay][yDisplay] != kNoParamID)
+	        || params::isPatchCableShortcut(xDisplay, yDisplay))) {
 		// don't allow automation of portamento in kit's
 		if ((outputType == OutputType::KIT)
 		    && (unpatchedNonGlobalParamShortcuts[xDisplay][yDisplay] == params::UNPATCHED_PORTAMENTO)) {
@@ -2425,6 +2420,18 @@ void AutomationView::potentiallyVerticalScrollToSelectedDrum(InstrumentClip* cli
 // used to record live automations in
 void AutomationView::modEncoderAction(int32_t whichModEncoder, int32_t offset) {
 
+	// if we're in automation overview or note editor
+	// then we want to change the value of the parameter assigned to the mod encoder
+	if (!inAutomationEditor()) {
+		ClipNavigationTimelineView::modEncoderAction(whichModEncoder, offset);
+		return;
+	}
+
+	// ok we're on the automation editor, so both mod encoders will edit the currently selected parameter
+	// we have two possible actions: step editing or editing current value
+
+	// now we need to setup the model stack with param for the selected parameter in the selected context
+
 	char modelStackMemory[MODEL_STACK_MAX_SIZE];
 	ModelStackWithTimelineCounter* modelStackWithTimelineCounter = nullptr;
 	ModelStackWithThreeMainThings* modelStackWithThreeMainThings = nullptr;
@@ -2440,46 +2447,69 @@ void AutomationView::modEncoderAction(int32_t whichModEncoder, int32_t offset) {
 		Clip* clip = getCurrentClip();
 		modelStackWithParam = getModelStackWithParamForClip(modelStackWithTimelineCounter, clip);
 	}
+
+	// if we don't have a model stack or auto param, then no parameter to edit, so return early
+	if (!modelStackWithParam || !modelStackWithParam->autoParam) {
+		return;
+	}
+
 	int32_t effectiveLength = getEffectiveLength(modelStackWithTimelineCounter);
 
-	// if user holding a node down, we'll adjust the value of the selected parameter being automated
-	if (isUIModeActive(UI_MODE_NOTES_PRESSED) || padSelectionOn) {
-		if (inAutomationEditor()
-		    && ((instrumentClipView.numEditPadPresses > 0
-		         && ((int32_t)(instrumentClipView.timeLastEditPadPress + 80 * 44 - AudioEngine::audioSampleTimer) < 0))
-		        || padSelectionOn)) {
+	// if user holding a node down, or we're in pad selection mode
+	// we'll adjust the value of the selected parameter being automated at the step selected
+	bool is_step_editing = isUIModeActive(UI_MODE_NOTES_PRESSED) || padSelectionOn;
+
+	if (is_step_editing) {
+		if ((instrumentClipView.numEditPadPresses > 0
+		     && ((int32_t)(instrumentClipView.timeLastEditPadPress + 80 * 44 - AudioEngine::audioSampleTimer) < 0))
+		    || padSelectionOn) {
 
 			if (automationEditorLayoutModControllable.automationModEncoderActionForSelectedPad(
 			        modelStackWithParam, whichModEncoder, offset, effectiveLength)) {
 				return;
 			}
 		}
-		else if (inNoteEditor()) {
-			goto followOnAction;
-		}
 	}
 	// if playback is enabled and you are recording, you will be able to record in live automations for
 	// the selected parameter this code is also executed if you're just changing the current value of
 	// the parameter at the current mod position
 	else {
-		if (inAutomationEditor()) {
-			automationEditorLayoutModControllable.automationModEncoderActionForUnselectedPad(
-			    modelStackWithParam, whichModEncoder, offset, effectiveLength);
-		}
-		else {
-			goto followOnAction;
-		}
+		automationEditorLayoutModControllable.automationModEncoderActionForUnselectedPad(
+		    modelStackWithParam, whichModEncoder, offset, effectiveLength);
 	}
 
 	uiNeedsRendering(&automationView);
-	return;
-
-followOnAction:
-	ClipNavigationTimelineView::modEncoderAction(whichModEncoder, offset);
 }
 
-// used to copy paste automation or to delete automation of the current selected parameter
+// used to change gold knob parameter, copy paste automation or to delete automation of the current selected parameter
 void AutomationView::modEncoderButtonAction(uint8_t whichModEncoder, bool on) {
+
+	// if we're in automation overview or note editor
+	// then we want to allow toggling with mod encoder buttons to change
+	// mod encoder selections or copy / paste
+	if (!inAutomationEditor()) {
+		instrumentClipView.modEncoderButtonAction(whichModEncoder, on);
+		// if we're on automation overview, re-render because we want to show automated params
+		if (onAutomationOverview()) {
+			uiNeedsRendering(&automationView);
+		}
+		return;
+	}
+
+	// if we're not trying to copy / paste (holding learn) and not trying to delete (holding shift), return
+	// if we're releasing mod encoder button action, return (we don't do anything on release)
+	bool is_learn_pressed = Buttons::isButtonPressed(hid::button::LEARN);
+	bool is_shift_pressed = Buttons::isShiftButtonPressed();
+	bool is_copy_action = is_learn_pressed && !is_shift_pressed;
+	bool is_paste_action = is_learn_pressed && is_shift_pressed;
+	bool is_delete_action = !is_learn_pressed & is_shift_pressed;
+	if (!on || (!is_copy_action && !is_paste_action && !is_delete_action)) {
+		return;
+	}
+
+	// if we got here then we're in automation editor and we want to copy / paste or delete automation
+
+	// now we need to setup the model stack with param for the selected parameter in the selected context
 
 	Clip* clip = getCurrentClip();
 	OutputType outputType = clip->output->type;
@@ -2498,63 +2528,37 @@ void AutomationView::modEncoderButtonAction(uint8_t whichModEncoder, bool on) {
 		modelStackWithTimelineCounter = currentSong->setupModelStackWithCurrentClip(modelStackMemory);
 		modelStackWithParam = getModelStackWithParamForClip(modelStackWithTimelineCounter, clip);
 	}
+
+	// if we don't have a model stack with param or auto param, then no automation to copy / paste or delete, so return
+	if (!modelStackWithParam || !modelStackWithParam->autoParam) {
+		return;
+	}
+
 	int32_t effectiveLength = getEffectiveLength(modelStackWithTimelineCounter);
 
 	int32_t xScroll = currentSong->xScroll[navSysId];
 	int32_t xZoom = currentSong->xZoom[navSysId];
 
-	// If they want to copy or paste automation...
-	if (Buttons::isButtonPressed(hid::button::LEARN)) {
-		if (on) {
-			if (Buttons::isShiftButtonPressed()) {
-				// paste within Automation Editor
-				if (inAutomationEditor()) {
-					automationEditorLayoutModControllable.pasteAutomation(modelStackWithParam, clip, effectiveLength,
-					                                                      xScroll, xZoom);
-				}
-				// paste on Automation Overview / Note Editor
-				else {
-					instrumentClipView.pasteAutomation(whichModEncoder, navSysId);
-				}
-			}
-			else {
-				// copy within Automation Editor
-				if (inAutomationEditor()) {
-					automationEditorLayoutModControllable.copyAutomation(modelStackWithParam, clip, xScroll, xZoom);
-				}
-				// copy on Automation Overview / Note Editor
-				else {
-					instrumentClipView.copyAutomation(whichModEncoder, navSysId);
-				}
-			}
-		}
+	// if they want to copy automation...
+	if (is_copy_action) {
+		automationEditorLayoutModControllable.copyAutomation(modelStackWithParam, clip, xScroll, xZoom);
+	}
+	// if they want to paste automation
+	else if (is_paste_action) {
+		automationEditorLayoutModControllable.pasteAutomation(modelStackWithParam, clip, effectiveLength, xScroll,
+		                                                      xZoom);
+	}
+	// if they want to delete automation
+	else if (is_delete_action) {
+		Action* action = actionLogger.getNewAction(ActionType::AUTOMATION_DELETE);
+		modelStackWithParam->autoParam->deleteAutomation(action, modelStackWithParam);
+
+		display->displayPopup(l10n::get(l10n::String::STRING_FOR_AUTOMATION_DELETED));
+
+		displayAutomation(padSelectionOn, !display->have7SEG());
 	}
 
-	// delete automation of current parameter selected
-	else if (Buttons::isShiftButtonPressed() && inAutomationEditor()) {
-		if (modelStackWithParam && modelStackWithParam->autoParam) {
-			Action* action = actionLogger.getNewAction(ActionType::AUTOMATION_DELETE);
-			modelStackWithParam->autoParam->deleteAutomation(action, modelStackWithParam);
-
-			display->displayPopup(l10n::get(l10n::String::STRING_FOR_AUTOMATION_DELETED));
-
-			displayAutomation(padSelectionOn, !display->have7SEG());
-		}
-	}
-
-	// if we're in automation overview or note editor
-	// then we want to allow toggling with mod encoder buttons to change
-	// mod encoder selections
-	else if (!inAutomationEditor()) {
-		goto followOnAction;
-	}
-
-	uiNeedsRendering(&automationView);
-	return;
-
-followOnAction: // it will come here when you are on the automation overview / in note editor iscreen
-
-	view.modEncoderButtonAction(whichModEncoder, on);
+	// refresh automation editor grid to show copy / pasted automation or deleted automation
 	uiNeedsRendering(&automationView);
 }
 
@@ -3030,7 +3034,7 @@ void AutomationView::initParameterSelection(bool updateDisplay) {
 	initPadSelection();
 
 	if (onArrangerView) {
-		currentSong->lastSelectedParamID = kNoSelection;
+		currentSong->lastSelectedParamID = params::kNoParamID;
 		currentSong->lastSelectedParamKind = params::Kind::NONE;
 		currentSong->lastSelectedParamShortcutX = kNoSelection;
 		currentSong->lastSelectedParamShortcutY = kNoSelection;
@@ -3038,7 +3042,7 @@ void AutomationView::initParameterSelection(bool updateDisplay) {
 	}
 	else {
 		Clip* clip = getCurrentClip();
-		clip->lastSelectedParamID = kNoSelection;
+		clip->lastSelectedParamID = params::kNoParamID;
 		clip->lastSelectedParamKind = params::Kind::NONE;
 		clip->lastSelectedParamShortcutX = kNoSelection;
 		clip->lastSelectedParamShortcutY = kNoSelection;
@@ -3181,11 +3185,11 @@ bool AutomationView::onAutomationOverview() {
 
 bool AutomationView::inAutomationEditor() {
 	if (onArrangerView) {
-		if (currentSong->lastSelectedParamID == kNoSelection) {
+		if (currentSong->lastSelectedParamID == params::kNoParamID) {
 			return false;
 		}
 	}
-	else if (getCurrentClip()->lastSelectedParamID == kNoSelection) {
+	else if (getCurrentClip()->lastSelectedParamID == params::kNoParamID) {
 		return false;
 	}
 
@@ -3196,8 +3200,7 @@ void AutomationView::setAutomationParamType() {
 	automationParamType = AutomationParamType::PER_SOUND;
 	if (!inAutomationEditor()) {
 		Clip* clip = getCurrentClip();
-		if ((clip->lastSelectedParamShortcutX == kVelocityShortcutX)
-		    && (clip->lastSelectedParamShortcutY == kVelocityShortcutY)) {
+		if (isNoteVelocityEditorShortcut(clip->lastSelectedParamShortcutX, clip->lastSelectedParamShortcutY)) {
 			automationParamType = AutomationParamType::NOTE_VELOCITY;
 		}
 	}

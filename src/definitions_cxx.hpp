@@ -24,12 +24,6 @@
 #include <cstdint>
 #include <cstdio>
 
-#define HARDWARE_TEST_MODE 0
-
-#define AUTOMATED_TESTER_ENABLED (0 && ALPHA_OR_BETA_VERSION)
-
-#define ALLOW_SPAM_MODE 0 // For debugging (in buttons.cpp, audio_engine.cpp, deluge.cpp)
-
 #if ALPHA_OR_BETA_VERSION
 // #define TEST_VECTOR 1
 // #define TEST_VECTOR_SEARCH_MULTIPLE 1
@@ -39,17 +33,7 @@
 // #define TEST_SAMPLE_LOOP_POINTS 1
 #endif
 
-#define SD_TEST_MODE_ENABLED 0
-#define SD_TEST_MODE_ENABLED_LOAD_SONGS 0
-#define SD_TEST_MODE_ENABLED_SAVE_SONGS 0
-#define UNDO_REDO_TEST_ENABLED 0
-#define RECORDING_TEST_ENABLED 0
-#define AUTOPILOT_TEST_ENABLED 0
-#define LAUNCH_CLIP_TEST_ENABLED 0
-
 #define PLAYBACK_STOP_SHOULD_CLEAR_MONO_EXPRESSION 1
-
-#define HAVE_SEQUENCE_STEP_CONTROL 1
 
 #define ENABLE_CLIP_CUTTING_DIAGNOSTICS 1
 
@@ -378,15 +362,6 @@ enum class PerformanceEditingMode : uint8_t {
 	PARAM,
 };
 
-// Midi Follow Mode Feedback Automation Modes
-
-enum class MIDIFollowFeedbackAutomationMode : uint8_t {
-	DISABLED,
-	LOW,
-	MEDIUM,
-	HIGH,
-};
-
 enum class OscType : uint8_t {
 	SINE,
 	TRIANGLE,
@@ -644,6 +619,7 @@ enum class GlobalMIDICommand {
 	FILL,
 	TRANSPOSE,
 	NEXT_SONG,
+	SHIFT,
 	LAST, // Keep as boundary
 };
 constexpr auto kNumGlobalMIDICommands = util::to_underlying(GlobalMIDICommand::LAST) + 1;
@@ -660,9 +636,46 @@ enum class MIDIFollowChannelType : uint8_t {
 	A,
 	B,
 	C,
+	Track,
 	NONE,
+	Track1,
+	Track2,
+	Track3,
+	Track4,
+	Track5,
+	Track6,
+	Track7,
+	Track8,
+	Track9,
+	Track10,
+	Track11,
+	Track12,
+	Track13,
+	Track14,
+	Track15,
+	Track16,
+	INVALID,
 };
-constexpr auto kNumMIDIFollowChannelTypes = util::to_underlying(MIDIFollowChannelType::NONE);
+constexpr MIDIFollowChannelType kLastValidMIDIFollowChannelType = MIDIFollowChannelType::Track16; // 20
+constexpr auto kNumMIDIFollowChannelTypes = util::to_underlying(MIDIFollowChannelType::Track1);   // 5
+constexpr auto kNumMIDIFollowChannelTypesIncludingTracks =
+    util::to_underlying(kLastValidMIDIFollowChannelType) + 1; // 21
+constexpr int32_t kNumMIDIFollowChannelTrackTypes =
+    kNumMIDIFollowChannelTypesIncludingTracks - kNumMIDIFollowChannelTypes; // 21 - 5 = 16
+
+// Midi Follow Mode Feedback Automation Modes
+enum class MIDIFollowFeedbackAutomationMode : uint8_t {
+	DISABLED,
+	LOW,
+	MEDIUM,
+	HIGH,
+	INVALID,
+};
+
+constexpr MIDIFollowFeedbackAutomationMode kLastValidMIDIFollowFeedbackAutomationMode =
+    MIDIFollowFeedbackAutomationMode::HIGH; // 3
+constexpr int32_t kNumMIDIFollowFeedbackAutomationModes =
+    util::to_underlying(kLastValidMIDIFollowFeedbackAutomationMode) + 1; // 4;
 
 enum class MIDITransposeControlMethod : uint8_t {
 	INKEY,
@@ -1073,8 +1086,8 @@ enum SessionLayoutType : uint8_t {
 };
 
 enum FavouritesDefaultLayout : uint8_t {
-	FavouritesDefaultLayoutFavorites,
-	FavouritesDefaultLayoutFavoritesAndBanks,
+	FavouritesDefaultLayoutFavourites,
+	FavouritesDefaultLayoutFavouritesAndBanks,
 	FavouritesDefaultLayoutOff,
 	FavouritesDefaultLayoutMaxElement // Keep as boundary
 };

@@ -1,6 +1,6 @@
-# Deluge Community Firmware Change Log
+# Page has been moved
 
-> To find a detailed list of how to use each feature, check here: [Community Features](docs/community_features.md)
+This page has been moved to the [delugecommunity.com](https://delugecommunity.com) website:
 
 ## c1.3.0
 
@@ -822,3 +822,4 @@ and MIDI clips on a per step basis at any zoom level. (Excludes MPE automations)
 `*` - Denotes a feature that is `ENABLED` by default in the `COMMUNITY FEATURES` menu but can be disabled.
 
 `†` - Denotes a feature that is `DISABLED` by default in the `COMMUNITY FEATURES` menu but can be enabled.
+https://delugecommunity.com/changelogs/changelog/

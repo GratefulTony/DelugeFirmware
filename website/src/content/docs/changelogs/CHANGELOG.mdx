@@ -20,7 +20,7 @@ import { Aside, LinkButton, Badge } from "@astrojs/starlight/components"
   Overview](/features/community_features)!
 </Aside>
 
-## c1.3.0 <Badge text="Upcoming" variant="tip" />
+## c1.3.0 Derbyshire <Badge text="Upcoming" variant="tip" />
 
 ### Sound Engine
 
@@ -215,6 +215,10 @@ A `Favourites` feature has been added to the browser for most file types. The `F
 - If scale mode is active, you can now check the current root note and scale by long pressing the scale button. On 7SEG it will display the root note on press and scale on release.
 - Long pressing the scale button will not result in entering or exiting scale mode so you can safely check the current root note and scale without accidentally exiting scale mode.
 
+##### Screen Transpose
+
+- :key[Horizontal + Turn Vertical] to transpose the notes on the current screen only. :key[Horizontal + Press Turn Vertical] locks the notes into their original octave so you get pseudo voice leading
+
 ##### Randomizer submenu
 
 - Added a new submenu to the `Sound` menu called `Randomizer`. This menu gives you access to the following parameters (which affect both sequenced and arpeggiated notes):
@@ -228,9 +232,9 @@ A `Favourites` feature has been added to the browser for most file types. The `F
 - Enhanced existing note probability, iteration and fill function functionality by enabling you to use each type independently. This means that you can now apply probability to iteration and fill and you can also apply iteration to fill.
   - To edit probability, hold a note / audition pad and turn the select encoder to the left to display current probability value / set new probability value.
   - To edit iterance, hold a note / audition pad and turn the select encoder to the right to display current iterance value / set new iterance value.
-  - To edit fill, you need to access the new note and note row editor menu's.
+  - To edit fill, hold a note / audition pad and press sync scaling to view the current fill setting and cycle through fill modes.
 - Added new note and note row editor menu's to edit note and note row parameters.
-  - Hold a note and press the select encoder to enter the note editor menu. While in the note editor menu, the selected note will blink. You can select other notes by pressing the notes on the grid.
+  - Hold a note and press the select encoder to enter the note editor menu. While in the note editor menu, the selected note will blink. You can select other notes by pressing the notes on the grid. In addition, notes which have had their probability, iterance or fill settings changed from default will be highlighted yellow to help quickly identify edited notes.
   - Hold a note row audition pad and press the select encoder to enter the note row editor menu. While in the note row editor menu, the selected note row's audition pad will blink. You can select other note row's by pressing the note row audition pad or by scrolling with the vertical encoder.
   - The iteration is now also customizable with custom iteration steps. If you scroll the iteration parameter all the way to the right, you will see the `CUSTOM` option. If you click the :key[Select] encoder, a new menu will appear to select the `DIVISOR` parameter (you can select from 1 to 8), and also as many `ITERATION #` toggles as `DIVISOR` is set, to allow you to activate or deactivate each iteration step.
 
@@ -274,12 +278,18 @@ A `Favourites` feature has been added to the browser for most file types. The `F
 ##### General
 
 - Fixed Quantize/Humanize bug which would freeze the velocity view UI
+- Updated shortcut for `Note Velocity View`. You can now only enter `Note Velocity View` by holding `Audition Pad` + pressing the `Velocity` pad.
 
 #### <ins>Automation View</ins>
 
 ##### Defaults
 
 - The `Settings/Defaults/Automation/Shift` toggle now only applies to Clip View. In Arranger View if you use `shift + <>` to insert / delete time at a specific point in the arrangement, all paramet[...]
+
+##### Automation Overview and Shortcuts
+
+- Removed the `Note Velocity View` shortcut from the Automation Overview. The `Velocity` pad on the Automation Overview now represents the Automatable parameter `Velocity Spread`
+- Updated shortcut for `Note Velocity View`. You can now only enter `Note Velocity View` by holding `Audition Pad` + pressing the `Velocity` pad.
 
 ##### Parameters
 
@@ -312,6 +322,10 @@ A `Favourites` feature has been added to the browser for most file types. The `F
 
 - Added toggle in `SETTINGS > DEFAULTS > UI > USE SHARPS(#)` to allow users to choose which accidentals to display. When enabled in OLED mode, notes will be displayed as A# or D#, as they did prior to this change. When disabled, notes will be displayed as B♭ or E♭. In 7SEG mode, a dot is used to indicade when the note has the configured accidental.
 
+#### <ins>Menu</ins>
+
+- Added battery level display in the `SETTINGS` menu showing current battery voltage and percentage on OLED and percentage on 7SEG.
+
 ### Sequencer
 
 #### <ins>Arpeggiator</ins>
@@ -334,15 +348,42 @@ A `Favourites` feature has been added to the browser for most file types. The `F
 
 ### MIDI
 
+#### <ins>Devices</ins>
+
+- Added new `Use Relative CC` toggle within the configuration of each MIDI device in the `Settings > Defaults > MIDI > Devices` menu.
+  - When enabled, regular (e.g. non expression) midi CCs received from a device are processed as relative CCs, overriding the current MIDI takeover setting.
+  - Note: the controller must be actually sending relative value changes (127 for down and 1 for up) in order for this to work.
+
 #### <ins>Learn</ins>
 
-- Added new `MIDI LEARN` menu to the `SONG` menu. In `Song Grid View` this menu enables you to learn `Clip/Section Launch`. In `Song Row View` this menu enables you to learn the `Clip/Section Launch` and `Instrument`.
-  - While in this menu, you just need to `hold a clip / section` and send midi to learn that clip / section. If you press the `clip / section` again you will unlearn it.
-- Added ability to `Midi Learn Instruments` and `Select the Audio Source for Audio Clips` in `Song Grid View Green Mode` by moving `Midi Learn Clip/Section Launch` actions to the `MIDI LEARN` menu mentioned above.
+- Fixed issue where MIDI CCs learned to global command's could not trigger those command's while in a menu
 - `Midi Learned Note Input for the Whole Kit` now persists between Kit preset changes.
 - Fixed unexpected behaviour for `Synth` and `Kit` clips that would cause `MIDI LEARNED PARAMS` to get lost when changing presets for Synth / Kits.
   - Note: for `Kit` clips it will migrate midi learn for `Kit Affect Entire` params only.
-- Added new learnable global command `LOAD NEXT SONG`, which when received while playing, it will queue to load the next song within the folder of the current song.
+- Added new `MIDI LEARN` menu to the `SONG` menu. In `Song Grid View` this menu enables you to learn `Clip/Section Launch`. In `Song Row View` this menu enables you to learn the `Clip/Section Launch` and `Instrument`.
+  - While in this menu, you just need to `hold a clip / section` and send midi to learn that clip / section. If you press the `clip / section` again you will unlearn it.
+- Added ability to `Midi Learn Instruments` and `Select the Audio Source for Audio Clips` in `Song Grid View Green Mode` by moving `Midi Learn Clip/Section Launch` actions to the `MIDI LEARN` menu mentioned above.
+- Added new learnable global commands:
+  - `LOAD NEXT SONG`, which when received while playing, it will queue to load the next song within the folder of the current song.
+  - `SHIFT` to toggle the deluge's `SHIFT` button. It can also be used to toggle sticky shift.
+    - Shift down: Note On or CC Value > 0
+    - Shift up: Note Off or CC Value = 0
+
+#### <ins>Follow</ins>
+
+- Add specific track control to `MIDI FOLLOW` enabling you to have instant mixer control of the parameters of up to 16 tracks.
+  - You can now configure up to 16 channels in the MIDI Follow menu.
+  - CC's received on the specific track channels are directed to the active clip of the corresponding track.
+  - Track 1 corresponds to bottom track in `ARRANGER VIEW` or left track in `GRID VIEW`.
+  - You can also now configure the Channel `TRACK` for MIDI Follow Feedback. If a specific track is selected and has been configured
+    for MIDI Follow control, the Deluge will send feedback of the CC values for that specific track.
+- Added new default CC 89 to toggle the mute of the active clip in a specific track.
+  - Toggle mute: CC Value > 0 (Send a CC value greater than 0 to toggle mute for the active clip in a specific track)
+    - If used together with `SHIFT`, it will trigger instant mute.
+- Added new default CC 90 to toggle solo of the active clip in a specific track.
+  - Toggle solo: CC Value > 0 (Send a CC Value greater than 0 to toggle mute for the active clip in a specific track)
+- You can now use relative CCs together with non-relative CCs for different devices on the same MIDI follow channel.
+  - See the `Devices` section above for information on the per MIDI device `Use Relative CC` configuration.
 
 ### SD CARD
 

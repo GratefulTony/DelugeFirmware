@@ -92,7 +92,6 @@ extern AudioInputChannel defaultRecordSource;
 void readSettings();
 void writeSettings();
 void resetSettings();
-void resetMidiFollowSettings();
 void resetAutomationSettings();
 
 } // namespace FlashStorage

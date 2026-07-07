@@ -51,6 +51,7 @@ SettingToggle menuAlternativeTapTempoBehaviour(RuntimeFeatureSettingType::Altern
 SettingToggle menuHorizontalMenus(RuntimeFeatureSettingType::HorizontalMenus);
 SettingToggle menuTrimFromStartOfAudioClip(RuntimeFeatureSettingType::TrimFromStartOfAudioClip);
 SettingToggle menuModFXPostDOTT(RuntimeFeatureSettingType::ModFXPostDOTT);
+SettingToggle menuShowBatteryLevel(RuntimeFeatureSettingType::ShowBatteryLevel);
 SettingToggle menuDisperserHiCPU(RuntimeFeatureSettingType::DisperserHiCPU);
 
 // Number of entries in the subMenuEntries array (total settings minus non-top-level minus submenu entries)
@@ -80,6 +81,7 @@ std::array<MenuItem*, kNumTopLevelEntries> subMenuEntries{&menuDrumRandomizer,
                                                           &menuHorizontalMenus,
                                                           &menuTrimFromStartOfAudioClip,
                                                           &menuModFXPostDOTT,
+                                                          &menuShowBatteryLevel,
                                                           &menuDisperserHiCPU,
                                                           &menuRetrospectiveSamplerSubmenu};
 

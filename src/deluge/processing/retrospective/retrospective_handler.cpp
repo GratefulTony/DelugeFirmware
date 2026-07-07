@@ -75,7 +75,7 @@ static SoundDrum* createNewDrumForKit(Kit* kit) {
 
 	// Back up param manager and set name
 	currentSong->backUpParamManager(new_drum, currentSong->getCurrentClip(), &param_manager, true);
-	new_drum->name.set(&drum_name);
+	new_drum->drumName = drum_name.get();
 	new_drum->nameIsDiscardable = true;
 
 	return new_drum;

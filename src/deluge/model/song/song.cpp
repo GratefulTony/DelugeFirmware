@@ -209,7 +209,7 @@ Song::Song() : backedUpParamManagers(sizeof(BackedUpParamManager)) {
 	globalEffectable.compressor.setBaseGain(0.85);
 
 	// initialize automation arranger view variables
-	lastSelectedParamID = kNoSelection;
+	lastSelectedParamID = params::kNoParamID;
 	lastSelectedParamKind = params::Kind::NONE;
 	lastSelectedParamShortcutX = kNoSelection;
 	lastSelectedParamShortcutY = kNoSelection;
@@ -727,6 +727,52 @@ int32_t Song::getYVisualFromYNote(int32_t yNote, bool inKeyMode, const MusicalKe
 	return yVisualWithinOctave + octave * key.modeNotes.count() + key.rootNote;
 }
 
+int32_t Song::incrementYNoteInKey(int32_t yNote, int32_t increment, bool inOctave) const {
+	return incrementYNoteInKey(yNote, increment, inOctave, key);
+}
+
+int32_t Song::incrementYNoteInKey(int32_t yNote, int32_t increment, bool inOctave, const MusicalKey& key) {
+	D_PRINTLN("Incrementing note %i by %i", yNote, increment);
+	auto inc = std::clamp<int32_t>(increment, -1, 1);
+	auto num_scale_notes = key.modeNotes.count();
+	int32_t y_note_relative_to_root = yNote - key.rootNote;
+	int32_t y_note_within_octave = (uint16_t)(y_note_relative_to_root + 120) % 12;
+
+	int32_t octave = ((uint16_t)(y_note_relative_to_root + 120 - y_note_within_octave) / 12) - 10;
+	auto old_octave = octave;
+	int32_t y_visual_within_octave = 0;
+	for (int32_t i = 0; i < num_scale_notes && key.modeNotes[i] <= y_note_within_octave; i++) {
+		y_visual_within_octave = i;
+	}
+	auto old_mode_note = y_visual_within_octave;
+	if (inOctave) {
+		y_visual_within_octave = (y_visual_within_octave + inc) % num_scale_notes;
+		if (y_visual_within_octave < 0) {
+			y_visual_within_octave = y_visual_within_octave + num_scale_notes;
+		}
+	}
+	else {
+		y_visual_within_octave = y_visual_within_octave + inc;
+		if (y_visual_within_octave >= num_scale_notes) {
+			y_visual_within_octave = y_visual_within_octave - num_scale_notes;
+			octave++;
+		}
+		else if (y_visual_within_octave < 0) {
+			y_visual_within_octave = y_visual_within_octave + num_scale_notes;
+			octave--;
+		}
+	}
+	auto new_note = key.modeNotes[y_visual_within_octave] + (octave * 12) + key.rootNote;
+	if (std::abs(new_note - yNote) > 2) {
+		D_PRINTLN("new note is too different");
+	}
+	D_PRINTLN("incremented from %i to %i", yNote, new_note);
+	D_PRINTLN("Octave %i, mode_note %i, old_octave %i, old mode note % i", octave, y_visual_within_octave, old_octave,
+	          old_mode_note);
+
+	return new_note;
+}
+
 int32_t Song::getYNoteFromYVisual(int32_t yVisual, bool inKeyMode) {
 	return getYNoteFromYVisual(yVisual, inKeyMode, key);
 }
@@ -886,8 +932,13 @@ bool allowResyncingDuringClipLengthChange = true;
 
 void Song::changeFillMode(bool on) {
 	fillModeActive = on;
-	// we peek fill notes when fill is held so need to re render rows
-	uiNeedsRendering(&instrumentClipView, 0xFFFFFFFF, 0);
+
+	UI* root_ui = getRootUI();
+	if (root_ui == &instrumentClipView) {
+		// we peek fill notes when fill is held so need to re render rows
+		uiNeedsRendering(&instrumentClipView, 0xFFFFFFFF, 0);
+	}
+
 	if ((runtimeFeatureSettings.get(RuntimeFeatureSettingType::SyncScalingAction)
 	     == RuntimeFeatureStateSyncScalingAction::Fill)) {
 		indicator_leds::setLedState(IndicatorLED::SYNC_SCALING, on);
@@ -1151,7 +1202,7 @@ weAreInArrangementEditorOrInClipInstance:
 	writer.writeAttribute("affectEntire", affectEntire);
 	writer.writeAttribute("activeModFunction", globalEffectable.modKnobMode);
 
-	if (lastSelectedParamID != kNoSelection) {
+	if (lastSelectedParamID != params::kNoParamID) {
 		writer.writeAttribute("lastSelectedParamID", lastSelectedParamID);
 		writer.writeAttribute("lastSelectedParamKind", util::to_underlying(lastSelectedParamKind));
 		writer.writeAttribute("lastSelectedParamShortcutX", lastSelectedParamShortcutX);
@@ -1652,7 +1703,6 @@ unknownTag:
 				// both until the end. Also, in firmware pre V3.1.0-alpha, all "sync" values were stored as plain
 				// old ints, to be read irrespective of insideWorldTickMagnitude
 				swingInterval = reader.readTagOrAttributeValueInt();
-				swingInterval = std::min(swingInterval, (uint8_t)9);
 				reader.exitTag("swingInterval");
 			}
 
@@ -2069,6 +2119,7 @@ loadOutput:
 		// know we have enough info to do the conversion
 		swingInterval = convertSyncLevelFromFileValueToInternalValue(swingInterval);
 	}
+	swingInterval = std::min(swingInterval, (uint8_t)9);
 
 	setTimePerTimerTick(newTimePerTimerTick);
 
@@ -2466,7 +2517,7 @@ void Song::renderAudio(std::span<StereoSample> outputBuffer, int32_t* reverbBuff
 
 		bool isClipActiveNow =
 		    (output->getActiveClip() && isClipActive(output->getActiveClip()->getClipBeingRecordedFrom()));
-		DISABLE_ALL_INTERRUPTS();
+		ENTER_CRITICAL_SECTION();
 		if (output->shouldRenderInSong()) {
 			// Check if this is the focused output and we need to capture it
 			if (output == focusedOutputForRetro && outputBuffer.size() <= kMaxTempBufferSamples) {
@@ -2496,7 +2547,7 @@ void Song::renderAudio(std::span<StereoSample> outputBuffer, int32_t* reverbBuff
 				                     !isClipActiveNow, isClipActiveNow);
 			}
 		}
-		ENABLE_INTERRUPTS();
+		EXIT_CRITICAL_SECTION();
 #if DO_AUDIO_LOG
 		char buf[64];
 		snprintf(buf, sizeof(buf), "complete: %s", output->name.get());
@@ -3665,10 +3716,10 @@ void Song::markAllInstrumentsAsEdited() {
 
 // used with the renameOutputUI class to check if you're trying to rename an output to the same
 // name as another output
-AudioOutput* Song::getAudioOutputFromName(String* name) {
+AudioOutput* Song::getAudioOutputFromName(std::string_view name) {
 	for (Output* thisOutput = firstOutput; thisOutput; thisOutput = thisOutput->next) {
 		if (thisOutput->type == OutputType::AUDIO) {
-			if (thisOutput->name.equalsCaseIrrespective(name)) {
+			if (deluge::string::caselessEquals(thisOutput->name.get(), name)) {
 				return (AudioOutput*)thisOutput;
 			}
 		}
@@ -4829,12 +4880,14 @@ Output* Song::navigateThroughPresetsForInstrument(Output* output, int32_t offset
 			oldNonAudioInstrument->setChannel(-1); // Get it out of the way
 
 			do {
-				newChannelSuffix += offset;
+				// Use +/-1 step regardless of encoder so channel-wrap logic stays correct.
+				int32_t step = (offset > 0) ? 1 : -1;
+				newChannelSuffix += step;
 
 				// Turned left
-				if (offset == -1) {
+				if (offset < 0) {
 					if (newChannelSuffix < -1) {
-						newChannel = (newChannel + offset) & 15;
+						newChannel = (newChannel + step) & 15;
 						newChannelSuffix = currentSong->getMaxMIDIChannelSuffix(newChannel);
 					}
 				}
@@ -4842,7 +4895,7 @@ Output* Song::navigateThroughPresetsForInstrument(Output* output, int32_t offset
 				// Turned right
 				else {
 					if (newChannelSuffix >= 26 || newChannelSuffix > currentSong->getMaxMIDIChannelSuffix(newChannel)) {
-						newChannel = (newChannel + offset) & 15;
+						newChannel = (newChannel + step) & 15;
 						newChannelSuffix = -1;
 					}
 				}

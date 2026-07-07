@@ -72,6 +72,7 @@
 #include "storage/audio/audio_file_manager.h"
 #include "storage/flash_storage.h"
 #include "storage/storage_manager.h"
+#include "timers_interrupts/timers_interrupts.h"
 #include "util/cfunctions.h"
 #include "util/functions.h"
 #include <math.h>
@@ -364,15 +365,16 @@ void PlaybackHandler::setupPlaybackUsingInternalClock(int32_t buttonPressLatency
 				bool recordingToArranger = isArrangerView && (recording == RecordingMode::NORMAL);
 				bool inArrangerCrossScreen = isArrangerView && currentSong->arrangerAutoScrollModeActive;
 
-				// start from current screen if:
-				// 1) restart shortcut is pressed and alternativePlaybackStartBehaviour is disabled
-				// 2) restart shortcut is not pressed and alternativePlaybackStartBehaviour is enabled
-				// 3) recording to arranger
-				// 4) in arranger view with cross screen auto scroll mode enabled
+				// Cross screen (arranger auto scroll) and alternativePlaybackStartBehaviour both flip the
+				// *default* direction so that plain play starts from the current screen; the restart shortcut
+				// always toggles the other way. This guarantees one combo starts from the current screen and
+				// the other from the beginning, even when cross screen and the community setting are both on
+				// (issue #3166). Recording into arranger always starts from the current screen.
 
-				startFromCurrentScreen = (isRestartShortcutPressed && !alternativePlaybackStartBehaviour)
-				                         || (!isRestartShortcutPressed && alternativePlaybackStartBehaviour)
-				                         || recordingToArranger || inArrangerCrossScreen;
+				bool startFromCurrentScreenByDefault = alternativePlaybackStartBehaviour || inArrangerCrossScreen;
+
+				startFromCurrentScreen =
+				    recordingToArranger || (isRestartShortcutPressed != startFromCurrentScreenByDefault);
 			}
 		}
 	}
@@ -517,6 +519,8 @@ void PlaybackHandler::setupPlayback(int32_t newPlaybackState, int32_t playFromPo
 	lastSwungTickActioned = 0;
 	lastTriggerClockOutTickDone = -1;
 	lastMIDIClockOutTickDone = -1;
+	timeLastMIDIClockOutTickSent = 0;
+	timeLastTriggerClockOutTickSent = 0;
 
 	swungTickScheduled = false;
 	triggerClockOutTickScheduled = false;
@@ -779,6 +783,7 @@ void PlaybackHandler::actionTimerTickPart2() {
 void PlaybackHandler::doTriggerClockOutTick() {
 	triggerClockOutTickScheduled = false;
 	lastTriggerClockOutTickDone++;
+	timeLastTriggerClockOutTickSent = AudioEngine::audioSampleTimer;
 	if (skipAnalogClocks) {
 		skipAnalogClocks--;
 	}
@@ -828,6 +833,23 @@ void PlaybackHandler::scheduleTriggerClockOutTickFromExternalClock() {
 	auto result = computeExternalClockSchedule(lastTriggerClockOutTickDone, lastInputTickReceived, internalTicksPer,
 	                                           analogOutTicksPer, inputTicksPer, internalTicksPerInput,
 	                                           timePerInputTickMovingAverage, timeLastInputTicks[0]);
+
+	// Burst guard (issue #3587), mirroring scheduleMIDIClockOutTickFromExternalClock(). After a blocking song
+	// load/save, buffered input clocks are drained in a tight loop and would each emit an output tick immediately,
+	// bursting the analog clock and desyncing followers. If we'd emit sooner than is physically possible at the
+	// current tempo, we're draining a backlog: skip the emit and realign instead, collapsing it to a single tick.
+	bool wouldEmit =
+	    (result.action == ClockScheduleAction::EmitAndSchedule || result.action == ClockScheduleAction::EmitAndResync);
+	if (wouldEmit && timePerInputTickMovingAverage != 0) {
+		// Real time we'd expect between successive analog out ticks at the current tempo.
+		uint64_t timePerAnalogOutTick = (uint64_t)timePerInputTickMovingAverage * internalTicksPer * inputTicksPer
+		                                / ((uint64_t)analogOutTicksPer * internalTicksPerInput);
+		uint32_t timeSinceLastSent = AudioEngine::audioSampleTimer - timeLastTriggerClockOutTickSent;
+		if (timeSinceLastSent < (timePerAnalogOutTick >> 1)) {
+			resyncAnalogOutTicksToInternalTicks();
+			return;
+		}
+	}
 
 	switch (result.action) {
 	case ClockScheduleAction::EmitAndResync:
@@ -888,6 +910,26 @@ void PlaybackHandler::scheduleMIDIClockOutTickFromExternalClock() {
 	                                           midiClockOutTicksPer, inputTicksPer, internalTicksPerInput,
 	                                           timePerInputTickMovingAverage, timeLastInputTicks[0]);
 
+	// Burst guard (issue #3587). A blocking operation such as a song load or save stalls MIDI servicing, so incoming
+	// clocks pile up in the input buffer and are then drained in a tight loop, each one wanting to emit an output
+	// clock immediately. The emit-one-then-resync logic in computeExternalClockSchedule() can't catch this because
+	// each backlog tick only puts us one tick behind. The result is a burst of clocks at a single instant that stalls
+	// or desyncs followers. So if we'd emit a clock sooner than is physically possible at the current tempo, we know
+	// we're draining a backlog: skip the emit and just realign the output counter, collapsing the backlog to a single
+	// clock instead of a burst.
+	bool wouldEmit =
+	    (result.action == ClockScheduleAction::EmitAndSchedule || result.action == ClockScheduleAction::EmitAndResync);
+	if (wouldEmit && timePerInputTickMovingAverage != 0) {
+		// Real time we'd expect between successive output clocks at the current tempo.
+		uint64_t timePerMIDIOutTick = (uint64_t)timePerInputTickMovingAverage * internalTicksPer * inputTicksPer
+		                              / ((uint64_t)midiClockOutTicksPer * internalTicksPerInput);
+		uint32_t timeSinceLastSent = AudioEngine::audioSampleTimer - timeLastMIDIClockOutTickSent;
+		if (timeSinceLastSent < (timePerMIDIOutTick >> 1)) {
+			resyncMIDIClockOutTicksToInternalTicks();
+			return;
+		}
+	}
+
 	switch (result.action) {
 	case ClockScheduleAction::EmitAndResync:
 		doMIDIClockOutTick();
@@ -906,12 +948,18 @@ void PlaybackHandler::scheduleMIDIClockOutTickFromExternalClock() {
 }
 
 void PlaybackHandler::doMIDIClockOutTick() {
-	// we need to flush the buffer in case there's a clock in it, otherwise both will be sent at once
+	CriticalSectionGuard guard;
+	// if there's a scheduled output already then don't mess with it. Will catch at next output
+	if (isTimerEnabled(TIMER_MIDI_GATE_OUTPUT)) {
+		return;
+	}
+	// otherwise if there's midi in here already then get it dumped
 	if (midiEngine.anythingInOutputBuffer()) {
 		midiEngine.flushMIDI();
 	}
 	midiClockOutTickScheduled = false;
 	lastMIDIClockOutTickDone++;
+	timeLastMIDIClockOutTickSent = AudioEngine::audioSampleTimer;
 	if (skipMidiClocks) {
 		skipMidiClocks--;
 	}
@@ -2830,6 +2878,11 @@ bool PlaybackHandler::tryGlobalMIDICommands(MIDICable& cable, int32_t channel, i
 				currentSong->loadNextSong();
 				break;
 
+			case GlobalMIDICommand::SHIFT:
+				Buttons::commandToggleShift(true);
+				indicator_leds::setLedState(indicator_leds::LED::SHIFT, Buttons::isShiftButtonPressed());
+				break;
+
 			// case GlobalMIDICommand::TAP:
 			default:
 				if (getCurrentUI() == getRootUI()) {
@@ -2864,16 +2917,20 @@ bool PlaybackHandler::tryGlobalMIDICommandsOff(MIDICable& cable, int32_t channel
 
 	if (midiEngine.globalMIDICommands[util::to_underlying(GlobalMIDICommand::TRANSPOSE)].equalsChannelOrZone(&cable,
 	                                                                                                         channel)) {
-		foundAnything = true;
 		MIDITranspose::doTranspose(false, note);
+		foundAnything = true;
 	}
-	else {
-		// Check for FILL command at index [8]
-		if (midiEngine.globalMIDICommands[util::to_underlying(GlobalMIDICommand::FILL)].equalsNoteOrCC(&cable, channel,
-		                                                                                               note)) {
-			currentSong->changeFillMode(false);
-			foundAnything = true;
-		}
+	// Check for FILL command at index [8]
+	else if (midiEngine.globalMIDICommands[util::to_underlying(GlobalMIDICommand::FILL)].equalsNoteOrCC(&cable, channel,
+	                                                                                                    note)) {
+		currentSong->changeFillMode(false);
+		foundAnything = true;
+	}
+	else if (midiEngine.globalMIDICommands[util::to_underlying(GlobalMIDICommand::SHIFT)].equalsNoteOrCC(
+	             &cable, channel, note)) {
+		Buttons::commandToggleShift(false);
+		indicator_leds::setLedState(indicator_leds::LED::SHIFT, Buttons::isShiftButtonPressed());
+		foundAnything = true;
 	}
 
 	return foundAnything;
@@ -3117,10 +3174,8 @@ void PlaybackHandler::midiCCReceived(MIDICable& cable, uint8_t channel, uint8_t 
 	else {
 		int32_t channelOrZone = cable.ports[MIDI_DIRECTION_INPUT_TO_DELUGE].channelToZone(channel);
 		// If the SoundEditor is the active UI, give it first dibs on the message
-		if (getCurrentUI() == &soundEditor) {
-			if (soundEditor.midiCCReceived(cable, channelOrZone, ccNumber, value)) {
-				return;
-			}
+		if (getCurrentUI() == &soundEditor && soundEditor.midiCCReceived(cable, channelOrZone, ccNumber, value)) {
+			return;
 		}
 		// then midi learn is second priority
 		else if (currentUIMode == UI_MODE_MIDI_LEARN) {

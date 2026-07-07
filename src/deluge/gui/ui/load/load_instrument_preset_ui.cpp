@@ -46,14 +46,15 @@
 
 using namespace deluge;
 namespace encoders = deluge::hid::encoders;
-using encoders::EncoderName;
 
 LoadInstrumentPresetUI loadInstrumentPresetUI{};
 
 bool LoadInstrumentPresetUI::getGreyoutColsAndRows(uint32_t* cols, uint32_t* rows) {
-	if (showingAuditionPads() && !qwertyAlwaysVisible) {
+	// grey out the mute pads, not the audition pads or main pads
+	if (showingAuditionPads()) {
 		*cols = 0b10;
 	}
+	// grey out everything
 	else {
 		*cols = 0xFFFFFFFF;
 	}
@@ -74,7 +75,7 @@ bool LoadInstrumentPresetUI::opened() {
 	if (loadingSynthToKitRow) {
 		initialOutputType = outputTypeToLoad = OutputType::SYNTH;
 		if (soundDrumToReplace) {
-			initialName.set(&soundDrumToReplace->name);
+			initialName.set(soundDrumToReplace->drumName);
 		}
 		else {
 			initialName.set("");
@@ -209,10 +210,9 @@ Error LoadInstrumentPresetUI::setupForOutputType() {
 	else {
 		if (loadingSynthToKitRow && soundDrumToReplace) {
 
-			if (&soundDrumToReplace->name) {
-				String* name = &soundDrumToReplace->name;
-				enteredText.set(name);
-				searchFilename.set(name);
+			if (!soundDrumToReplace->drumName.empty()) {
+				enteredText.set(soundDrumToReplace->drumName);
+				searchFilename.set(soundDrumToReplace->drumName);
 			}
 
 			if (&soundDrumToReplace->path) {
@@ -799,7 +799,7 @@ nonNumeric:
 		char const* underscoreAddress = strrchr(oldNameChars, ' ');
 		if (underscoreAddress) {
 lookAtSuffixNumber:
-			int32_t underscorePos = (uint32_t)underscoreAddress - (uint32_t)oldNameChars;
+			int32_t underscorePos = (uintptr_t)underscoreAddress - (uintptr_t)oldNameChars;
 			numberStartPos = underscorePos + 1;
 			int32_t oldNumberLength = oldNameLength - numberStartPos;
 			if (oldNumberLength > 0) {
@@ -1086,7 +1086,7 @@ Error LoadInstrumentPresetUI::performLoadSynthToKit() {
 	soundDrumToReplace->loadAllSamples(true);
 
 	// soundDrumToReplace->name.set(getCurrentFilenameWithoutExtension());
-	getCurrentFilenameWithoutExtension(&soundDrumToReplace->name);
+	soundDrumToReplace->drumName = getCurrentFilenameWithoutExtension();
 	soundDrumToReplace->path.set(&currentDir);
 	ParamManager* paramManager =
 	    currentSong->getBackedUpParamManagerPreferablyWithClip(soundDrumToReplace, instrumentClipToLoadFor);
@@ -1583,11 +1583,11 @@ doneMoving:
 		deluge::hid::display::OLED::sendMainImage(); // Sorta cheating - bypassing the UI layered renderer.
 	}
 
-	if (encoders::getEncoder(EncoderName::SELECT).detentPos) {
+	if (encoders::select.pending()) {
 		D_PRINTLN("go again 1 --------------------------");
 
 doPendingPresetNavigation:
-		offset = encoders::getEncoder(EncoderName::SELECT).getLimitedDetentPosAndReset();
+		offset = encoders::select.take();
 
 		if (toReturn.loadedFromFile) {
 			currentSong->deleteOutput(toReturn.fileItem->instrument);
@@ -1611,7 +1611,7 @@ doPendingPresetNavigation:
 
 		toReturn.loadedFromFile = true;
 
-		if (encoders::getEncoder(EncoderName::SELECT).detentPos) {
+		if (encoders::select.pending()) {
 			D_PRINTLN("go again 2 --------------------------");
 			goto doPendingPresetNavigation;
 		}
@@ -1626,7 +1626,7 @@ doPendingPresetNavigation:
 	currentUIMode = oldUIMode;
 
 	// If user wants to move on...
-	if (encoders::getEncoder(EncoderName::SELECT).detentPos) {
+	if (encoders::select.pending()) {
 		D_PRINTLN("go again 3 --------------------------");
 		goto doPendingPresetNavigation;
 	}

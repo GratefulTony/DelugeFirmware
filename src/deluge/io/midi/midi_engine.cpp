@@ -21,15 +21,18 @@
 #include "gui/ui/sound_editor.h"
 #include "hid/display/display.h"
 #include "hid/hid_sysex.h"
+#include "hid/led/indicator_leds.h"
 #include "io/debug/log.h"
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_device_manager.h"
+#include "io/midi/midi_follow.h"
 #include "io/midi/sysex.h"
 #include "mem_functions.h"
 #include "model/song/song.h"
 #include "playback/mode/playback_mode.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/smsysex.h"
+#include "timers_interrupts/timers_interrupts.h"
 #include "version.h"
 
 extern "C" {
@@ -295,7 +298,8 @@ int32_t MidiEngine::getPotentialNumConnectedUSBMIDIDevices(int32_t ip) {
 
 // Warning - this will sometimes (not always) be called in an ISR
 void MidiEngine::flushUSBMIDIOutput() {
-
+	// make sure the interrupt doesn't fire mid flush
+	CriticalSectionGuard guard;
 	if (usbLock) {
 		return;
 	}
@@ -789,7 +793,11 @@ void MidiEngine::midiSysexReceived(MIDICable& cable, uint8_t* data, int32_t len)
 		developerSysexCodeReceived = true;
 	}
 	// The payload includes the msgID and the ending 0F0
-	unsigned payloadLength = len - payloadOffset;
+	int payloadLength = len - payloadOffset;
+	if (payloadLength < 1) {
+		// in this case it's garbage so just ignore it
+		return;
+	}
 	uint8_t* payloadStart = data + payloadOffset;
 	switch (data[payloadOffset]) {
 	case SysEx::SysexCommands::Ping: // PING test message, reply
