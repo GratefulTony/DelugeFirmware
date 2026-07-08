@@ -30,6 +30,7 @@ public:
 	void clusterStolen(int32_t clusterIndex);
 	bool setupNewCluster(int32_t cachedClusterIndex);
 	Cluster* getCluster(int32_t clusterIndex);
+	Cluster* getClusterForWriting(int32_t clusterIndex);
 	void setWriteBytePos(int32_t newWriteBytePos);
 
 	int32_t writeBytePos;

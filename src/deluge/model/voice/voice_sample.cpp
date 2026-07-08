@@ -1534,7 +1534,7 @@ uncachedPlayback:
 				}
 			}
 
-			Cluster* cacheCluster = cache->getCluster(cacheClusterIndex);
+			Cluster* cacheCluster = cache->getClusterForWriting(cacheClusterIndex);
 			if (ALPHA_OR_BETA_VERSION && !cacheCluster) {
 				// Check that the Cluster hasn't been stolen - but this should have been detected right at the start
 				FREEZE_WITH_ERROR("E166");
