@@ -1076,6 +1076,7 @@ enum KeyboardLayoutType : uint8_t {
 	KeyboardLayoutTypeChordLibrary,
 	KeyboardLayoutTypeDrums,
 	KeyboardLayoutTypeNorns,
+	KeyboardLayoutTypeIris,
 	KeyboardLayoutTypeMaxElement // Keep as boundary
 };
 

@@ -64,6 +64,14 @@ struct KeyboardStateChord {
 };
 /// Please note that saving and restoring currently needs to be added manually in instrument_clip.cpp and all layouts
 /// share one struct for storage
+struct KeyboardStateIris {
+	uint8_t quality = 0;     // Index into the quality families (major..other)
+	uint8_t complexity = 0;  // Which chord within the family (triad, 6, 7, 9...)
+	int8_t bassPc = -1;      // Slash bass pitch class relative to the root pads; -1 = off
+	uint8_t octave = 2;      // Octave selector (root pad 0 = kIrisBaseOctaveNote + 12*octave)
+	uint8_t voicingBias = 4; // Voice-leading spread bias 0..15 (close .. open)
+};
+
 struct KeyboardState {
 	KeyboardLayoutType currentLayout = FlashStorage::defaultKeyboardLayout;
 
@@ -73,6 +81,7 @@ struct KeyboardState {
 	KeyboardStatePiano piano;
 	KeyboardStateChord chord;
 	KeyboardStateChordLibrary chordLibrary;
+	KeyboardStateIris iris;
 
 	layout::ColumnControlState columnControl;
 };
