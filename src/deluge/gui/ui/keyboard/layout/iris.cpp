@@ -89,7 +89,8 @@ void KeyboardLayoutIris::evaluatePads(PressedPad presses[kMaxNumKeyboardPadPress
 			controlHandledMask &= ~bit;
 			continue;
 		}
-		if (!pressed.dead && pressed.x < kDisplayWidth && pressed.y != kIrisRowRoot && !(controlHandledMask & bit)) {
+		bool isControl = (pressed.y != kIrisRowRoot) || (pressed.x >= kIrisOctavePadFirst);
+		if (!pressed.dead && pressed.x < kDisplayWidth && isControl && !(controlHandledMask & bit)) {
 			controlHandledMask |= bit;
 			handleControlPad(pressed.x, pressed.y);
 		}
@@ -105,11 +106,6 @@ void KeyboardLayoutIris::evaluatePads(PressedPad presses[kMaxNumKeyboardPadPress
 				rootPadX = pressed.x;
 				bestTime = pressed.timeLastPadPress;
 			}
-		}
-		// Octave selector pads live on the root row
-		if (pressed.active && !pressed.dead && pressed.x >= kIrisOctavePadFirst && pressed.x < kDisplayWidth
-		    && pressed.y == kIrisRowRoot) {
-			getState().iris.octave = pressed.x - kIrisOctavePadFirst;
 		}
 	}
 
@@ -133,25 +129,67 @@ void KeyboardLayoutIris::handleControlPad(int32_t x, int32_t y) {
 	KeyboardStateIris& state = getState().iris;
 
 	switch (y) {
+	case kIrisRowRoot: // Octave selector pads (x >= kIrisOctavePadFirst)
+		if (x >= kIrisOctavePadFirst) {
+			state.octave = x - kIrisOctavePadFirst;
+			char longName[16];
+			snprintf(longName, sizeof(longName), "Octave %d", state.octave + 1);
+			char shortName[5];
+			snprintf(shortName, sizeof(shortName), "OCT%d", state.octave + 1);
+			char const* shortLong[2] = {shortName, longName};
+			display->displayPopup(shortLong);
+		}
+		break;
 	case kIrisRowBass:
 		if (x < kOctaveSize) {
 			// Latching toggle: press the active bass pad to clear it
 			state.bassPc = (state.bassPc == x) ? -1 : x;
+			if (state.bassPc < 0) {
+				char const* shortLong[2] = {"OFF", "Bass: off"};
+				display->displayPopup(shortLong);
+			}
+			else {
+				char noteName[3] = {0};
+				int32_t isNatural = 1;
+				noteCodeToString(60 + ((getRootNote() + x) % kOctaveSize), noteName, &isNatural, false);
+				char longName[16];
+				snprintf(longName, sizeof(longName), "Bass: %s", noteName);
+				char const* shortLong[2] = {noteName, longName};
+				display->displayPopup(shortLong);
+			}
 		}
 		break;
 	case kIrisRowComplexity:
 		if (x < kIrisNumComplexities) {
 			state.complexity = x;
+			const Chord& chord = chordsForQuality(state.quality)[state.complexity];
+			char longName[24];
+			snprintf(longName, sizeof(longName), "Chord: %s", chord.name);
+			char const* shortLong[2] = {chord.name, longName};
+			display->displayPopup(shortLong);
 		}
 		break;
 	case kIrisRowQuality:
 		if (x < kIrisNumQualities) {
 			state.quality = x;
+			static const char* const kQualityShort[kIrisNumQualities] = {"MAJ", "MIN", "DOM", "DIM", "AUG", "OTHR"};
+			static const char* const kQualityLong[kIrisNumQualities] = {"Major",      "Minor",     "Dominant",
+			                                                            "Diminished", "Augmented", "Other"};
+			char const* shortLong[2] = {kQualityShort[x], kQualityLong[x]};
+			display->displayPopup(shortLong);
 		}
 		break;
-	case kIrisRowVoicing:
+	case kIrisRowVoicing: {
 		state.voicingBias = x;
+		static const char* const kSpreadNames[4] = {"Close", "Mid", "Open", "Wide"};
+		char longName[20];
+		snprintf(longName, sizeof(longName), "Voicing: %s %d", kSpreadNames[x >> 2], x);
+		char shortName[5];
+		snprintf(shortName, sizeof(shortName), "VC%02d", x);
+		char const* shortLong[2] = {shortName, longName};
+		display->displayPopup(shortLong);
 		break;
+	}
 	default:
 		break;
 	}
