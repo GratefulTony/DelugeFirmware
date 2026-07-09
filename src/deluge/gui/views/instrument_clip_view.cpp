@@ -6648,7 +6648,8 @@ void InstrumentClipView::commandTransposeScreen(int32_t offset, bool inOctave) {
 
 		if (noteRow && !noteRow->hasNoNotes()) {
 			int32_t currentYNote = noteRow->y;
-			auto destYNote = currentSong->incrementYNoteInKey(currentYNote, offset, inOctave);
+			// what if it's not in key?
+			auto destYNote = currentSong->incrementYNoteInKey(currentYNote, offset, inOctave, clip->inScaleMode);
 			D_PRINTLN("Moving note from row %i to %i", currentYNote, destYNote);
 
 			// Skip if note would stay in same row
