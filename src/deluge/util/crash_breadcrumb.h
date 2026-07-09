@@ -44,6 +44,11 @@ void crashBreadcrumbNotePointers(uint32_t lrSys, uint32_t lrUsr, const uint32_t*
 // ignored, so a nested fault during the freeze UI can't overwrite the original crumb.
 void crashBreadcrumbStash(const char* errorCode);
 
+// Seals a pointers-only crumb (code "?") immediately after the stack walk, before the pad
+// drawing path which can hang on a wedged PIC DMA. The subsequent crashBreadcrumbStash
+// upgrades it with the real error code; if that never runs, the provisional crumb survives.
+void crashBreadcrumbSealProvisional(void);
+
 #ifdef __cplusplus
 }
 

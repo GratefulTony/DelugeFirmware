@@ -69,6 +69,7 @@ uint32_t pendingLrUsr;
 uint32_t pendingStackTrace[kMaxStackTrace];
 uint32_t pendingNumStackTrace;
 bool sealedThisSession;
+bool provisionalThisSession;
 bool contextWrittenThisSession;
 
 uint32_t computeCrc() {
@@ -147,10 +148,23 @@ extern "C" void crashBreadcrumbNotePointers(uint32_t lrSys, uint32_t lrUsr, cons
 	}
 }
 
+extern "C" void crashBreadcrumbSealProvisional() {
+	// Called from the fault handler right after the stack walk, before anything that can hang
+	// (the pad-drawing path ends in a busy-wait on the PIC DMA). Seals a pointers-only crumb
+	// that the full stash upgrades moments later - or that survives alone if we never get there.
+	if (sealedThisSession || provisionalThisSession || crumbIsValid()) {
+		return;
+	}
+	provisionalThisSession = true;
+	crashBreadcrumbStash("?");
+	sealedThisSession = false; // Allow the real stash to upgrade this crumb
+}
+
 extern "C" void crashBreadcrumbStash(const char* errorCode) {
 	// First crash wins - both within this session (a nested fault during the freeze UI must not
 	// overwrite the original crumb) and against an unflushed crumb from a previous session.
-	if (sealedThisSession || crumbIsValid()) {
+	// A provisional crumb sealed by this same crash is the one exception: upgrade it.
+	if (sealedThisSession || (crumbIsValid() && !provisionalThisSession)) {
 		return;
 	}
 	sealedThisSession = true;
@@ -223,8 +237,19 @@ bool haveReport;
 } // namespace
 
 void crashBreadcrumbDumpRecent() {
-	if (haveReport && Debug::midiDebugCable != nullptr) {
+	if (Debug::midiDebugCable == nullptr) {
+		return;
+	}
+	if (haveReport) {
 		Debug::sysexDebugPrint(*Debug::midiDebugCable, reportLine, false);
+	}
+	else if (crumb.magic == kMagic) {
+		// Magic survived but CRC didn't: the crumb decayed across a power cycle.
+		Debug::sysexDebugPrint(*Debug::midiDebugCable, "breadcrumb: found but corrupt (RAM decay across power-off?)",
+		                       true);
+	}
+	else {
+		Debug::sysexDebugPrint(*Debug::midiDebugCable, "breadcrumb: none this boot", true);
 	}
 }
 

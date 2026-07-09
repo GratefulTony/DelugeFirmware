@@ -179,6 +179,7 @@ extern uint32_t program_code_end;
 	}
 
 	crashBreadcrumbNotePointers(addrSYSLR, addrUSRLR, stackPointers, stackPointerCount);
+	crashBreadcrumbSealProvisional();
 
 	uint32_t currentColumnPairIndex = 0;
 
