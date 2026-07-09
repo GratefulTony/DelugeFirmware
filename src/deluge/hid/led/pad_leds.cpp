@@ -32,6 +32,7 @@
 #include "gui/waveform/waveform_renderer.h"
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
+#include "hid/hid_sysex.h"
 #include "model/clip/audio_clip.h"
 #include "model/clip/instrument_clip.h"
 #include "model/sample/sample.h"
@@ -943,6 +944,8 @@ void sendOutMainPadColours() {
 
 	needToSendOutMainPadColours = false;
 
+	HIDSysex::panelPadsDirty();
+
 	AudioEngine::logAction("sendOutMainPadColours 2");
 }
 
@@ -963,6 +966,8 @@ void sendOutSidebarColours() {
 	PIC::flush();
 
 	needToSendOutSidebarColours = false;
+
+	HIDSysex::panelPadsDirty();
 }
 
 void sendOutSidebarColoursSoon() {

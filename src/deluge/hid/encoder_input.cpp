@@ -23,6 +23,7 @@
 #include "gui/views/instrument_clip_view.h"
 #include "hid/buttons.h"
 #include "hid/encoders.h"
+#include "hid/hid_sysex.h"
 #include "hid/led/pad_leds.h"
 #include "hid/matrix/matrix_driver.h"
 #include "model/action/action_logger.h"
@@ -97,6 +98,10 @@ bool interpretEncoders(bool skipActioning) {
 			anything = true;
 
 			int32_t detentDelta = fe.take();
+
+			if (!skipActioning) {
+				HIDSysex::panelEncoderEvent(e, detentDelta);
+			}
 
 			// Handlers that take int8_t (tempo, select) get a saturating narrowing cast so that very fast
 			// spinning cannot overflow the parameter type.  Horizontal/vertical actions take int32_t and
@@ -173,6 +178,8 @@ checkResult:
 			// If encoder turned...
 			if (offset != 0) {
 				anything = true;
+
+				HIDSysex::panelEncoderEvent(4 + e, offset);
 
 				// Do it, only if
 				if (offset + modEncoderInitialTurnDirection[e] != 0) {

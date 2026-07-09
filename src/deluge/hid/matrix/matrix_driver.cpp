@@ -30,6 +30,7 @@
 #include "gui/views/session_view.h"
 #include "gui/waveform/waveform_renderer.h"
 #include "hid/display/display.h"
+#include "hid/hid_sysex.h"
 #include "hid/led/pad_leds.h"
 #include "io/debug/log.h"
 #include "model/clip/audio_clip.h"
@@ -73,6 +74,8 @@ ActionResult MatrixDriver::padAction(int32_t x, int32_t y, int32_t velocity) {
 	}
 
 	padStates[x][y] = velocity;
+
+	HIDSysex::panelPadInputEvent(x, y, velocity);
 #if ENABLE_MATRIX_DEBUG
 	D_PRINT("UI=%s,PAD_X=%d,PAD_Y=%d,VEL=%d", getCurrentUI()->getUIName(), x, y, velocity);
 #endif

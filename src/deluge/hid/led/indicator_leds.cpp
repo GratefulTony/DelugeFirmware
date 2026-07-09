@@ -19,6 +19,7 @@
 #include "RZA1/uart/sio_char.h"
 #include "drivers/pic/pic.h"
 #include "gui/ui_timer_manager.h"
+#include "hid/hid_sysex.h"
 #include <array>
 #include <cstdint>
 
@@ -51,6 +52,8 @@ void setLedState(LED led, bool newState, bool allowContinuedBlinking) {
 
 	uint8_t l = static_cast<int32_t>(led);
 	ledStates[l] = newState;
+
+	HIDSysex::panelLedEvent(l, newState ? 1 : 0);
 
 	if (newState) {
 		PIC::setLEDOn(l);

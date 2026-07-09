@@ -24,6 +24,7 @@
 #include "gui/views/arranger_view.h"
 #include "gui/views/session_view.h"
 #include "gui/views/view.h"
+#include "hid/hid_sysex.h"
 #include "model/mod_controllable/mod_controllable.h"
 #include "model/settings/runtime_feature_settings.h"
 #include "playback/mode/playback_mode.h"
@@ -74,6 +75,8 @@ bool buttonStates[NUM_BUTTON_COLS + 1][NUM_BUTTON_ROWS]; // The extra col is for
 
 ActionResult buttonAction(deluge::hid::Button b, bool on, bool inCardRoutine) {
 	using namespace deluge::hid::button;
+
+	HIDSysex::panelButtonEvent(b, on);
 
 	// Must happen up here before it's actioned, because if its action accesses SD card, we might multiple-enter this
 	// function, and don't want to then be setting this after that later action, erasing what it set
