@@ -59,6 +59,7 @@
 #include "definitions.h"
 #include "drivers/ssi/ssi.h"
 #include "drivers/uart/uart.h"
+#include "util/crash_breadcrumb.h"
 #include <version.h>
 
 extern uint32_t program_stack_start;
@@ -177,6 +178,8 @@ extern uint32_t program_code_end;
 		}
 	}
 
+	crashBreadcrumbNotePointers(addrSYSLR, addrUSRLR, stackPointers, stackPointerCount);
+
 	uint32_t currentColumnPairIndex = 0;
 
 	// Print LR from USR mode if it is valid
@@ -254,6 +257,7 @@ extern void fault_handler_print_freeze_pointers(uint32_t addrSYSLR, uint32_t add
 
 extern void handle_cpu_fault(uint32_t addrSYSLR, uint32_t addrSYSSP, uint32_t addrUSRLR, uint32_t addrUSRSP) {
 	printPointers(addrSYSLR, addrSYSSP, addrUSRLR, addrUSRSP, true);
+	crashBreadcrumbStash("FAULT");
 	clearTxBuffer();
 	// if we start using user mode then we'd want to do this to get an accurate call stack. We don't so just don't
 	//__asm__("CPS  0x10"); // Go to USR mode

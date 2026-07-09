@@ -30,6 +30,7 @@
 #include "processing/engines/audio_engine.h"
 #include "storage/flash_storage.h"
 #include "util/cfunctions.h"
+#include "util/crash_breadcrumb.h"
 #include "util/d_string.h"
 #include <algorithm>
 #include <string.h>
@@ -1215,6 +1216,7 @@ checkTimeTilTimeout:
 }
 
 void OLED::freezeWithError(char const* text) {
+	crashBreadcrumbStash(text);
 	OLED::clearMainImage();
 	int32_t yPixel = OLED_MAIN_TOPMOST_PIXEL;
 	main.drawString("Error:", 0, yPixel, kTextSpacingX, kTextSizeYUpdated, 0, OLED_MAIN_WIDTH_PIXELS);

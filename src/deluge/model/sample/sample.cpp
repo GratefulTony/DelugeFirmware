@@ -28,6 +28,7 @@
 #include "storage/audio/audio_file_manager.h"
 #include "storage/cluster/cluster.h"
 #include "storage/multi_range/multisample_range.h"
+#include "util/crash_breadcrumb.h"
 #include <cmath>
 #include <cstring>
 #include <new>
@@ -1765,12 +1766,24 @@ void Sample::numReasonsDecreasedToZero(char const* errorCode) {
 	}
 
 	if (numClusterReasons) {
+		crashBreadcrumbContextStart();
+		crashBreadcrumbContextAppend(filePath.get());
 		D_PRINTLN("reason dump---");
 		for (int32_t c = 0; c < clusters.getNumElements(); c++) {
 
 			Cluster* cluster = clusters.getElement(c)->cluster;
 			if (cluster) {
 				D_PRINT("cluster->numReasonsToBeLoaded[%d]", cluster->numReasonsToBeLoaded);
+
+				if (cluster->numReasonsToBeLoaded) {
+					crashBreadcrumbContextAppend(" c");
+					crashBreadcrumbContextAppendInt(c);
+					crashBreadcrumbContextAppend(":");
+					crashBreadcrumbContextAppendInt(cluster->numReasonsToBeLoaded);
+					crashBreadcrumbContextAppend(cluster == audioFileManager.clusterBeingLoaded ? "L"
+					                             : cluster->loaded                              ? "l"
+					                                                                            : "u");
+				}
 
 				if (cluster == audioFileManager.clusterBeingLoaded) {
 					D_PRINTLN(" (loading)");
