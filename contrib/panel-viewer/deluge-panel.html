@@ -348,6 +348,12 @@ function subscribe() {
 }
 
 async function init() {
+  if (!navigator.requestMIDIAccess) {
+    statusEl.textContent = window.isSecureContext
+      ? "This browser has no WebMIDI - use Chrome/Chromium, or Firefox 108+ (which will ask to install a MIDI site permission)."
+      : "WebMIDI needs a secure context - serve this file over http://localhost (e.g. python3 -m http.server) instead of opening it directly.";
+    return;
+  }
   let access;
   try { access = await navigator.requestMIDIAccess({ sysex: true }); }
   catch (err) { statusEl.textContent = "WebMIDI denied: " + err; return; }
