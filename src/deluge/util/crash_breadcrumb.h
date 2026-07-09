@@ -56,4 +56,8 @@ void crashBreadcrumbContextAppendInt(int32_t value);
 // Appends any sealed crumb to CRASH.LOG and invalidates it. Call only from a context where
 // SD access is safe (RESOURCE_SD task); no-op when no valid crumb exists.
 void crashBreadcrumbFlushRoutine();
+
+// Sends this session's crash report (if one was found) to the attached sysex debug console.
+// Called when a console attaches, so a report from boot time is replayed rather than lost.
+void crashBreadcrumbDumpRecent();
 #endif

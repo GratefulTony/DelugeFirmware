@@ -21,10 +21,15 @@
 
 #include "crash_breadcrumb.h"
 #include "fatfs/ff.h"
+#include "io/midi/sysex.h"
 #include "model/song/song.h"
 #include <cstddef>
 #include <cstring>
 #include <version.h>
+
+namespace Debug {
+extern MIDICable* midiDebugCable;
+}
 
 namespace AudioEngine {
 extern uint32_t audioSampleTimer;
@@ -211,36 +216,54 @@ void crashBreadcrumbContextAppendInt(int32_t value) {
 	crumb.contextLen = pos;
 }
 
+namespace {
+char reportLine[640];
+size_t reportLineLength;
+bool haveReport;
+} // namespace
+
+void crashBreadcrumbDumpRecent() {
+	if (haveReport && Debug::midiDebugCable != nullptr) {
+		Debug::sysexDebugPrint(*Debug::midiDebugCable, reportLine, false);
+	}
+}
+
 void crashBreadcrumbFlushRoutine() {
 	if (!crumbIsValid()) {
 		return;
 	}
 
-	char line[640];
-	size_t pos = 0;
-	appendString(line, sizeof(line), pos, crumb.errorCode);
-	appendString(line, sizeof(line), pos, " fw=");
-	appendString(line, sizeof(line), pos, crumb.fwVersion);
-	appendString(line, sizeof(line), pos, " up=");
-	appendUint(line, sizeof(line), pos, crumb.uptimeSamples / 44100);
-	appendString(line, sizeof(line), pos, "s song=");
-	appendString(line, sizeof(line), pos, crumb.songName[0] ? crumb.songName : "-");
-	appendString(line, sizeof(line), pos, " lrS=");
-	appendHex(line, sizeof(line), pos, crumb.lrSys);
-	appendString(line, sizeof(line), pos, " lrU=");
-	appendHex(line, sizeof(line), pos, crumb.lrUsr);
-	appendString(line, sizeof(line), pos, " stk=");
-	for (uint32_t i = 0; i < crumb.numStackTrace; i++) {
-		if (i) {
-			appendChar(line, sizeof(line), pos, ',');
+	if (!haveReport) {
+		char* line = reportLine;
+		constexpr size_t lineSize = sizeof(reportLine);
+		size_t pos = 0;
+		appendString(line, lineSize, pos, crumb.errorCode);
+		appendString(line, lineSize, pos, " fw=");
+		appendString(line, lineSize, pos, crumb.fwVersion);
+		appendString(line, lineSize, pos, " up=");
+		appendUint(line, lineSize, pos, crumb.uptimeSamples / 44100);
+		appendString(line, lineSize, pos, "s song=");
+		appendString(line, lineSize, pos, crumb.songName[0] ? crumb.songName : "-");
+		appendString(line, lineSize, pos, " lrS=");
+		appendHex(line, lineSize, pos, crumb.lrSys);
+		appendString(line, lineSize, pos, " lrU=");
+		appendHex(line, lineSize, pos, crumb.lrUsr);
+		appendString(line, lineSize, pos, " stk=");
+		for (uint32_t i = 0; i < crumb.numStackTrace; i++) {
+			if (i) {
+				appendChar(line, lineSize, pos, ',');
+			}
+			appendHex(line, lineSize, pos, crumb.stackTrace[i]);
 		}
-		appendHex(line, sizeof(line), pos, crumb.stackTrace[i]);
+		if (crumb.contextLen && crumb.contextLen < sizeof(crumb.context)) {
+			appendString(line, lineSize, pos, " ctx: ");
+			appendString(line, lineSize, pos, crumb.context);
+		}
+		appendChar(line, lineSize, pos, '\n');
+		reportLineLength = pos;
+		haveReport = true;
+		crashBreadcrumbDumpRecent();
 	}
-	if (crumb.contextLen && crumb.contextLen < sizeof(crumb.context)) {
-		appendString(line, sizeof(line), pos, " ctx: ");
-		appendString(line, sizeof(line), pos, crumb.context);
-	}
-	appendChar(line, sizeof(line), pos, '\n');
 
 	FIL file;
 	if (f_open(&file, "CRASH.LOG", FA_WRITE | FA_OPEN_ALWAYS) != FR_OK) {
@@ -248,10 +271,10 @@ void crashBreadcrumbFlushRoutine() {
 	}
 	f_lseek(&file, f_size(&file));
 	UINT written = 0;
-	FRESULT result = f_write(&file, line, pos, &written);
+	FRESULT result = f_write(&file, reportLine, reportLineLength, &written);
 	f_close(&file);
 
-	if (result == FR_OK && written == pos) {
+	if (result == FR_OK && written == reportLineLength) {
 		crumb.magic = 0;
 		crumb.crc = 0;
 		flushCrumbToRam();
