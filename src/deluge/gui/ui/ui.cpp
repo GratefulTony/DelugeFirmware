@@ -174,6 +174,19 @@ UI* getUIUpOneLevel(int32_t numLevelsUp) {
 // If UI not found, chaos
 void closeUI(UI* uiToClose) {
 
+	// A UI that isn't on the stack (e.g. already closed by another path) must be a no-op - the search loop
+	// below stops at u == 1 and would otherwise fall through to indexing uiNavigationHierarchy[-1]
+	bool onStack = false;
+	for (int32_t i = numUIsOpen - 1; i >= 1; i--) {
+		if (uiNavigationHierarchy[i] == uiToClose) {
+			onStack = true;
+			break;
+		}
+	}
+	if (!onStack) {
+		return;
+	}
+
 	bool redrawMainPads = false;
 	bool redrawSidebar = false;
 
