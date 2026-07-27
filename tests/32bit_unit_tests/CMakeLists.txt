@@ -35,6 +35,10 @@ file(GLOB_RECURSE deluge_SOURCES
         ../../src/lib/printf.c
 )
 
+# Includes song.h, which drags the reverb headers and their Argon dependency into the host build;
+# the test targets don't fetch Argon and nothing here tests the breadcrumb.
+list(FILTER deluge_SOURCES EXCLUDE REGEX "crash_breadcrumb")
+
 file(GLOB_RECURSE mock_SOURCES
         # Mock implementations
         mocks/*

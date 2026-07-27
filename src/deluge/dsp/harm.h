@@ -210,8 +210,8 @@ struct HarmParams {
 			float w0 = centerFreq * (6.2831853f / 4294967296.0f);
 
 			float Q = 30.0f - (static_cast<float>(hpf - 1) / 126.0f) * 29.5f;
-			float sinw0 = std::sinf(w0);
-			float cosw0 = std::cosf(w0);
+			float sinw0 = std::sin(w0);
+			float cosw0 = std::cos(w0);
 			float alpha = sinw0 / (2.0f * Q);
 			float inv_a0 = 1.0f / (1.0f + alpha);
 
@@ -295,7 +295,7 @@ struct HarmParams {
 			    kHarmPortaMaxRate - (static_cast<float>(porta) / 127.0f) * (kHarmPortaMaxRate - kHarmPortaMinRate);
 			// Compute final value after N samples: freq = target + (current - target) * (1 - rate)^N
 			float retention = 1.0f - portaRate;
-			float retentionN = std::powf(retention, static_cast<float>(buffer.size()));
+			float retentionN = std::pow(retention, static_cast<float>(buffer.size()));
 			currentFreq = targetFreq + (currentFreq - targetFreq) * retentionN;
 		}
 
@@ -305,7 +305,7 @@ struct HarmParams {
 		// Only recompute when frequency changed (sqrtf is ~30 cycles)
 		if (pitchChanged || currentFreq != targetFreq) {
 			float outputHz = currentFreq * (kHarmSampleRate / 4294967296.0f);
-			float pinkScale = (outputHz > 40.0f) ? std::sqrtf(40.0f / outputHz) : 1.0f;
+			float pinkScale = (outputHz > 40.0f) ? std::sqrt(40.0f / outputHz) : 1.0f;
 			cachedPinkQ31 = static_cast<q31_t>(pinkScale * static_cast<float>(ONE_Q31));
 		}
 

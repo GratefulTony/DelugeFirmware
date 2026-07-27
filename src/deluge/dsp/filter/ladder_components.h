@@ -19,10 +19,8 @@
 
 #include "util/fixedpoint.h"
 #include <algorithm>
-#include <cstdint>
-#ifdef __ARM_NEON
 #include <arm_neon.h>
-#endif
+#include <cstdint>
 namespace deluge::dsp::filter {
 class BasicFilterComponent {
 public:
@@ -53,10 +51,6 @@ public:
 
 	q31_t memory = 0;
 };
-
-// The stereo NEON components below are unavailable in host test builds (x86), which reach this
-// header via audio_engine.h; their only users are ARM-only DSP translation units.
-#ifdef __ARM_NEON
 
 /// Stereo filter component - processes L/R channels in parallel using NEON
 /// Note: Do NOT add alignas() - it causes static initialization crashes
@@ -286,7 +280,5 @@ struct StereoBiquadAllpass {
 		return y;
 	}
 };
-
-#endif // __ARM_NEON
 
 } // namespace deluge::dsp::filter

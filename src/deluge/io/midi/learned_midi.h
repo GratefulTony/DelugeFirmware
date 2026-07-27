@@ -32,15 +32,17 @@ public:
 	LearnedMIDI();
 	void clear();
 
-	constexpr bool equalsCable(MIDICable* newCable) const {
+	// Not constexpr: reads the runtime global MIDIDeviceManager::differentiatingInputsByDevice, so it can
+	// never be constant-evaluated - GCC 12 rejects the constexpr marking outright (GCC 14 merely defers).
+	bool equalsCable(MIDICable* newCable) const {
 		return (!MIDIDeviceManager::differentiatingInputsByDevice || !cable || newCable == cable);
 	}
 
-	constexpr bool equalsChannelOrZone(MIDICable* newCable, int32_t newChannelOrZone) const {
+	bool equalsChannelOrZone(MIDICable* newCable, int32_t newChannelOrZone) const {
 		return (newChannelOrZone == channelOrZone && equalsCable(newCable));
 	}
 
-	constexpr bool equalsNoteOrCC(MIDICable* newCable, int32_t newChannel, int32_t newNoteOrCC) const {
+	bool equalsNoteOrCC(MIDICable* newCable, int32_t newChannel, int32_t newNoteOrCC) const {
 		return (newNoteOrCC == noteOrCC && equalsChannelOrZone(newCable, newChannel));
 	}
 

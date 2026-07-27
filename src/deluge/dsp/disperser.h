@@ -58,9 +58,14 @@ namespace deluge::dsp {
 
 /// Saturating add for q31_t using ARM scalar qadd instruction
 [[gnu::always_inline]] inline q31_t q31_sat_add(q31_t a, q31_t b) {
+#if defined(__arm__)
 	q31_t result;
 	asm("qadd %0, %1, %2" : "=r"(result) : "r"(a), "r"(b));
 	return result;
+#else
+	// Host test builds have no qadd instruction
+	return static_cast<q31_t>(std::clamp<int64_t>(static_cast<int64_t>(a) + b, INT32_MIN, INT32_MAX));
+#endif
 }
 
 // Forward declarations
