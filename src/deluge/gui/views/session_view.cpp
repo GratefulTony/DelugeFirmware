@@ -2157,6 +2157,9 @@ void SessionView::replaceInstrumentClipWithAudioClip(Clip* clip) {
 		return;
 	}
 
+	// The old clip is freed inside the swap - clear MidiFollow's cached pointer to it, as removeClip() does
+	midiFollow.removeClip(clip);
+
 	Clip* newClip = currentSong->replaceInstrumentClipWithAudioClip(clip, clipIndex);
 
 	if (!newClip) {
