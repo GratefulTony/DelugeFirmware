@@ -1653,6 +1653,7 @@ void Sound::noteOn(ModelStackWithThreeMainThings* modelStack, ArpeggiatorBase* a
 	arpeggiator->noteOn(arpSettings, noteCodePreArp, velocity, &instruction, fromMIDIChannel, mpeValues);
 
 	bool atLeastOneNoteOn = false;
+	bool atLeastOneNoteLeftPending = false;
 	if (instruction.arpNoteOn != nullptr) {
 		for (int32_t n = 0; n < ARP_MAX_INSTRUCTION_NOTES; n++) {
 			if (instruction.arpNoteOn->noteCodeOnPostArp[n] == ARP_NOTE_NONE) {
@@ -1671,8 +1672,9 @@ void Sound::noteOn(ModelStackWithThreeMainThings* modelStack, ArpeggiatorBase* a
 			}
 			else {
 				// D_PRINTLN("couldn't start note from sound::noteon");
+				// It stays PENDING, and render() will start it as soon as a voice is available
+				atLeastOneNoteLeftPending = true;
 			}
-			// todo: end pending note?
 		}
 	}
 	if (!atLeastOneNoteOn) {
@@ -1681,6 +1683,11 @@ void Sound::noteOn(ModelStackWithThreeMainThings* modelStack, ArpeggiatorBase* a
 		if (arpSettings != nullptr && arpeggiator->hasAnyInputNotesActive() && arpSettings->mode != ArpMode::OFF) {
 			reassessRenderSkippingStatus(modelStackWithSoundFlags);
 		}
+	}
+	else if (atLeastOneNoteLeftPending) {
+		// We started no voice for that note, so nothing else will have taken us out of render-skipping - and render()
+		// is the only thing that can start the pending note (issue #2262)
+		reassessRenderSkippingStatus(modelStackWithSoundFlags);
 	}
 }
 
@@ -2305,11 +2312,14 @@ void Sound::reassessRenderSkippingStatus(ModelStackWithSoundFlags* modelStack, b
 	// ModelStack, cos many deeper-nested functions called by this one need it too!
 	ArpeggiatorSettings* arpSettings = getArpSettings();
 
+	// A note that couldn't get a voice yet is only ever started from render(), so we must keep rendering while one is
+	// pending - otherwise it'd stay pending forever (issue #2262)
 	bool skippingStatusNow =
 	    (voices_.empty() && (delay.repeatsUntilAbandon == 0u) && !stutterer.isStuttering(this)
 	     && !disperser.delay.hasEnergy() // Disperser tail still ringing
 	     && (harm.envelope <= 0.0f)      // Harm envelope still releasing
-	     && ((arpSettings == nullptr) || !getArp()->hasAnyInputNotesActive() || arpSettings->mode == ArpMode::OFF));
+	     && ((arpSettings == nullptr) || !getArp()->hasAnyInputNotesActive() || arpSettings->mode == ArpMode::OFF)
+	     && !getArp()->hasPendingNotes(arpSettings));
 
 	if (skippingStatusNow != skippingRendering) {
 
@@ -5922,7 +5932,9 @@ ModelStackWithAutoParam* Sound::getParamFromMIDIKnob(MIDIKnob& knob, ModelStackW
 }
 
 const Sound::ActiveVoice& Sound::acquireVoice() noexcept(false) {
-	if (voices_.size() >= maxVoiceCount) {
+	auto count_toward_voice_limit = [](const ActiveVoice& voice) { return !voice->isCullFading(); };
+
+	if (std::ranges::count_if(voices_, count_toward_voice_limit) >= maxVoiceCount) {
 		this->terminateOneActiveVoice();
 	}
 
@@ -5990,14 +6002,18 @@ void Sound::terminateOneActiveVoice() {
 		return;
 	}
 
-	ActiveVoice* best = &voices_.front();
-	for (ActiveVoice& voice : voices_ | std::views::drop(1)) {
-		// skip voices which are already releasing faster than we're going to release them
-		if (voice->envelopes[0].state >= EnvelopeStage::FAST_RELEASE
-		    && voice->envelopes[0].fastReleaseIncrement >= SOFT_CULL_INCREMENT) {
+	// The eligibility filter must apply to EVERY voice, including the first: seeding `best` with front()
+	// unfiltered meant a just-fast-released front voice (highest rating, since FAST_RELEASE outranks every
+	// sounding stage) absorbed every subsequent terminate in the same render window - so chords overran
+	// maxVoiceCount and the limiter sometimes chopped held notes instead (issue #4721).
+	ActiveVoice* best = nullptr;
+	for (ActiveVoice& voice : voices_) {
+		if (voice->isCullFading()) {
 			continue;
 		}
-		best = (*best)->getPriorityRating() < voice->getPriorityRating() ? &voice : best;
+		if (best == nullptr || (*best)->getPriorityRating() < voice->getPriorityRating()) {
+			best = &voice;
+		}
 	}
 
 	if (best == nullptr) {
@@ -6005,7 +6021,10 @@ void Sound::terminateOneActiveVoice() {
 	}
 
 	const ActiveVoice& voice = *best;
-	bool still_rendering = voice->doFastRelease(4 * SOFT_CULL_INCREMENT);
+	// SOFT_CULL_INCREMENT = a 128-sample (~2.9 ms) fade, matching release 1.2's voice-limit steal. Faster rates
+	// (the 4x, 32-sample sub-millisecond one) read as a pop on sustained material when a low maxVoices makes every
+	// note-on steal (issue #4721).
+	bool still_rendering = voice->doFastRelease(SOFT_CULL_INCREMENT);
 
 	if (!still_rendering) {
 		this->freeActiveVoice(voice);
@@ -6017,19 +6036,26 @@ void Sound::forceReleaseOneActiveVoice() {
 		return;
 	}
 
-	ActiveVoice* best = &voices_.front();
-	for (ActiveVoice& voice : voices_ | std::views::drop(1)) {
-		// skip voices releasing faster than this - we'd rather release another voice
-		if (voice->envelopes[0].state >= EnvelopeStage::FAST_RELEASE
-		    && voice->envelopes[0].fastReleaseIncrement >= 4096) {
+	// As in terminateOneActiveVoice: the filter must cover the first voice too, or an already-fast-releasing
+	// front voice (highest rating) soaks up every call in the window.
+	// Note isCullFading() only protects voices already fading at >= SOFT_CULL_INCREMENT; a voice fast-releasing
+	// more slowly (increment in [4096, SOFT_CULL_INCREMENT)) is still eligible, so speedUpRelease() below doubles
+	// it up to the cull-fade rate. This is intentional: a slow fade shouldn't be allowed to linger under load.
+	ActiveVoice* best = nullptr;
+	for (ActiveVoice& voice : voices_) {
+		if (voice->isCullFading()) {
 			continue;
 		}
-		best = (*best)->getPriorityRating() < voice->getPriorityRating() ? &voice : best;
+		if (best == nullptr || (*best)->getPriorityRating() < voice->getPriorityRating()) {
+			best = &voice;
+		}
+	}
+
+	if (best == nullptr) {
+		return;
 	}
 
 	const ActiveVoice& voice = *best;
-
-	auto stage = voice->envelopes[0].state;
 
 	bool still_rendering = voice->speedUpRelease();
 

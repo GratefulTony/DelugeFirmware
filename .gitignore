@@ -33,6 +33,7 @@ __pycache__
 .session.vim
 
 .idea
+.junie
 *.srctrl*
 
 .deluge_hex_key

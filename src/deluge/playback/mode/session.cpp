@@ -1345,7 +1345,7 @@ void Session::armSectionWhenNeitherClockActive(ModelStack* modelStack, int32_t s
 	for (int32_t c = 0; c < modelStack->song->sessionClips.getNumElements(); c++) {
 		Clip* clip = modelStack->song->sessionClips.getClipAtIndex(c);
 
-		if (clip->section == section && !clip->activeIfNoSolo) {
+		if (clip->section == section && clip->launchStyle != LaunchStyle::FILL && !clip->activeIfNoSolo) {
 			clip->activeIfNoSolo = true;
 			clip->onLaunch();
 
@@ -1436,7 +1436,7 @@ void Session::armClipsAlongWithExistingLaunching(ArmState armState, uint8_t sect
 	{
 		for (int l = 0; l < currentSong->sessionClips.getNumElements(); l++) {
 			Clip* thisClip = currentSong->sessionClips.getClipAtIndex(l);
-			if (thisClip->section == section) {
+			if (thisClip->section == section && thisClip->launchStyle != LaunchStyle::FILL) {
 				// If we're arming a section, we know there's no soloing or armed Clips, so that's easy.
 				// Only arm if it's not playing
 				if (!thisClip->activeIfNoSolo) {
@@ -1462,7 +1462,7 @@ void Session::armClipsWithNothingToSyncTo(uint8_t section, Clip* clip) {
 	{
 		for (int c = 0; c < currentSong->sessionClips.getNumElements(); c++) {
 			Clip* thisClip = currentSong->sessionClips.getClipAtIndex(c);
-			if (thisClip->section == section) {
+			if (thisClip->section == section && thisClip->launchStyle != LaunchStyle::FILL) {
 				thisClip->activeIfNoSolo = true;
 				thisClip->onLaunch();
 				currentSong->assertActiveness(modelStack->addTimelineCounter(thisClip)); // Very inefficient
@@ -1512,7 +1512,8 @@ void Session::userWantsToArmClipsToStartOrSolo(uint8_t section, Clip* clip, bool
 		for (int32_t c = 0; c < currentSong->sessionClips.getNumElements(); c++) {
 			Clip* thisClip = currentSong->sessionClips.getClipAtIndex(c);
 
-			if (thisClip->section == section && thisClip->loopLength > longestStartingClipLength) {
+			if (thisClip->section == section && thisClip->launchStyle != LaunchStyle::FILL
+			    && thisClip->loopLength > longestStartingClipLength) {
 				longestStartingClipLength = thisClip->loopLength;
 			}
 		}
