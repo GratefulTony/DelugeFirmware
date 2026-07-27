@@ -31,6 +31,7 @@
 #include "memory/general_memory_allocator.h"
 #include "model/action/action_logger.h"
 #include "util/cfunctions.h"
+#include "util/crash_breadcrumb.h"
 #include "util/functions.h"
 #include <cstdint>
 #include <cstring>
@@ -697,6 +698,7 @@ void SevenSegment::setTextVeryBasicA1(char const* text) {
 // Highest error code used, fix branch: i041
 
 void SevenSegment::freezeWithError(char const* text) {
+	crashBreadcrumbStash(text);
 	setTextVeryBasicA1(text);
 
 	while (1) {

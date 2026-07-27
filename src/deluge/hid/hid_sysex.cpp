@@ -4,6 +4,8 @@
 #include "gui/ui_timer_manager.h"
 #include "hid/display/oled.h"
 #include "hid/display/seven_segment.h"
+#include "hid/led/indicator_leds.h"
+#include "hid/led/pad_leds.h"
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_engine.h"
 #include "io/midi/sysex.h"
@@ -16,6 +18,18 @@ MIDICable* midiDisplayCable = nullptr;
 int32_t midiDisplayUntil = 0;
 uint8_t* oledDeltaImage = nullptr;
 bool oledDeltaForce = true;
+
+#if ENABLE_PANEL_STREAM
+namespace indicator_leds {
+extern bool ledStates[];
+}
+
+MIDICable* panelStateCable = nullptr;
+int32_t panelStateUntil = 0;
+RGB panelPadsLastSent[kDisplayHeight][kDisplayWidth + kSideBarWidth];
+bool panelPadsSendAll = true;
+bool panelPadsPending = false;
+#endif
 
 void HIDSysex::sysexReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 	if (len < 3) {
@@ -33,6 +47,10 @@ void HIDSysex::sysexReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 
 	case 2:
 		readBlock(cable);
+		break;
+
+	case 3:
+		requestPanelState(cable, data, len);
 		break;
 
 	default:
@@ -236,3 +254,144 @@ void HIDSysex::readBlock(MIDICable& cable) {
 	                                     // 		device->sendSysex(reply, packed + 7); //
 	cable.sendSysex(reply, packed + 10); //
 }
+
+#if ENABLE_PANEL_STREAM
+
+namespace {
+
+bool panelStreamActive() {
+	return panelStateCable != nullptr && AudioEngine::audioSampleTimer <= (uint32_t)panelStateUntil;
+}
+
+void sendPanelEvent(uint8_t type, uint8_t a, uint8_t b, uint8_t c) {
+	if (!panelStreamActive()) {
+		return;
+	}
+	if (panelStateCable->sendBufferSpace() < 32) {
+		return; // Events are ephemeral - drop rather than block
+	}
+	uint8_t reply[12] = {0xF0,
+	                     0x00,
+	                     0x21,
+	                     0x7B,
+	                     0x01,
+	                     0x02,
+	                     0x43,
+	                     type,
+	                     static_cast<uint8_t>(a & 0x7F),
+	                     static_cast<uint8_t>(b & 0x7F),
+	                     static_cast<uint8_t>(c & 0x7F),
+	                     0xF7};
+	panelStateCable->sendSysex(reply, sizeof(reply));
+}
+
+void sendPanelLedSnapshot() {
+	using indicator_leds::LED;
+	const LED allLeds[] = {
+	    LED::AFFECT_ENTIRE, LED::SESSION_VIEW, LED::CLIP_VIEW, LED::SYNTH,      LED::KIT,
+	    LED::MIDI,          LED::CV,           LED::KEYBOARD,  LED::SCALE_MODE, LED::CROSS_SCREEN_EDIT,
+	    LED::BACK,          LED::LOAD,         LED::SAVE,      LED::LEARN,      LED::TAP_TEMPO,
+	    LED::SYNC_SCALING,  LED::TRIPLETS,     LED::PLAY,      LED::RECORD,     LED::SHIFT,
+	    LED::MOD_0,         LED::MOD_1,        LED::MOD_2,     LED::MOD_3,      LED::MOD_4,
+	    LED::MOD_5,         LED::MOD_6,        LED::MOD_7,
+	};
+	for (LED led : allLeds) {
+		uint8_t l = static_cast<uint8_t>(led);
+		sendPanelEvent(0, l, indicator_leds::ledStates[l] ? 1 : 0, 0);
+	}
+}
+
+} // namespace
+
+void HIDSysex::requestPanelState(MIDICable& cable, uint8_t* data, int32_t len) {
+	if (data[2] == 2 || data[2] == 3) {
+		panelStateCable = &cable;
+		panelStateUntil = AudioEngine::audioSampleTimer + 2 * kSampleRate;
+		if (data[2] == 3) {
+			panelPadsSendAll = true;
+			sendPanelLedSnapshot();
+		}
+		panelPadsPending = true;
+		sendPanelPadsIfChanged();
+	}
+}
+
+void HIDSysex::sendPanelPadsIfChanged() {
+	if (!panelStreamActive()) {
+		return;
+	}
+	if (!panelPadsPending && !panelPadsSendAll) {
+		return;
+	}
+	if (panelStateCable->sendBufferSpace() < 600) {
+		return; // Stays pending; retried on next pad update or keepalive
+	}
+
+	constexpr int32_t numCols = kDisplayWidth + kSideBarWidth;
+	constexpr int32_t rowBytes = numCols * 3;
+	static_assert(sizeof(RGB) == 3, "pad stream assumes packed RGB");
+	uint8_t* current = reinterpret_cast<uint8_t*>(&PadLEDs::image[0][0]);
+	uint8_t* last = reinterpret_cast<uint8_t*>(&panelPadsLastSent[0][0]);
+
+	int32_t firstRow = 0;
+	int32_t lastRow = kDisplayHeight - 1;
+	if (!panelPadsSendAll) {
+		firstRow = -1;
+		for (int32_t r = 0; r < kDisplayHeight; r++) {
+			if (memcmp(current + r * rowBytes, last + r * rowBytes, rowBytes) != 0) {
+				if (firstRow < 0) {
+					firstRow = r;
+				}
+				lastRow = r;
+			}
+		}
+		if (firstRow < 0) {
+			panelPadsPending = false;
+			return;
+		}
+	}
+	int32_t numRows = lastRow - firstRow + 1;
+
+	uint8_t reply_hdr[8] = {0xF0, 0x00, 0x21, 0x7B, 0x01, 0x02, 0x42, 0x00};
+	uint8_t* reply = midiEngine.sysex_fmt_buffer;
+	memcpy(reply, reply_hdr, sizeof(reply_hdr));
+	reply[8] = firstRow;
+	reply[9] = numRows;
+	int32_t packed = pack_8to7_rle(reply + 10, 600, current + firstRow * rowBytes, numRows * rowBytes);
+	if (packed <= 0) {
+		return;
+	}
+	memcpy(last + firstRow * rowBytes, current + firstRow * rowBytes, numRows * rowBytes);
+	panelPadsSendAll = false;
+	panelPadsPending = false;
+	reply[10 + packed] = 0xF7;
+	panelStateCable->sendSysex(reply, packed + 11);
+}
+
+void HIDSysex::panelPadsDirty() {
+	panelPadsPending = true;
+	sendPanelPadsIfChanged();
+}
+
+void HIDSysex::panelLedEvent(uint8_t ledCode, uint8_t state) {
+	sendPanelEvent(0, ledCode, state, 0);
+}
+
+void HIDSysex::panelKnobIndicatorEvent(uint8_t whichKnob, uint8_t level) {
+	sendPanelEvent(1, whichKnob, level > 127 ? 127 : level, 0);
+}
+
+void HIDSysex::panelButtonEvent(uint8_t buttonCode, bool on) {
+	sendPanelEvent(2, buttonCode, on ? 1 : 0, 0);
+}
+
+void HIDSysex::panelPadInputEvent(uint8_t x, uint8_t y, uint8_t velocity) {
+	sendPanelEvent(3, x, y, velocity > 127 ? 127 : velocity);
+}
+
+void HIDSysex::panelEncoderEvent(uint8_t encoderId, int32_t delta) {
+	int32_t clamped = delta < -63 ? -63 : (delta > 63 ? 63 : delta);
+	sendPanelEvent(4, encoderId, static_cast<uint8_t>(clamped + 64), 0);
+}
+
+#endif // ENABLE_PANEL_STREAM

@@ -94,6 +94,17 @@ INTERNAL_RAM_END = 0x20300000;
 
 SECTIONS
 {
+	/* Crash breadcrumb lives at the very start of the data-retention RAM block, below the
+	   firmware image. NOLOAD and never emptied at boot: its contents must survive resets
+	   and chainloads so the crash log can be written once the system is healthy again.
+	   Cache-line (32B) aligned so it can be flushed to physical RAM at freeze time. */
+	.crash_breadcrumb (NOLOAD) :
+	{
+		. = ALIGN(32);
+		KEEP(*(.crash_breadcrumb))
+		. = ALIGN(32);
+	} > RAM012L
+
 	.frunk_bss (NOLOAD) :
 	{
         . = ALIGN(4);

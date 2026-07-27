@@ -59,6 +59,12 @@ public:
 	void drawPixelsForOled() override {
 		deluge::hid::display::oled_canvas::Canvas& canvas = hid::display::OLED::main;
 
+		// A freshly created track can have SPECIFIC_OUTPUT input with no source output assigned yet
+		if (audioOutputBeingEdited->getOutputRecordingFrom() == nullptr) {
+			canvas.drawStringCentred("None", OLED_MAIN_TOPMOST_PIXEL + 28, kTextTitleSpacingX, kTextTitleSizeY);
+			return;
+		}
+
 		// track
 		Output* output = currentSong->getOutputFromIndex(outputIndex);
 
@@ -96,6 +102,10 @@ public:
 	}
 
 	void drawFor7seg() {
+		if (audioOutputBeingEdited->getOutputRecordingFrom() == nullptr) {
+			display->setScrollingText("NONE", 0);
+			return;
+		}
 		char const* text = audioOutputBeingEdited->getOutputRecordingFrom()->name.get();
 		display->setScrollingText(text, 0);
 	}

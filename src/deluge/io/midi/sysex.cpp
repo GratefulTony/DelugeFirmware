@@ -22,6 +22,7 @@
 #include "io/midi/midi_device.h"
 #include "io/midi/midi_engine.h"
 #include "util/chainload.h"
+#include "util/crash_breadcrumb.h"
 
 #include "util/pack.h"
 
@@ -35,6 +36,7 @@ void Debug::sysexReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 	case 0:
 		if (data[2] == 1) {
 			midiDebugCable = &cable;
+			crashBreadcrumbDumpRecent();
 		}
 		else if (data[2] == 0) {
 			midiDebugCable = nullptr;

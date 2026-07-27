@@ -81,7 +81,7 @@ for i in range(2):
             "oscillator/phi_stereo_zone.md",
             name="STRING_FOR_PHI_STEREO",
             title="STRING_FOR_OSC_PHI_STEREO_MENU_TITLE",
-            available_when="Oscillator type must be a phi-family oscillator (PhiMorph/PhiStair/PhiWeave/PhiVox/PhiSwarm/PhiGendy)",
+            available_when="Oscillator type must be a stereo-capable phi-family oscillator (PhiMorph/PhiStair/PhiWeave/PhiSwarm/PhiGendy - PhiVox excluded)",
         ),
         Menu(
             "sample::Transpose",

@@ -217,7 +217,28 @@ void SampleCache::prioritizeNotStealingCluster(int32_t clusterIndex) {
 	}
 }
 
+// Writer-side accessor: the frontier cluster was just set up by setupNewCluster(),
+// so it's initialized even though writeBytePos hasn't advanced into it yet - the
+// reader-side bound in getCluster() would reject it (that was regression E166).
+Cluster* SampleCache::getClusterForWriting(int32_t clusterIndex) {
+	if (clusterIndex < 0 || clusterIndex >= numClusters) {
+		return nullptr;
+	}
+	prioritizeNotStealingCluster(clusterIndex);
+	return clusters[clusterIndex];
+}
+
 Cluster* SampleCache::getCluster(int32_t clusterIndex) {
+	// Bounds guard: clusters[] entries are only initialized as far as writeBytePos has
+	// reached (see the member's declaration). Indexing beyond that hands back an
+	// uninitialized pointer, and prioritizeNotStealingCluster immediately does
+	// steal-queue surgery through it - getRegion() freezes with E339 when the garbage
+	// falls outside every region, or corrupts the queues when it doesn't. Callers all
+	// handle nullptr (loop-crossfade window reads legitimately probe past the loop
+	// end, where nothing is ever written).
+	if (clusterIndex < 0 || clusterIndex >= getNumExistentClusters(writeBytePos)) {
+		return nullptr;
+	}
 	prioritizeNotStealingCluster(clusterIndex);
 	return clusters[clusterIndex];
 }

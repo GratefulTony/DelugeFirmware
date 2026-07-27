@@ -67,6 +67,7 @@
 #include "storage/flash_storage.h"
 #include "storage/smsysex.h"
 #include "storage/storage_manager.h"
+#include "util/crash_breadcrumb.h"
 #include "util/misc.h"
 #include "util/pack.h"
 #include <stdlib.h>
@@ -562,6 +563,8 @@ void registerTasks() {
 	// these ones are actually "slow" -> file manager just checks if an sd card has been inserted, audio recorder checks
 	// if recordings are finished
 	addRepeatingTask([]() { audioFileManager.slowRoutine(); }, p++, 0.1, 0.1, 0.2, "audio file slow", RESOURCE_SD);
+	addRepeatingTask([]() { crashBreadcrumbFlushRoutine(); }, p++, 1.0, 2.0, 4.0, "crash breadcrumb flush",
+	                 RESOURCE_SD);
 	addRepeatingTask([]() { audioRecorder.slowRoutine(); }, p++, 0.01, 0.09, 0.1, "audio recorder slow", RESOURCE_NONE);
 	// formerly part of cluster loading (why? no idea), actions undo/redo midi commands
 	addRepeatingTask([]() { playbackHandler.slowRoutine(); }, p++, 0.01, 0.09, 0.1, "playback slow routine",
