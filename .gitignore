@@ -38,3 +38,5 @@ __pycache__
 
 .deluge_hex_key
 debuglog.txt
+debuglog.log
+/deluge.bin
