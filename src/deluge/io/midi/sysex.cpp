@@ -38,7 +38,9 @@ void Debug::sysexReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 		if (data[2] == 1) {
 			midiDebugCable = &cable;
 			crashBreadcrumbDumpRecent();
-			sdramTextBenchRequest();
+			// sdramTextBenchRequest(): intentionally not auto-run. The cold-cache trials
+			// repeatedly invalidate every cache while the system runs live, which is hostile
+			// now that real UI code executes from SDRAM. Re-enable deliberately to remeasure.
 		}
 		else if (data[2] == 0) {
 			midiDebugCable = nullptr;
