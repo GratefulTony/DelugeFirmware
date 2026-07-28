@@ -46,6 +46,7 @@
 #include "hid/led/pad_leds.h"
 #include "hid/matrix/matrix_driver.h"
 #include "io/debug/log.h"
+#include "io/debug/sdram_text_bench.h"
 #include "io/midi/midi_device_manager.h"
 #include "io/midi/midi_engine.h"
 #include "io/midi/midi_follow.h"
@@ -572,6 +573,7 @@ void registerTasks() {
 	addRepeatingTask([]() { audioFileManager.slowRoutine(); }, p++, 0.1, 0.1, 0.2, "audio file slow", RESOURCE_SD);
 	addRepeatingTask([]() { crashBreadcrumbFlushRoutine(); }, p++, 1.0, 2.0, 4.0, "crash breadcrumb flush",
 	                 RESOURCE_SD);
+	addRepeatingTask([]() { sdramTextBenchRoutine(); }, p++, 0.25, 0.5, 1.0, "sdram text bench", RESOURCE_NONE);
 	// Needs the SD resources: it can call finishRecording(), which frees the SampleRecorder, and that must not happen
 	// while the card routine is part-way through using it.
 	addRepeatingTask([]() { audioRecorder.slowRoutine(); }, p++, 0.01, 0.09, 0.1, "audio recorder slow",

@@ -38,7 +38,7 @@ void Debug::sysexReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 		if (data[2] == 1) {
 			midiDebugCable = &cable;
 			crashBreadcrumbDumpRecent();
-			sdramTextBenchReport();
+			sdramTextBenchRequest();
 		}
 		else if (data[2] == 0) {
 			midiDebugCable = nullptr;
