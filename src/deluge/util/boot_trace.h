@@ -47,6 +47,7 @@ void bootTraceDone(void);
 uint32_t bootTracePrevStage(void);  // 0xFF = completed; 0 = no valid trace (e.g. power cycle)
 uint32_t bootTracePrevWasWdt(void); // 1 if the reset that ended the previous run was the WDT
 uint32_t bootTraceBootCount(void);
+uint32_t bootTraceIsComplete(void); // 1 once bootTraceDone() has run this boot
 
 #ifdef __cplusplus
 }

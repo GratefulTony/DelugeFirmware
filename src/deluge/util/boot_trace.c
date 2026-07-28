@@ -85,3 +85,7 @@ uint32_t bootTracePrevWasWdt(void) {
 uint32_t bootTraceBootCount(void) {
 	return bootTrace.bootCount;
 }
+
+uint32_t bootTraceIsComplete(void) {
+	return bootTrace.stage == 0xFF;
+}

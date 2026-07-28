@@ -17,6 +17,7 @@
 
 #include "oled.h"
 #include "RZA1/mtu/mtu.h"
+#include "RZA1/wdt/wdt.h"
 #include "definitions_cxx.hpp"
 #include "drivers/dmac/dmac.h"
 #include "drivers/pic/pic.h"
@@ -29,6 +30,7 @@
 #include "playback/playback_handler.h"
 #include "processing/engines/audio_engine.h"
 #include "storage/flash_storage.h"
+#include "util/boot_trace.h"
 #include "util/cfunctions.h"
 #include "util/crash_breadcrumb.h"
 #include "util/d_string.h"
@@ -1282,9 +1284,30 @@ void OLED::freezeWithError(char const* text) {
 	DMACn(OLED_SPI_DMA_CHANNEL).CHCTRL_n |=
 	    DMAC_CHCTRL_0S_CLRTC | DMAC_CHCTRL_0S_SETEN; // ---- Enable DMA Transfer and clear TC bit ----
 
+	// A freeze during BOOT can't be inspected over USB (the console never came up), and this
+	// board's retention RAM does not survive a power cycle - the only exit a user has. So show
+	// the error for 10 seconds, then stop kicking the boot watchdog: the reset lands in the
+	// SD-installed firmware, whose breadcrumb flush writes this crumb to CRASH.LOG.
+	bool autoReset = !bootTraceIsComplete();
+	if (autoReset) {
+		wdtBootArm();
+	}
+	uint32_t freezeElapsed = 0;
+	uint16_t lastT = *TCNT[TIMER_SYSTEM_SLOW];
+
 	while (1) {
 		PIC::flush();
 		uartFlushIfNotSending(UART_ITEM_MIDI);
+
+		if (autoReset) {
+			uint16_t now = *TCNT[TIMER_SYSTEM_SLOW];
+			freezeElapsed += (uint16_t)(now - lastT);
+			lastT = now;
+			if (freezeElapsed < msToSlowTimerCount(10000)) {
+				wdtKick();
+			}
+			// else: stop kicking; WDT resets us within ~63ms
+		}
 
 		uint8_t value;
 		bool anything = uartGetChar(UART_ITEM_PIC, (char*)&value);
@@ -1294,6 +1317,9 @@ void OLED::freezeWithError(char const* text) {
 			}
 			else if (value == 249) {}
 		}
+	}
+	if (autoReset) {
+		wdtBootDisarm(); // User resumed before the deadline
 	}
 	oledWaitingForMessage = 256;
 	spiBusCurrentlySending = false;
