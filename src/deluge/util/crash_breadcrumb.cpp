@@ -71,6 +71,7 @@ uint32_t pendingNumStackTrace;
 bool sealedThisSession;
 bool provisionalThisSession;
 bool contextWrittenThisSession;
+bool bootCrumbSealedThisSession;
 
 uint32_t computeCrc() {
 	uint32_t hash = 2166136261u;
@@ -83,6 +84,13 @@ uint32_t computeCrc() {
 
 bool crumbIsValid() {
 	return crumb.magic == kMagic && crumb.crc == computeCrc();
+}
+
+// Boot-stage crumbs ("BTxx") record chainload-boot progress; unlike crash crumbs they update
+// freely and never take precedence - a real crash may overwrite them, and a completed boot
+// clears them.
+bool isBootCrumb() {
+	return crumb.errorCode[0] == 'B' && crumb.errorCode[1] == 'T';
 }
 
 void flushCrumbToRam() {
@@ -152,7 +160,7 @@ extern "C" void crashBreadcrumbSealProvisional() {
 	// Called from the fault handler right after the stack walk, before anything that can hang
 	// (the pad-drawing path ends in a busy-wait on the PIC DMA). Seals a pointers-only crumb
 	// that the full stash upgrades moments later - or that survives alone if we never get there.
-	if (sealedThisSession || provisionalThisSession || crumbIsValid()) {
+	if (sealedThisSession || provisionalThisSession || (crumbIsValid() && !isBootCrumb())) {
 		return;
 	}
 	provisionalThisSession = true;
@@ -163,8 +171,9 @@ extern "C" void crashBreadcrumbSealProvisional() {
 extern "C" void crashBreadcrumbStash(const char* errorCode) {
 	// First crash wins - both within this session (a nested fault during the freeze UI must not
 	// overwrite the original crumb) and against an unflushed crumb from a previous session.
-	// A provisional crumb sealed by this same crash is the one exception: upgrade it.
-	if (sealedThisSession || (crumbIsValid() && !provisionalThisSession)) {
+	// Exceptions: a provisional crumb sealed by this same crash gets upgraded, and a boot-stage
+	// crumb never outranks a real crash.
+	if (sealedThisSession || (crumbIsValid() && !provisionalThisSession && !isBootCrumb())) {
 		return;
 	}
 	sealedThisSession = true;
@@ -199,8 +208,44 @@ extern "C" void crashBreadcrumbStash(const char* errorCode) {
 	}
 }
 
+extern "C" void crashBreadcrumbBootStage(uint32_t stage) {
+	// A hung boot leaves this sealed; the boot watchdog then resets into the SD-installed
+	// firmware, whose flush task writes it to CRASH.LOG as code "BTnn" - the only storage an
+	// intervening old-firmware boot preserves. A real crash crumb awaiting flush outranks this.
+	if (crumbIsValid() && !isBootCrumb()) {
+		return;
+	}
+	bootCrumbSealedThisSession = true;
+	crumb.magic = kMagic;
+	crumb.errorCode[0] = 'B';
+	crumb.errorCode[1] = 'T';
+	crumb.errorCode[2] = static_cast<char>('0' + (stage / 10) % 10);
+	crumb.errorCode[3] = static_cast<char>('0' + stage % 10);
+	crumb.errorCode[4] = 0;
+	crumb.lrSys = 0;
+	crumb.lrUsr = 0;
+	crumb.numStackTrace = 0;
+	for (uint32_t i = 0; i < kMaxStackTrace; i++) {
+		crumb.stackTrace[i] = 0;
+	}
+	crumb.uptimeSamples = 0;
+	copyBounded(crumb.fwVersion, kFirmwareVersionString, sizeof(crumb.fwVersion));
+	crumb.songName[0] = 0;
+	crumb.contextLen = 0;
+	crumb.context[0] = 0;
+	sealAndFlush();
+}
+
+extern "C" void crashBreadcrumbBootDone(void) {
+	if (crumbIsValid() && isBootCrumb()) {
+		crumb.magic = 0;
+		crumb.crc = 0;
+		flushCrumbToRam();
+	}
+}
+
 void crashBreadcrumbContextStart() {
-	if (sealedThisSession || crumbIsValid()) {
+	if (sealedThisSession || (crumbIsValid() && !isBootCrumb())) {
 		return;
 	}
 	contextWrittenThisSession = true;
@@ -209,7 +254,7 @@ void crashBreadcrumbContextStart() {
 }
 
 void crashBreadcrumbContextAppend(char const* text) {
-	if (sealedThisSession || crumbIsValid()) {
+	if (sealedThisSession || (crumbIsValid() && !isBootCrumb())) {
 		return;
 	}
 	size_t pos = crumb.contextLen;
@@ -218,7 +263,7 @@ void crashBreadcrumbContextAppend(char const* text) {
 }
 
 void crashBreadcrumbContextAppendInt(int32_t value) {
-	if (sealedThisSession || crumbIsValid()) {
+	if (sealedThisSession || (crumbIsValid() && !isBootCrumb())) {
 		return;
 	}
 	size_t pos = crumb.contextLen;
@@ -255,6 +300,14 @@ void crashBreadcrumbDumpRecent() {
 
 void crashBreadcrumbFlushRoutine() {
 	if (!crumbIsValid()) {
+		return;
+	}
+
+	// A boot-stage crumb sealed by THIS session is work-in-progress, not evidence - it only
+	// becomes reportable when a DIFFERENT session finds it (i.e. the previous boot hung and the
+	// watchdog reset us into other firmware). Without this, the flush task races bootTraceDone
+	// and publishes a bogus BTnn for every healthy boot.
+	if (isBootCrumb() && bootCrumbSealedThisSession) {
 		return;
 	}
 

@@ -59,8 +59,10 @@
 #include "RZA1/gpio/gpio.h"
 #include "RZA1/stb/stb.h"
 #include "RZA1/uart/sio_char.h" // IWYU pragma: keep false positive, needed for R_INTC_Init
-#include "definitions.h"        // IWYU pragma: keep false positive, needed for memory limits
+#include "RZA1/wdt/wdt.h"
+#include "definitions.h" // IWYU pragma: keep false positive, needed for memory limits
 #include "deluge/deluge.h"
+#include "util/boot_trace.h"
 #include <string.h> //memset
 
 #if defined(__thumb2__) || (defined(__thumb__) && defined(__ARM_ARCH_6M__))
@@ -114,11 +116,15 @@ static void emptySection(uint32_t* start, uint32_t* end) {
 static void relocateSDRAMSection(uint32_t* start, uint32_t* end) {
 	uint32_t* src = (uint32_t*)((uint32_t)&__heap_start + ((uint32_t)start - PLACEMENT_SDRAM_START));
 	uint32_t* dst = start;
+	uint32_t n = 0;
 	while (dst < end) {
 		*dst = *src; // Copy to SDRAM
 		*src = 0;    // Clear in internal ram
 		++src;
 		++dst;
+		if ((++n & 0x3FFF) == 0) {
+			wdtKick(); // Boot watchdog period (~63ms) is shorter than a large section copy
+		}
 	}
 }
 
@@ -129,8 +135,16 @@ static void relocateSDRAMSection(uint32_t* start, uint32_t* end) {
  * Return Value : none
  *******************************************************************************/
 void resetprg(void) {
+	// Boot tracer + watchdog: stage numbers persist in retention RAM across WDT resets and
+	// chainloads, so a hung boot's last stage is readable by the next instrumented boot. The
+	// WDT (63ms period, power-on reset on overflow) covers boot only up to libc_init_array;
+	// a hung chainloaded image resets back into the SD-installed firmware.
+	bootTraceBegin();
+	wdtBootArm();
+
 	emptySection(&__frunk_bss_start, &__frunk_bss_end);
 	emptySection(&__sdram_bss_start, &__sdram_bss_end);
+	bootTraceStage(2);
 	// Enable all modules' clocks --------------------------------------------------------------
 	STB_Init();
 	// SDRAM pin mux ------------------------------------------------------------------
@@ -178,6 +192,7 @@ void resetprg(void) {
 	setPinMux(2, 6, 1); // RD/!WR
 
 	R_INTC_Init(); // Set up interrupt controller
+	bootTraceStage(3);
 
 	// branch prediction, data cache, instruction cache
 	R_CACHE_L1Init();
@@ -185,18 +200,31 @@ void resetprg(void) {
 	// must be second or l1 will flush into it. Note this is currently instruction caching only, DMA has
 	// bad interactions with data caching in L2 since it's physically after the DMA controllers
 	L2CacheInit();
+	bootTraceStage(4);
 	__enable_irq();
 	__enable_fiq();
+	bootTraceStage(5);
 	// Setup SDRAM. Have to do this before we init global objects
 	userdef_bsc_cs2_init(0); // 64MB, hardcoded
+	bootTraceStage(6);
 
 	const uint32_t SDRAM_SIZE = EXTERNAL_MEMORY_END - EXTERNAL_MEMORY_BEGIN;
-	memset((void*)EXTERNAL_MEMORY_BEGIN, 0, SDRAM_SIZE);
+	// Chunked so the boot watchdog (~63ms period) can be kicked: the full 64MB memset takes
+	// several periods.
+	for (uint32_t off = 0; off < SDRAM_SIZE; off += 0x100000) {
+		memset((void*)(EXTERNAL_MEMORY_BEGIN + off), 0, 0x100000);
+		wdtKick();
+	}
+	bootTraceStage(7);
 
 	relocateSDRAMSection(&__reloc_sections_start__, &__reloc_sections_end__);
+	wdtKick();
 	relocateSDRAMSection(&__sdram_text_start, &__sdram_text_end);
+	wdtKick();
 	relocateSDRAMSection(&__sdram_data_start, &__sdram_data_end);
+	wdtKick();
 	relocateSDRAMSection(&__sdram_rodata_start, &__sdram_rodata_end);
+	bootTraceStage(8);
 
 	// .sdram_text is executable, and the copy above went through the D-cache (enabled just before
 	// this in R_CACHE_L1Init) while instruction fetch bypasses it - and speculative fetches during
@@ -214,8 +242,15 @@ void resetprg(void) {
 		                 "isb");
 	}
 #endif
+	bootTraceStage(9);
+
+	// C++ static init duration is unbounded, so the boot watchdog stops here. Stages keep
+	// advancing so a hang later in boot is still attributed (just without auto-recovery).
+	wdtBootDisarm();
+	bootTraceStage(10);
 
 	__libc_init_array();
+	bootTraceStage(11);
 	// located in OSLikeStuff/main.c
 	main();
 

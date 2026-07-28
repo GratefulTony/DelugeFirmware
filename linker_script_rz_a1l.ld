@@ -103,6 +103,11 @@ SECTIONS
 		. = ALIGN(32);
 		KEEP(*(.crash_breadcrumb))
 		. = ALIGN(32);
+		/* Boot-stage tracer, directly after the breadcrumb: same retention rules (never zeroed
+		   at boot, survives resets and chainloads). Older firmware without .boot_trace input
+		   sections simply leaves these bytes untouched. */
+		KEEP(*(.boot_trace))
+		. = ALIGN(32);
 	} > RAM012L
 
 	.frunk_bss (NOLOAD) :

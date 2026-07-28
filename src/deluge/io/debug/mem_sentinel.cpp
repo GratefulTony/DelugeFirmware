@@ -21,6 +21,7 @@
 #include "io/debug/mem_sentinel.h"
 #include "io/midi/sysex.h"
 #include "memory/memory_allocator_interface.h"
+#include "util/boot_trace.h"
 #include <cstring>
 
 namespace Debug {
@@ -137,6 +138,29 @@ void drainEvents() {
 } // namespace
 
 void memSentinelRoutine() {
+	static bool bootMarkedDone = false;
+	if (!bootMarkedDone) {
+		bootMarkedDone = true;
+		bootTraceDone(); // First tick of the scheduler = boot effectively complete
+	}
+
+	// Report the PREVIOUS boot's outcome once per session when a console is attached: after a
+	// watchdog-recovered hang, this line (on the next instrumented boot) carries the stage the
+	// hung boot died at.
+	static bool bootTraceReported = false;
+	if (!bootTraceReported && Debug::midiDebugCable != nullptr) {
+		bootTraceReported = true;
+		lineStart();
+		append("{\"boottrace\":{\"prevStage\":");
+		appendHex(bootTracePrevStage());
+		append(",\"prevWasWdt\":");
+		appendHex(bootTracePrevWasWdt());
+		append(",\"bootCount\":");
+		appendHex(bootTraceBootCount());
+		append("}}");
+		lineSend();
+	}
+
 	if (!mirrorsReady) {
 		setupMirrors();
 		return;

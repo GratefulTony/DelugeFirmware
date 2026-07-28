@@ -49,6 +49,12 @@ void crashBreadcrumbStash(const char* errorCode);
 // upgrades it with the real error code; if that never runs, the provisional crumb survives.
 void crashBreadcrumbSealProvisional(void);
 
+// Boot-stage crumbs ("BTnn"): sealed at each boot stage so a hung chainload boot leaves its
+// last stage for the SD firmware to flush to CRASH.LOG after the boot watchdog resets. Never
+// outranks a real crash crumb; cleared by BootDone when boot completes.
+void crashBreadcrumbBootStage(uint32_t stage);
+void crashBreadcrumbBootDone(void);
+
 #ifdef __cplusplus
 }
 
