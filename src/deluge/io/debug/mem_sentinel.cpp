@@ -141,7 +141,8 @@ void memSentinelRoutine() {
 	static bool bootMarkedDone = false;
 	if (!bootMarkedDone) {
 		bootMarkedDone = true;
-		bootTraceDone(); // First tick of the scheduler = boot effectively complete
+		bootTraceDone();      // First tick of the scheduler = boot effectively complete
+		runtimeWatchdogArm(); // From here on, every task dispatch kicks; hangs reset + attribute
 	}
 
 	// Report the PREVIOUS boot's outcome once per session when a console is attached: after a
@@ -157,6 +158,11 @@ void memSentinelRoutine() {
 		appendHex(bootTracePrevWasWdt());
 		append(",\"bootCount\":");
 		appendHex(bootTraceBootCount());
+		if (bootTracePrevRuntimeTask()[0] != 0) {
+			append(",\"prevRuntimeTask\":\"");
+			append(bootTracePrevRuntimeTask());
+			append("\"");
+		}
 		append("}}");
 		lineSend();
 	}

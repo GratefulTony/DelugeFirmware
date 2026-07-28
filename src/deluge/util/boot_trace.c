@@ -24,11 +24,13 @@
 #include "util/crash_breadcrumb.h"
 
 #define BOOT_TRACE_MAGIC 0xB007B007u
+#define RUNTIME_TASK_NAME_LEN 24
 
 struct BootTrace {
 	uint32_t magic;
 	uint32_t stage;
 	uint32_t bootCount;
+	char runtimeTask[RUNTIME_TASK_NAME_LEN]; // Last task dispatched while runtime WDT armed
 };
 
 __attribute__((__section__(".boot_trace"))) static volatile struct BootTrace bootTrace;
@@ -36,6 +38,8 @@ __attribute__((__section__(".boot_trace"))) static volatile struct BootTrace boo
 // This boot's snapshot of the previous run (regular bss, valid after bootTraceBegin)
 static uint32_t prevStage;
 static uint32_t prevWasWdt;
+static char prevRuntimeTask[RUNTIME_TASK_NAME_LEN];
+static uint32_t runtimeWdtArmed;
 
 static void flushTrace(void) {
 	// Make sure the words are in physical RAM, not just D-cache: a hang or WDT reset won't
@@ -47,11 +51,19 @@ void bootTraceBegin(void) {
 	prevWasWdt = wdtReadAndClearOverflow();
 	if (bootTrace.magic == BOOT_TRACE_MAGIC) {
 		prevStage = bootTrace.stage;
+		// Snapshot the previous run's last-dispatched task (meaningful when it ended in a
+		// runtime WDT reset), then clear it for this run.
+		for (uint32_t i = 0; i < RUNTIME_TASK_NAME_LEN; i++) {
+			prevRuntimeTask[i] = bootTrace.runtimeTask[i];
+		}
+		prevRuntimeTask[RUNTIME_TASK_NAME_LEN - 1] = 0;
 	}
 	else {
 		prevStage = 0; /* Power cycle (RAM decayed) or first boot of an instrumented image */
 		bootTrace.bootCount = 0;
+		prevRuntimeTask[0] = 0;
 	}
+	bootTrace.runtimeTask[0] = 0;
 	bootTrace.magic = BOOT_TRACE_MAGIC;
 	bootTrace.bootCount++;
 	bootTrace.stage = 1;
@@ -88,4 +100,28 @@ uint32_t bootTraceBootCount(void) {
 
 uint32_t bootTraceIsComplete(void) {
 	return bootTrace.stage == 0xFF;
+}
+
+void runtimeWatchdogArm(void) {
+	runtimeWdtArmed = 1;
+	wdtBootArm();
+}
+
+void runtimeWatchdogTaskTick(const char* taskName) {
+	if (!runtimeWdtArmed) {
+		return;
+	}
+	wdtKick();
+	// Stamp the dispatched task's name; only the flushed retention copy matters. Bounded copy,
+	// cheap enough for every dispatch (name strings are short; one cache-line flush).
+	uint32_t i = 0;
+	for (; i < RUNTIME_TASK_NAME_LEN - 1 && taskName[i] != 0; i++) {
+		bootTrace.runtimeTask[i] = taskName[i];
+	}
+	bootTrace.runtimeTask[i] = 0;
+	flushTrace();
+}
+
+const char* bootTracePrevRuntimeTask(void) {
+	return (prevWasWdt && prevStage == 0xFF) ? prevRuntimeTask : "";
 }

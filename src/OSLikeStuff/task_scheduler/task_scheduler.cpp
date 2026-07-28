@@ -17,6 +17,8 @@
 
 #include "OSLikeStuff/task_scheduler/task_scheduler.h"
 
+#include "util/boot_trace.h"
+
 #include "io/debug/log.h"
 #include "resource_checker.h"
 #include <algorithm>
@@ -229,6 +231,10 @@ void TaskManager::runTask(TaskID id) {
 	countThisTask = true;
 	currentID = id;
 	auto* current_task = &list[currentID];
+	// Runtime watchdog: every dispatch kicks and stamps the task name into retention. A handler
+	// that spins without yielding stops dispatches, the WDT fires, and the next instrumented
+	// boot reports which task was running. yield() re-enters here, so yielding loops stay fed.
+	runtimeWatchdogTaskTick(current_task->name);
 
 	{
 		Time timeNow = getSecondsFromStart();

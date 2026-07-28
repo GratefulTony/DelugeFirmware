@@ -1284,14 +1284,14 @@ void OLED::freezeWithError(char const* text) {
 	DMACn(OLED_SPI_DMA_CHANNEL).CHCTRL_n |=
 	    DMAC_CHCTRL_0S_CLRTC | DMAC_CHCTRL_0S_SETEN; // ---- Enable DMA Transfer and clear TC bit ----
 
-	// A freeze during BOOT can't be inspected over USB (the console never came up), and this
-	// board's retention RAM does not survive a power cycle - the only exit a user has. So show
-	// the error for 10 seconds, then stop kicking the boot watchdog: the reset lands in the
-	// SD-installed firmware, whose breadcrumb flush writes this crumb to CRASH.LOG.
-	bool autoReset = !bootTraceIsComplete();
-	if (autoReset) {
-		wdtBootArm();
-	}
+	// This board's retention RAM does not survive a power cycle - the only exit a user
+	// otherwise has from this screen - so every freeze eventually stops kicking the watchdog:
+	// the reset lands in the SD-installed firmware, whose breadcrumb flush writes this crumb
+	// (and its context) to CRASH.LOG. Boot-window freezes get 10s on screen (USB never came
+	// up; nothing to inspect), post-boot freezes 30s (time to read, attach a console, or
+	// attempt resume with the select knob - which cancels the deadline).
+	uint32_t graceMs = bootTraceIsComplete() ? 30000 : 10000;
+	wdtBootArm();
 	uint32_t freezeElapsed = 0;
 	uint16_t lastT = *TCNT[TIMER_SYSTEM_SLOW];
 
@@ -1299,11 +1299,11 @@ void OLED::freezeWithError(char const* text) {
 		PIC::flush();
 		uartFlushIfNotSending(UART_ITEM_MIDI);
 
-		if (autoReset) {
+		{
 			uint16_t now = *TCNT[TIMER_SYSTEM_SLOW];
 			freezeElapsed += (uint16_t)(now - lastT);
 			lastT = now;
-			if (freezeElapsed < msToSlowTimerCount(10000)) {
+			if (freezeElapsed < msToSlowTimerCount(graceMs)) {
 				wdtKick();
 			}
 			// else: stop kicking; WDT resets us within ~63ms
@@ -1318,8 +1318,10 @@ void OLED::freezeWithError(char const* text) {
 			else if (value == 249) {}
 		}
 	}
-	if (autoReset) {
-		wdtBootDisarm(); // User resumed before the deadline
+	// User resumed before the deadline. Post-boot, the scheduler's dispatch kicks resume with
+	// the next task, so leave the watchdog running; during boot there's no kicker yet.
+	if (!bootTraceIsComplete()) {
+		wdtBootDisarm();
 	}
 	oledWaitingForMessage = 256;
 	spiBusCurrentlySending = false;

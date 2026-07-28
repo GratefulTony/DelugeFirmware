@@ -19,6 +19,7 @@
 
 #include "chainload.h"
 #include "RZA1/mtu/mtu.h"
+#include "RZA1/wdt/wdt.h"
 #include "definitions.h"
 #include "timers_interrupts/timers_interrupts.h"
 
@@ -28,6 +29,10 @@ extern "C" void v7_dma_flush_range(uint32_t start, uint32_t end);
 #endif
 
 void chainload_from_buf(uint8_t* buffer, int buf_size) {
+	// The copy + new-image boot takes far longer than the runtime watchdog's 63ms period,
+	// and the new image re-arms its own boot watchdog immediately.
+	wdtBootDisarm();
+
 	uint32_t user_code_start = *(uint32_t*)(buffer + OFF_USER_CODE_START);
 	uint32_t user_code_end = *(uint32_t*)(buffer + OFF_USER_CODE_END);
 	uint32_t user_code_exec = *(uint32_t*)(buffer + OFF_USER_CODE_EXECUTE);

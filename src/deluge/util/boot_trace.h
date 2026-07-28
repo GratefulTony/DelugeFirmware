@@ -49,6 +49,14 @@ uint32_t bootTracePrevWasWdt(void); // 1 if the reset that ended the previous ru
 uint32_t bootTraceBootCount(void);
 uint32_t bootTraceIsComplete(void); // 1 once bootTraceDone() has run this boot
 
+// Runtime watchdog: armed once boot completes; the scheduler kicks it on every task dispatch
+// and stamps the task name into retention. A runtime hang (any handler spinning >63ms without
+// dispatching) resets into the SD firmware; the next instrumented boot then reports
+// prevStage=0xFF + prevWasWdt=1 + the name of the task that was running when kicking stopped.
+void runtimeWatchdogArm(void);
+void runtimeWatchdogTaskTick(const char* taskName);
+const char* bootTracePrevRuntimeTask(void); // "" unless previous run = runtime WDT reset
+
 #ifdef __cplusplus
 }
 #endif
