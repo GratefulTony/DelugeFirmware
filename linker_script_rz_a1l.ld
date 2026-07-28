@@ -206,6 +206,7 @@ SECTIONS
 	.rodata :
 	{
 		. = ALIGN(0x4);
+		PROVIDE(__rodata_start = .);
 
 		*(.rodata)
 		INPUT_SECTION_FLAGS(!SHF_STRINGS) *(.rodata.*) /* this should be all strings?  */
@@ -214,8 +215,9 @@ SECTIONS
 		
 		KEEP(*(.init))
 		KEEP(*(.fini))
-		
+
 		. = ALIGN(0x4);
+		PROVIDE(__rodata_end = .);
 	} > RAM012L
 	
 	.data : 

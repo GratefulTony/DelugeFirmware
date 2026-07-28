@@ -18,6 +18,7 @@
  */
 
 #include "io/midi/sysex.h"
+#include "io/debug/mem_sentinel.h"
 #include "io/debug/print.h"
 #include "io/debug/sdram_text_bench.h"
 #include "io/midi/midi_device.h"
@@ -38,6 +39,7 @@ void Debug::sysexReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 		if (data[2] == 1) {
 			midiDebugCable = &cable;
 			crashBreadcrumbDumpRecent();
+			// (sentinel events, if any, drain via memSentinelRoutine's task once a cable is set)
 			// sdramTextBenchRequest(): intentionally not auto-run. The cold-cache trials
 			// repeatedly invalidate every cache while the system runs live, which is hostile
 			// now that real UI code executes from SDRAM. Re-enable deliberately to remeasure.
@@ -58,6 +60,19 @@ void Debug::sysexReceived(MIDICable& cable, uint8_t* data, int32_t len) {
 		loadCheckAndRun(data, len);
 #endif
 		break;
+
+	case 5: {
+		// TEMP DIAGNOSTIC: peek 32 bytes. Payload: 8 ASCII hex chars of address at data[2..9].
+		if (len >= 10 && midiDebugCable != nullptr) {
+			uint32_t addr = 0;
+			for (int32_t i = 0; i < 8; i++) {
+				char c = (char)data[2 + i];
+				addr <<= 4;
+				addr |= (c <= '9') ? (c - '0') : ((c & 0xDF) - 'A' + 10);
+			}
+			memSentinelPeek(addr);
+		}
+	} break;
 
 	default:
 		break;

@@ -1,10 +1,5 @@
 #include "submenu.h"
-#include "io/midi/sysex.h"
 #include "processing/sound/sound.h"
-
-namespace Debug {
-extern MIDICable* midiDebugCable;
-}
 
 #include "etl/vector.h"
 #include "gui/views/automation_view.h"
@@ -185,13 +180,6 @@ void Submenu::selectEncoderAction(int32_t offset) {
 				offset++;
 			}
 		} while (offset < 0);
-	}
-	// TEMP DIAGNOSTIC (encoder-no-redraw bug) - remove
-	{
-		namespace D = ::Debug;
-		if (D::midiDebugCable != nullptr) {
-			D::sysexDebugPrint(*D::midiDebugCable, "D:sub-upd", true);
-		}
 	}
 	updateDisplay();
 }
