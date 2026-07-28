@@ -21,8 +21,13 @@
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
 #include "hid/led/pad_leds.h"
+#include "io/midi/sysex.h"
 #include "util/misc.h"
 #include <utility>
+
+namespace Debug {
+extern MIDICable* midiDebugCable;
+}
 
 using deluge::hid::display::OLED;
 
@@ -365,6 +370,13 @@ void doAnyPendingGridRendering() {
 
 void doAnyPendingOLEDRendering() {
 	if (doesOLEDNeedRendering) {
+		// TEMP DIAGNOSTIC (encoder-no-redraw bug) - remove
+		{
+			namespace D = ::Debug;
+			if (D::midiDebugCable != nullptr) {
+				D::sysexDebugPrint(*D::midiDebugCable, "D:rndr", true);
+			}
+		}
 		int32_t u = numUIsOpen - 1;
 		while ((u > 0) && uiNavigationHierarchy[u]->oledShowsUIUnderneath) {
 			u--;
