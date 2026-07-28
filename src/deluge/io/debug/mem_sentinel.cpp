@@ -142,24 +142,39 @@ void memSentinelRoutine() {
 		return;
 	}
 
-	for (uint32_t ri = 0; ri < kNumRegions; ri++) {
-		Region& r = regions[ri];
-		uint32_t sizeWords = ((uint32_t)r.end - (uint32_t)r.start) / 4;
-		uint32_t const* live = r.start;
-		uint32_t const* gold = (uint32_t const*)r.mirror;
-		if (memcmp(gold, live, sizeWords * 4) == 0) {
-			continue;
-		}
-		// Locate and record every differing word (bounded), then resync the mirror so the
-		// next event is caught too.
+	// Sweep one small slice per tick: comparing everything at once blocks the cooperative
+	// scheduler for ~10ms (audible glitch every tick) and evicts the audio working set from the
+	// D-cache. 32KB/tick keeps each visit well under the audio buffer budget; a full 2MB sweep
+	// completes every ~1-2 minutes, which is plenty - immutable-region corruption doesn't undo
+	// itself, we only trade detection latency.
+	constexpr uint32_t kSliceBytes = 32 * 1024;
+	static uint32_t regionCursor = 0;
+	static uint32_t offsetCursor = 0;
+
+	Region& r = regions[regionCursor];
+	uint32_t regionSize = (uint32_t)r.end - (uint32_t)r.start;
+	uint32_t sliceLen = kSliceBytes;
+	if (offsetCursor + sliceLen > regionSize) {
+		sliceLen = regionSize - offsetCursor;
+	}
+	uint32_t const* live = (uint32_t const*)((uint32_t)r.start + offsetCursor);
+	uint32_t const* gold = (uint32_t const*)(r.mirror + offsetCursor);
+
+	if (memcmp(gold, live, sliceLen) != 0) {
 		uint32_t found = 0;
-		for (uint32_t w = 0; w < sizeWords && found < kMaxEvents; w++) {
+		for (uint32_t w = 0; w < sliceLen / 4 && found < kMaxEvents; w++) {
 			if (live[w] != gold[w]) {
-				recordEvent(ri, (uint32_t)&live[w], gold[w], live[w]);
+				recordEvent(regionCursor, (uint32_t)&live[w], gold[w], live[w]);
 				found++;
 			}
 		}
-		memcpy(r.mirror, r.start, sizeWords * 4);
+		memcpy((void*)(r.mirror + offsetCursor), live, sliceLen);
+	}
+
+	offsetCursor += sliceLen;
+	if (offsetCursor >= regionSize) {
+		offsetCursor = 0;
+		regionCursor = (regionCursor + 1) % kNumRegions;
 	}
 
 	// One event line per tick, same pacing rule as the bench reporter
