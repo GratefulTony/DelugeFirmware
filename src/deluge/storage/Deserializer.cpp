@@ -37,6 +37,7 @@
 #include "processing/sound/sound_instrument.h"
 #include "storage/audio/audio_file_manager.h"
 #include "storage/storage_manager.h"
+#include "util/crash_breadcrumb.h"
 #include "util/firmware_version.h"
 #include "util/functions.h"
 #include "util/try.h"
@@ -258,6 +259,30 @@ char const* XMLDeserializer::readNextTagOrAttributeName() {
 #if ALPHA_OR_BETA_VERSION
 		// Can happen with invalid files, though I'm implementing error checks whenever a user alerts me to a scenario.
 		// Fraser got this, Nov 2021.
+		// Breadcrumb context: the corrupt state value plus a snippet of the read buffer around the
+		// parse position, which identifies both the file being parsed and what the parser saw.
+		crashBreadcrumbContextStart();
+		crashBreadcrumbContextAppend("E365 xmlArea=");
+		crashBreadcrumbContextAppendInt(xmlArea);
+		crashBreadcrumbContextAppend(" depth=");
+		crashBreadcrumbContextAppendInt(tagDepthFile);
+		crashBreadcrumbContextAppend(" pos=");
+		crashBreadcrumbContextAppendInt(fileReadBufferCurrentPos);
+		crashBreadcrumbContextAppend(" buf=");
+		if (fileClusterBuffer != nullptr && currentReadBufferEndPos > 0) {
+			char snippet[65];
+			int32_t snipStart = fileReadBufferCurrentPos - 32;
+			if (snipStart < 0) {
+				snipStart = 0;
+			}
+			int32_t snipLen = 0;
+			for (; snipLen < 64 && (UINT)(snipStart + snipLen) < currentReadBufferEndPos; snipLen++) {
+				char c = fileClusterBuffer[snipStart + snipLen];
+				snippet[snipLen] = (c >= 32 && c < 127) ? c : '.';
+			}
+			snippet[snipLen] = 0;
+			crashBreadcrumbContextAppend(snippet);
+		}
 		FREEZE_WITH_ERROR("E365");
 #else
 		__builtin_unreachable();
