@@ -20,7 +20,7 @@ Most of the features in this branch are built to support my personal use case fo
 Highly experimental and for most users, not a replacement for the main community firmware. Folks interested are encouraged to experiment, but we recommend backing up sd cards just in case. 
 
 - owlet-firmware-1.3 is the default branch and has a stable baseline.
-- dev branch is where new work happens. https://github.com/owlet-labs/DelugeFirmware/blob/dev/README.md
+- dev branch holds the final public state of development work. https://github.com/owlet-labs/DelugeFirmware/blob/dev/README.md
 
 ### Known limitations
 
