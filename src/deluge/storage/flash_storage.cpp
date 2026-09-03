@@ -18,8 +18,10 @@
 #include "storage/flash_storage.h"
 #include "RZA1/cpu_specific.h"
 #include "definitions_cxx.hpp"
+#include "gui/l10n/l10n.h"
 #include "gui/menu_item/colour.h"
 #include "gui/ui/sound_editor.h"
+#include "hid/display/display.h"
 #include "hid/led/pad_leds.h"
 #include "io/midi/midi_engine.h"
 #include "io/midi/midi_transpose.h"
@@ -188,8 +190,10 @@ enum Entries {
 190: GlobalMIDICommand::SHIFT channel + 1
 191: GlobalMIDICommand::SHIFT noteCode + 1
 192-195: GlobalMIDICommand::SHIFT product / vendor ids
-196: defaultRecordSource (owlet; relocated from 190 when upstream claimed 190-195)
-197: midiFollowModKnobBaseCC (owlet; relocated from 191)
+196: screensaver mode
+197: screensaver timeout minutes
+198: defaultRecordSource (owlet; relocated from 196 when upstream claimed 196-197 for the screensaver)
+199: midiFollowModKnobBaseCC (owlet; relocated from 197; 0 = never saved, treated as disabled)
 */
 
 uint8_t defaultScale;
@@ -234,6 +238,8 @@ StartupSongMode defaultStartupSongMode;
 bool highCPUUsageIndicator;
 
 uint8_t defaultHoldTime;
+ScreensaverMode screensaverMode;
+uint8_t screensaverTimeoutMinutes;
 int32_t holdTime;
 
 uint8_t defaultSwingInterval;
@@ -352,6 +358,9 @@ void resetSettings() {
 	defaultHoldTime = 2;
 	holdTime = (defaultHoldTime * kSampleRate) / 20;
 
+	screensaverMode = kDefaultScreensaverMode;
+	screensaverTimeoutMinutes = kDefaultScreensaverTimeoutMinutes;
+
 	defaultSwingInterval = 8 - defaultMagnitude; // 16th notes
 
 	defaultDisabledPresetScales = {0};
@@ -369,6 +378,15 @@ void resetSettings() {
 	defaultUseSharps = true;
 
 	defaultRecordSource = AudioInputChannel::LEFT;
+}
+
+void factoryReset(bool showPopup) {
+	if (showPopup) {
+		display->displayPopup(display->haveOLED() ? deluge::l10n::get(deluge::l10n::String::STRING_FOR_RESET_FLASH)
+		                                          : deluge::l10n::get(deluge::l10n::String::STRING_FOR_FACTORY_RESET));
+	}
+	resetSettings();
+	writeSettings();
 }
 
 void resetAutomationSettings() {
@@ -624,11 +642,11 @@ void readSettings() {
 	// the MIDIFollow XML file; the owlet mod-knob base CC stays in flash,
 	// relocated to byte 197.)
 	// midiEngine.midiFollowModKnobBaseCC (MIDI_CC_NONE = disabled, 1-112 = base CC)
-	if (buffer[197] != MIDI_CC_NONE && buffer[197] > kMaxMIDIValue - 15) {
+	if (buffer[199] == 0 || (buffer[199] != MIDI_CC_NONE && buffer[199] > kMaxMIDIValue - 15)) {
 		midiEngine.midiFollowModKnobBaseCC = MIDI_CC_NONE;
 	}
 	else {
-		midiEngine.midiFollowModKnobBaseCC = buffer[197];
+		midiEngine.midiFollowModKnobBaseCC = buffer[199];
 	}
 	gridEmptyPadsCreateRec = buffer[146];
 
@@ -792,11 +810,35 @@ void readSettings() {
 		defaultPatchCablePolarity = static_cast<Polarity>(buffer[189]);
 	}
 
-	if (buffer[196] >= util::to_underlying(AudioInputChannel::SPECIFIC_OUTPUT)) {
+	// Bytes 196-197 hold the screensaver settings, and take the shipped defaults on any unit that
+	// has never saved them -- which is how an upgrading unit picks the screensaver up.
+	//
+	// Byte 196 can't detect that case by itself: such a unit has both bytes zeroed, because
+	// writeSettings() clears the whole buffer first, and a zeroed mode byte is indistinguishable
+	// from a deliberate OFF. Two signals cover it between them. The version says whether the last
+	// firmware to save predates the setting, which catches anything released, official firmware
+	// included. It can't catch a 1.3.0 nightly from before the setting landed, though, since every
+	// build off this tree stamps the same 1.3.0 -- so the timeout covers that: zero is outside the
+	// range this firmware ever writes, so it too only occurs on a unit that has never saved here.
+	if (savedVersion < FirmwareVersion::community({1, 3, 0}) || buffer[197] < kMinScreensaverTimeoutMinutes
+	    || buffer[197] > kMaxScreensaverTimeoutMinutes) {
+		screensaverMode = kDefaultScreensaverMode;
+		screensaverTimeoutMinutes = kDefaultScreensaverTimeoutMinutes;
+	}
+	else {
+		screensaverTimeoutMinutes = buffer[197];
+		// The block has been written, so an OFF here is the user's choice and is honoured. Only a
+		// corrupt out-of-range mode falls back.
+		screensaverMode =
+		    (buffer[196] < kNumScreensaverModes) ? static_cast<ScreensaverMode>(buffer[196]) : kDefaultScreensaverMode;
+	}
+
+	// Owlet: defaultRecordSource. Byte 198 reads as zero (NONE) on units that never saved here.
+	if (buffer[198] == 0 || buffer[198] >= util::to_underlying(AudioInputChannel::SPECIFIC_OUTPUT)) {
 		defaultRecordSource = AudioInputChannel::LEFT;
 	}
 	else {
-		defaultRecordSource = static_cast<AudioInputChannel>(buffer[196]);
+		defaultRecordSource = static_cast<AudioInputChannel>(buffer[198]);
 	}
 }
 
@@ -1032,9 +1074,11 @@ void writeSettings() {
 
 	buffer[189] = util::to_underlying(defaultPatchCablePolarity);
 
-	buffer[196] = util::to_underlying(defaultRecordSource);
+	buffer[196] = util::to_underlying(screensaverMode);
+	buffer[197] = screensaverTimeoutMinutes;
 
-	buffer[197] = midiEngine.midiFollowModKnobBaseCC;
+	buffer[198] = util::to_underlying(defaultRecordSource);
+	buffer[199] = midiEngine.midiFollowModKnobBaseCC;
 
 	R_SFLASH_EraseSector(0x80000 - 0x1000, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, 1, SPIBSC_OUTPUT_ADDR_24);
 	R_SFLASH_ByteProgram(0x80000 - 0x1000, buffer.data(), 256, SPIBSC_CH, SPIBSC_CMNCR_BSZ_SINGLE, SPIBSC_1BIT,

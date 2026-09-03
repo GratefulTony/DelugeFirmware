@@ -18,6 +18,8 @@
 #include "settings.h"
 #include "devSysexSetting.h"
 #include "emulated_display.h"
+#include "hid/display/display.h"
+#include "hid/display/oled_canvas/canvas.h"
 #include "retrospective_sampler.h"
 #include "setting.h"
 #include "shift_is_sticky.h"
@@ -26,6 +28,26 @@
 extern deluge::gui::menu_item::runtime_feature::Setting runtimeFeatureSettingMenuItem;
 
 namespace deluge::gui::menu_item::runtime_feature {
+
+// A SettingToggle that is only relevant (and thus only shown) when an OLED display is
+// active — real or emulated. Used for features that have no effect in 7-segment mode.
+class OledOnlySettingToggle : public SettingToggle {
+public:
+	using SettingToggle::SettingToggle;
+	bool isRelevant(ModControllableAudio*, int32_t) override { return display->haveOLED(); }
+};
+
+// The RoundedCorners toggle additionally pushes its value into the Canvas drawing flag,
+// so the low-level primitives don't have to read runtime feature settings themselves.
+class RoundedCornersSettingToggle final : public OledOnlySettingToggle {
+public:
+	using OledOnlySettingToggle::OledOnlySettingToggle;
+	void writeCurrentValue() override {
+		OledOnlySettingToggle::writeCurrentValue();
+		hid::display::oled_canvas::Canvas::roundedCornersEnabled =
+		    runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RoundedCorners);
+	}
+};
 
 // Generic menu item instances
 SettingToggle menuDrumRandomizer(RuntimeFeatureSettingType::DrumRandomizer);
@@ -48,10 +70,11 @@ SettingToggle menuDisplayChordLayout(RuntimeFeatureSettingType::DisplayChordKeyb
 SettingToggle menuAlternativePlaybackStartBehaviour(RuntimeFeatureSettingType::AlternativePlaybackStartBehaviour);
 SettingToggle menuEnableGridViewLoopPads(RuntimeFeatureSettingType::EnableGridViewLoopPads);
 SettingToggle menuAlternativeTapTempoBehaviour(RuntimeFeatureSettingType::AlternativeTapTempoBehaviour);
-SettingToggle menuHorizontalMenus(RuntimeFeatureSettingType::HorizontalMenus);
+OledOnlySettingToggle menuHorizontalMenus(RuntimeFeatureSettingType::HorizontalMenus);
 SettingToggle menuTrimFromStartOfAudioClip(RuntimeFeatureSettingType::TrimFromStartOfAudioClip);
 SettingToggle menuModFXPostDOTT(RuntimeFeatureSettingType::ModFXPostDOTT);
 SettingToggle menuShowBatteryLevel(RuntimeFeatureSettingType::ShowBatteryLevel);
+RoundedCornersSettingToggle menuRoundedCorners(RuntimeFeatureSettingType::RoundedCorners);
 SettingToggle menuDisperserHiCPU(RuntimeFeatureSettingType::DisperserHiCPU);
 
 // Number of entries in the subMenuEntries array (total settings minus non-top-level minus submenu entries)
@@ -79,6 +102,7 @@ std::array<MenuItem*, kNumTopLevelEntries> subMenuEntries{&menuDrumRandomizer,
                                                           &menuEnableGridViewLoopPads,
                                                           &menuAlternativeTapTempoBehaviour,
                                                           &menuHorizontalMenus,
+                                                          &menuRoundedCorners,
                                                           &menuTrimFromStartOfAudioClip,
                                                           &menuModFXPostDOTT,
                                                           &menuShowBatteryLevel,

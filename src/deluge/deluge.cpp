@@ -39,6 +39,7 @@
 #include "hid/buttons.h"
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
+#include "hid/display/screensaver.h"
 #include "hid/display/seven_segment.h"
 #include "hid/encoder_input.h"
 #include "hid/encoders.h"
@@ -234,6 +235,16 @@ extern "C" void closeUSBPeripheral(void);
 uint32_t picFirmwareVersion = 0;
 bool picSaysOLEDPresent = false;
 
+namespace Deluge {
+void factoryReset() {
+	display->displayPopup(deluge::l10n::get(deluge::l10n::String::STRING_FOR_FACTORY_RESET));
+	FlashStorage::factoryReset(false);
+	runtimeFeatureSettings.factoryReset(false);
+	midiFollow.factoryReset(false);
+	MIDIDeviceManager::factoryReset(false);
+}
+} // namespace Deluge
+
 bool isShortPress(uint32_t pressTime) {
 	return ((int32_t)(AudioEngine::audioSampleTimer - pressTime) < FlashStorage::holdTime);
 }
@@ -265,6 +276,9 @@ bool readButtonsAndPads() {
 	if (anything) {
 
 		if (value < PIC::kPadAndButtonMessagesEnd) {
+
+			// Any pad or button edge counts as activity, press or release alike.
+			deluge::hid::display::Screensaver::noteActivity();
 
 			int32_t thisPadPressIsOn = nextPadPressIsOn;
 			nextPadPressIsOn = USE_DEFAULT_VELOCITY;
@@ -465,7 +479,6 @@ void setupStartupSong() {
 			}
 		}
 		// Load song, if we got this far!
-		void* songMemory = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(Song));
 		currentSong->setSongFullPath(filename);
 		if (openUI(&loadSongUI)) {
 			loadSongUI.performLoad();
@@ -777,9 +790,7 @@ extern "C" int32_t deluge_main(void) {
 
 		case RESET_SETTINGS:
 			if (!otherButtonsOrEvents) {
-				display->displayPopup(deluge::l10n::get(deluge::l10n::String::STRING_FOR_FACTORY_RESET));
-				FlashStorage::resetSettings();
-				FlashStorage::writeSettings();
+				Deluge::factoryReset();
 			}
 			return 0;
 
@@ -832,6 +843,8 @@ extern "C" int32_t deluge_main(void) {
 		retrospectiveBuffer.init();
 	}
 
+	deluge::hid::display::oled_canvas::Canvas::roundedCornersEnabled =
+	    runtimeFeatureSettings.isOn(RuntimeFeatureSettingType::RoundedCorners);
 	MIDIDeviceManager::readDevicesFromFile();
 	midiFollow.readDefaultsFromFile();
 	PadLEDs::setBrightnessLevel(FlashStorage::defaultPadBrightness);
@@ -908,6 +921,11 @@ extern "C" int32_t deluge_main(void) {
 	L2CacheUnlockData();
 	sdRoutineLock = false; // Allow SD routine to start happening
 
+	// Settings have been read and the UI is up: start the idle countdown.
+	if (hid::display::have_oled_screen) {
+		deluge::hid::display::Screensaver::settingsChanged();
+	}
+
 #ifdef USE_TASK_MANAGER
 	registerTasks();
 	startTaskManager();
@@ -979,7 +997,14 @@ extern "C" void routineForSD(void) {
 	sdRoutineLock = true;
 	static UIStage step = UIStage::oled;
 	AudioEngine::logAction("from routineForSD()");
+	// process audio
 	AudioEngine::runRoutine();
+#ifdef USE_TASK_MANAGER // if using task manager, midi and analog clock are processed separately from audio
+	// process midi clock
+	playbackHandler.midiRoutine();
+	// process analog clock
+	playbackHandler.routine();
+#endif
 	switch (step) {
 	case UIStage::oled:
 		if (display->haveOLED()) {
