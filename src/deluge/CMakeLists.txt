@@ -92,3 +92,7 @@ if(ENABLE_FX_BENCHMARK)
     target_compile_definitions(deluge PUBLIC ENABLE_FX_BENCHMARK=1)
 endif(ENABLE_FX_BENCHMARK)
 
+if(ENABLE_SDRAM_TEXT_BENCH)
+    target_compile_definitions(deluge PUBLIC ENABLE_SDRAM_TEXT_BENCH=1)
+endif(ENABLE_SDRAM_TEXT_BENCH)
+

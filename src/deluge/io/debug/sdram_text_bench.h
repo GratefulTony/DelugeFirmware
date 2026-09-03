@@ -26,9 +26,22 @@
 // printed as JSON lines to the sysex debug console on first console attach.
 // See docs/dev/sdram_text_prototype.md for protocol and interpretation.
 
+// Compiled in only with -DENABLE_SDRAM_TEXT_BENCH=ON: the two kernel copies cost ~32KB of
+// internal .text, which release builds would rather hand to the fast heap.
+#if ENABLE_SDRAM_TEXT_BENCH
+
 // Called from the sysex rx handler on console attach. Only flags the request: the report
 // sends multiple sysex replies, and sending from inside the rx handler deadlocks the USB
 // pipeline, so the actual run happens in sdramTextBenchRoutine() from the task scheduler.
 void sdramTextBenchRequest();
 // Scheduler task: runs the benchmark and sends the report if one was requested.
 void sdramTextBenchRoutine();
+
+#else // !ENABLE_SDRAM_TEXT_BENCH
+
+inline void sdramTextBenchRequest() {
+}
+inline void sdramTextBenchRoutine() {
+}
+
+#endif // ENABLE_SDRAM_TEXT_BENCH

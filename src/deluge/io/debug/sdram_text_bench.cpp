@@ -19,6 +19,9 @@
  * in all copies or substantial portions of this file.
  */
 #include "io/debug/sdram_text_bench.h"
+
+#if ENABLE_SDRAM_TEXT_BENCH
+
 #include "definitions.h"
 #include "io/debug/print.h"
 #include "io/midi/sysex.h"
@@ -264,3 +267,5 @@ void sdramTextBenchRoutine() {
 	reportKernel("sprawl", "internal", sprawlIntCold, sprawlIntWarm);
 	reportKernel("sprawl", "sdram", sprawlSdrCold, sprawlSdrWarm);
 }
+
+#endif // ENABLE_SDRAM_TEXT_BENCH

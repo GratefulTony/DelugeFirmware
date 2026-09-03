@@ -73,6 +73,9 @@ option(ENABLE_MATRIX_DEBUG "Enable logging of pad events" OFF)
 # FX benchmarking
 option(ENABLE_FX_BENCHMARK "Enable FX cycle benchmarking" OFF)
 
+# SDRAM-vs-internal code placement A/B benchmark (debug tooling, ~32KB of internal .text)
+option(ENABLE_SDRAM_TEXT_BENCH "Enable the .sdram_text placement benchmark" OFF)
+
 # Colored output
 set(CMAKE_COLOR_DIAGNOSTICS ON)
 add_compile_options($<$<CXX_COMPILER_ID:Clang>:-fansi-escape-codes>)
