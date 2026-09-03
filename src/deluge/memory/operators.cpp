@@ -5,8 +5,11 @@
 // todo - make this work in unit tests, need to remove hard coded addresses in GMA
 #if !IN_UNIT_TESTS
 void* operator new(std::size_t n) noexcept(false) {
-	// allocate on external RAM
-	void* addr = GeneralMemoryAllocator::get().allocExternal(n);
+	// External RAM first, then fall back to the stealable (sample-cache) region like every other non-audio
+	// allocation does. The external region is only 2MB; a large song fills it with param sets, after which an
+	// external-only allocation would fail for every std::string / std::vector in the firmware while plenty of RAM
+	// remains elsewhere. Never internal RAM: that stays reserved for the audio-critical allocMaxSpeed callers.
+	void* addr = GeneralMemoryAllocator::get().allocLowSpeed(n);
 	if (addr == nullptr) [[unlikely]] {
 		// The throwing operator new must never return null: std::string / std::vector and friends assume a non-null
 		// buffer, so returning null silently corrupts them. Throw the same lightweight exception the custom STL

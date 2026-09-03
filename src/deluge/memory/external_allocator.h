@@ -28,14 +28,15 @@ public:
 		if (n == 0) {
 			return nullptr;
 		}
-		void* addr = GeneralMemoryAllocator::get().allocExternal(n * sizeof(T));
+		// External RAM, then the stealable region (see operator new in operators.cpp for why external-only is unsafe).
+		void* addr = GeneralMemoryAllocator::get().allocLowSpeed(n * sizeof(T));
 		if (addr == nullptr) [[unlikely]] {
 			throw deluge::exception::BAD_ALLOC;
 		}
 		return static_cast<T*>(addr);
 	}
 
-	void deallocate(T* p, std::size_t n) { GeneralMemoryAllocator::get().deallocExternal(p); }
+	void deallocate(T* p, std::size_t n) { GeneralMemoryAllocator::get().dealloc(p); }
 
 	template <typename U>
 	bool operator==(const deluge::memory::external_allocator<U>& o) {
