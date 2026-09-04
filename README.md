@@ -1,9 +1,9 @@
 # Deluge Owlet Firmware (1.3 Port)
 
 > [!NOTE]
-> **Development has moved.** Bug fixes, new features, and general development have moved to
+> **Day-to-day development happens elsewhere.** New feature work lives in
 > [`owlet-labs/DelugeFirmware-talon`](https://github.com/owlet-labs/DelugeFirmware-talon).
-> This archive remains available for posterity.
+> This repository still receives releases and bug fixes, and is where tagged builds are published.
 
 This is **owlet-firmware**, a personal fork of the Deluge Community Firmware maintained at [owlet-labs/DelugeFirmware](https://github.com/owlet-labs/DelugeFirmware). It serves as a playground for experimental sound design features that may be too specialized or CPU-intensive for the main community branch.
 
@@ -20,7 +20,7 @@ Most of the features in this branch are built to support my personal use case fo
 Highly experimental and for most users, not a replacement for the main community firmware. Folks interested are encouraged to experiment, but we recommend backing up sd cards just in case. 
 
 - owlet-firmware-1.3 is the default branch and has a stable baseline.
-- dev branch holds the final public state of development work. https://github.com/owlet-labs/DelugeFirmware/blob/dev/README.md
+- dev branch tracks development work as it lands here. https://github.com/owlet-labs/DelugeFirmware/blob/dev/README.md
 
 ### Known limitations
 
