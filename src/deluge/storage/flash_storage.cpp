@@ -752,14 +752,14 @@ void readSettings() {
 		accessibilityShortcuts = buffer[174];
 	}
 
-	if (buffer[175] < 0 && buffer[175] > util::to_underlying(MenuHighlighting::NO_INVERSION)) {
+	if (buffer[175] > util::to_underlying(MenuHighlighting::NO_INVERSION)) {
 		accessibilityMenuHighlighting = MenuHighlighting::PARTIAL_INVERSION;
 	}
 	else {
 		accessibilityMenuHighlighting = static_cast<MenuHighlighting>(buffer[175]);
 	}
 
-	if (buffer[176] < 0 && buffer[176] > util::to_underlying(OutputType::AUDIO)) {
+	if (buffer[176] > util::to_underlying(OutputType::AUDIO)) {
 		defaultNewClipType = OutputType::SYNTH;
 	}
 	else {
@@ -820,7 +820,13 @@ void readSettings() {
 	// included. It can't catch a 1.3.0 nightly from before the setting landed, though, since every
 	// build off this tree stamps the same 1.3.0 -- so the timeout covers that: zero is outside the
 	// range this firmware ever writes, so it too only occurs on a unit that has never saved here.
-	if (savedVersion < FirmwareVersion::community({1, 3, 0}) || buffer[197] < kMinScreensaverTimeoutMinutes
+	// Owlet: the "never saved here reads as zero" reasoning above holds upstream, but NOT on this
+	// fork. Every owlet 1.3 release wrote defaultRecordSource to 196 and midiFollowModKnobBaseCC to
+	// 199's old home at 197, so byte 197 carries a MIDI CC number -- non-zero, and a plain upgrade
+	// lands it in 1..60 often enough to be read back as a timeout in minutes (observed on hardware:
+	// the screensaver switching itself on). Our units all stamp <= 1.3.0, so widen the guard to
+	// include 1.3.0 itself: a unit upgrading from any owlet release takes the defaults exactly once.
+	if (savedVersion <= FirmwareVersion::community({1, 3, 0}) || buffer[197] < kMinScreensaverTimeoutMinutes
 	    || buffer[197] > kMaxScreensaverTimeoutMinutes) {
 		screensaverMode = kDefaultScreensaverMode;
 		screensaverTimeoutMinutes = kDefaultScreensaverTimeoutMinutes;
